@@ -15,6 +15,7 @@
 //! Descriptor for the application reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 
 use crate::ApplicationReactionBuilder;
@@ -24,8 +25,13 @@ use crate::ApplicationReactionBuilder;
 /// The application reaction is primarily used for programmatic in-process
 /// subscriptions and has minimal configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ApplicationReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationReactionConfigDto {}
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(ApplicationReactionConfigDto)))]
+struct ApplicationReactionSchemas;
 
 /// Descriptor for the application reaction plugin.
 pub struct ApplicationReactionDescriptor;
@@ -40,9 +46,13 @@ impl ReactionPluginDescriptor for ApplicationReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "ApplicationReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <ApplicationReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = ApplicationReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

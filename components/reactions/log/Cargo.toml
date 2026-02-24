@@ -12,6 +12,9 @@ categories = ["development-tools::debugging"]
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
@@ -30,3 +33,6 @@ ordered-float = "3.0"
 handlebars = "5.1"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[features]
+dynamic-plugin = []

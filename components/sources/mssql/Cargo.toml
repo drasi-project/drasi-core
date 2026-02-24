@@ -23,12 +23,17 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "mssql", "cdc"]
 categories = ["database"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 tiberius = { version = "0.12", features = ["chrono", "rust_decimal"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -50,3 +55,6 @@ tokio-test = "0.4"
 testcontainers = "0.23"
 drasi-bootstrap-mssql.workspace = true
 drasi-reaction-application.workspace = true
+
+[features]
+dynamic-plugin = []

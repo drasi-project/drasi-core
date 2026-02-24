@@ -15,6 +15,7 @@
 //! Descriptor for the SSE reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -23,6 +24,7 @@ use crate::config::SseExtension;
 
 /// DTO for an SSE template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = SseTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SseTemplateSpecDto {
     /// Handlebars template string.
@@ -36,6 +38,7 @@ pub struct SseTemplateSpecDto {
 
 /// DTO for per-query SSE template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = SseQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SseQueryConfigDto {
     /// Template for ADD operations.
@@ -53,6 +56,7 @@ pub struct SseQueryConfigDto {
 
 /// Configuration DTO for the SSE reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = SseReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct SseReactionConfigDto {
     /// Host to bind SSE server.
@@ -101,6 +105,14 @@ fn map_query_config(dto: &SseQueryConfigDto) -> crate::QueryConfig {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(
+    SseReactionConfigDto,
+    SseQueryConfigDto,
+    SseTemplateSpecDto,
+)))]
+struct SseReactionSchemas;
+
 /// Descriptor for the SSE reaction plugin.
 pub struct SseReactionDescriptor;
 
@@ -114,9 +126,13 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "SseReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <SseReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = SseReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

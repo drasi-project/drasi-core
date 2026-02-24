@@ -26,6 +26,9 @@ categories = ["network-programming"]
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 drasi-lib.workspace = true
 drasi-reaction-http.workspace = true
@@ -44,3 +47,6 @@ prost-types = "0.12"
 ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[features]
+dynamic-plugin = []

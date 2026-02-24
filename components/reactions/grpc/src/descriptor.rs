@@ -15,6 +15,7 @@
 //! Descriptor for the gRPC reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::GrpcReactionBuilder;
 
 /// Configuration DTO for the gRPC reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GrpcReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct GrpcReactionConfigDto {
     /// gRPC server endpoint URL.
@@ -63,6 +65,10 @@ pub struct GrpcReactionConfigDto {
     pub metadata: HashMap<String, String>,
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(GrpcReactionConfigDto)))]
+struct GrpcReactionSchemas;
+
 /// Descriptor for the gRPC reaction plugin.
 pub struct GrpcReactionDescriptor;
 
@@ -76,9 +82,13 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "GrpcReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <GrpcReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = GrpcReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

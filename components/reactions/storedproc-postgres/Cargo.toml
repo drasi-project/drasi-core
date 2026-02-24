@@ -23,6 +23,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "reaction", "postgresql", "storedproc"]
 categories = ["database"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 drasi-lib.workspace = true
 
@@ -56,3 +59,6 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [lints]
 workspace = true
+
+[features]
+dynamic-plugin = []

@@ -26,6 +26,9 @@ categories = ["development-tools"]
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 drasi-lib.workspace = true
 anyhow = "1.0"
@@ -41,3 +44,6 @@ prost-types = "0.12"
 ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[features]
+dynamic-plugin = []

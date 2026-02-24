@@ -9,12 +9,17 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "source", "mock", "testing"]
 categories = ["development-tools::testing"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -28,3 +33,6 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
 rand = "0.8"
+
+[features]
+dynamic-plugin = []

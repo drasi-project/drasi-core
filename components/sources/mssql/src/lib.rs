@@ -70,6 +70,7 @@
 pub mod config;
 pub mod connection;
 pub mod decoder;
+pub mod descriptor;
 pub mod error;
 pub mod keys;
 pub mod lsn;
@@ -524,4 +525,17 @@ mod tests {
         assert_eq!(source.config.table_keys.len(), 1);
         assert_eq!(source.config.table_keys[0].table, "orders");
     }
+}
+
+/// Dynamic plugin entry point.
+///
+/// # Safety
+/// The caller must ensure this is only called once and takes ownership of the
+/// returned pointer via `Box::from_raw`.
+#[cfg(feature = "dynamic-plugin")]
+#[no_mangle]
+pub extern "C" fn drasi_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
+    let registration = drasi_plugin_sdk::PluginRegistration::new()
+        .with_source(Box::new(descriptor::MsSqlSourceDescriptor));
+    Box::into_raw(Box::new(registration))
 }

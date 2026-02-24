@@ -26,6 +26,9 @@ categories = ["network-programming"]
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 drasi-lib.workspace = true
 drasi-reaction-grpc.workspace = true
@@ -49,3 +52,6 @@ utoipa = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.11"
+
+[features]
+dynamic-plugin = []

@@ -15,12 +15,14 @@
 //! Descriptor for the profiler reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 
 use crate::ProfilerReactionBuilder;
 
 /// Configuration DTO for the profiler reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = ProfilerReactionConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProfilerReactionConfigDto {
     /// Window size for profiling statistics.
@@ -33,6 +35,10 @@ pub struct ProfilerReactionConfigDto {
     #[schema(value_type = Option<ConfigValueU64>)]
     pub report_interval_secs: Option<ConfigValue<u64>>,
 }
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(ProfilerReactionConfigDto)))]
+struct ProfilerReactionSchemas;
 
 /// Descriptor for the profiler reaction plugin.
 pub struct ProfilerReactionDescriptor;
@@ -47,9 +53,13 @@ impl ReactionPluginDescriptor for ProfilerReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "ProfilerReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <ProfilerReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = ProfilerReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

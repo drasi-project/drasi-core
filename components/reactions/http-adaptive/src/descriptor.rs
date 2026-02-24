@@ -15,6 +15,7 @@
 //! Descriptor for the HTTP adaptive reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -25,6 +26,7 @@ pub use drasi_reaction_http::descriptor::{CallSpecDto, HttpQueryConfigDto};
 
 /// Configuration DTO for the HTTP adaptive reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = HttpAdaptiveReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpAdaptiveReactionConfigDto {
     /// Base URL for HTTP requests.
@@ -83,6 +85,10 @@ fn map_query_config(dto: &HttpQueryConfigDto) -> drasi_reaction_http::QueryConfi
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(HttpAdaptiveReactionConfigDto)))]
+struct HttpAdaptiveReactionSchemas;
+
 /// Descriptor for the HTTP adaptive reaction plugin.
 pub struct HttpAdaptiveReactionDescriptor;
 
@@ -96,9 +102,13 @@ impl ReactionPluginDescriptor for HttpAdaptiveReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "HttpAdaptiveReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <HttpAdaptiveReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = HttpAdaptiveReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

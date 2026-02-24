@@ -23,12 +23,17 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "http"]
 categories = ["network-programming"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -63,3 +68,6 @@ regex = "1.10"
 tokio-test = "0.4"
 drasi-reaction-application = { path = "../../reactions/application" }
 env_logger = "0.11"
+
+[features]
+dynamic-plugin = []

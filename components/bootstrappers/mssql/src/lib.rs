@@ -34,7 +34,21 @@
 //! # }
 //! ```
 
+pub mod descriptor;
 pub mod mssql;
 
 pub use drasi_source_mssql::{AuthMode, EncryptionMode, MsSqlSourceConfig, TableKeyConfig};
 pub use mssql::{MsSqlBootstrapProvider, MsSqlBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// # Safety
+/// The caller must ensure this is only called once and takes ownership of the
+/// returned pointer via `Box::from_raw`.
+#[cfg(feature = "dynamic-plugin")]
+#[no_mangle]
+pub extern "C" fn drasi_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
+    let registration = drasi_plugin_sdk::PluginRegistration::new()
+        .with_bootstrapper(Box::new(descriptor::MsSqlBootstrapDescriptor));
+    Box::into_raw(Box::new(registration))
+}

@@ -23,12 +23,17 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "bootstrap", "postgres"]
 categories = ["database"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -44,3 +49,6 @@ serde_json = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
 tokio = { version = "1.0", features = ["full"] }
+
+[features]
+dynamic-plugin = []

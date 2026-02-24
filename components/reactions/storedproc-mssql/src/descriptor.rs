@@ -15,6 +15,7 @@
 //! Descriptor for the MS SQL Server stored procedure reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::{MsSqlStoredProcReaction, QueryConfig, TemplateSpec};
 
 /// DTO for a template specification (stored procedure command).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = StoredProcTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StoredProcTemplateSpecDto {
     /// Handlebars template string for the stored procedure command.
@@ -30,6 +32,7 @@ pub struct StoredProcTemplateSpecDto {
 
 /// DTO for per-query stored procedure template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = StoredProcQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StoredProcQueryConfigDto {
     /// Template for ADD operations.
@@ -47,6 +50,7 @@ pub struct StoredProcQueryConfigDto {
 
 /// Configuration DTO for the MS SQL Server stored procedure reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = MsSqlStoredProcReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct MsSqlStoredProcReactionConfigDto {
     /// Database hostname or IP address.
@@ -107,6 +111,14 @@ fn map_query_config(dto: &StoredProcQueryConfigDto) -> QueryConfig {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(
+    MsSqlStoredProcReactionConfigDto,
+    StoredProcQueryConfigDto,
+    StoredProcTemplateSpecDto,
+)))]
+struct MsSqlStoredProcReactionSchemas;
+
 /// Descriptor for the MS SQL Server stored procedure reaction plugin.
 pub struct MsSqlStoredProcReactionDescriptor;
 
@@ -120,9 +132,13 @@ impl ReactionPluginDescriptor for MsSqlStoredProcReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "MsSqlStoredProcReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <MsSqlStoredProcReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = MsSqlStoredProcReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

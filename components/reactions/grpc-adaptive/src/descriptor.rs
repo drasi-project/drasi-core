@@ -15,6 +15,7 @@
 //! Descriptor for the gRPC adaptive reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::GrpcAdaptiveReactionBuilder;
 
 /// Configuration DTO for the gRPC adaptive reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GrpcAdaptiveReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct GrpcAdaptiveReactionConfigDto {
     /// gRPC server endpoint URL.
@@ -73,6 +75,10 @@ pub struct GrpcAdaptiveReactionConfigDto {
     pub adaptive_batch_timeout_ms: Option<ConfigValue<u64>>,
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(GrpcAdaptiveReactionConfigDto)))]
+struct GrpcAdaptiveReactionSchemas;
+
 /// Descriptor for the gRPC adaptive reaction plugin.
 pub struct GrpcAdaptiveReactionDescriptor;
 
@@ -86,9 +92,13 @@ impl ReactionPluginDescriptor for GrpcAdaptiveReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "GrpcAdaptiveReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <GrpcAdaptiveReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = GrpcAdaptiveReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

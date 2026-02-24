@@ -15,12 +15,14 @@
 //! Descriptor for the platform reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 
 use crate::PlatformReactionBuilder;
 
 /// Configuration DTO for the platform reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = PlatformReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformReactionConfigDto {
     /// Redis connection URL.
@@ -63,6 +65,10 @@ pub struct PlatformReactionConfigDto {
     pub batch_max_wait_ms: Option<ConfigValue<u64>>,
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(PlatformReactionConfigDto)))]
+struct PlatformReactionSchemas;
+
 /// Descriptor for the platform reaction plugin.
 pub struct PlatformReactionDescriptor;
 
@@ -76,9 +82,13 @@ impl ReactionPluginDescriptor for PlatformReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "PlatformReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <PlatformReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = PlatformReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

@@ -42,12 +42,26 @@
 //! ]);
 //! ```
 
+pub mod descriptor;
 pub mod script_file;
 pub mod script_reader;
 pub mod script_types;
 
 pub use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
 pub use script_file::{ScriptFileBootstrapProvider, ScriptFileBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// # Safety
+/// The caller must ensure this is only called once and takes ownership of the
+/// returned pointer via `Box::from_raw`.
+#[cfg(feature = "dynamic-plugin")]
+#[no_mangle]
+pub extern "C" fn drasi_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
+    let registration = drasi_plugin_sdk::PluginRegistration::new()
+        .with_bootstrapper(Box::new(descriptor::ScriptFileBootstrapDescriptor));
+    Box::into_raw(Box::new(registration))
+}
 
 #[cfg(test)]
 mod tests {

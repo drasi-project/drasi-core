@@ -15,6 +15,7 @@
 //! Descriptor for the log reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::LogReactionBuilder;
 
 /// DTO for a template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LogTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TemplateSpecDto {
     /// Handlebars template string.
@@ -31,6 +33,7 @@ pub struct TemplateSpecDto {
 
 /// DTO for per-query template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LogQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct QueryConfigDto {
     /// Template for ADD operations.
@@ -48,6 +51,7 @@ pub struct QueryConfigDto {
 
 /// Configuration DTO for the log reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LogReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct LogReactionConfigDto {
     /// Query-specific template configurations.
@@ -71,6 +75,14 @@ fn map_query_config(dto: &QueryConfigDto) -> crate::QueryConfig {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(
+    LogReactionConfigDto,
+    QueryConfigDto,
+    TemplateSpecDto,
+)))]
+struct LogReactionSchemas;
+
 /// Descriptor for the log reaction plugin.
 pub struct LogReactionDescriptor;
 
@@ -84,9 +96,13 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "LogReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <LogReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = LogReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(

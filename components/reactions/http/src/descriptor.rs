@@ -15,6 +15,7 @@
 //! Descriptor for the HTTP reaction plugin.
 
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::HttpReactionBuilder;
 
 /// DTO for an HTTP call specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = CallSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallSpecDto {
     /// URL path or absolute URL (supports Handlebars templates).
@@ -41,6 +43,7 @@ pub struct CallSpecDto {
 
 /// DTO for per-query HTTP call configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = HttpQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpQueryConfigDto {
     /// HTTP call specification for ADD operations.
@@ -58,6 +61,7 @@ pub struct HttpQueryConfigDto {
 
 /// Configuration DTO for the HTTP reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = HttpReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpReactionConfigDto {
     /// Base URL for HTTP requests.
@@ -96,6 +100,14 @@ fn map_query_config(dto: &HttpQueryConfigDto) -> crate::QueryConfig {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(components(schemas(
+    HttpReactionConfigDto,
+    HttpQueryConfigDto,
+    CallSpecDto,
+)))]
+struct HttpReactionSchemas;
+
 /// Descriptor for the HTTP reaction plugin.
 pub struct HttpReactionDescriptor;
 
@@ -109,9 +121,13 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
         "1.0.0"
     }
 
+    fn config_schema_name(&self) -> &str {
+        "HttpReactionConfig"
+    }
+
     fn config_schema_json(&self) -> String {
-        let schema = <HttpReactionConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap()
+        let api = HttpReactionSchemas::openapi();
+        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
     }
 
     async fn create_reaction(
