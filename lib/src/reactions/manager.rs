@@ -19,7 +19,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
-use crate::component_graph::{ComponentGraph, ComponentKind, ComponentNode, RelationshipKind};
+use crate::component_graph::{
+    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
+    RelationshipKind,
+};
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::managers::{
@@ -42,6 +45,10 @@ pub struct ReactionManager {
     log_registry: Arc<ComponentLogRegistry>,
     /// Shared component graph — the authoritative registry for component state and events
     graph: Arc<RwLock<ComponentGraph>>,
+    /// Channel sender for routing status updates through the graph update loop.
+    /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
+    /// the loop applies them to the graph and records events automatically.
+    update_tx: ComponentUpdateSender,
 }
 
 impl ReactionManager {
@@ -55,6 +62,7 @@ impl ReactionManager {
         instance_id: impl Into<String>,
         log_registry: Arc<ComponentLogRegistry>,
         graph: Arc<RwLock<ComponentGraph>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
@@ -64,6 +72,7 @@ impl ReactionManager {
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             graph,
+            update_tx,
         }
     }
 
@@ -182,15 +191,12 @@ impl ReactionManager {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
 
-            // Set transitional state in graph before starting
-            {
-                let mut graph = self.graph.write().await;
-                let _ = graph.update_status_with_message(
-                    &id,
-                    ComponentStatus::Starting,
-                    Some("Starting reaction".to_string()),
-                );
-            }
+            // Route transitional state through the graph update loop
+            let _ = self.update_tx.send(ComponentUpdate::Status {
+                component_id: id.clone(),
+                status: ComponentStatus::Starting,
+                message: Some("Starting reaction".to_string()),
+            }).await;
 
             reaction.start().await?;
         } else {
@@ -210,15 +216,12 @@ impl ReactionManager {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
-            // Set transitional state in graph before stopping
-            {
-                let mut graph = self.graph.write().await;
-                let _ = graph.update_status_with_message(
-                    &id,
-                    ComponentStatus::Stopping,
-                    Some("Stopping reaction".to_string()),
-                );
-            }
+            // Route transitional state through the graph update loop
+            let _ = self.update_tx.send(ComponentUpdate::Status {
+                component_id: id.clone(),
+                status: ComponentStatus::Stopping,
+                message: Some("Stopping reaction".to_string()),
+            }).await;
 
             reaction.stop().await?;
         } else {
@@ -364,15 +367,12 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Emit Reconfiguring event via the graph
-            {
-                let mut graph = self.graph.write().await;
-                let _ = graph.update_status_with_message(
-                    &id,
-                    ComponentStatus::Reconfiguring,
-                    Some("Reconfiguring reaction".to_string()),
-                );
-            }
+            // Route transitional state through the graph update loop
+            let _ = self.update_tx.send(ComponentUpdate::Status {
+                component_id: id.clone(),
+                status: ComponentStatus::Reconfiguring,
+                message: Some("Reconfiguring reaction".to_string()),
+            }).await;
 
             // If running or starting, stop first then validate
             if was_running {

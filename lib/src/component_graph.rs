@@ -427,43 +427,52 @@ impl ComponentGraph {
 
     /// Apply a [`ComponentUpdate`] received from the mpsc channel.
     ///
-    /// Called by the graph update loop task. Updates the graph and emits a
-    /// broadcast event. This is the only status-write path from the update loop.
-    pub fn apply_update(&mut self, update: ComponentUpdate) {
+    /// Called by the graph update loop task. Updates the graph, emits a
+    /// broadcast event, and returns the event so the loop can record it
+    /// in the appropriate manager's [`ComponentEventHistory`].
+    pub fn apply_update(&mut self, update: ComponentUpdate) -> Option<ComponentEvent> {
         match update {
             ComponentUpdate::Status {
                 component_id,
                 status,
                 message,
-            } => {
-                if let Err(e) = self.update_status_with_message(&component_id, status, message) {
+            } => match self.update_status_with_message(&component_id, status, message) {
+                Ok(event) => event,
+                Err(e) => {
                     tracing::debug!(
                         "Graph update loop: status update skipped for '{}': {e}",
                         component_id
                     );
+                    None
                 }
-            }
+            },
         }
     }
 
-    /// Emit a [`ComponentEvent`] to all subscribers.
+    /// Emit a [`ComponentEvent`] to all broadcast subscribers and return it.
     ///
-    /// Silently ignores send failures (no subscribers connected).
+    /// Returns `Some(event)` if the component kind maps to a [`ComponentType`],
+    /// `None` for kinds like `Instance` that have no external type.
+    /// Silently ignores broadcast send failures (no subscribers connected).
     fn emit_event(
         &self,
         component_id: &str,
         kind: &ComponentKind,
         status: ComponentStatus,
         message: Option<String>,
-    ) {
+    ) -> Option<ComponentEvent> {
         if let Some(component_type) = kind.to_component_type() {
-            let _ = self.event_tx.send(ComponentEvent {
+            let event = ComponentEvent {
                 component_id: component_id.to_string(),
                 component_type,
                 status,
                 timestamp: chrono::Utc::now(),
                 message,
-            });
+            };
+            let _ = self.event_tx.send(event.clone());
+            Some(event)
+        } else {
+            None
         }
     }
 
@@ -579,27 +588,33 @@ impl ComponentGraph {
     /// Update a component's status.
     ///
     /// Emits a [`ComponentEvent`] with the new status to all subscribers.
-    pub fn update_status(&mut self, id: &str, status: ComponentStatus) -> anyhow::Result<()> {
+    /// Used internally by [`apply_update`] and tests.
+    fn update_status(
+        &mut self,
+        id: &str,
+        status: ComponentStatus,
+    ) -> anyhow::Result<Option<ComponentEvent>> {
         self.update_status_with_message(id, status, None)
     }
 
     /// Update a component's status with an optional message.
     ///
     /// Emits a [`ComponentEvent`] with the new status and message to all subscribers.
-    pub fn update_status_with_message(
+    /// Called by [`apply_update`] in the graph update loop — the single funnel for
+    /// all status mutations.
+    fn update_status_with_message(
         &mut self,
         id: &str,
         status: ComponentStatus,
         message: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<ComponentEvent>> {
         let node = self
             .get_component_mut(id)
             .ok_or_else(|| anyhow::anyhow!("Component '{id}' not found in graph"))?;
         let kind = node.kind.clone();
         node.status = status.clone();
 
-        self.emit_event(id, &kind, status, message);
-        Ok(())
+        Ok(self.emit_event(id, &kind, status, message))
     }
 
     // ========================================================================

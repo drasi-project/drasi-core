@@ -92,6 +92,7 @@ mod manager_tests {
     ) {
         let log_registry = crate::managers::get_or_init_global_registry();
         let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
         let graph = Arc::new(tokio::sync::RwLock::new(graph));
 
         // Spawn a mini graph update loop for tests
@@ -110,6 +111,7 @@ mod manager_tests {
             "test-instance",
             log_registry.clone(),
             graph.clone(),
+            update_tx.clone(),
         ));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
@@ -125,6 +127,7 @@ mod manager_tests {
             middleware_registry,
             log_registry,
             graph.clone(),
+            update_tx,
         ));
 
         (query_manager, source_manager, graph)

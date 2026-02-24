@@ -110,6 +110,7 @@ mod query_joins_tests {
         // Use the global shared log registry for test isolation with tracing
         let log_registry = crate::managers::get_or_init_global_registry();
         let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
         let graph = Arc::new(tokio::sync::RwLock::new(graph));
 
         // Spawn a mini graph update loop for tests
@@ -128,6 +129,7 @@ mod query_joins_tests {
             "test-instance",
             log_registry.clone(),
             graph.clone(),
+            update_tx.clone(),
         ));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
@@ -143,6 +145,7 @@ mod query_joins_tests {
             middleware_registry,
             log_registry,
             graph,
+            update_tx,
         ));
 
         (query_manager, source_manager)

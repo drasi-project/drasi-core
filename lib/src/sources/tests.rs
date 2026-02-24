@@ -372,6 +372,7 @@ mod manager_tests {
         let log_registry = crate::managers::get_or_init_global_registry();
 
         let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
         let graph = Arc::new(tokio::sync::RwLock::new(graph));
 
         // Spawn a mini graph update loop for tests (consumes mpsc updates and applies to graph)
@@ -390,6 +391,7 @@ mod manager_tests {
             "test-instance",
             log_registry,
             graph.clone(),
+            update_tx,
         ));
         (manager, graph)
     }
@@ -1336,13 +1338,24 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Check events from graph broadcast
+        // Check events from graph broadcast.
+        // Events now arrive asynchronously via the graph update loop, so we
+        // wait briefly for the loop to process the channel message.
         let mut found_reconfiguring = false;
-        while let Ok(event) = event_rx.try_recv() {
-            if event.component_id == "reconfig-event-source"
-                && event.status == ComponentStatus::Reconfiguring
-            {
-                found_reconfiguring = true;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match event_rx.try_recv() {
+                Ok(event) => {
+                    if event.component_id == "reconfig-event-source"
+                        && event.status == ComponentStatus::Reconfiguring
+                    {
+                        found_reconfiguring = true;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
             }
         }
         assert!(found_reconfiguring, "Expected Reconfiguring event");

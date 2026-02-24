@@ -163,7 +163,7 @@ pub struct DrasiLib {
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
     // Lifecycle manager for orchestrating component lifecycle
-    pub(crate) lifecycle: Arc<RwLock<LifecycleManager>>,
+    pub(crate) lifecycle: Arc<LifecycleManager>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
@@ -226,8 +226,6 @@ impl DrasiLib {
     /// Internal constructor - creates uninitialized server
     /// Use `builder()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
-        let (channels, receivers) = EventChannels::new();
-
         // Use the shared global log registry.
         // Since tracing uses a single global subscriber, all DrasiLib instances
         // share the same log registry. This ensures logs are properly routed
@@ -242,12 +240,14 @@ impl DrasiLib {
         // so subscribers and components can use them without acquiring the graph lock.
         let (graph, update_rx) = ComponentGraph::new(&instance_id);
         let component_event_broadcast_tx = graph.event_sender().clone();
+        let update_tx = graph.update_sender();
         let component_graph = Arc::new(RwLock::new(graph));
 
         let source_manager = Arc::new(SourceManager::new(
             &instance_id,
             log_registry.clone(),
             component_graph.clone(),
+            update_tx.clone(),
         ));
 
         // Initialize middleware registry and register all standard middleware factories
@@ -289,12 +289,14 @@ impl DrasiLib {
             middleware_registry.clone(),
             log_registry.clone(),
             component_graph.clone(),
+            update_tx.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(
             &instance_id,
             log_registry.clone(),
             component_graph.clone(),
+            update_tx.clone(),
         ));
 
         let state_guard = StateGuard::new();
@@ -307,25 +309,44 @@ impl DrasiLib {
             config.clone(),
         );
 
-        let lifecycle = Arc::new(RwLock::new(LifecycleManager::new(
+        let lifecycle = Arc::new(LifecycleManager::new(
             config.clone(),
             source_manager.clone(),
             query_manager.clone(),
             reaction_manager.clone(),
-            component_event_broadcast_tx.clone(),
-            Some(receivers),
-        )));
+        ));
 
         // Spawn the graph update loop — sole consumer of component status updates.
         // Components send status changes via the mpsc update channel (fire-and-forget),
-        // and this loop applies them to the graph and emits broadcast events.
+        // and this loop applies them to the graph, emits broadcast events, and records
+        // events in each manager's ComponentEventHistory.
         {
             let graph = component_graph.clone();
+            let sm = source_manager.clone();
+            let qm = query_manager.clone();
+            let rm = reaction_manager.clone();
             tokio::spawn(async move {
                 let mut update_rx = update_rx;
                 while let Some(update) = update_rx.recv().await {
                     let mut g = graph.write().await;
-                    g.apply_update(update);
+                    let event = g.apply_update(update);
+                    drop(g); // release lock before async record_event
+
+                    if let Some(event) = event {
+                        log::info!(
+                            "Component Event - {:?} {}: {:?} - {}",
+                            event.component_type,
+                            event.component_id,
+                            event.status,
+                            event.message.clone().unwrap_or_default()
+                        );
+
+                        match event.component_type {
+                            ComponentType::Source => sm.record_event(event).await,
+                            ComponentType::Query => qm.record_event(event).await,
+                            ComponentType::Reaction => rm.record_event(event).await,
+                        }
+                    }
                 }
                 tracing::debug!("Graph update loop exited — all senders dropped");
             });
@@ -374,14 +395,7 @@ impl DrasiLib {
         self.reaction_manager.inject_state_store(state_store).await;
 
         // Load configuration
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.load_configuration().await?;
-        drop(lifecycle);
-
-        // Start event processors (one-time)
-        let mut lifecycle = self.lifecycle.write().await;
-        lifecycle.start_event_processors().await;
-        drop(lifecycle);
+        self.lifecycle.load_configuration().await?;
 
         self.state_guard.mark_initialized().await;
         info!("Drasi Server Core initialized successfully");
@@ -438,8 +452,7 @@ impl DrasiLib {
         }
 
         // Start all configured components
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.start_components().await?;
+        self.lifecycle.start_components().await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");
@@ -487,8 +500,7 @@ impl DrasiLib {
         info!("Stopping Drasi Server Core");
 
         // Stop all components
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.stop_all_components().await?;
+        self.lifecycle.stop_all_components().await?;
 
         *running = false;
         info!("Drasi Server Core stopped successfully");
