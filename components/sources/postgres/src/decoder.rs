@@ -731,7 +731,9 @@ pub fn decode_column_value_text(
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
             } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
-            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
+            } else if let Ok(dt) =
+                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
+            {
                 // No offset in text but OID says timestamptz — assume UTC
                 Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
             } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
@@ -904,7 +906,9 @@ mod tests {
                 assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
                 assert_eq!(dt.naive_local().to_string(), "2024-06-15 10:30:45");
             }
-            other => panic!("Expected ZonedDateTime for timestamptz OID with no tz info, got {other:?}"),
+            other => {
+                panic!("Expected ZonedDateTime for timestamptz OID with no tz info, got {other:?}")
+            }
         }
     }
 

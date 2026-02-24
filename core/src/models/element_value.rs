@@ -172,11 +172,15 @@ impl From<&serde_json::Value> for ElementValue {
                     if let Some(val_str) = o.get("value").and_then(|v| v.as_str()) {
                         match type_tag {
                             "LocalDateTime" => {
-                                if let Ok(dt) = NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S") {
+                                if let Ok(dt) =
+                                    NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S")
+                                {
                                     return ElementValue::LocalDateTime(dt);
                                 }
                                 // Also try formats with fractional seconds
-                                if let Ok(dt) = NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S%.f") {
+                                if let Ok(dt) =
+                                    NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S%.f")
+                                {
                                     return ElementValue::LocalDateTime(dt);
                                 }
                             }
