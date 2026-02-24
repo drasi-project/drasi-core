@@ -118,6 +118,10 @@ impl TryInto<ElementValue> for VariableValue {
     }
 }
 
+/// Tag used inside JSON envelopes to preserve `ElementValue` datetime type
+/// information across serialization round-trips.
+const DRASI_TYPE_TAG: &str = "__drasi_type";
+
 impl From<&ElementValue> for serde_json::Value {
     fn from(val: &ElementValue) -> Self {
         match val {
@@ -130,8 +134,18 @@ impl From<&ElementValue> for serde_json::Value {
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
             ElementValue::List(l) => serde_json::Value::Array(l.iter().map(|x| x.into()).collect()),
             ElementValue::Object(o) => serde_json::Value::Object(o.into()),
-            ElementValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
-            ElementValue::ZonedDateTime(dt) => serde_json::Value::String(dt.to_rfc3339()),
+            ElementValue::LocalDateTime(dt) => {
+                serde_json::json!({
+                    DRASI_TYPE_TAG: "LocalDateTime",
+                    "value": dt.to_string()
+                })
+            }
+            ElementValue::ZonedDateTime(dt) => {
+                serde_json::json!({
+                    DRASI_TYPE_TAG: "ZonedDateTime",
+                    "value": dt.to_rfc3339()
+                })
+            }
         }
     }
 }
@@ -152,7 +166,31 @@ impl From<&serde_json::Value> for ElementValue {
             }
             serde_json::Value::String(s) => ElementValue::String(Arc::from(s.as_str())),
             serde_json::Value::Array(a) => ElementValue::List(a.iter().map(|x| x.into()).collect()),
-            serde_json::Value::Object(o) => ElementValue::Object(o.into()),
+            serde_json::Value::Object(o) => {
+                // Check for tagged datetime envelope
+                if let Some(type_tag) = o.get(DRASI_TYPE_TAG).and_then(|v| v.as_str()) {
+                    if let Some(val_str) = o.get("value").and_then(|v| v.as_str()) {
+                        match type_tag {
+                            "LocalDateTime" => {
+                                if let Ok(dt) = NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S") {
+                                    return ElementValue::LocalDateTime(dt);
+                                }
+                                // Also try formats with fractional seconds
+                                if let Ok(dt) = NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S%.f") {
+                                    return ElementValue::LocalDateTime(dt);
+                                }
+                            }
+                            "ZonedDateTime" => {
+                                if let Ok(dt) = DateTime::parse_from_rfc3339(val_str) {
+                                    return ElementValue::ZonedDateTime(dt);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ElementValue::Object(o.into())
+            }
         }
     }
 }
@@ -386,7 +424,13 @@ mod tests {
         let dt = sample_naive_datetime();
         let ev = ElementValue::LocalDateTime(dt);
         let json: serde_json::Value = (&ev).into();
-        assert_eq!(json, serde_json::Value::String(dt.to_string()));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "__drasi_type": "LocalDateTime",
+                "value": dt.to_string()
+            })
+        );
     }
 
     #[test]
@@ -394,7 +438,13 @@ mod tests {
         let dt = sample_fixed_datetime();
         let ev = ElementValue::ZonedDateTime(dt);
         let json: serde_json::Value = (&ev).into();
-        assert_eq!(json, serde_json::Value::String(dt.to_rfc3339()));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "__drasi_type": "ZonedDateTime",
+                "value": dt.to_rfc3339()
+            })
+        );
     }
 
     // ── Round-trip: ElementValue → VariableValue → ElementValue ────────
@@ -426,6 +476,62 @@ mod tests {
         let json = serde_json::Value::String("2024-06-15 10:30:45".to_string());
         let ev: ElementValue = (&json).into();
         assert!(matches!(ev, ElementValue::String(_)));
+    }
+
+    // ── JSON round-trip via tagged envelope ─────────────────────────────
+
+    #[test]
+    fn json_roundtrip_local_datetime() {
+        let dt = sample_naive_datetime();
+        let original = ElementValue::LocalDateTime(dt);
+        let json: serde_json::Value = (&original).into();
+        let recovered: ElementValue = (&json).into();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn json_roundtrip_zoned_datetime() {
+        let dt = sample_fixed_datetime();
+        let original = ElementValue::ZonedDateTime(dt);
+        let json: serde_json::Value = (&original).into();
+        let recovered: ElementValue = (&json).into();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn json_roundtrip_zoned_datetime_utc() {
+        let dt = Utc
+            .with_ymd_and_hms(2024, 1, 1, 0, 0, 0)
+            .unwrap()
+            .fixed_offset();
+        let original = ElementValue::ZonedDateTime(dt);
+        let json: serde_json::Value = (&original).into();
+        let recovered: ElementValue = (&json).into();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn tagged_object_with_unknown_type_stays_object() {
+        // An object with __drasi_type set to an unknown type should
+        // be deserialized as a regular Object, not a datetime.
+        let json = serde_json::json!({
+            "__drasi_type": "UnknownType",
+            "value": "some-value"
+        });
+        let ev: ElementValue = (&json).into();
+        assert!(matches!(ev, ElementValue::Object(_)));
+    }
+
+    #[test]
+    fn tagged_object_with_invalid_datetime_stays_object() {
+        // A tagged envelope with an unparseable value should fall back
+        // to Object rather than panic.
+        let json = serde_json::json!({
+            "__drasi_type": "ZonedDateTime",
+            "value": "not-a-datetime"
+        });
+        let ev: ElementValue = (&json).into();
+        assert!(matches!(ev, ElementValue::Object(_)));
     }
 
     // ── Other variants still work ──────────────────────────────────────
