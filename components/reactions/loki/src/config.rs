@@ -25,12 +25,20 @@ fn default_timeout_ms() -> u64 {
     5000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BasicAuth {
     pub username: String,
     pub password: String,
 }
 
+impl std::fmt::Debug for BasicAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BasicAuth")
+            .field("username", &self.username)
+            .field("password", &"***REDACTED***")
+            .finish()
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LokiReactionConfig {
     #[serde(default = "default_endpoint")]
