@@ -76,6 +76,99 @@
 //! }
 //! ```
 //!
+//! ## Static vs. Dynamic Plugins
+//!
+//! Plugins can be integrated with Drasi Server in two ways:
+//!
+//! ### Static Linking
+//!
+//! Compile the plugin directly into the server binary. Create a
+//! [`PluginRegistration`](registration::PluginRegistration) and pass its descriptors
+//! to the server's plugin registry at startup. This is the simplest approach and
+//! is shown in the Quick Start above.
+//!
+//! ### Dynamic Loading
+//!
+//! Build the plugin as a shared library (`cdylib`) that the server loads at runtime
+//! from a plugins directory. This allows deploying new plugins without recompiling
+//! the server. See [Creating a Dynamic Plugin](#creating-a-dynamic-plugin) below
+//! for the full workflow.
+//!
+//! ## Creating a Dynamic Plugin
+//!
+//! Dynamic plugins are compiled as shared libraries (`.so` on Linux, `.dylib` on
+//! macOS, `.dll` on Windows) and placed in the server's plugins directory. The server
+//! discovers and loads them automatically at startup.
+//!
+//! ### Step 1: Set up the crate
+//!
+//! In your plugin's `Cargo.toml`, set the crate type to `cdylib`:
+//!
+//! ```toml
+//! [lib]
+//! crate-type = ["cdylib"]
+//!
+//! [dependencies]
+//! drasi-plugin-sdk = "..."  # Must match the server's version exactly
+//! drasi-lib = "..."
+//! ```
+//!
+//! ### Step 2: Implement descriptor(s)
+//!
+//! Implement [`SourcePluginDescriptor`](descriptor::SourcePluginDescriptor),
+//! [`ReactionPluginDescriptor`](descriptor::ReactionPluginDescriptor), and/or
+//! [`BootstrapPluginDescriptor`](descriptor::BootstrapPluginDescriptor) for your
+//! plugin. See the [`descriptor`] module docs for the full trait requirements.
+//!
+//! ### Step 3: Export the entry point
+//!
+//! Every dynamic plugin shared library **must** export a C function named
+//! `drasi_plugin_init` that returns a heap-allocated
+//! [`PluginRegistration`](registration::PluginRegistration) via raw pointer:
+//!
+//! ```rust,ignore
+//! use drasi_plugin_sdk::prelude::*;
+//!
+//! #[no_mangle]
+//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
+//!     let registration = PluginRegistration::new()
+//!         .with_source(Box::new(MySourceDescriptor))
+//!         .with_reaction(Box::new(MyReactionDescriptor));
+//!     Box::into_raw(Box::new(registration))
+//! }
+//! ```
+//!
+//! **Important details:**
+//!
+//! - The function must be `#[no_mangle]` and `extern "C"` so the server can find it
+//!   via the C ABI.
+//! - The `PluginRegistration` must be heap-allocated with `Box::new` and returned as
+//!   a raw pointer via [`Box::into_raw`]. The server takes ownership by calling
+//!   `Box::from_raw`.
+//! - The [`PluginRegistration::new()`](registration::PluginRegistration::new) constructor
+//!   automatically embeds the [`SDK_VERSION`](registration::SDK_VERSION) constant.
+//!   The server checks this at load time and **rejects plugins built with a different
+//!   SDK version**.
+//!
+//! ### Step 4: Build and deploy
+//!
+//! ```bash
+//! cargo build --release
+//! # Copy the shared library to the server's plugins directory
+//! cp target/release/libmy_plugin.so /path/to/plugins/
+//! ```
+//!
+//! ### Compatibility Requirements
+//!
+//! Both the plugin and the server **must** be compiled with:
+//!
+//! - The **same Rust toolchain** version (the Rust ABI is not stable across versions).
+//! - The **same `drasi-plugin-sdk` version**. The server compares
+//!   [`SDK_VERSION`](registration::SDK_VERSION) at load time and rejects mismatches.
+//!
+//! Failing to meet these requirements will result in the plugin being rejected at
+//! load time or, in the worst case, undefined behavior from ABI incompatibility.
+//!
 //! ## Modules
 //!
 //! - [`config_value`] — The [`ConfigValue<T>`](config_value::ConfigValue) enum for

@@ -33,19 +33,25 @@
 //! }
 //! ```
 //!
-//! # For Dynamically-Loaded Plugins (Future)
+//! # For Dynamically-Loaded Plugins
 //!
-//! Dynamic plugins export a C-ABI entry point:
+//! Dynamic plugins are compiled as shared libraries (`cdylib`) and export a C-ABI
+//! entry point. The function must return a heap-allocated `PluginRegistration` as a
+//! raw pointer. The server takes ownership via `Box::from_raw`.
 //!
 //! ```rust,ignore
 //! use drasi_plugin_sdk::prelude::*;
 //!
 //! #[no_mangle]
-//! pub extern "C" fn drasi_plugin_init() -> PluginRegistration {
-//!     PluginRegistration::new()
-//!         .with_source(Box::new(MySourceDescriptor))
+//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
+//!     let registration = PluginRegistration::new()
+//!         .with_source(Box::new(MySourceDescriptor));
+//!     Box::into_raw(Box::new(registration))
 //! }
 //! ```
+//!
+//! The `#[no_mangle]` attribute and `extern "C"` ABI are required so the server
+//! can locate the symbol by name (`drasi_plugin_init`) in the shared library.
 //!
 //! # SDK Version Compatibility
 //!
@@ -59,7 +65,12 @@ use crate::descriptor::{
 /// The version of the Drasi Plugin SDK.
 ///
 /// This is automatically embedded in every [`PluginRegistration`] and checked
-/// by the server at load time for compatibility.
+/// by the server at load time for compatibility. If the server's `SDK_VERSION`
+/// does not match the plugin's `SDK_VERSION`, the plugin is rejected during
+/// dynamic loading.
+///
+/// For dynamic plugins, this means both the server and the plugin must be
+/// compiled against the exact same version of the `drasi-plugin-sdk` crate.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Contains the descriptors provided by a plugin.
@@ -75,6 +86,22 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///     .with_source(Box::new(PostgresSourceDescriptor))
 ///     .with_bootstrapper(Box::new(PostgresBootstrapDescriptor));
 /// ```
+///
+/// # Role in Dynamic Loading
+///
+/// For dynamically-loaded plugins, a `PluginRegistration` is the value returned by
+/// the `drasi_plugin_init()` entry point. The server:
+///
+/// 1. Loads the shared library (`.so`/`.dylib`/`.dll`).
+/// 2. Resolves the `drasi_plugin_init` symbol.
+/// 3. Calls it and takes ownership of the returned `PluginRegistration` via
+///    [`Box::from_raw`].
+/// 4. Validates that [`sdk_version`](Self::sdk_version) matches the server's
+///    [`SDK_VERSION`]. Mismatches cause the plugin to be rejected.
+/// 5. Extracts all descriptors and registers them in the plugin registry.
+///
+/// The entry point must return a `*mut PluginRegistration` created with
+/// `Box::into_raw(Box::new(registration))`.
 pub struct PluginRegistration {
     /// The SDK version this plugin was compiled against.
     pub sdk_version: &'static str,

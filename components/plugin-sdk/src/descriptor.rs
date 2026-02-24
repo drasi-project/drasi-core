@@ -66,6 +66,16 @@
 //! The server compares the plugin's `config_version()` against known versions and
 //! can reject incompatible plugins at load time.
 //!
+//! # Dynamic Loading
+//!
+//! Descriptors are fully compatible with dynamic loading. When a plugin is compiled
+//! as a `cdylib` shared library, the descriptor trait objects are passed to the server
+//! through the [`PluginRegistration`](crate::registration::PluginRegistration) returned
+//! by the `drasi_plugin_init()` entry point. The server calls the descriptor methods
+//! (e.g., `kind()`, `config_schema_json()`, `create_source()`) across the shared library
+//! boundary. Both plugin and server **must** be compiled with the same Rust toolchain
+//! and the same `drasi-plugin-sdk` version for this to work correctly.
+//!
 //! # Complete Example
 //!
 //! ```rust,ignore
@@ -361,7 +371,7 @@ mod tests {
         let desc = TestSourceDescriptor;
         let schema = desc.config_schema_json();
         let parsed: serde_json::Value = serde_json::from_str(&schema).expect("valid JSON");
-        assert_eq!(parsed["type"], "object");
+        assert_eq!(parsed["TestSourceConfig"]["type"], "object");
     }
 
     #[tokio::test]
