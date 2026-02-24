@@ -80,12 +80,26 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
         VariableValue::Null => serde_json::Value::Null,
         VariableValue::Bool(b) => serde_json::Value::Bool(*b),
         VariableValue::Float(f) => {
-            // Float might be NaN or Infinity, handle gracefully
-            serde_json::Value::String(f.to_string())
+            if f.is_f64() {
+                // from_f64 returns None for NaN/Infinity, but is_f64() already checks finiteness
+                let s = f.to_string();
+                s.parse::<f64>()
+                    .ok()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or_else(|| serde_json::Value::String(s))
+            } else {
+                serde_json::Value::String(f.to_string())
+            }
         }
         VariableValue::Integer(i) => {
-            // Integer might be too large for JSON number
-            serde_json::Value::String(i.to_string())
+            if let Some(val) = i.as_i64() {
+                serde_json::Value::Number(serde_json::Number::from(val))
+            } else if let Some(val) = i.as_u64() {
+                serde_json::Value::Number(serde_json::Number::from(val))
+            } else {
+                serde_json::Value::String(i.to_string())
+            }
         }
         VariableValue::String(s) => serde_json::Value::String(s.clone()),
         VariableValue::List(list) => {
