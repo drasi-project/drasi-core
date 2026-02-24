@@ -21,15 +21,18 @@
 //! # Built-in Resolvers
 //!
 //! - [`EnvironmentVariableResolver`] — Reads from `std::env::var()`, falls back to default.
-//! - [`SecretResolver`] — Stub that returns `NotImplemented` (will be backed by a secret store).
+//! - [`SecretResolver`] — Default stub that returns `NotImplemented`.
 //!
-//! # Custom Resolvers
+//! # Registering a Secret Resolver
 //!
-//! Implement [`ValueResolver`] to add custom resolution logic (e.g., HashiCorp Vault, AWS SSM):
+//! Consuming libraries should call [`register_secret_resolver`] once at startup to
+//! provide a concrete implementation. All [`DtoMapper::new()`](crate::mapper::DtoMapper::new)
+//! calls will automatically use it:
 //!
 //! ```rust,ignore
-//! use drasi_plugin_sdk::resolver::{ValueResolver, ResolverError};
+//! use drasi_plugin_sdk::resolver::{register_secret_resolver, ValueResolver, ResolverError};
 //! use drasi_plugin_sdk::ConfigValue;
+//! use std::sync::Arc;
 //!
 //! struct VaultResolver { /* client */ }
 //!
@@ -37,16 +40,31 @@
 //!     fn resolve_to_string(&self, value: &ConfigValue<String>) -> Result<String, ResolverError> {
 //!         match value {
 //!             ConfigValue::Secret { name } => {
-//!                 // Look up secret in Vault
+//!                 // Look up secret in Vault, K8s, etc.
 //!                 Ok("resolved-value".to_string())
 //!             }
 //!             _ => Err(ResolverError::WrongResolverType),
 //!         }
 //!     }
 //! }
+//!
+//! register_secret_resolver(Arc::new(VaultResolver { /* ... */ })).expect("already registered");
+//! ```
+//!
+//! # Custom Resolvers
+//!
+//! For per-mapper overrides, use [`DtoMapper::with_resolver`](crate::mapper::DtoMapper::with_resolver):
+//!
+//! ```rust,ignore
+//! use drasi_plugin_sdk::mapper::DtoMapper;
+//! use std::sync::Arc;
+//!
+//! let mapper = DtoMapper::new()
+//!     .with_resolver("Secret", Arc::new(MyTestResolver));
 //! ```
 
 use crate::config_value::ConfigValue;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 /// Errors that can occur during value resolution.
@@ -107,10 +125,10 @@ impl ValueResolver for EnvironmentVariableResolver {
     }
 }
 
-/// Resolves [`ConfigValue::Secret`] references.
+/// Default resolver for [`ConfigValue::Secret`] references.
 ///
-/// Currently returns [`ResolverError::NotImplemented`] — will be backed by
-/// a pluggable secret store in a future release.
+/// Returns [`ResolverError::NotImplemented`] unless a custom secret resolver
+/// has been registered via [`register_secret_resolver`].
 pub struct SecretResolver;
 
 impl ValueResolver for SecretResolver {
@@ -122,6 +140,51 @@ impl ValueResolver for SecretResolver {
             _ => Err(ResolverError::WrongResolverType),
         }
     }
+}
+
+/// Global secret resolver registry.
+///
+/// Allows a consuming library to register a concrete [`ValueResolver`] for
+/// secrets once at startup. All subsequent [`DtoMapper::new()`](crate::mapper::DtoMapper::new)
+/// calls will automatically use the registered resolver for
+/// [`ConfigValue::Secret`] references.
+static SECRET_RESOLVER: OnceLock<Arc<dyn ValueResolver>> = OnceLock::new();
+
+/// Register a global secret resolver.
+///
+/// This must be called **once** before any [`DtoMapper`](crate::mapper::DtoMapper)
+/// instances are created. Subsequent calls will return an `Err` containing the
+/// resolver that was not stored.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use drasi_plugin_sdk::resolver::{register_secret_resolver, ValueResolver, ResolverError};
+/// use drasi_plugin_sdk::ConfigValue;
+/// use std::sync::Arc;
+///
+/// struct VaultResolver;
+///
+/// impl ValueResolver for VaultResolver {
+///     fn resolve_to_string(&self, value: &ConfigValue<String>) -> Result<String, ResolverError> {
+///         match value {
+///             ConfigValue::Secret { name } => Ok(fetch_from_vault(name)),
+///             _ => Err(ResolverError::WrongResolverType),
+///         }
+///     }
+/// }
+///
+/// register_secret_resolver(Arc::new(VaultResolver)).expect("already registered");
+/// ```
+pub fn register_secret_resolver(
+    resolver: Arc<dyn ValueResolver>,
+) -> Result<(), Arc<dyn ValueResolver>> {
+    SECRET_RESOLVER.set(resolver)
+}
+
+/// Returns the globally registered secret resolver, if one has been registered.
+pub(crate) fn get_secret_resolver() -> Option<Arc<dyn ValueResolver>> {
+    SECRET_RESOLVER.get().cloned()
 }
 
 #[cfg(test)]

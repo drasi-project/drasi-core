@@ -217,4 +217,4 @@ pub use descriptor::{
 };
 pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
-pub use resolver::ResolverError;
+pub use resolver::{register_secret_resolver, ResolverError};

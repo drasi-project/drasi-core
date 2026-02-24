@@ -73,9 +73,12 @@
 //! ```
 
 use crate::config_value::ConfigValue;
-use crate::resolver::{EnvironmentVariableResolver, ResolverError, SecretResolver, ValueResolver};
+use crate::resolver::{
+    get_secret_resolver, EnvironmentVariableResolver, ResolverError, SecretResolver, ValueResolver,
+};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors that can occur during DTO-to-domain mapping.
@@ -131,15 +134,23 @@ pub trait ConfigMapper<TDto, TDomain>: Send + Sync {
 /// - `"EnvironmentVariable"` → [`EnvironmentVariableResolver`]
 /// - `"Secret"` → [`SecretResolver`] (currently returns `NotImplemented`)
 pub struct DtoMapper {
-    resolvers: HashMap<&'static str, Box<dyn ValueResolver>>,
+    resolvers: HashMap<&'static str, Arc<dyn ValueResolver>>,
 }
 
 impl DtoMapper {
     /// Create a new mapper with the default resolvers (environment variable + secret).
+    ///
+    /// If a global secret resolver has been registered via
+    /// [`register_secret_resolver`](crate::resolver::register_secret_resolver),
+    /// it will be used automatically. Otherwise, the default [`SecretResolver`]
+    /// stub is used (which returns `NotImplemented`).
     pub fn new() -> Self {
-        let mut resolvers: HashMap<&'static str, Box<dyn ValueResolver>> = HashMap::new();
-        resolvers.insert("EnvironmentVariable", Box::new(EnvironmentVariableResolver));
-        resolvers.insert("Secret", Box::new(SecretResolver));
+        let mut resolvers: HashMap<&'static str, Arc<dyn ValueResolver>> = HashMap::new();
+        resolvers.insert("EnvironmentVariable", Arc::new(EnvironmentVariableResolver));
+
+        let secret_resolver =
+            get_secret_resolver().unwrap_or_else(|| Arc::new(SecretResolver));
+        resolvers.insert("Secret", secret_resolver);
 
         Self { resolvers }
     }
@@ -147,7 +158,11 @@ impl DtoMapper {
     /// Register a custom [`ValueResolver`] for a given reference kind.
     ///
     /// This replaces any previously registered resolver for the same kind.
-    pub fn with_resolver(mut self, kind: &'static str, resolver: Box<dyn ValueResolver>) -> Self {
+    pub fn with_resolver(
+        mut self,
+        kind: &'static str,
+        resolver: Arc<dyn ValueResolver>,
+    ) -> Self {
         self.resolvers.insert(kind, resolver);
         self
     }
@@ -187,7 +202,14 @@ impl DtoMapper {
             ConfigValue::Static(v) => Ok(v.clone()),
 
             ConfigValue::Secret { name } => {
-                let string_val = self.resolve_secret_to_string(name)?;
+                let resolver = self
+                    .resolvers
+                    .get("Secret")
+                    .ok_or_else(|| ResolverError::NoResolverFound("Secret".to_string()))?;
+                let string_cv = ConfigValue::Secret {
+                    name: name.clone(),
+                };
+                let string_val = resolver.resolve_to_string(&string_cv)?;
                 string_val.parse::<T>().map_err(|e| {
                     ResolverError::ParseError(format!("Failed to parse secret '{name}': {e}"))
                 })
@@ -233,13 +255,6 @@ impl DtoMapper {
         values: &[ConfigValue<String>],
     ) -> Result<Vec<String>, ResolverError> {
         values.iter().map(|v| self.resolve_string(v)).collect()
-    }
-
-    /// Helper: resolve secret name to string (delegates to SecretResolver).
-    fn resolve_secret_to_string(&self, name: &str) -> Result<String, ResolverError> {
-        Err(ResolverError::NotImplemented(format!(
-            "Secret resolution not yet implemented for '{name}'"
-        )))
     }
 
     /// Map a DTO using a [`ConfigMapper`] implementation.
@@ -408,7 +423,7 @@ mod tests {
             }
         }
 
-        let mapper = DtoMapper::new().with_resolver("Secret", Box::new(AlwaysResolver));
+        let mapper = DtoMapper::new().with_resolver("Secret", Arc::new(AlwaysResolver));
         let value = ConfigValue::Secret {
             name: "test".to_string(),
         };

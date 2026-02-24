@@ -43,7 +43,8 @@ pub use crate::mapper::{ConfigMapper, DtoMapper, MappingError};
 
 // Resolver types
 pub use crate::resolver::{
-    EnvironmentVariableResolver, ResolverError, SecretResolver, ValueResolver,
+    register_secret_resolver, EnvironmentVariableResolver, ResolverError, SecretResolver,
+    ValueResolver,
 };
 
 // Plugin descriptor traits
