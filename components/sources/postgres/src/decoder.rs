@@ -708,9 +708,9 @@ pub fn decode_column_value_text(
             // text, varchar, name
             Ok(ElementValue::String(Arc::from(text)))
         }
-        1114 | 1184 => {
-            // timestamp, timestamptz
-            // Try parsing as NaiveDateTime first (timestamp without tz)
+        1114 => {
+            // timestamp (without timezone)
+            // Try parsing as NaiveDateTime first, then fall back to zoned formats
             if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
                 Ok(ElementValue::LocalDateTime(dt))
             } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
@@ -719,6 +719,24 @@ pub fn decode_column_value_text(
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
             } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
                 Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else {
+                // Fall back to string if parsing fails
+                Ok(ElementValue::String(Arc::from(text)))
+            }
+        }
+        1184 => {
+            // timestamptz — always produce ZonedDateTime to match CDC binary path.
+            // Try offset-aware formats first, then treat offset-less text as UTC.
+            if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
+                // No offset in text but OID says timestamptz — assume UTC
+                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
+                // No offset in text but OID says timestamptz — assume UTC
+                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
             } else {
                 // Fall back to string if parsing fails
                 Ok(ElementValue::String(Arc::from(text)))
@@ -877,13 +895,29 @@ mod tests {
     // ── decode_column_value_text: timestamp OID with ambiguous input ───
 
     #[test]
-    fn decode_timestamp_oid_with_plain_datetime_string() {
-        // OID 1184 (timestamptz) but the string has no tz info → LocalDateTime
+    fn decode_timestamptz_oid_with_plain_datetime_string_assumes_utc() {
+        // OID 1184 (timestamptz) but the string has no tz info → ZonedDateTime (UTC)
+        // This matches the CDC binary path which always produces ZonedDateTime for OID 1184
         let ev = decode_column_value_text("2024-06-15 10:30:45", 1184).unwrap();
-        assert!(
-            matches!(ev, ElementValue::LocalDateTime(_)),
-            "Expected LocalDateTime for timestamptz OID with no tz info, got {ev:?}"
-        );
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
+                assert_eq!(dt.naive_local().to_string(), "2024-06-15 10:30:45");
+            }
+            other => panic!("Expected ZonedDateTime for timestamptz OID with no tz info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_oid_with_fractional_no_offset_assumes_utc() {
+        // OID 1184 with fractional seconds but no offset → ZonedDateTime (UTC)
+        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
     }
 
     #[test]
