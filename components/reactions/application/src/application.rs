@@ -22,7 +22,7 @@ use std::sync::Arc;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::{mpsc, RwLock};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
+use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -528,11 +528,11 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting application reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -540,11 +540,11 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Application reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -606,11 +606,11 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Application reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, ComponentKind, ComponentNode, RelationshipKind};
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::managers::{
@@ -31,7 +32,6 @@ use crate::state_store::StateStoreProvider;
 pub struct ReactionManager {
     instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
-    event_tx: ComponentEventSender,
     /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
@@ -40,23 +40,30 @@ pub struct ReactionManager {
     event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
+    /// Shared component graph — the authoritative registry for component state and events
+    graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl ReactionManager {
     /// Create a new ReactionManager
+    ///
+    /// # Parameters
+    /// - `instance_id`: The DrasiLib instance ID for log routing
+    /// - `log_registry`: Shared log registry for component log streaming
+    /// - `graph`: Shared component graph for tracking component relationships and emitting events
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
             query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            graph,
         }
     }
 
@@ -99,6 +106,31 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
+        // Registry-first: register in the component graph before creating runtime state.
+        // The graph is the authoritative source of truth — if it rejects the add
+        // (duplicate ID), the runtime instance is never created.
+        {
+            let mut graph = self.graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), reaction.type_name().to_string());
+            let node = ComponentNode {
+                id: reaction_id.clone(),
+                kind: ComponentKind::Reaction,
+                status: ComponentStatus::Added,
+                metadata,
+            };
+            graph.add_component(node)?;
+
+            // Create bidirectional Feeds/SubscribesTo edges for each subscribed query
+            for query_id in reaction.query_ids() {
+                if graph.contains(&query_id) {
+                    let _ =
+                        graph.add_relationship(&query_id, &reaction_id, RelationshipKind::Feeds);
+                }
+            }
+        }
+        // Graph emits ComponentEvent(Added) automatically
+
         // Query provider must be available for reactions
         let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
             anyhow::anyhow!(
@@ -107,42 +139,28 @@ impl ReactionManager {
         })?;
 
         // Construct runtime context for this reaction
+        let update_tx = {
+            let graph = self.graph.read().await;
+            graph.update_sender()
+        };
         let context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
-            self.event_tx.clone(),
             self.state_store.read().await.clone(),
             query_provider,
+            update_tx,
         );
 
         // Initialize the reaction with its runtime context
         reaction.initialize(context).await;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance for fast lookups
         {
             let mut reactions = self.reactions.write().await;
-            if reactions.contains_key(&reaction_id) {
-                return Err(anyhow::anyhow!(
-                    "Reaction with id '{reaction_id}' already exists"
-                ));
-            }
-            reactions.insert(reaction_id.clone(), reaction);
+            reactions.insert(reaction_id.clone(), reaction.clone());
         }
 
         info!("Added reaction: {reaction_id}");
-
-        // Emit Added event for introspection
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: reaction_id,
-                component_type: ComponentType::Reaction,
-                status: ComponentStatus::Added,
-                timestamp: chrono::Utc::now(),
-                message: Some("Reaction added".to_string()),
-            })
-            .await;
 
         Ok(())
     }
@@ -163,6 +181,17 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Set transitional state in graph before starting
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Starting,
+                    Some("Starting reaction".to_string()),
+                );
+            }
+
             reaction.start().await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
@@ -180,6 +209,17 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Set transitional state in graph before stopping
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                );
+            }
+
             reaction.stop().await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
@@ -269,24 +309,17 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
+            // Remove from the component graph (emits Removed event automatically)
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.remove_component(&id);
+            }
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
             // Clean up log registry for this reaction
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted reaction: {id}");
-
-            // Emit Removed event for introspection
-            let _ = self
-                .event_tx
-                .send(ComponentEvent {
-                    component_id: id,
-                    component_type: ComponentType::Reaction,
-                    status: ComponentStatus::Removed,
-                    timestamp: chrono::Utc::now(),
-                    message: Some("Reaction removed".to_string()),
-                })
-                .await;
 
             Ok(())
         } else {
@@ -331,17 +364,15 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Emit Reconfiguring event
-            let _ = self
-                .event_tx
-                .send(ComponentEvent {
-                    component_id: id.clone(),
-                    component_type: ComponentType::Reaction,
-                    status: ComponentStatus::Reconfiguring,
-                    timestamp: chrono::Utc::now(),
-                    message: Some("Reconfiguring reaction".to_string()),
-                })
-                .await;
+            // Emit Reconfiguring event via the graph
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Reconfiguring,
+                    Some("Reconfiguring reaction".to_string()),
+                );
+            }
 
             // If running or starting, stop first then validate
             if was_running {
@@ -374,12 +405,16 @@ impl ReactionManager {
                     "QueryProvider not injected - was ReactionManager initialized properly?"
                 )
             })?;
+            let update_tx = {
+                let graph = self.graph.read().await;
+                graph.update_sender()
+            };
             let context = ReactionRuntimeContext::new(
                 &self.instance_id,
                 &id,
-                self.event_tx.clone(),
                 self.state_store.read().await.clone(),
                 query_provider,
+                update_tx,
             );
             new_reaction.initialize(context).await;
 

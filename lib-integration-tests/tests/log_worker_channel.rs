@@ -101,8 +101,8 @@ impl Source for HighVolumeLogSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         Ok(())
     }
@@ -188,8 +188,8 @@ impl Source for SimpleLogSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         Ok(())
     }

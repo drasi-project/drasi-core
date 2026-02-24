@@ -28,7 +28,6 @@
 //! ```ignore
 //! use drasi_lib::queries::base::QueryBase;
 //! use drasi_lib::config::QueryConfig;
-//! use drasi_lib::channels::ComponentEventSender;
 //! use anyhow::Result;
 //!
 //! pub struct MyQuery {
@@ -37,8 +36,8 @@
 //! }
 //!
 //! impl MyQuery {
-//!     pub fn new(config: QueryConfig, event_tx: ComponentEventSender) -> Result<Self> {
-//!         let base = QueryBase::new(config, event_tx)?;
+//!     pub fn new(config: QueryConfig) -> Result<Self> {
+//!         let base = QueryBase::new(config)?;
 //!         Ok(Self { base /* ... */ })
 //!     }
 //! }
@@ -51,9 +50,9 @@ use tokio::sync::RwLock;
 
 use crate::channels::{
     BroadcastChangeDispatcher, ChangeDispatcher, ChangeReceiver, ChannelChangeDispatcher,
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, DispatchMode,
-    QueryResult, QuerySubscriptionResponse,
+    ComponentStatus, DispatchMode, QueryResult, QuerySubscriptionResponse,
 };
+use crate::component_graph::ComponentStatusHandle;
 use crate::config::QueryConfig;
 // Profiling will be used when implementing performance tracking
 use chrono::Utc;
@@ -62,12 +61,10 @@ use chrono::Utc;
 pub struct QueryBase {
     /// Query configuration
     pub config: QueryConfig,
-    /// Current component status
-    pub status: Arc<RwLock<ComponentStatus>>,
+    /// Component status handle — always available, wired to graph by QueryManager.
+    pub status_handle: ComponentStatusHandle,
     /// Dispatchers for sending query results to subscribers
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>>,
-    /// Channel for sending component lifecycle events
-    pub event_tx: ComponentEventSender,
     /// Handle to the query's main task
     pub task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal
@@ -76,7 +73,7 @@ pub struct QueryBase {
 
 impl QueryBase {
     /// Create a new QueryBase with the given configuration
-    pub fn new(config: QueryConfig, event_tx: ComponentEventSender) -> Result<Self> {
+    pub fn new(config: QueryConfig) -> Result<Self> {
         // Determine dispatch mode (default to Channel if not specified)
         let dispatch_mode = config.dispatch_mode.unwrap_or_default();
 
@@ -91,20 +88,33 @@ impl QueryBase {
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
 
+        let status_handle = ComponentStatusHandle::new(&config.id);
+
         Ok(Self {
             config,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            status_handle,
             dispatchers: Arc::new(RwLock::new(dispatchers)),
-            event_tx,
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
         })
     }
 
-    /// Subscribe to this query's results
+    /// Returns a clone of the [`ComponentStatusHandle`] for use in spawned tasks.
+    pub fn status_handle(&self) -> ComponentStatusHandle {
+        self.status_handle.clone()
+    }
+
+    /// Set the component's status — updates local state AND notifies the graph.
     ///
-    /// For broadcast mode: returns a receiver from the single broadcast dispatcher
-    /// For channel mode: creates a new channel dispatcher and returns its receiver
+    /// This is the single canonical way to change a query's status.
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status_handle.set_status(status, message).await;
+    }
+
+    /// Get the current status.
+    pub async fn get_status(&self) -> ComponentStatus {
+        self.status_handle.get_status().await
+    }
     pub async fn subscribe(&self, reaction_id: &str) -> Result<QuerySubscriptionResponse> {
         info!(
             "Query '{}' received subscription from reaction '{}'",
@@ -179,24 +189,7 @@ impl QueryBase {
         Ok(())
     }
 
-    /// Update status and emit a lifecycle event
-    pub async fn emit_status_event(&self, status: ComponentStatus, message: Option<&str>) {
-        *self.status.write().await = status.clone();
-
-        let event = ComponentEvent {
-            component_id: self.config.id.clone(),
-            component_type: ComponentType::Query,
-            status,
-            timestamp: Utc::now(),
-            message: message.map(|m| m.to_string()),
-        };
-
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send component event: {e}");
-        }
-    }
-
-    /// Handle common stop functionality
+    /// Handle common stop functionality.
     pub async fn stop_common(&self) -> Result<()> {
         info!("Stopping query '{}'", self.config.id);
 
@@ -223,14 +216,13 @@ impl QueryBase {
             }
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Query '{}' stopped", self.config.id)),
+        )
+        .await;
         info!("Query '{}' stopped", self.config.id);
         Ok(())
-    }
-
-    /// Get the current status
-    pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
     }
 
     /// Set the task handle
@@ -268,8 +260,7 @@ mod tests {
             storage_backend: None,
         };
 
-        let (event_tx, _) = tokio::sync::mpsc::channel(100);
-        let base = QueryBase::new(config, event_tx).unwrap();
+        let base = QueryBase::new(config).unwrap();
 
         // Subscribe multiple times
         let sub1 = base.subscribe("reaction1").await.unwrap();
@@ -315,8 +306,7 @@ mod tests {
             storage_backend: None,
         };
 
-        let (event_tx, _) = tokio::sync::mpsc::channel(100);
-        let base = QueryBase::new(config, event_tx).unwrap();
+        let base = QueryBase::new(config).unwrap();
 
         // Subscribe multiple times - each gets its own channel
         let sub1 = base.subscribe("reaction1").await.unwrap();

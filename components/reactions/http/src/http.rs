@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -277,11 +277,11 @@ impl Reaction for HttpReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting HTTP reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -289,18 +289,18 @@ impl Reaction for HttpReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("HTTP reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Spawn the main processing task
         let reaction_name = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let query_configs = self.config.routes.clone();
         let base_url = self.config.base_url.clone();
         let token = self.config.token.clone();
@@ -355,7 +355,7 @@ impl Reaction for HttpReaction {
                 };
                 let query_result = query_result_arc.as_ref();
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -482,7 +482,12 @@ impl Reaction for HttpReaction {
             }
 
             info!("[{reaction_name}] HTTP reaction stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("HTTP reaction processing task stopped".to_string()),
+                )
+                .await;
         });
 
         // Store the processing task handle
@@ -499,11 +504,11 @@ impl Reaction for HttpReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("HTTP reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

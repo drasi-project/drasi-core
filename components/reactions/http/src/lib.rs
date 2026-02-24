@@ -21,7 +21,6 @@
 //!
 //! ```rust,ignore
 //! use drasi_reaction_http::{HttpReaction, HttpReactionConfig};
-//! use drasi_lib::channels::ComponentEventSender;
 //! use std::sync::Arc;
 //!
 //! // Create configuration
@@ -37,7 +36,6 @@
 //!     "my-http-reaction",
 //!     vec!["query1".to_string()],
 //!     config,
-//!     event_tx,
 //! ));
 //! drasi.add_reaction(reaction).await?;
 //! ```

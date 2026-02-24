@@ -429,8 +429,6 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
-pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
 pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
 pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
@@ -491,45 +489,31 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub component_event_tx: ComponentEventSender,
-    pub component_event_broadcast_tx: ComponentEventBroadcastSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
     pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (component_event_tx, component_event_rx) = mpsc::channel(1000);
-        let (component_event_broadcast_tx, _) = broadcast::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            component_event_tx,
-            component_event_broadcast_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            component_event_rx,
             _control_rx: control_rx,
             control_signal_rx,
         };
 
         (channels, receivers)
-    }
-
-    /// Subscribe to all component events (status changes, additions, removals).
-    /// Returns a broadcast receiver that gets a copy of every ComponentEvent.
-    pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
-        self.component_event_broadcast_tx.subscribe()
     }
 }
 

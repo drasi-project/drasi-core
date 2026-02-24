@@ -25,6 +25,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, ComponentKind, ComponentNode, RelationshipKind};
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::managers::{
@@ -78,26 +79,32 @@ pub fn convert_json_to_element_properties(
 pub struct SourceManager {
     instance_id: String,
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
-    event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
+    /// Shared component graph — the authoritative registry for component state and events
+    graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl SourceManager {
     /// Create a new SourceManager
+    ///
+    /// # Parameters
+    /// - `instance_id`: The DrasiLib instance ID for log routing
+    /// - `log_registry`: Shared log registry for component log streaming
+    /// - `graph`: Shared component graph for tracking component relationships and emitting events
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             sources: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
             state_store: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            graph,
         }
     }
 
@@ -136,43 +143,49 @@ impl SourceManager {
     pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
+        let auto_start = source.auto_start();
 
-        // Construct runtime context for this source
+        // Registry-first: register in the component graph before creating runtime state.
+        // The graph is the authoritative source of truth — if it rejects the add
+        // (duplicate ID), the runtime instance is never created.
+        {
+            let mut graph = self.graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), auto_start.to_string());
+            let node = ComponentNode {
+                id: source_id.clone(),
+                kind: ComponentKind::Source,
+                status: ComponentStatus::Added,
+                metadata,
+            };
+            graph.add_component(node)?;
+        }
+        // Graph emits ComponentEvent(Added) automatically
+
+        // Construct runtime context for this source (includes update channel for status reporting)
+        let update_tx = {
+            let graph = self.graph.read().await;
+            graph.update_sender()
+        };
         let context = SourceRuntimeContext::new(
             &self.instance_id,
             &source_id,
-            self.event_tx.clone(),
             self.state_store.read().await.clone(),
+            update_tx,
         );
 
         // Initialize the source with its runtime context
         source.initialize(context).await;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance for fast lookups
         {
             let mut sources = self.sources.write().await;
-            if sources.contains_key(&source_id) {
-                return Err(anyhow::anyhow!(
-                    "Source with id '{source_id}' already exists"
-                ));
-            }
             sources.insert(source_id.clone(), source);
         }
 
         info!("Added source: {source_id}");
-
-        // Emit Added event for introspection
-        let _ = self
-            .event_tx
-            .send(ComponentEvent {
-                component_id: source_id,
-                component_type: ComponentType::Source,
-                status: ComponentStatus::Added,
-                timestamp: chrono::Utc::now(),
-                message: Some("Source added".to_string()),
-            })
-            .await;
 
         Ok(())
     }
@@ -186,6 +199,17 @@ impl SourceManager {
         if let Some(source) = source {
             let status = source.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Set transitional state in graph before starting
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Starting,
+                    Some("Starting source".to_string()),
+                );
+            }
+
             source.start().await?;
         } else {
             return Err(anyhow::anyhow!("Source not found: {id}"));
@@ -203,6 +227,17 @@ impl SourceManager {
         if let Some(source) = source {
             let status = source.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Set transitional state in graph before stopping
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Stopping,
+                    Some("Stopping source".to_string()),
+                );
+            }
+
             source.stop().await?;
         } else {
             return Err(anyhow::anyhow!("Source not found: {id}"));
@@ -309,24 +344,17 @@ impl SourceManager {
 
             // Now remove the source
             self.sources.write().await.remove(&id);
+            // Remove from the component graph (emits Removed event automatically)
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.remove_component(&id);
+            }
             // Clean up event history for this source
             self.event_history.write().await.remove_component(&id);
             // Clean up log history for this source
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
             info!("Deleted source: {id}");
-
-            // Emit Removed event for introspection
-            let _ = self
-                .event_tx
-                .send(ComponentEvent {
-                    component_id: id,
-                    component_type: ComponentType::Source,
-                    status: ComponentStatus::Removed,
-                    timestamp: chrono::Utc::now(),
-                    message: Some("Source removed".to_string()),
-                })
-                .await;
 
             Ok(())
         } else {
@@ -367,17 +395,15 @@ impl SourceManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Emit Reconfiguring event
-            let _ = self
-                .event_tx
-                .send(ComponentEvent {
-                    component_id: id.clone(),
-                    component_type: ComponentType::Source,
-                    status: ComponentStatus::Reconfiguring,
-                    timestamp: chrono::Utc::now(),
-                    message: Some("Reconfiguring source".to_string()),
-                })
-                .await;
+            // Emit Reconfiguring event via the graph
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.update_status_with_message(
+                    &id,
+                    ComponentStatus::Reconfiguring,
+                    Some("Reconfiguring source".to_string()),
+                );
+            }
 
             // If running or starting, stop first then validate
             if was_running {
@@ -405,11 +431,15 @@ impl SourceManager {
 
             // Initialize the new source with runtime context
             let new_source: Arc<dyn Source> = Arc::new(new_source);
+            let update_tx = {
+                let graph = self.graph.read().await;
+                graph.update_sender()
+            };
             let context = SourceRuntimeContext::new(
                 &self.instance_id,
                 &id,
-                self.event_tx.clone(),
                 self.state_store.read().await.clone(),
+                update_tx,
             );
             new_source.initialize(context).await;
 

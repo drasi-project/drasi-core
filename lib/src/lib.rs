@@ -16,6 +16,9 @@
 // Core Public Modules
 // ============================================================================
 
+/// Component dependency graph — the single source of truth for configuration
+pub mod component_graph;
+
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 
@@ -141,6 +144,8 @@ pub use reactions::{QueryProvider, Reaction};
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;
+/// Bootstrap provider that generates data from the component graph
+pub use bootstrap::ComponentGraphBootstrapProvider;
 
 /// Index backend plugin trait for implementing storage backends
 pub use indexes::IndexBackendPlugin;
@@ -167,6 +172,11 @@ pub use builder::DrasiLibBuilder;
 
 /// Fluent builder for query configurations
 pub use builder::Query;
+
+/// Component graph types for dependency tracking and configuration queries
+pub use component_graph::{
+    ComponentGraph, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,
+};
 
 // ============================================================================
 // API Module (backward compatibility alias)

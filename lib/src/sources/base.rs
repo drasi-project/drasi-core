@@ -37,6 +37,7 @@ use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
+use crate::component_graph::ComponentStatusHandle;
 use crate::context::SourceRuntimeContext;
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
@@ -140,8 +141,8 @@ pub struct SourceBase {
     dispatch_buffer_capacity: usize,
     /// Whether this source should auto-start
     pub auto_start: bool,
-    /// Current component status
-    pub status: Arc<RwLock<ComponentStatus>>,
+    /// Component status handle — always available, wired to graph during initialize().
+    status_handle: ComponentStatusHandle,
     /// Dispatchers for sending source events to subscribers
     ///
     /// This is a vector of dispatchers that send source events to all registered
@@ -150,8 +151,6 @@ pub struct SourceBase {
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
-    /// Channel for sending component status events (extracted from context for convenience)
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Handle to the source's main task
@@ -193,14 +192,13 @@ impl SourceBase {
             .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
 
         Ok(Self {
-            id: params.id,
+            id: params.id.clone(),
             dispatch_mode,
             dispatch_buffer_capacity,
             auto_start: params.auto_start,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -220,14 +218,14 @@ impl SourceBase {
     ///
     /// The context provides access to:
     /// - `source_id`: The source's unique identifier
-    /// - `status_tx`: Channel for reporting component status events
+    /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
-        // Extract services for convenience
-        *self.status_tx.write().await = Some(context.status_tx.clone());
+        // Wire the status handle to the graph update channel
+        self.status_handle.wire(context.update_tx.clone()).await;
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -248,14 +246,12 @@ impl SourceBase {
         self.state_store.read().await.clone()
     }
 
-    /// Get the status channel Arc for internal use by spawned tasks
+    /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
-    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component status events.
-    ///
-    /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.status_tx.clone()
+    /// The handle can both read and write the component's status and automatically
+    /// notifies the graph on every status change (after `initialize()`).
+    pub fn status_handle(&self) -> ComponentStatusHandle {
+        self.status_handle.clone()
     }
 
     /// Clone the SourceBase with shared Arc references
@@ -268,10 +264,9 @@ impl SourceBase {
             dispatch_mode: self.dispatch_mode,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             auto_start: self.auto_start,
-            status: self.status.clone(),
+            status_handle: self.status_handle.clone(),
             dispatchers: self.dispatchers.clone(),
             context: self.context.clone(),
-            status_tx: self.status_tx.clone(),
             state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -598,7 +593,11 @@ impl SourceBase {
             }
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Source '{}' stopped", self.id)),
+        )
+        .await;
         info!("Source '{}' stopped", self.id);
         Ok(())
     }
@@ -626,24 +625,16 @@ impl SourceBase {
         Ok(())
     }
 
-    /// Get the current status
+    /// Get the current status.
     pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
-    /// Set the current status
-    pub async fn set_status(&self, status: ComponentStatus) {
-        *self.status.write().await = status;
-    }
-
-    /// Transition to a new status and send event
-    pub async fn set_status_with_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        *self.status.write().await = status.clone();
-        self.send_component_event(status, message).await
+    /// Set the component's status — updates local state AND notifies the graph.
+    ///
+    /// This is the single canonical way to change a source's status.
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status_handle.set_status(status, message).await;
     }
 
     /// Set the task handle
@@ -654,32 +645,5 @@ impl SourceBase {
     /// Set the shutdown sender
     pub async fn set_shutdown_tx(&self, tx: tokio::sync::oneshot::Sender<()>) {
         *self.shutdown_tx.write().await = Some(tx);
-    }
-
-    /// Send a component event
-    ///
-    /// If the status channel has not been initialized yet, this method silently
-    /// succeeds without sending anything. This allows sources to be used
-    /// in a standalone fashion without DrasiLib if needed.
-    pub async fn send_component_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status,
-            timestamp: chrono::Utc::now(),
-            message,
-        };
-
-        if let Some(ref tx) = *self.status_tx.read().await {
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {e}");
-            }
-        }
-        // If status_tx is None, silently skip - initialization happens before start()
-        Ok(())
     }
 }

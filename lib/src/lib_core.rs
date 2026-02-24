@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
@@ -39,6 +40,8 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// - **Sources**: Data ingestion points (PostgreSQL, HTTP, gRPC, Application, Mock, Platform)
 /// - **Queries**: Continuous Cypher or GQL queries that process data changes in real-time
 /// - **Reactions**: Output destinations that receive query results (HTTP, gRPC, Application, Log)
+/// - **Component Graph**: A directed dependency graph tracking all components and their
+///   bidirectional relationships (Source→Query→Reaction). The DrasiLib instance is the root node.
 ///
 /// # Lifecycle States
 ///
@@ -165,8 +168,17 @@ pub struct DrasiLib {
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
     pub(crate) log_registry: Arc<ComponentLogRegistry>,
-    // Broadcast sender for component events (used by introspection source)
+    // Broadcast sender for component events — shared with ComponentGraph.
+    //
+    // This is the *same* sender that the ComponentGraph uses internally to emit
+    // events on mutations. Cloned before the graph is wrapped in `Arc<RwLock<>>`,
+    // so subscribers can call `.subscribe()` without acquiring the graph lock.
     pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
+    /// Component dependency graph — the single source of truth for component relationships.
+    ///
+    /// All managers share this graph via `Arc<RwLock<>>`. The graph is updated atomically
+    /// alongside the manager HashMaps when components are added, removed, or updated.
+    pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl Clone for DrasiLib {
@@ -183,6 +195,7 @@ impl Clone for DrasiLib {
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
+            component_graph: Arc::clone(&self.component_graph),
         }
     }
 }
@@ -204,7 +217,7 @@ impl DrasiLib {
     /// Subscribe to all component events (status changes, additions, removals).
     ///
     /// Returns a broadcast receiver that gets a copy of every `ComponentEvent` across
-    /// all sources, queries, and reactions. Used by the introspection source to
+    /// all sources, queries, and reactions. Used by the component graph source to
     /// detect component lifecycle changes in real-time.
     pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
         self.component_event_broadcast_tx.subscribe()
@@ -224,10 +237,17 @@ impl DrasiLib {
         // Get the instance ID from config for log routing
         let instance_id = config.id.clone();
 
+        // Create the shared component graph with the instance as root node.
+        // Extract the broadcast sender and update sender BEFORE wrapping in Arc<RwLock<>>
+        // so subscribers and components can use them without acquiring the graph lock.
+        let (graph, update_rx) = ComponentGraph::new(&instance_id);
+        let component_event_broadcast_tx = graph.event_sender().clone();
+        let component_graph = Arc::new(RwLock::new(graph));
+
         let source_manager = Arc::new(SourceManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             log_registry.clone(),
+            component_graph.clone(),
         ));
 
         // Initialize middleware registry and register all standard middleware factories
@@ -264,17 +284,17 @@ impl DrasiLib {
 
         let query_manager = Arc::new(QueryManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             source_manager.clone(),
             config.index_factory.clone(),
             middleware_registry.clone(),
             log_registry.clone(),
+            component_graph.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             log_registry.clone(),
+            component_graph.clone(),
         ));
 
         let state_guard = StateGuard::new();
@@ -292,9 +312,24 @@ impl DrasiLib {
             source_manager.clone(),
             query_manager.clone(),
             reaction_manager.clone(),
+            component_event_broadcast_tx.clone(),
             Some(receivers),
-            Some(channels.component_event_broadcast_tx.clone()),
         )));
+
+        // Spawn the graph update loop — sole consumer of component status updates.
+        // Components send status changes via the mpsc update channel (fire-and-forget),
+        // and this loop applies them to the graph and emits broadcast events.
+        {
+            let graph = component_graph.clone();
+            tokio::spawn(async move {
+                let mut update_rx = update_rx;
+                while let Some(update) = update_rx.recv().await {
+                    let mut g = graph.write().await;
+                    g.apply_update(update);
+                }
+                tracing::debug!("Graph update loop exited — all senders dropped");
+            });
+        }
 
         Self {
             config,
@@ -307,7 +342,8 @@ impl DrasiLib {
             lifecycle,
             middleware_registry,
             log_registry,
-            component_event_broadcast_tx: channels.component_event_broadcast_tx,
+            component_event_broadcast_tx,
+            component_graph,
         }
     }
 

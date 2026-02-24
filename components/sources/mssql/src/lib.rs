@@ -229,7 +229,7 @@ impl Source for MsSqlSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
 
         let config = self.config.clone();
@@ -256,7 +256,7 @@ impl Source for MsSqlSource {
         // Store task handle for shutdown
         *self.task_handle.write().await = Some(task_handle);
 
-        self.base.set_status(ComponentStatus::Running).await;
+        self.base.set_status(ComponentStatus::Running, None).await;
 
         log::info!("MS SQL source '{}' started CDC polling", self.base.id);
         Ok(())
@@ -288,7 +288,7 @@ impl Source for MsSqlSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base.set_status(ComponentStatus::Stopped, None).await;
 
         Ok(())
     }

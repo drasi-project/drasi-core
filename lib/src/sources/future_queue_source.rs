@@ -21,9 +21,7 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
-use crate::channels::{
-    ComponentEventSender, ComponentType, DispatchMode, SourceEvent, SourceEventWrapper,
-};
+use crate::channels::{DispatchMode, SourceEvent, SourceEventWrapper};
 use crate::ComponentStatus;
 use tracing::Instrument;
 

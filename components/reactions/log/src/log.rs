@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -349,11 +349,11 @@ impl Reaction for LogReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting log reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -361,11 +361,11 @@ impl Reaction for LogReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Log reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         self.log_result(&format!(
             "Started - receiving results from queries: {:?}",
@@ -603,11 +603,11 @@ impl Reaction for LogReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Log reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

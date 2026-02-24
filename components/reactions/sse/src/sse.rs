@@ -27,7 +27,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -261,11 +261,11 @@ impl Reaction for SseReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting SSE reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -273,17 +273,17 @@ impl Reaction for SseReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("SSE reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Spawn processing task
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let broadcasters = self.broadcasters.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
@@ -299,7 +299,7 @@ impl Reaction for SseReaction {
             super::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
@@ -594,11 +594,11 @@ impl Reaction for SseReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("SSE reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
@@ -395,11 +395,11 @@ impl Reaction for GrpcReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting gRPC reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -407,18 +407,18 @@ impl Reaction for GrpcReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("gRPC reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Start processing task that dequeues from priority queue
         let reaction_name = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let endpoint = self.config.endpoint.clone();
         let batch_size = self.config.batch_size;
         let batch_flush_timeout_ms = self.config.batch_flush_timeout_ms;
@@ -470,7 +470,7 @@ impl Reaction for GrpcReaction {
                     query_result.results.len()
                 );
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     info!("[{}] Reaction status changed to non-running, exiting main loop (batch has {} items)",
                           reaction_name, batch.len());
                     break;
@@ -810,7 +810,12 @@ impl Reaction for GrpcReaction {
             }
 
             info!("[{reaction_name}] gRPC reaction processing task stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("gRPC reaction processing task stopped".to_string()),
+                )
+                .await;
         });
 
         self.base.set_processing_task(processing_task_handle).await;
@@ -824,11 +829,11 @@ impl Reaction for GrpcReaction {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("gRPC reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

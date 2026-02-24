@@ -14,7 +14,7 @@ use std::time::Duration;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::mpsc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::{QueryProvider, Reaction};
 
@@ -403,7 +403,7 @@ impl AdaptiveHttpReaction {
             };
             let query_result = query_result_arc.as_ref();
 
-            if !matches!(*base.status.read().await, ComponentStatus::Running) {
+            if !matches!(base.get_status().await, ComponentStatus::Running) {
                 info!("[{reaction_name}] Reaction status changed to non-running, exiting");
                 break;
             }
@@ -473,11 +473,11 @@ impl Reaction for AdaptiveHttpReaction {
 
         // Set status to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting adaptive HTTP reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to queries
         // QueryProvider is available from initialize() context
@@ -485,7 +485,7 @@ impl Reaction for AdaptiveHttpReaction {
 
         // Set status to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some(format!(
                     "Adaptive HTTP reaction running - Base URL: {}, Batch endpoints: {}",
@@ -497,7 +497,7 @@ impl Reaction for AdaptiveHttpReaction {
                     }
                 )),
             )
-            .await?;
+            .await;
 
         // Create Arc for sharing self with the internal task
         // Note: We clone the base by creating a new one with shared Arcs
@@ -540,11 +540,11 @@ impl Reaction for AdaptiveHttpReaction {
 
         // Set status to Stopping
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping adaptive HTTP reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Perform common cleanup
         self.base.stop_common().await?;
@@ -554,11 +554,11 @@ impl Reaction for AdaptiveHttpReaction {
 
         // Set status to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive HTTP reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

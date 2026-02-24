@@ -28,7 +28,7 @@ use crate::sources::SourceManager;
 ///
 /// This module handles:
 /// - Loading configuration and creating components
-/// - Starting event processors for component events
+/// - Starting event processors that record events from the graph broadcast
 /// - Starting components in dependency order (Sources → Queries → Reactions)
 /// - Stopping components in reverse order (Reactions → Queries → Sources)
 pub(crate) struct LifecycleManager {
@@ -38,8 +38,9 @@ pub(crate) struct LifecycleManager {
     reaction_manager: Arc<ReactionManager>,
     // Event receivers - taken and consumed during initialization
     event_receivers: Option<EventReceivers>,
-    // Broadcast sender for introspection — forwards all component events
-    component_event_broadcast_tx: Option<ComponentEventBroadcastSender>,
+    // Broadcast sender for component events — shared with ComponentGraph.
+    // Used to subscribe for event recording (EventHistory).
+    component_event_broadcast_tx: ComponentEventBroadcastSender,
 }
 
 impl LifecycleManager {
@@ -49,8 +50,8 @@ impl LifecycleManager {
         source_manager: Arc<SourceManager>,
         query_manager: Arc<QueryManager>,
         reaction_manager: Arc<ReactionManager>,
+        component_event_broadcast_tx: ComponentEventBroadcastSender,
         event_receivers: Option<EventReceivers>,
-        component_event_broadcast_tx: Option<ComponentEventBroadcastSender>,
     ) -> Self {
         Self {
             config,
@@ -81,21 +82,21 @@ impl LifecycleManager {
 
     /// Start event processors (one-time operation during initialization)
     ///
-    /// This takes ownership of the event receivers and spawns background tasks
-    /// to process component events. Can only be called once.
+    /// Subscribes to the ComponentGraph's broadcast channel and spawns a background task
+    /// that records events in each manager's EventHistory. This replaces the old mpsc relay loop.
     pub async fn start_event_processors(&mut self) {
         if let Some(receivers) = self.event_receivers.take() {
             // Clone manager references for the event processor task
             let source_manager = self.source_manager.clone();
             let query_manager = self.query_manager.clone();
             let reaction_manager = self.reaction_manager.clone();
-            let broadcast_tx = self.component_event_broadcast_tx.take();
 
-            // Start component event processor
-            let component_rx = receivers.component_event_rx;
+            // Subscribe to the graph's broadcast channel
+            let mut rx = self.component_event_broadcast_tx.subscribe();
+
+            // Start component event processor — records events from graph broadcast into EventHistory
             tokio::spawn(async move {
-                let mut rx = component_rx;
-                while let Some(event) = rx.recv().await {
+                while let Ok(event) = rx.recv().await {
                     info!(
                         "Component Event - {:?} {}: {:?} - {}",
                         event.component_type,
@@ -103,11 +104,6 @@ impl LifecycleManager {
                         event.status,
                         event.message.clone().unwrap_or_default()
                     );
-
-                    // Forward to introspection broadcast (ignore if no subscribers)
-                    if let Some(ref tx) = broadcast_tx {
-                        let _ = tx.send(event.clone());
-                    }
 
                     // Record the event in the appropriate manager's history
                     match event.component_type {
@@ -124,11 +120,8 @@ impl LifecycleManager {
                 }
             });
 
-            // DataRouter no longer needed - queries subscribe directly to sources
             // control_signal_rx is no longer used
             drop(receivers.control_signal_rx);
-
-            // SubscriptionRouter no longer needed - reactions subscribe directly to queries
         }
     }
 

@@ -151,7 +151,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
+use drasi_lib::channels::{ComponentStatus, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -396,8 +396,7 @@ impl ApplicationSource {
 
         let source_name = self.base.id.clone();
         let base_dispatchers = self.base.dispatchers.clone();
-        let status_tx = self.base.status_tx();
-        let status = self.base.status.clone();
+        let reporter = self.base.status_handle();
         let source_id = self.base.id.clone();
 
         // Get instance_id from context for log routing isolation
@@ -418,19 +417,12 @@ impl ApplicationSource {
             async move {
                 info!("ApplicationSource '{source_name}' event processor started");
 
-                if let Some(ref tx) = *status_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_name.clone(),
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Running,
-                            timestamp: chrono::Utc::now(),
-                            message: Some("Processing events".to_string()),
-                        })
-                        .await;
-                }
-
-                *status.write().await = ComponentStatus::Running;
+                reporter
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some("Processing events".to_string()),
+                    )
+                    .await;
 
                 while let Some(change) = rx.recv().await {
                     debug!("ApplicationSource '{source_name}' received event: {change:?}");
@@ -488,11 +480,11 @@ impl Source for ApplicationSource {
         info!("Starting ApplicationSource '{}'", self.base.id);
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting application source".to_string()),
             )
-            .await?;
+            .await;
 
         self.process_events().await?;
 
@@ -503,28 +495,28 @@ impl Source for ApplicationSource {
         info!("Stopping ApplicationSource '{}'", self.base.id);
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping application source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Application source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.base.status.read().await.clone()
+        self.base.get_status().await
     }
 
     async fn subscribe(

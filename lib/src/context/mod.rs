@@ -59,8 +59,9 @@
 //! ```
 
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use crate::channels::ComponentEventSender;
+use crate::component_graph::ComponentUpdateSender;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -73,8 +74,8 @@ use crate::state_store::StateStoreProvider;
 ///
 /// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `source_id`: The unique identifier for this source instance
-/// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
+/// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
 ///
 /// # Clone
 ///
@@ -88,17 +89,17 @@ pub struct SourceRuntimeContext {
     /// Unique identifier for this source instance
     pub source_id: String,
 
-    /// Channel for reporting component status/lifecycle events.
-    ///
-    /// Use this to send status updates (Starting, Running, Stopped, Error)
-    /// back to DrasiLib for monitoring and lifecycle management.
-    pub status_tx: ComponentEventSender,
-
     /// Optional persistent state storage.
     ///
     /// This is `Some` if a state store provider was configured on DrasiLib,
     /// otherwise `None`. Sources can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
+
+    /// mpsc sender for fire-and-forget component status updates.
+    ///
+    /// Status changes sent here are applied to the component graph by the
+    /// graph update loop, which emits broadcast events to all subscribers.
+    pub update_tx: ComponentUpdateSender,
 }
 
 impl SourceRuntimeContext {
@@ -111,19 +112,19 @@ impl SourceRuntimeContext {
     ///
     /// * `instance_id` - The DrasiLib instance ID
     /// * `source_id` - The unique identifier for this source
-    /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
+    /// * `update_tx` - mpsc sender for status updates to the component graph
     pub fn new(
         instance_id: impl Into<String>,
         source_id: impl Into<String>,
-        status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             source_id: source_id.into(),
-            status_tx,
             state_store,
+            update_tx,
         }
     }
 
@@ -135,14 +136,6 @@ impl SourceRuntimeContext {
     /// Get the source's unique identifier.
     pub fn source_id(&self) -> &str {
         &self.source_id
-    }
-
-    /// Get a reference to the status channel.
-    ///
-    /// Use this to send component status updates (Starting, Running, Stopped, Error)
-    /// back to DrasiLib.
-    pub fn status_tx(&self) -> &ComponentEventSender {
-        &self.status_tx
     }
 
     /// Get a reference to the state store if configured.
@@ -159,11 +152,11 @@ impl std::fmt::Debug for SourceRuntimeContext {
         f.debug_struct("SourceRuntimeContext")
             .field("instance_id", &self.instance_id)
             .field("source_id", &self.source_id)
-            .field("status_tx", &"<ComponentEventSender>")
             .field(
                 "state_store",
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
+            .field("update_tx", &"<ComponentUpdateSender>")
             .finish()
     }
 }
@@ -177,9 +170,9 @@ impl std::fmt::Debug for SourceRuntimeContext {
 ///
 /// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `reaction_id`: The unique identifier for this reaction instance
-/// - `status_tx`: Channel for reporting component status/lifecycle events
 /// - `state_store`: Optional persistent state storage (if configured)
 /// - `query_provider`: Access to query instances for subscription
+/// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
 ///
 /// # Clone
 ///
@@ -193,12 +186,6 @@ pub struct ReactionRuntimeContext {
     /// Unique identifier for this reaction instance
     pub reaction_id: String,
 
-    /// Channel for reporting component status/lifecycle events.
-    ///
-    /// Use this to send status updates (Starting, Running, Stopped, Error)
-    /// back to DrasiLib for monitoring and lifecycle management.
-    pub status_tx: ComponentEventSender,
-
     /// Optional persistent state storage.
     ///
     /// This is `Some` if a state store provider was configured on DrasiLib,
@@ -210,6 +197,12 @@ pub struct ReactionRuntimeContext {
     /// Reactions use this to get query instances and subscribe to their results.
     /// This is always available (not optional) since reactions require queries.
     pub query_provider: Arc<dyn QueryProvider>,
+
+    /// mpsc sender for fire-and-forget component status updates.
+    ///
+    /// Status changes sent here are applied to the component graph by the
+    /// graph update loop, which emits broadcast events to all subscribers.
+    pub update_tx: ComponentUpdateSender,
 }
 
 impl ReactionRuntimeContext {
@@ -222,22 +215,22 @@ impl ReactionRuntimeContext {
     ///
     /// * `instance_id` - The DrasiLib instance ID
     /// * `reaction_id` - The unique identifier for this reaction
-    /// * `status_tx` - Channel for reporting component status/lifecycle events
     /// * `state_store` - Optional persistent state storage
     /// * `query_provider` - Access to query instances for subscription
+    /// * `update_tx` - mpsc sender for status updates to the component graph
     pub fn new(
         instance_id: impl Into<String>,
         reaction_id: impl Into<String>,
-        status_tx: ComponentEventSender,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         query_provider: Arc<dyn QueryProvider>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             reaction_id: reaction_id.into(),
-            status_tx,
             state_store,
             query_provider,
+            update_tx,
         }
     }
 
@@ -249,14 +242,6 @@ impl ReactionRuntimeContext {
     /// Get the reaction's unique identifier.
     pub fn reaction_id(&self) -> &str {
         &self.reaction_id
-    }
-
-    /// Get a reference to the status channel.
-    ///
-    /// Use this to send component status updates (Starting, Running, Stopped, Error)
-    /// back to DrasiLib.
-    pub fn status_tx(&self) -> &ComponentEventSender {
-        &self.status_tx
     }
 
     /// Get a reference to the state store if configured.
@@ -280,12 +265,12 @@ impl std::fmt::Debug for ReactionRuntimeContext {
         f.debug_struct("ReactionRuntimeContext")
             .field("instance_id", &self.instance_id)
             .field("reaction_id", &self.reaction_id)
-            .field("status_tx", &"<ComponentEventSender>")
             .field(
                 "state_store",
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
             .field("query_provider", &"<QueryProvider>")
+            .field("update_tx", &"<ComponentUpdateSender>")
             .finish()
     }
 }
@@ -293,12 +278,12 @@ impl std::fmt::Debug for ReactionRuntimeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component_graph::ComponentGraph;
     use crate::queries::Query;
     use crate::state_store::MemoryStateStoreProvider;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
 
     // Mock QueryProvider for testing
     struct MockQueryProvider;
@@ -310,13 +295,18 @@ mod tests {
         }
     }
 
+    fn test_update_tx() -> ComponentUpdateSender {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        graph.update_sender()
+    }
+
     #[tokio::test]
     async fn test_source_runtime_context_creation() {
-        let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
+        let update_tx = test_update_tx();
 
         let context =
-            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
+            SourceRuntimeContext::new("test-instance", "test-source", Some(state_store), update_tx);
 
         assert_eq!(context.instance_id(), "test-instance");
         assert_eq!(context.source_id(), "test-source");
@@ -325,9 +315,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_source_runtime_context_without_state_store() {
-        let (status_tx, _rx) = mpsc::channel(100);
+        let update_tx = test_update_tx();
 
-        let context = SourceRuntimeContext::new("test-instance", "test-source", status_tx, None);
+        let context = SourceRuntimeContext::new("test-instance", "test-source", None, update_tx);
 
         assert_eq!(context.source_id(), "test-source");
         assert!(context.state_store().is_none());
@@ -335,11 +325,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_source_runtime_context_clone() {
-        let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
+        let update_tx = test_update_tx();
 
         let context =
-            SourceRuntimeContext::new("test-instance", "test-source", status_tx, Some(state_store));
+            SourceRuntimeContext::new("test-instance", "test-source", Some(state_store), update_tx);
 
         let cloned = context.clone();
         assert_eq!(cloned.source_id(), context.source_id());
@@ -347,16 +337,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_reaction_runtime_context_creation() {
-        let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
         let query_provider = Arc::new(MockQueryProvider);
+        let update_tx = test_update_tx();
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
             "test-reaction",
-            status_tx,
             Some(state_store),
             query_provider,
+            update_tx,
         );
 
         assert_eq!(context.instance_id(), "test-instance");
@@ -366,15 +356,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_reaction_runtime_context_without_state_store() {
-        let (status_tx, _rx) = mpsc::channel(100);
         let query_provider = Arc::new(MockQueryProvider);
+        let update_tx = test_update_tx();
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
             "test-reaction",
-            status_tx,
             None,
             query_provider,
+            update_tx,
         );
 
         assert_eq!(context.reaction_id(), "test-reaction");
@@ -383,16 +373,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_reaction_runtime_context_clone() {
-        let (status_tx, _rx) = mpsc::channel(100);
         let state_store = Arc::new(MemoryStateStoreProvider::new());
         let query_provider = Arc::new(MockQueryProvider);
+        let update_tx = test_update_tx();
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
             "test-reaction",
-            status_tx,
             Some(state_store),
             query_provider,
+            update_tx,
         );
 
         let cloned = context.clone();
@@ -401,8 +391,8 @@ mod tests {
 
     #[test]
     fn test_source_runtime_context_debug() {
-        let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
-        let context = SourceRuntimeContext::new("test-instance", "test", status_tx, None);
+        let update_tx = test_update_tx();
+        let context = SourceRuntimeContext::new("test-instance", "test", None, update_tx);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("SourceRuntimeContext"));
         assert!(debug_str.contains("test"));
@@ -410,10 +400,10 @@ mod tests {
 
     #[test]
     fn test_reaction_runtime_context_debug() {
-        let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
         let query_provider = Arc::new(MockQueryProvider);
+        let update_tx = test_update_tx();
         let context =
-            ReactionRuntimeContext::new("test-instance", "test", status_tx, None, query_provider);
+            ReactionRuntimeContext::new("test-instance", "test", None, query_provider, update_tx);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));

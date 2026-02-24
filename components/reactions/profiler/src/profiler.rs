@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
@@ -477,11 +477,11 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting profiler reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider is available from initialize() context
@@ -489,11 +489,11 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Profiler reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
@@ -565,11 +565,11 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Profiler reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

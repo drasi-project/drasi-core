@@ -151,8 +151,8 @@ impl Source for TestSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -289,8 +289,8 @@ impl Reaction for TestReaction {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 

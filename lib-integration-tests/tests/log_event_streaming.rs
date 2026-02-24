@@ -94,8 +94,8 @@ impl Source for TestSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         let span = tracing::info_span!(
             "test_source_running",
@@ -221,8 +221,8 @@ impl Reaction for TestReaction {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         let span = tracing::info_span!(
             "test_reaction_running",
@@ -382,7 +382,7 @@ async fn test_source_event_streaming() {
     let statuses: Vec<_> = received_events.iter().map(|e| &e.status).collect();
     println!("Received source events: {statuses:?}");
 
-    // SourceBase.set_status_with_event sends Running event directly
+    // SourceBase.set_status sends Running event directly
     assert!(
         received_events
             .iter()
