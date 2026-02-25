@@ -13,32 +13,32 @@
 # limitations under the License.
 
 [package]
-name = "drasi-source-application"
-version = "0.1.7"
+name = "drasi-mssql-common"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Application source plugin for Drasi"
+description = "Shared types for MS SQL source and bootstrap plugins"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "application"]
+keywords = ["drasi", "mssql", "common"]
 categories = ["database"]
 
 [lints]
 workspace = true
 
 [dependencies]
-drasi-plugin-runtime = { workspace = true }
-drasi-lib.workspace = true
 drasi-core.workspace = true
+tiberius = { version = "0.12", features = ["chrono", "rust_decimal"] }
+tokio = { version = "1.0", features = ["net"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 anyhow = "1.0"
-async-trait = "0.1"
 log = "0.4"
-tracing = "0.1"
-tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+rust_decimal = "1.34"
+ordered-float = "3.7.0"
+hex = "0.4"
+
+[dev-dependencies]
 serde_json = "1.0"
-chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-tokio-stream = "0.1"
-prost-types = "0.12"
-ordered-float = "3.0"

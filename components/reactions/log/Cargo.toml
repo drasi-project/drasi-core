@@ -13,9 +13,10 @@ categories = ["development-tools::debugging"]
 workspace = true
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 anyhow = "1.0"
@@ -33,6 +34,3 @@ ordered-float = "3.0"
 handlebars = "5.1"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-
-[features]
-dynamic-plugin = []

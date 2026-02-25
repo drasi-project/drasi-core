@@ -27,9 +27,10 @@ categories = ["web-programming"]
 workspace = true
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
@@ -60,5 +61,3 @@ ordered-float = "3.0"
 chrono = "0.4"
 
 
-[features]
-dynamic-plugin = []

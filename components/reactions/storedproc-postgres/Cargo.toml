@@ -24,9 +24,10 @@ keywords = ["drasi", "plugin", "reaction", "postgresql", "storedproc"]
 categories = ["database"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 
 # Async runtime
@@ -60,5 +61,3 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 [lints]
 workspace = true
 
-[features]
-dynamic-plugin = []

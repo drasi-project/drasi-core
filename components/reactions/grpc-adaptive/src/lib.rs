@@ -206,9 +206,8 @@ mod tests {
 /// # Safety
 /// The caller must ensure this is only called once and takes ownership of the
 /// returned pointer via `Box::from_raw`.
-#[cfg(feature = "dynamic-plugin")]
 #[no_mangle]
-pub extern "C" fn drasi_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
+pub extern "C" fn drasi_reaction_grpc_adaptive_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
     let registration = drasi_plugin_sdk::PluginRegistration::new()
         .with_reaction(Box::new(descriptor::GrpcAdaptiveReactionDescriptor));
     Box::into_raw(Box::new(registration))

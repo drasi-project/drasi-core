@@ -1,0 +1,15 @@
+[package]
+name = "drasi-tokio-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared Tokio runtime bridge for Drasi dynamic plugin loading"
+
+[lib]
+crate-type = ["lib", "dylib"]
+
+[dependencies]
+tokio = { version = "=1.44.1", features = ["full"] }
+
+[lints]
+workspace = true

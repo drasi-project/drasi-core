@@ -67,25 +67,25 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod connection;
 pub mod decoder;
 pub mod descriptor;
-pub mod error;
-pub mod keys;
 pub mod lsn;
 pub mod stream;
 pub mod types;
 
+// Re-export from drasi-mssql-common
+pub use drasi_mssql_common::config;
+pub use drasi_mssql_common::connection;
+pub use drasi_mssql_common::error;
+pub use drasi_mssql_common::keys;
+
 // Re-export main types
-pub use config::{
-    validate_sql_identifier, AuthMode, EncryptionMode, MsSqlSourceConfig, StartPosition,
+pub use drasi_mssql_common::{
+    validate_sql_identifier, AuthMode, ConnectionError, EncryptionMode, LsnError, MsSqlConnection,
+    MsSqlError, MsSqlErrorKind, MsSqlSourceConfig, PrimaryKeyCache, PrimaryKeyError, StartPosition,
     TableKeyConfig,
 };
-pub use connection::MsSqlConnection;
 pub use decoder::CdcOperation;
-pub use error::{ConnectionError, LsnError, MsSqlError, MsSqlErrorKind, PrimaryKeyError};
-pub use keys::PrimaryKeyCache;
 pub use lsn::Lsn;
 
 use anyhow::Result;
@@ -532,9 +532,8 @@ mod tests {
 /// # Safety
 /// The caller must ensure this is only called once and takes ownership of the
 /// returned pointer via `Box::from_raw`.
-#[cfg(feature = "dynamic-plugin")]
 #[no_mangle]
-pub extern "C" fn drasi_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
+pub extern "C" fn drasi_source_mssql_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
     let registration = drasi_plugin_sdk::PluginRegistration::new()
         .with_source(Box::new(descriptor::MsSqlSourceDescriptor));
     Box::into_raw(Box::new(registration))

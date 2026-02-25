@@ -10,12 +10,13 @@ keywords = ["drasi", "plugin", "source", "mock", "testing"]
 categories = ["development-tools::testing"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -33,6 +34,3 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
 rand = "0.8"
-
-[features]
-dynamic-plugin = []

@@ -24,12 +24,14 @@ keywords = ["drasi", "plugin", "mssql", "cdc"]
 categories = ["database"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
+drasi-mssql-common = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -56,5 +58,3 @@ testcontainers = "0.23"
 drasi-bootstrap-mssql.workspace = true
 drasi-reaction-application.workspace = true
 
-[features]
-dynamic-plugin = []

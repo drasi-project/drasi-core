@@ -15,7 +15,7 @@
 //! Plugin registration and discovery.
 //!
 //! A [`PluginRegistration`] is the entry point for a plugin shared library. When the
-//! server loads a `.so`/`.dll`/`.dylib` file, it calls the `drasi_plugin_init()` export
+//! server loads a `.so`/`.dll`/`.dylib` file, it calls the `drasi_<crate_name>_plugin_init()` export
 //! which returns a `PluginRegistration` containing the plugin's descriptors.
 //!
 //! # For Statically-Linked Plugins
@@ -35,7 +35,7 @@
 //!
 //! # For Dynamically-Loaded Plugins
 //!
-//! Dynamic plugins are compiled as shared libraries (`cdylib`) and export a C-ABI
+//! Dynamic plugins are compiled as shared libraries (`dylib`) and export a C-ABI
 //! entry point. The function must return a heap-allocated `PluginRegistration` as a
 //! raw pointer. The server takes ownership via `Box::from_raw`.
 //!
@@ -43,7 +43,7 @@
 //! use drasi_plugin_sdk::prelude::*;
 //!
 //! #[no_mangle]
-//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
+//! pub extern "C" fn drasi_<crate_name>_plugin_init() -> *mut PluginRegistration {
 //!     let registration = PluginRegistration::new()
 //!         .with_source(Box::new(MySourceDescriptor));
 //!     Box::into_raw(Box::new(registration))
@@ -51,7 +51,7 @@
 //! ```
 //!
 //! The `#[no_mangle]` attribute and `extern "C"` ABI are required so the server
-//! can locate the symbol by name (`drasi_plugin_init`) in the shared library.
+//! can locate the symbol by name (`drasi_<crate_name>_plugin_init`) in the shared library.
 //!
 //! # SDK Version Compatibility
 //!
@@ -90,10 +90,10 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// # Role in Dynamic Loading
 ///
 /// For dynamically-loaded plugins, a `PluginRegistration` is the value returned by
-/// the `drasi_plugin_init()` entry point. The server:
+/// the `drasi_<crate_name>_plugin_init()` entry point. The server:
 ///
 /// 1. Loads the shared library (`.so`/`.dylib`/`.dll`).
-/// 2. Resolves the `drasi_plugin_init` symbol.
+/// 2. Resolves the `drasi_<crate_name>_plugin_init` symbol.
 /// 3. Calls it and takes ownership of the returned `PluginRegistration` via
 ///    [`Box::from_raw`].
 /// 4. Validates that [`sdk_version`](Self::sdk_version) matches the server's
@@ -108,6 +108,13 @@ pub struct PluginRegistration {
 
     /// The Rust compiler version used to build this plugin.
     pub rust_version: &'static str,
+
+    /// The Tokio version this plugin was compiled against.
+    pub tokio_version: &'static str,
+
+    /// Build compatibility hash from the shared runtime.
+    /// Computed from rustc version, crate version, target triple, and profile.
+    pub build_hash: &'static str,
 
     /// Source plugin descriptors provided by this plugin.
     pub sources: Vec<Box<dyn SourcePluginDescriptor>>,
@@ -124,7 +131,9 @@ impl PluginRegistration {
     pub fn new() -> Self {
         Self {
             sdk_version: SDK_VERSION,
-            rust_version: option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown"),
+            rust_version: env!("DRASI_RUSTC_VERSION"),
+            tokio_version: drasi_plugin_runtime::TOKIO_VERSION,
+            build_hash: drasi_plugin_runtime::BUILD_HASH,
             sources: Vec::new(),
             reactions: Vec::new(),
             bootstrappers: Vec::new(),
@@ -171,6 +180,8 @@ impl std::fmt::Debug for PluginRegistration {
         f.debug_struct("PluginRegistration")
             .field("sdk_version", &self.sdk_version)
             .field("rust_version", &self.rust_version)
+            .field("tokio_version", &self.tokio_version)
+            .field("build_hash", &self.build_hash)
             .field(
                 "sources",
                 &self.sources.iter().map(|s| s.kind()).collect::<Vec<_>>(),

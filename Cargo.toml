@@ -48,8 +48,17 @@ members = [
   # State Store Plugins
   "components/state_stores/redb",
 
+  # Shared component libraries
+  "components/mssql-common",
+
   # Plugin SDK
   "components/plugin-sdk",
+
+  # Plugin Runtime (shared dynamic library for dynamic plugins)
+  "components/plugin-runtime",
+
+  # Tokio Bridge (legacy, kept for backward compat)
+  "components/tokio-bridge",
 
   # Internal
   "shared-tests",
@@ -87,6 +96,8 @@ drasi-functions-gql = { version = "0.3.3", path = "functions-gql" }
 drasi-middleware = { version = "0.3.5", path = "middleware" }
 drasi-lib = { version = "0.3.8", path = "lib" }
 drasi-plugin-sdk = { version = "0.3.1", path = "components/plugin-sdk" }
+drasi-tokio-bridge = { version = "0.3.1", path = "components/tokio-bridge" }
+drasi-plugin-runtime = { version = "0.3.1", path = "components/plugin-runtime" }
 
 # Common dependencies
 utoipa = { version = "4", features = ["chrono"] }
@@ -97,6 +108,7 @@ drasi-reaction-http = { version = "0.1.8", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.5", path = "components/reactions/grpc" }
 drasi-index-rocksdb = { version = "0.2.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.4", path = "components/indexes/garnet" }
+drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
 drasi-source-mssql = { version = "0.1.0", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.1.0", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }

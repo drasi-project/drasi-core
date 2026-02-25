@@ -24,12 +24,13 @@ keywords = ["drasi", "plugin", "postgres"]
 categories = ["database"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -67,5 +68,3 @@ serial_test = "3.0"
 testcontainers = "0.23"
 tokio-test = "0.4"
 
-[features]
-dynamic-plugin = []

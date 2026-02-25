@@ -24,12 +24,13 @@ keywords = ["drasi", "plugin", "http"]
 categories = ["network-programming"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -69,5 +70,3 @@ tokio-test = "0.4"
 drasi-reaction-application = { path = "../../reactions/application" }
 env_logger = "0.11"
 
-[features]
-dynamic-plugin = []

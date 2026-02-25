@@ -36,7 +36,7 @@ const MAX_IDENTIFIER_LENGTH: usize = 128;
 ///
 /// # Example
 /// ```
-/// use drasi_source_mssql::validate_sql_identifier;
+/// use drasi_mssql_common::validate_sql_identifier;
 ///
 /// assert!(validate_sql_identifier("orders").is_ok());
 /// assert!(validate_sql_identifier("dbo.orders").is_ok());

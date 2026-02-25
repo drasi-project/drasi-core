@@ -24,12 +24,13 @@ keywords = ["drasi", "plugin", "bootstrap", "script"]
 categories = ["filesystem"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -48,5 +49,3 @@ tokio-postgres = "0.7"
 postgres-types = "0.2"
 redis = { version = "0.25", features = ["tokio-comp"] }
 
-[features]
-dynamic-plugin = []

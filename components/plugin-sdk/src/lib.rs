@@ -123,14 +123,14 @@
 //! ### Step 3: Export the entry point
 //!
 //! Every dynamic plugin shared library **must** export a C function named
-//! `drasi_plugin_init` that returns a heap-allocated
+//! `drasi_<crate_name>_plugin_init` that returns a heap-allocated
 //! [`PluginRegistration`](registration::PluginRegistration) via raw pointer:
 //!
 //! ```rust,ignore
 //! use drasi_plugin_sdk::prelude::*;
 //!
 //! #[no_mangle]
-//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
+//! pub extern "C" fn drasi_<crate_name>_plugin_init() -> *mut PluginRegistration {
 //!     let registration = PluginRegistration::new()
 //!         .with_source(Box::new(MySourceDescriptor))
 //!         .with_reaction(Box::new(MyReactionDescriptor));

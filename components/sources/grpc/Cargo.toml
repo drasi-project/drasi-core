@@ -24,12 +24,13 @@ keywords = ["drasi", "plugin", "grpc"]
 categories = ["network-programming"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib", "dylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
+drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
@@ -52,5 +53,3 @@ ordered-float = "3.0"
 [build-dependencies]
 tonic-build = "0.11"
 
-[features]
-dynamic-plugin = []
