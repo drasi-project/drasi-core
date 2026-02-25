@@ -24,7 +24,7 @@ keywords = ["drasi", "plugin", "bootstrap", "application"]
 categories = ["development-tools"]
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib"]
 
 [lints]
 workspace = true

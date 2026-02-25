@@ -68,3 +68,6 @@ serial_test = "3.0"
 testcontainers = "0.23"
 tokio-test = "0.4"
 
+
+[features]
+dynamic-plugin = []

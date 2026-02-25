@@ -123,14 +123,14 @@
 //! ### Step 3: Export the entry point
 //!
 //! Every dynamic plugin shared library **must** export a C function named
-//! `drasi_<crate_name>_plugin_init` that returns a heap-allocated
+//! `drasi_plugin_init` that returns a heap-allocated
 //! [`PluginRegistration`](registration::PluginRegistration) via raw pointer:
 //!
 //! ```rust,ignore
 //! use drasi_plugin_sdk::prelude::*;
 //!
 //! #[no_mangle]
-//! pub extern "C" fn drasi_<crate_name>_plugin_init() -> *mut PluginRegistration {
+//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
 //!     let registration = PluginRegistration::new()
 //!         .with_source(Box::new(MySourceDescriptor))
 //!         .with_reaction(Box::new(MyReactionDescriptor));
@@ -218,3 +218,45 @@ pub use descriptor::{
 pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
+
+/// Export the standard dynamic-plugin entry points.
+///
+/// This macro generates both:
+/// - `drasi_plugin_init` — returns the [`PluginRegistration`] (called by the server)
+/// - `drasi_plugin_build_hash` — returns the build hash as a C string (pre-check
+///   by the server before calling `drasi_plugin_init`, to catch ABI mismatches early)
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use drasi_plugin_sdk::prelude::*;
+///
+/// export_plugin! {
+///     PluginRegistration::new()
+///         .with_source(Box::new(MySourceDescriptor))
+/// }
+/// ```
+///
+/// The macro is gated on `#[cfg(feature = "dynamic-plugin")]` at the call site,
+/// so it only emits symbols when building as a shared library.
+#[macro_export]
+macro_rules! export_plugin {
+    ($registration:expr) => {
+        #[no_mangle]
+        pub extern "C" fn drasi_plugin_init() -> *mut $crate::PluginRegistration {
+            Box::into_raw(Box::new($registration))
+        }
+
+        #[no_mangle]
+        pub extern "C" fn drasi_plugin_build_hash() -> *const u8 {
+            // Return a pointer to a null-terminated C string containing the build hash.
+            // The static ensures the pointer remains valid for the lifetime of the process.
+            static BUILD_HASH_CSTR: std::sync::LazyLock<std::ffi::CString> =
+                std::sync::LazyLock::new(|| {
+                    std::ffi::CString::new(drasi_plugin_runtime::BUILD_HASH)
+                        .expect("BUILD_HASH contains no interior NUL bytes")
+                });
+            BUILD_HASH_CSTR.as_ptr() as *const u8
+        }
+    };
+}

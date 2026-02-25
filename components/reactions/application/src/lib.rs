@@ -127,14 +127,4 @@ mod tests {
     }
 }
 
-/// Dynamic plugin entry point.
-///
-/// # Safety
-/// The caller must ensure this is only called once and takes ownership of the
-/// returned pointer via `Box::from_raw`.
-#[no_mangle]
-pub extern "C" fn drasi_reaction_application_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
-    let registration = drasi_plugin_sdk::PluginRegistration::new()
-        .with_reaction(Box::new(descriptor::ApplicationReactionDescriptor));
-    Box::into_raw(Box::new(registration))
-}
+// Core plugin — registered statically by the server, not exported for dynamic loading.

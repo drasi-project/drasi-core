@@ -15,7 +15,7 @@
 //! Plugin registration and discovery.
 //!
 //! A [`PluginRegistration`] is the entry point for a plugin shared library. When the
-//! server loads a `.so`/`.dll`/`.dylib` file, it calls the `drasi_<crate_name>_plugin_init()` export
+//! server loads a `.so`/`.dll`/`.dylib` file, it calls the `drasi_plugin_init()` export
 //! which returns a `PluginRegistration` containing the plugin's descriptors.
 //!
 //! # For Statically-Linked Plugins
@@ -43,7 +43,7 @@
 //! use drasi_plugin_sdk::prelude::*;
 //!
 //! #[no_mangle]
-//! pub extern "C" fn drasi_<crate_name>_plugin_init() -> *mut PluginRegistration {
+//! pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
 //!     let registration = PluginRegistration::new()
 //!         .with_source(Box::new(MySourceDescriptor));
 //!     Box::into_raw(Box::new(registration))
@@ -51,7 +51,7 @@
 //! ```
 //!
 //! The `#[no_mangle]` attribute and `extern "C"` ABI are required so the server
-//! can locate the symbol by name (`drasi_<crate_name>_plugin_init`) in the shared library.
+//! can locate the symbol by name (`drasi_plugin_init`) in the shared library.
 //!
 //! # SDK Version Compatibility
 //!
@@ -90,10 +90,10 @@ pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// # Role in Dynamic Loading
 ///
 /// For dynamically-loaded plugins, a `PluginRegistration` is the value returned by
-/// the `drasi_<crate_name>_plugin_init()` entry point. The server:
+/// the `drasi_plugin_init()` entry point. The server:
 ///
 /// 1. Loads the shared library (`.so`/`.dylib`/`.dll`).
-/// 2. Resolves the `drasi_<crate_name>_plugin_init` symbol.
+/// 2. Resolves the `drasi_plugin_init` symbol.
 /// 3. Calls it and takes ownership of the returned `PluginRegistration` via
 ///    [`Box::from_raw`].
 /// 4. Validates that [`sdk_version`](Self::sdk_version) matches the server's

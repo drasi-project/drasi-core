@@ -27,7 +27,7 @@ categories = ["development-tools"]
 workspace = true
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib"]
 
 [dependencies]
 drasi-plugin-runtime = { workspace = true }

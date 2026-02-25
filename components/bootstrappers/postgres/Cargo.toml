@@ -51,3 +51,6 @@ postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
 tokio = { version = "1.0", features = ["full"] }
 
+
+[features]
+dynamic-plugin = []

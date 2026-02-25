@@ -34,3 +34,6 @@ ordered-float = "3.0"
 handlebars = "5.1"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[features]
+dynamic-plugin = []

@@ -10,7 +10,7 @@ keywords = ["drasi", "plugin", "bootstrap", "noop"]
 categories = ["development-tools"]
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib"]
 
 [lints]
 workspace = true

@@ -49,12 +49,8 @@ pub use reaction::MySqlStoredProcReaction;
 
 /// Dynamic plugin entry point.
 ///
-/// # Safety
-/// The caller must ensure this is only called once and takes ownership of the
-/// returned pointer via `Box::from_raw`.
-#[no_mangle]
-pub extern "C" fn drasi_reaction_storedproc_mysql_plugin_init() -> *mut drasi_plugin_sdk::PluginRegistration {
-    let registration = drasi_plugin_sdk::PluginRegistration::new()
-        .with_reaction(Box::new(descriptor::MySqlStoredProcReactionDescriptor));
-    Box::into_raw(Box::new(registration))
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin! {
+    drasi_plugin_sdk::PluginRegistration::new()
+        .with_reaction(Box::new(descriptor::MySqlStoredProcReactionDescriptor))
 }

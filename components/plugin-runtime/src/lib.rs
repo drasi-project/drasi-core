@@ -101,3 +101,49 @@ pub fn init_tracing(default_level: &str) {
     // Bridge log crate → tracing (so log::info!() also goes through the subscriber)
     let _ = tracing_log::LogTracer::init();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_hash_is_non_empty() {
+        assert!(
+            !BUILD_HASH.is_empty(),
+            "BUILD_HASH should be set by build.rs"
+        );
+    }
+
+    #[test]
+    fn test_build_hash_is_hex() {
+        assert!(
+            BUILD_HASH.chars().all(|c| c.is_ascii_hexdigit()),
+            "BUILD_HASH should be a hex string, got: {BUILD_HASH}"
+        );
+    }
+
+    #[test]
+    fn test_build_hash_length() {
+        // DefaultHasher produces a u64 → 16 hex chars
+        assert_eq!(
+            BUILD_HASH.len(),
+            16,
+            "BUILD_HASH should be 16 hex chars (u64 hash)"
+        );
+    }
+
+    #[test]
+    fn test_tokio_version_is_pinned() {
+        assert!(
+            !TOKIO_VERSION.is_empty(),
+            "TOKIO_VERSION should be non-empty"
+        );
+        // Verify it looks like a semver version
+        assert!(
+            TOKIO_VERSION
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.'),
+            "TOKIO_VERSION should be a version string"
+        );
+    }
+}

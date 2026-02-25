@@ -56,3 +56,6 @@ testcontainers-modules = { version = "0.11", features = ["mysql"] }
 [lints]
 workspace = true
 
+
+[features]
+dynamic-plugin = []

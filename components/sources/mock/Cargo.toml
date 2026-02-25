@@ -34,3 +34,6 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
 rand = "0.8"
+
+[features]
+dynamic-plugin = []
