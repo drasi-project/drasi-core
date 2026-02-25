@@ -117,11 +117,7 @@ pub struct PostgresBootstrapConfigDto {
 // ── Descriptor ───────────────────────────────────────────────────────────────
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    PostgresBootstrapConfigDto,
-    SslModeDto,
-    TableKeyConfigDto,
-)))]
+#[openapi(components(schemas(PostgresBootstrapConfigDto, SslModeDto, TableKeyConfigDto,)))]
 struct PostgresBootstrapSchemas;
 
 /// Plugin descriptor for the PostgreSQL bootstrap provider.

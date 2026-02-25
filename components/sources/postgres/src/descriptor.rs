@@ -16,8 +16,8 @@
 
 use crate::{PostgresSourceConfig, SslMode, TableKeyConfig};
 use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use std::str::FromStr;
+use utoipa::OpenApi;
 
 /// PostgreSQL source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -117,11 +117,7 @@ fn default_ssl_mode() -> ConfigValue<SslModeDto> {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    PostgresSourceConfigDto,
-    SslModeDto,
-    TableKeyConfigDto,
-)))]
+#[openapi(components(schemas(PostgresSourceConfigDto, SslModeDto, TableKeyConfigDto,)))]
 struct PostgresSourceSchemas;
 
 /// Descriptor for the PostgreSQL source plugin.

@@ -14,9 +14,9 @@
 
 //! Descriptor for the platform reaction plugin.
 
+use drasi_lib::reactions::Reaction;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
-use drasi_lib::reactions::Reaction;
 
 use crate::PlatformReactionBuilder;
 

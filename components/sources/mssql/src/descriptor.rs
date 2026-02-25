@@ -16,8 +16,8 @@
 
 use crate::{AuthMode, EncryptionMode, MsSqlSourceBuilder, StartPosition, TableKeyConfig};
 use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use std::str::FromStr;
+use utoipa::OpenApi;
 
 /// MS SQL source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -235,11 +235,13 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
         let password: String = mapper.resolve_string(&dto.password)?;
         let auth_mode: AuthMode = mapper.resolve_typed::<AuthModeDto>(&dto.auth_mode)?.into();
         let poll_interval_ms: u64 = mapper.resolve_typed(&dto.poll_interval_ms)?;
-        let encryption: EncryptionMode =
-            mapper.resolve_typed::<EncryptionModeDto>(&dto.encryption)?.into();
+        let encryption: EncryptionMode = mapper
+            .resolve_typed::<EncryptionModeDto>(&dto.encryption)?
+            .into();
         let trust_server_certificate: bool = mapper.resolve_typed(&dto.trust_server_certificate)?;
-        let start_position: StartPosition =
-            mapper.resolve_typed::<StartPositionDto>(&dto.start_position)?.into();
+        let start_position: StartPosition = mapper
+            .resolve_typed::<StartPositionDto>(&dto.start_position)?
+            .into();
 
         let mut builder = MsSqlSourceBuilder::new(id)
             .with_host(host)

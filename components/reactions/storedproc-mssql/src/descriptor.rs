@@ -14,10 +14,10 @@
 
 //! Descriptor for the MS SQL Server stored procedure reaction plugin.
 
-use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
+use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
+use utoipa::OpenApi;
 
 use crate::{MsSqlStoredProcReaction, QueryConfig, TemplateSpec};
 
@@ -148,8 +148,7 @@ impl ReactionPluginDescriptor for MsSqlStoredProcReactionDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
-        let dto: MsSqlStoredProcReactionConfigDto =
-            serde_json::from_value(config_json.clone())?;
+        let dto: MsSqlStoredProcReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
         let mut builder = MsSqlStoredProcReaction::builder(id)

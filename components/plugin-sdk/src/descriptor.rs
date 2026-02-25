@@ -348,9 +348,7 @@ mod tests {
             _config_json: &serde_json::Value,
             _auto_start: bool,
         ) -> anyhow::Result<Box<dyn Source>> {
-            Ok(Box::new(MockTestSource {
-                id: id.to_string(),
-            }))
+            Ok(Box::new(MockTestSource { id: id.to_string() }))
         }
     }
 

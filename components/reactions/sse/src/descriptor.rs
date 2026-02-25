@@ -14,13 +14,13 @@
 
 //! Descriptor for the SSE reaction plugin.
 
-use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
+use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
+use utoipa::OpenApi;
 
-use crate::SseReactionBuilder;
 use crate::config::SseExtension;
+use crate::SseReactionBuilder;
 
 /// DTO for an SSE template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -106,11 +106,7 @@ fn map_query_config(dto: &SseQueryConfigDto) -> crate::QueryConfig {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    SseReactionConfigDto,
-    SseQueryConfigDto,
-    SseTemplateSpecDto,
-)))]
+#[openapi(components(schemas(SseReactionConfigDto, SseQueryConfigDto, SseTemplateSpecDto,)))]
 struct SseReactionSchemas;
 
 /// Descriptor for the SSE reaction plugin.

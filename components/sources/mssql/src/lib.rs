@@ -80,12 +80,12 @@ pub use drasi_mssql_common::error;
 pub use drasi_mssql_common::keys;
 
 // Re-export main types
+pub use decoder::CdcOperation;
 pub use drasi_mssql_common::{
     validate_sql_identifier, AuthMode, ConnectionError, EncryptionMode, LsnError, MsSqlConnection,
     MsSqlError, MsSqlErrorKind, MsSqlSourceConfig, PrimaryKeyCache, PrimaryKeyError, StartPosition,
     TableKeyConfig,
 };
-pub use decoder::CdcOperation;
 pub use lsn::Lsn;
 
 use anyhow::Result;

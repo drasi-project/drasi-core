@@ -58,22 +58,22 @@ pub const BUILD_HASH: &str = env!("DRASI_BUILD_HASH");
 
 // Re-export all shared dependencies so they are included in the dylib
 // and available to consumers.
-pub use tokio;
+pub use anyhow;
+pub use async_trait;
+pub use chrono;
+pub use drasi_lib;
+pub use futures;
+pub use log;
+pub use ordered_float;
 pub use serde;
 pub use serde_json;
-pub use anyhow;
 pub use thiserror;
-pub use async_trait;
-pub use utoipa;
-pub use drasi_lib;
-pub use log;
-pub use chrono;
-pub use uuid;
-pub use futures;
-pub use ordered_float;
+pub use tokio;
 pub use tracing;
-pub use tracing_subscriber;
 pub use tracing_log;
+pub use tracing_subscriber;
+pub use utoipa;
+pub use uuid;
 
 /// Initialize the global tracing subscriber with an env filter and fmt layer.
 ///
@@ -85,8 +85,8 @@ pub fn init_tracing(default_level: &str) {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
     tracing_subscriber::registry()
         .with(filter)

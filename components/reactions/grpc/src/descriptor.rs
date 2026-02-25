@@ -14,10 +14,10 @@
 
 //! Descriptor for the gRPC reaction plugin.
 
-use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
+use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
+use utoipa::OpenApi;
 
 use crate::GrpcReactionBuilder;
 

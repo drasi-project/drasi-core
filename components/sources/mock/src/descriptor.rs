@@ -53,10 +53,7 @@ fn default_interval_ms() -> ConfigValue<u64> {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    MockSourceConfigDto,
-    DataTypeDto,
-)))]
+#[openapi(components(schemas(MockSourceConfigDto, DataTypeDto,)))]
 struct MockSourceSchemas;
 
 /// Descriptor for the mock source plugin.

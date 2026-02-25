@@ -212,9 +212,7 @@ pub mod resolver;
 
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;
-pub use descriptor::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
-};
+pub use descriptor::{BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor};
 pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};

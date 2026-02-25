@@ -188,11 +188,7 @@ impl std::fmt::Debug for PluginRegistration {
             )
             .field(
                 "reactions",
-                &self
-                    .reactions
-                    .iter()
-                    .map(|r| r.kind())
-                    .collect::<Vec<_>>(),
+                &self.reactions.iter().map(|r| r.kind()).collect::<Vec<_>>(),
             )
             .field(
                 "bootstrappers",

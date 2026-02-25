@@ -22,8 +22,8 @@ use crate::config::{
 };
 use crate::{HttpSourceBuilder, HttpSourceConfig};
 use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use std::collections::HashMap;
+use utoipa::OpenApi;
 
 /// HTTP source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]

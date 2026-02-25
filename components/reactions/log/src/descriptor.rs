@@ -14,10 +14,10 @@
 
 //! Descriptor for the log reaction plugin.
 
-use drasi_plugin_sdk::prelude::*;
-use utoipa::OpenApi;
 use drasi_lib::reactions::Reaction;
+use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
+use utoipa::OpenApi;
 
 use crate::LogReactionBuilder;
 
@@ -76,11 +76,7 @@ fn map_query_config(dto: &QueryConfigDto) -> crate::QueryConfig {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    LogReactionConfigDto,
-    QueryConfigDto,
-    TemplateSpecDto,
-)))]
+#[openapi(components(schemas(LogReactionConfigDto, QueryConfigDto, TemplateSpecDto,)))]
 struct LogReactionSchemas;
 
 /// Descriptor for the log reaction plugin.

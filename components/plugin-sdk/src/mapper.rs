@@ -148,8 +148,7 @@ impl DtoMapper {
         let mut resolvers: HashMap<&'static str, Arc<dyn ValueResolver>> = HashMap::new();
         resolvers.insert("EnvironmentVariable", Arc::new(EnvironmentVariableResolver));
 
-        let secret_resolver =
-            get_secret_resolver().unwrap_or_else(|| Arc::new(SecretResolver));
+        let secret_resolver = get_secret_resolver().unwrap_or_else(|| Arc::new(SecretResolver));
         resolvers.insert("Secret", secret_resolver);
 
         Self { resolvers }
@@ -158,11 +157,7 @@ impl DtoMapper {
     /// Register a custom [`ValueResolver`] for a given reference kind.
     ///
     /// This replaces any previously registered resolver for the same kind.
-    pub fn with_resolver(
-        mut self,
-        kind: &'static str,
-        resolver: Arc<dyn ValueResolver>,
-    ) -> Self {
+    pub fn with_resolver(mut self, kind: &'static str, resolver: Arc<dyn ValueResolver>) -> Self {
         self.resolvers.insert(kind, resolver);
         self
     }
@@ -206,9 +201,7 @@ impl DtoMapper {
                     .resolvers
                     .get("Secret")
                     .ok_or_else(|| ResolverError::NoResolverFound("Secret".to_string()))?;
-                let string_cv = ConfigValue::Secret {
-                    name: name.clone(),
-                };
+                let string_cv = ConfigValue::Secret { name: name.clone() };
                 let string_val = resolver.resolve_to_string(&string_cv)?;
                 string_val.parse::<T>().map_err(|e| {
                     ResolverError::ParseError(format!("Failed to parse secret '{name}': {e}"))
@@ -391,11 +384,7 @@ mod tests {
         }
 
         impl ConfigMapper<TestDto, TestDomain> for TestMapper {
-            fn map(
-                &self,
-                dto: &TestDto,
-                resolver: &DtoMapper,
-            ) -> Result<TestDomain, MappingError> {
+            fn map(&self, dto: &TestDto, resolver: &DtoMapper) -> Result<TestDomain, MappingError> {
                 Ok(TestDomain {
                     host: resolver.resolve_string(&dto.host)?,
                 })
