@@ -26,33 +26,27 @@ use crate::{AuthMode, EncryptionMode, MsSqlBootstrapProvider, MsSqlSourceConfig,
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = AuthMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AuthModeDto {
+    #[default]
     SqlServer,
     Windows,
     AzureAd,
 }
 
-impl Default for AuthModeDto {
-    fn default() -> Self {
-        Self::SqlServer
-    }
-}
 
 /// Encryption mode DTO (mirrors [`EncryptionMode`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = EncryptionMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EncryptionModeDto {
     Off,
     On,
+    #[default]
     NotSupported,
 }
 
-impl Default for EncryptionModeDto {
-    fn default() -> Self {
-        Self::NotSupported
-    }
-}
 
 /// Table key configuration DTO (mirrors [`TableKeyConfig`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -160,7 +154,7 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = MsSqlBootstrapSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
+        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
     }
 
     async fn create_bootstrap_provider(

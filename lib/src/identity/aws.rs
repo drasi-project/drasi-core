@@ -189,14 +189,14 @@ impl IdentityProvider for AwsIdentityProvider {
             .port(self.port as u64)
             .username(&self.username)
             .build()
-            .map_err(|e| anyhow!("Failed to build auth token config: {}", e))?;
+            .map_err(|e| anyhow!("Failed to build auth token config: {e}"))?;
 
         // Create the generator and generate the token
         let generator = AuthTokenGenerator::new(auth_config);
         let token = generator
             .auth_token(&self.config)
             .await
-            .map_err(|e| anyhow!("Failed to generate AWS IAM token: {}", e))?;
+            .map_err(|e| anyhow!("Failed to generate AWS IAM token: {e}"))?;
 
         Ok(Credentials::Token {
             username: self.username.clone(),
@@ -401,6 +401,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod integration_tests {
     use super::*;
 
@@ -432,7 +433,7 @@ mod integration_tests {
             } => {
                 assert_eq!(user, username);
                 assert!(!token.is_empty());
-                assert!(token.contains(&hostname)); // Token should contain the hostname
+                assert!(token.contains(hostname)); // Token should contain the hostname
                 println!("✓ Successfully generated AWS IAM auth token");
                 println!("  Token length: {}", token.len());
                 println!("  Token is a signed URL for RDS authentication");
@@ -463,7 +464,7 @@ mod integration_tests {
             Ok(_) => panic!("Expected Token credentials"),
             Err(e) => {
                 println!("⚠ Failed to generate token (expected if Aurora cluster doesn't exist)");
-                println!("  Error: {}", e);
+                println!("  Error: {e}");
             }
         }
     }

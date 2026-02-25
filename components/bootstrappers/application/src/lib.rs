@@ -44,7 +44,7 @@ pub mod descriptor;
 
 pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
 
-/// Dynamic plugin entry point.
+// Dynamic plugin entry point.
 // Core plugin — registered statically by the server, not exported for dynamic loading.
 
 #[cfg(test)]

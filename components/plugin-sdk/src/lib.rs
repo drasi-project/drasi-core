@@ -178,8 +178,8 @@
 //!   trait for DTO-to-domain conversions.
 //! - [`descriptor`] — Plugin descriptor traits
 //!   ([`SourcePluginDescriptor`](descriptor::SourcePluginDescriptor),
-//!    [`ReactionPluginDescriptor`](descriptor::ReactionPluginDescriptor),
-//!    [`BootstrapPluginDescriptor`](descriptor::BootstrapPluginDescriptor)).
+//!   [`ReactionPluginDescriptor`](descriptor::ReactionPluginDescriptor),
+//!   [`BootstrapPluginDescriptor`](descriptor::BootstrapPluginDescriptor)).
 //! - [`registration`] — The [`PluginRegistration`](registration::PluginRegistration) struct
 //!   returned by plugin entry points.
 //! - [`prelude`] — Convenience re-exports for plugin authors.

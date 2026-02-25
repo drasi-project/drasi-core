@@ -28,17 +28,14 @@ use crate::PostgresBootstrapProvider;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = SslMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SslModeDto {
     Disable,
+    #[default]
     Prefer,
     Require,
 }
 
-impl Default for SslModeDto {
-    fn default() -> Self {
-        Self::Prefer
-    }
-}
 
 /// Table key configuration DTO (mirrors [`TableKeyConfig`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -139,7 +136,7 @@ impl BootstrapPluginDescriptor for PostgresBootstrapDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = PostgresBootstrapSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
+        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
     }
 
     async fn create_bootstrap_provider(

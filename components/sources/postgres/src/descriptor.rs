@@ -49,17 +49,14 @@ pub struct PostgresSourceConfigDto {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = SslMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SslModeDto {
     Disable,
+    #[default]
     Prefer,
     Require,
 }
 
-impl Default for SslModeDto {
-    fn default() -> Self {
-        Self::Prefer
-    }
-}
 
 impl FromStr for SslModeDto {
     type Err = String;
@@ -139,7 +136,7 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = PostgresSourceSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
+        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
     }
 
     async fn create_source(

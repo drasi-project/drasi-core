@@ -26,20 +26,17 @@ use serde::{Deserialize, Serialize};
 /// SSL mode for PostgreSQL connections
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SslMode {
     /// Disable SSL encryption
     Disable,
     /// Prefer SSL but allow unencrypted connections
+    #[default]
     Prefer,
     /// Require SSL encryption
     Require,
 }
 
-impl Default for SslMode {
-    fn default() -> Self {
-        Self::Prefer
-    }
-}
 
 impl std::fmt::Display for SslMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

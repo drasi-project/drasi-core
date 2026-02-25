@@ -55,17 +55,14 @@ pub struct MsSqlSourceConfigDto {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = AuthMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AuthModeDto {
+    #[default]
     SqlServer,
     Windows,
     AzureAd,
 }
 
-impl Default for AuthModeDto {
-    fn default() -> Self {
-        Self::SqlServer
-    }
-}
 
 impl FromStr for AuthModeDto {
     type Err = String;
@@ -93,17 +90,14 @@ impl From<AuthModeDto> for AuthMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = EncryptionMode)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EncryptionModeDto {
     Off,
     On,
+    #[default]
     NotSupported,
 }
 
-impl Default for EncryptionModeDto {
-    fn default() -> Self {
-        Self::NotSupported
-    }
-}
 
 impl FromStr for EncryptionModeDto {
     type Err = String;
@@ -131,16 +125,13 @@ impl From<EncryptionModeDto> for EncryptionMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = StartPosition)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum StartPositionDto {
     Beginning,
+    #[default]
     Current,
 }
 
-impl Default for StartPositionDto {
-    fn default() -> Self {
-        Self::Current
-    }
-}
 
 impl FromStr for StartPositionDto {
     type Err = String;
@@ -216,7 +207,7 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = MsSqlSourceSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap()
+        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
     }
 
     async fn create_source(

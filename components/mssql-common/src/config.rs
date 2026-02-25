@@ -80,8 +80,10 @@ pub fn validate_sql_identifier(name: &str) -> Result<()> {
 /// Authentication mode for MS SQL Server
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum AuthMode {
     /// SQL Server authentication (username/password)
+    #[default]
     SqlServer,
     /// Windows integrated authentication (Kerberos)
     Windows,
@@ -89,11 +91,6 @@ pub enum AuthMode {
     AzureAd,
 }
 
-impl Default for AuthMode {
-    fn default() -> Self {
-        Self::SqlServer
-    }
-}
 
 impl std::fmt::Display for AuthMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -108,36 +105,30 @@ impl std::fmt::Display for AuthMode {
 /// TLS/SSL encryption mode
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum EncryptionMode {
     /// No encryption
     Off,
     /// Require encryption
     On,
     /// Encrypt if supported, otherwise allow unencrypted
+    #[default]
     NotSupported,
 }
 
-impl Default for EncryptionMode {
-    fn default() -> Self {
-        Self::NotSupported
-    }
-}
 
 /// Starting position when no LSN is found in the state store
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum StartPosition {
     /// Start from the beginning (earliest available LSN)
     Beginning,
     /// Start from the current LSN (now)
+    #[default]
     Current,
 }
 
-impl Default for StartPosition {
-    fn default() -> Self {
-        Self::Current
-    }
-}
 
 impl std::fmt::Display for EncryptionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
