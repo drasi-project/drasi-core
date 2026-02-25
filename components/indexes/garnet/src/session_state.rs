@@ -74,12 +74,18 @@ pub struct SortedSetDeltas {
 /// is drained into a single atomic Redis pipeline (MULTI/EXEC).
 pub struct WriteBuffer {
     keys: HashMap<String, KeyState>,
+    /// Keys that were DEL'd at some point during this session. A subsequent
+    /// write (set_add, hash_set, …) overwrites `KeyState::Deleted` in `keys`,
+    /// but we still need to emit `DEL key` on commit so stale Redis members
+    /// are removed before the new state is applied.
+    cleared_keys: HashSet<String>,
 }
 
 impl WriteBuffer {
     fn new() -> Self {
         Self {
             keys: HashMap::new(),
+            cleared_keys: HashSet::new(),
         }
     }
 
@@ -307,6 +313,7 @@ impl WriteBuffer {
     // --- Key-level operations ---
 
     pub fn del(&mut self, key: String) {
+        self.cleared_keys.insert(key.clone());
         self.keys.insert(key, KeyState::Deleted);
     }
 
@@ -316,20 +323,28 @@ impl WriteBuffer {
 
     /// Drain the buffer into a Redis pipeline for atomic execution.
     ///
-    /// Ordering: For keys that went through `Deleted` → new state, the original
-    /// Deleted has been overwritten by the new state (since we use `insert`),
-    /// but we still need `DEL` for set/sorted-set delta keys to clear Redis state
-    /// before applying deltas. `Deleted` variant keys just get `DEL`.
+    /// For keys that went through `Deleted` → new state within a single session,
+    /// the `Deleted` variant was overwritten by the subsequent write. We track
+    /// these in `cleared_keys` so we can emit `DEL key` before applying the new
+    /// state, ensuring stale Redis members/fields are removed.
     pub fn drain_into_pipeline(&mut self, pipeline: &mut Pipeline) {
+        let cleared = std::mem::take(&mut self.cleared_keys);
+
         for (key, state) in self.keys.drain() {
             match state {
                 KeyState::Deleted => {
                     pipeline.del(&key).ignore();
                 }
                 KeyState::StringValue(v) => {
+                    // SET is a full overwrite — no DEL needed even for cleared keys.
                     pipeline.cmd("SET").arg(&key).arg(v).ignore();
                 }
                 KeyState::Hash { fields } => {
+                    // If this key was DEL'd then rewritten, clear stale fields first.
+                    if cleared.contains(&key) {
+                        pipeline.del(&key).ignore();
+                    }
+
                     let mut set_fields: Vec<(String, Vec<u8>)> = Vec::new();
                     let mut del_fields: Vec<String> = Vec::new();
 
@@ -359,8 +374,11 @@ impl WriteBuffer {
                     }
                 }
                 KeyState::Set { added, removed } => {
-                    // SREM before SADD to handle re-add after remove
-                    if !removed.is_empty() {
+                    // If this key was DEL'd then rewritten, clear stale members first.
+                    if cleared.contains(&key) {
+                        pipeline.del(&key).ignore();
+                    } else if !removed.is_empty() {
+                        // SREM before SADD to handle re-add after remove
                         let mut cmd = redis::cmd("SREM");
                         cmd.arg(&key);
                         for member in &removed {
@@ -378,8 +396,11 @@ impl WriteBuffer {
                     }
                 }
                 KeyState::SortedSet { added, removed } => {
-                    // ZREM before ZADD
-                    if !removed.is_empty() {
+                    // If this key was DEL'd then rewritten, clear stale members first.
+                    if cleared.contains(&key) {
+                        pipeline.del(&key).ignore();
+                    } else if !removed.is_empty() {
+                        // ZREM before ZADD
                         let mut cmd = redis::cmd("ZREM");
                         cmd.arg(&key);
                         for member in &removed {
@@ -705,6 +726,8 @@ mod tests {
             BufferReadResult::Found(true) => {}
             _ => panic!("expected Found(true) after del+add"),
         }
+        // Key should be tracked in cleared_keys so drain emits DEL before SADD
+        assert!(buf.cleared_keys.contains("s1"));
     }
 
     #[test]
@@ -845,6 +868,72 @@ mod tests {
         let mut pipeline = redis::pipe();
         buf.drain_into_pipeline(&mut pipeline);
         assert!(buf.keys.is_empty());
+    }
+
+    #[test]
+    fn drain_del_then_set_add_clears_stale_members() {
+        let mut buf = WriteBuffer::new();
+        buf.set_add("s1".into(), b"old".to_vec());
+        buf.del("s1".into());
+        buf.set_add("s1".into(), b"new".to_vec());
+        assert!(buf.cleared_keys.contains("s1"));
+        let mut pipeline = redis::pipe();
+        buf.drain_into_pipeline(&mut pipeline);
+        assert!(buf.keys.is_empty());
+        assert!(buf.cleared_keys.is_empty());
+    }
+
+    #[test]
+    fn drain_del_then_zset_add_clears_stale_members() {
+        let mut buf = WriteBuffer::new();
+        buf.zset_add("z1".into(), b"old".to_vec(), 1.0);
+        buf.del("z1".into());
+        buf.zset_add("z1".into(), b"new".to_vec(), 2.0);
+        assert!(buf.cleared_keys.contains("z1"));
+        let mut pipeline = redis::pipe();
+        buf.drain_into_pipeline(&mut pipeline);
+        assert!(buf.keys.is_empty());
+        assert!(buf.cleared_keys.is_empty());
+    }
+
+    #[test]
+    fn drain_del_then_hash_set_clears_stale_fields() {
+        let mut buf = WriteBuffer::new();
+        buf.hash_set("h1".into(), "f1", b"old".to_vec());
+        buf.del("h1".into());
+        buf.hash_set("h1".into(), "f2", b"new".to_vec());
+        assert!(buf.cleared_keys.contains("h1"));
+        let mut pipeline = redis::pipe();
+        buf.drain_into_pipeline(&mut pipeline);
+        assert!(buf.keys.is_empty());
+        assert!(buf.cleared_keys.is_empty());
+    }
+
+    #[test]
+    fn drain_del_only_no_rewrite_not_in_cleared() {
+        let mut buf = WriteBuffer::new();
+        buf.del("k1".into());
+        // cleared_keys tracks it, but KeyState is still Deleted
+        assert!(buf.cleared_keys.contains("k1"));
+        let mut pipeline = redis::pipe();
+        buf.drain_into_pipeline(&mut pipeline);
+        assert!(buf.keys.is_empty());
+        assert!(buf.cleared_keys.is_empty());
+    }
+
+    #[test]
+    fn string_set_after_del_not_affected() {
+        // SET is a full overwrite in Redis, so cleared_keys is tracked
+        // but drain_into_pipeline skips DEL for StringValue.
+        let mut buf = WriteBuffer::new();
+        buf.string_set("k1".into(), b"v1".to_vec());
+        buf.del("k1".into());
+        buf.string_set("k1".into(), b"v2".to_vec());
+        assert!(buf.cleared_keys.contains("k1"));
+        let mut pipeline = redis::pipe();
+        buf.drain_into_pipeline(&mut pipeline);
+        assert!(buf.keys.is_empty());
+        assert!(buf.cleared_keys.is_empty());
     }
 
     // --- GarnetSessionState unit tests ---

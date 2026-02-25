@@ -463,7 +463,7 @@ mod session {
             .await
             .unwrap();
 
-        session_control.rollback();
+        session_control.rollback().unwrap();
 
         // Verify nothing persisted
         let elem = element_index.get_element(&element_ref).await.unwrap();

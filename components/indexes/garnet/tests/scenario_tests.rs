@@ -517,7 +517,7 @@ mod session {
             .await
             .unwrap();
 
-        session_control.rollback();
+        session_control.rollback().unwrap();
 
         // Verify nothing persisted
         let elem = element_index.get_element(&element_ref).await.unwrap();
@@ -713,7 +713,7 @@ mod session {
             )
             .await
             .unwrap();
-        session_control.rollback();
+        session_control.rollback().unwrap();
 
         // Second session: write v2, then commit
         let node_v2 = Element::Node {

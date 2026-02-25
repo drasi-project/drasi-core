@@ -123,10 +123,12 @@ impl AccumulatorIndex for GarnetResultIndex {
                     Some(v) => {
                         let stored: StoredValueAccumulator = v.into();
                         let bytes = redis::ToRedisArgs::to_redis_args(&stored);
-                        // StoredValueAccumulator serializes to a single byte array
-                        if let Some(b) = bytes.into_iter().next() {
-                            buffer.string_set(ari_key, b);
-                        }
+                        let b = bytes.into_iter().next().ok_or_else(|| {
+                            IndexError::other(std::io::Error::other(
+                                "StoredValueAccumulator serialized to empty Redis args",
+                            ))
+                        })?;
+                        buffer.string_set(ari_key, b);
                     }
                 }
                 return Ok(());

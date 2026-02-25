@@ -86,8 +86,9 @@ async fn main() {
         let mut builder = QueryBuilder::new(&scenario_config.query, parser)
             .with_function_registry(function_registry);
 
-        // Open shared Redis connection if either index type needs it
-        let redis_connection = if test_run_config.element_index_type == IndexType::Redis
+        // Open shared Redis connection and session state if either index type needs it
+        let (redis_connection, garnet_session_state) = if test_run_config.element_index_type
+            == IndexType::Redis
             || test_run_config.result_index_type == IndexType::Redis
         {
             let url = match env::var("REDIS_URL") {
@@ -95,14 +96,17 @@ async fn main() {
                 Err(_) => "redis://127.0.0.1:6379".to_string(),
             };
             let client = redis::Client::open(url.as_str()).unwrap();
-            Some(client.get_multiplexed_async_connection().await.unwrap())
+            let con = client.get_multiplexed_async_connection().await.unwrap();
+            let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+            (Some(con), Some(session_state))
         } else {
-            None
+            (None, None)
         };
 
-        // Open shared RocksDB if either index type needs it (avoids LOCK conflict
-        // from opening the same unified DB path twice)
-        let rocks_db = if test_run_config.element_index_type == IndexType::RocksDB
+        // Open shared RocksDB and session state if either index type needs it
+        // (avoids LOCK conflict from opening the same unified DB path twice)
+        let (rocks_db, rocks_session_state) = if test_run_config.element_index_type
+            == IndexType::RocksDB
             || test_run_config.result_index_type == IndexType::RocksDB
         {
             let options = RocksIndexOptions {
@@ -113,9 +117,11 @@ async fn main() {
                 Ok(p) => p,
                 Err(_) => "test-data".to_string(),
             };
-            Some(open_unified_db(&path, &query_id, &options).unwrap())
+            let db = open_unified_db(&path, &query_id, &options).unwrap();
+            let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+            (Some(db), Some(session_state))
         } else {
-            None
+            (None, None)
         };
 
         // Configure the correct element index
@@ -123,7 +129,7 @@ async fn main() {
             IndexType::Memory => builder,
             IndexType::Redis => {
                 let con = redis_connection.clone().unwrap();
-                let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+                let session_state = garnet_session_state.clone().unwrap();
                 let element_index = GarnetElementIndex::new(&query_id, con, false, session_state);
 
                 builder.with_element_index(Arc::new(element_index))
@@ -135,7 +141,7 @@ async fn main() {
                 };
 
                 let db = rocks_db.clone().unwrap();
-                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let session_state = rocks_session_state.clone().unwrap();
                 let element_index = RocksDbElementIndex::new(db, options, session_state);
                 element_index.clear().await.unwrap();
 
@@ -148,14 +154,14 @@ async fn main() {
             IndexType::Memory => builder,
             IndexType::Redis => {
                 let con = redis_connection.clone().unwrap();
-                let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+                let session_state = garnet_session_state.unwrap();
                 let ari = GarnetResultIndex::new(&query_id, con, session_state);
 
                 builder.with_result_index(Arc::new(ari))
             }
             IndexType::RocksDB => {
                 let db = rocks_db.unwrap();
-                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let session_state = rocks_session_state.unwrap();
                 let ari = RocksDbResultIndex::new(db, session_state);
                 ari.clear().await.unwrap();
 
