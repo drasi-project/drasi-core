@@ -30,11 +30,14 @@ use async_trait::async_trait;
 use std::fmt;
 use std::sync::Arc;
 
-use super::{ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex};
+use super::{
+    ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex, SessionControl,
+};
 
 /// Set of indexes for a query.
 ///
-/// Groups the four index types needed for query evaluation into a single unit.
+/// Groups the index types and session control needed for query evaluation into
+/// a single unit.
 /// This enables backends to create all indexes from a shared underlying resource
 /// (e.g., a single RocksDB instance or Redis connection).
 pub struct IndexSet {
@@ -46,6 +49,8 @@ pub struct IndexSet {
     pub result_index: Arc<dyn ResultIndex>,
     /// Future queue for temporal queries
     pub future_queue: Arc<dyn FutureQueue>,
+    /// Session control for atomic transaction lifecycle
+    pub session_control: Arc<dyn SessionControl>,
 }
 
 impl fmt::Debug for IndexSet {
@@ -55,6 +60,7 @@ impl fmt::Debug for IndexSet {
             .field("archive_index", &"<trait object>")
             .field("result_index", &"<trait object>")
             .field("future_queue", &"<trait object>")
+            .field("session_control", &"<trait object>")
             .finish()
     }
 }
@@ -89,10 +95,10 @@ impl fmt::Debug for IndexSet {
 pub trait IndexBackendPlugin: Send + Sync {
     /// Create all indexes for a query from a single shared backend instance.
     ///
-    /// This method creates the element index, archive index, result index, and
-    /// future queue backed by a shared storage resource (e.g., a single RocksDB
-    /// database or Redis connection). This reduces resource overhead and enables
-    /// cross-index atomic transactions.
+    /// This method creates the element index, archive index, result index,
+    /// future queue, and session control backed by a shared storage resource
+    /// (e.g., a single RocksDB database or Redis connection). This reduces
+    /// resource overhead and enables cross-index atomic transactions.
     async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError>;
 
     /// Returns true if this backend is volatile (data lost on restart).
