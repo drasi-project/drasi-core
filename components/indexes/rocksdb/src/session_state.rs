@@ -113,6 +113,24 @@ impl RocksDbSessionState {
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
+
+    /// Execute `f` against the active session transaction if one exists,
+    /// otherwise create an auto-commit transaction, run `f`, and commit.
+    pub(crate) fn with_txn<R>(
+        &self,
+        f: impl FnOnce(&Transaction<'_, OptimisticTransactionDB>) -> Result<R, IndexError>,
+    ) -> Result<R, IndexError> {
+        let guard = self.lock()?;
+        if let Some(txn) = guard.as_ref() {
+            f(txn)
+        } else {
+            drop(guard);
+            let txn = self.db.transaction();
+            let result = f(&txn)?;
+            txn.commit().map_err(IndexError::other)?;
+            Ok(result)
+        }
+    }
 }
 
 impl Drop for RocksDbSessionState {
@@ -120,13 +138,18 @@ impl Drop for RocksDbSessionState {
         // Clear the transaction before struct fields (including the Arc<DB>) are dropped.
         // This is load-bearing: Rust drops fields in declaration order, so without this,
         // `db` would drop before `active_txn`, causing use-after-free if this is the last Arc<DB>.
-        // Use get_mut() instead of lock() since &mut self guarantees exclusive access.
-        if let Ok(inner) = self.active_txn.get_mut() {
-            if inner.is_some() {
-                log::warn!("RocksDbSessionState dropped with active transaction — rolling back");
-            }
-            let _ = inner.take();
+        //
+        // Use get_mut() since &mut self guarantees exclusive access. If the mutex is
+        // poisoned (a thread panicked while holding the lock), we MUST still clear the
+        // transaction to uphold the safety invariant of the 'static transmute.
+        let inner = match self.active_txn.get_mut() {
+            Ok(inner) => inner,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.is_some() {
+            log::warn!("RocksDbSessionState dropped with active transaction — rolling back");
         }
+        let _ = inner.take();
     }
 }
 

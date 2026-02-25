@@ -95,13 +95,11 @@ impl FutureQueue for RocksDbFutureQueue {
 
             let prefix = encode_index_prefix(position_in_query as u32, group_signature);
 
-            let txn_guard = session_state.lock()?;
-
-            if let Some(session_txn) = txn_guard.as_ref() {
+            session_state.with_txn(|txn| {
                 let should_push = match push_type {
                     PushType::Always => true,
                     PushType::IfNotExists => {
-                        let mut iter = session_txn.prefix_iterator_cf(&index_cf, prefix);
+                        let mut iter = txn.prefix_iterator_cf(&index_cf, prefix);
                         match iter.next() {
                             Some(item) => match item {
                                 Ok((key, _)) => key[0..12] != prefix,
@@ -111,7 +109,7 @@ impl FutureQueue for RocksDbFutureQueue {
                         }
                     }
                     PushType::Overwrite => {
-                        remove_internal(session_txn, &index_cf, &queue_cf, prefix)?;
+                        remove_internal(txn, &index_cf, &queue_cf, prefix)?;
                         true
                     }
                 };
@@ -131,71 +129,14 @@ impl FutureQueue for RocksDbFutureQueue {
                         buf
                     };
 
-                    if let Err(e) = session_txn.put_cf(&index_cf, index_key, due_time.to_be_bytes())
-                    {
-                        return Err(IndexError::other(e));
-                    };
-
-                    if let Err(e) =
-                        session_txn.put_cf(&queue_cf, queue_key, future_ref.encode_to_vec())
-                    {
-                        return Err(IndexError::other(e));
-                    };
+                    txn.put_cf(&index_cf, index_key, due_time.to_be_bytes())
+                        .map_err(IndexError::other)?;
+                    txn.put_cf(&queue_cf, queue_key, future_ref.encode_to_vec())
+                        .map_err(IndexError::other)?;
                 }
 
                 Ok(should_push)
-            } else {
-                drop(txn_guard);
-                let txn = db.transaction();
-
-                let should_push = match push_type {
-                    PushType::Always => true,
-                    PushType::IfNotExists => {
-                        let mut iter = db.prefix_iterator_cf(&index_cf, prefix);
-                        match iter.next() {
-                            Some(item) => match item {
-                                Ok((key, _)) => key[0..12] != prefix,
-                                Err(e) => return Err(IndexError::other(e)),
-                            },
-                            None => true,
-                        }
-                    }
-                    PushType::Overwrite => {
-                        remove_internal(&txn, &index_cf, &queue_cf, prefix)?;
-                        true
-                    }
-                };
-
-                if should_push {
-                    let index_key = {
-                        let mut buf = [0u8; 20];
-                        buf[0..12].copy_from_slice(&prefix);
-                        buf[12..20].copy_from_slice(&hash);
-                        buf
-                    };
-
-                    let queue_key = {
-                        let mut buf = [0u8; 16];
-                        buf[0..8].copy_from_slice(&due_time.to_be_bytes());
-                        buf[8..16].copy_from_slice(&hash);
-                        buf
-                    };
-
-                    if let Err(e) = txn.put_cf(&index_cf, index_key, due_time.to_be_bytes()) {
-                        return Err(IndexError::other(e));
-                    };
-
-                    if let Err(e) = txn.put_cf(&queue_cf, queue_key, future_ref.encode_to_vec()) {
-                        return Err(IndexError::other(e));
-                    };
-
-                    if let Err(e) = txn.commit() {
-                        return Err(IndexError::other(e));
-                    }
-                }
-
-                Ok(should_push)
-            }
+            })
         });
 
         match task.await {
@@ -220,24 +161,9 @@ impl FutureQueue for RocksDbFutureQueue {
                 .cf_handle(QUEUE_CF)
                 .expect("fqueue column family not found");
 
-            let position_in_query = position_in_query as u32;
+            let prefix = encode_index_prefix(position_in_query as u32, group_signature);
 
-            let prefix = encode_index_prefix(position_in_query, group_signature);
-
-            let txn_guard = session_state.lock()?;
-
-            if let Some(session_txn) = txn_guard.as_ref() {
-                remove_internal(session_txn, &index_cf, &queue_cf, prefix)?;
-                Ok(())
-            } else {
-                drop(txn_guard);
-                let txn = db.transaction();
-                remove_internal(&txn, &index_cf, &queue_cf, prefix)?;
-                match txn.commit() {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            }
+            session_state.with_txn(|txn| remove_internal(txn, &index_cf, &queue_cf, prefix))
         });
 
         match task.await {
@@ -259,11 +185,10 @@ impl FutureQueue for RocksDbFutureQueue {
                 .expect("fqueue column family not found");
 
             let read_opts = ReadOptions::default();
-            let txn_guard = session_state.lock()?;
 
-            if let Some(session_txn) = txn_guard.as_ref() {
+            session_state.with_txn(|txn| {
                 let mut iter =
-                    session_txn.iterator_cf_opt(&queue_cf, read_opts, rocksdb::IteratorMode::Start);
+                    txn.iterator_cf_opt(&queue_cf, read_opts, rocksdb::IteratorMode::Start);
 
                 let result = match iter.next() {
                     Some(head) => match head {
@@ -276,9 +201,7 @@ impl FutureQueue for RocksDbFutureQueue {
                                     Err(_) => return Err(IndexError::CorruptedData),
                                 };
 
-                            if let Err(e) = session_txn.delete_cf(&queue_cf, &key) {
-                                return Err(IndexError::other(e));
-                            };
+                            txn.delete_cf(&queue_cf, &key).map_err(IndexError::other)?;
 
                             let prefix = encode_index_prefix(
                                 stored_future_ref.position_in_query,
@@ -291,9 +214,8 @@ impl FutureQueue for RocksDbFutureQueue {
                                 buf
                             };
 
-                            if let Err(e) = session_txn.delete_cf(&index_cf, index_key) {
-                                return Err(IndexError::other(e));
-                            };
+                            txn.delete_cf(&index_cf, index_key)
+                                .map_err(IndexError::other)?;
 
                             let future_ref: FutureElementRef = stored_future_ref.into();
                             Some(future_ref)
@@ -304,56 +226,7 @@ impl FutureQueue for RocksDbFutureQueue {
                 };
 
                 Ok(result)
-            } else {
-                drop(txn_guard);
-                let mut iter =
-                    db.iterator_cf_opt(&queue_cf, read_opts, rocksdb::IteratorMode::Start);
-
-                let txn = db.transaction();
-
-                let result = match iter.next() {
-                    Some(head) => match head {
-                        Ok((key, future_ref)) => {
-                            let hash = &key[8..];
-
-                            let stored_future_ref =
-                                match StoredFutureElementRef::decode(Bytes::from(future_ref)) {
-                                    Ok(v) => v,
-                                    Err(_) => return Err(IndexError::CorruptedData),
-                                };
-
-                            if let Err(e) = txn.delete_cf(&queue_cf, &key) {
-                                return Err(IndexError::other(e));
-                            };
-
-                            let prefix = encode_index_prefix(
-                                stored_future_ref.position_in_query,
-                                stored_future_ref.group_signature,
-                            );
-                            let index_key = {
-                                let mut buf = [0u8; 20];
-                                buf[0..12].copy_from_slice(&prefix);
-                                buf[12..20].copy_from_slice(hash);
-                                buf
-                            };
-
-                            if let Err(e) = txn.delete_cf(&index_cf, index_key) {
-                                return Err(IndexError::other(e));
-                            };
-
-                            let future_ref: FutureElementRef = stored_future_ref.into();
-                            Some(future_ref)
-                        }
-                        Err(e) => return Err(IndexError::other(e)),
-                    },
-                    _ => None,
-                };
-
-                match txn.commit() {
-                    Ok(_) => Ok(result),
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            }
+            })
         });
 
         match task.await {

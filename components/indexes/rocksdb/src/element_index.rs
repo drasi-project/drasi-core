@@ -130,19 +130,9 @@ impl ElementIndex for RocksDbElementIndex {
         let slot_affinity = slot_affinity.clone();
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
-            let txn_guard = context.session_state.lock()?;
-            if let Some(session_txn) = txn_guard.as_ref() {
-                set_element_internal(context.clone(), session_txn, stored, &slot_affinity)?;
-                Ok(())
-            } else {
-                drop(txn_guard);
-                let txn = context.db.transaction();
-                set_element_internal(context.clone(), &txn, stored, &slot_affinity)?;
-                match txn.commit() {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            }
+            context
+                .session_state
+                .with_txn(|txn| set_element_internal(context.clone(), txn, stored, &slot_affinity))
         });
 
         match task.await {
@@ -156,24 +146,9 @@ impl ElementIndex for RocksDbElementIndex {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
-            let txn_guard = context.session_state.lock()?;
-            if let Some(session_txn) = txn_guard.as_ref() {
-                delete_element_internal(
-                    context.clone(),
-                    session_txn,
-                    &element_key,
-                    Some(session_txn),
-                )?;
-                Ok(())
-            } else {
-                drop(txn_guard);
-                let txn = context.db.transaction();
-                delete_element_internal(context.clone(), &txn, &element_key, None)?;
-                match txn.commit() {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            }
+            context.session_state.with_txn(|txn| {
+                delete_element_internal(context.clone(), txn, &element_key, Some(txn))
+            })
         });
 
         match task.await {
