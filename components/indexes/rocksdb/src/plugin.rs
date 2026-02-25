@@ -31,7 +31,7 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
 use rocksdb::{OptimisticTransactionDB, Options};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +39,7 @@ use std::sync::Arc;
 use crate::element_index::{self, RocksDbElementIndex, RocksIndexOptions};
 use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::result_index::{self, RocksDbResultIndex};
+use crate::{RocksDbSessionControl, RocksDbSessionState};
 
 /// Open a unified RocksDB database with all column families needed for a query.
 ///
@@ -160,16 +161,23 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             e
         })?;
 
-        let element_index = Arc::new(RocksDbElementIndex::new(db.clone(), options));
-        let result_index = Arc::new(RocksDbResultIndex::new(db.clone()));
-        let future_queue = Arc::new(RocksDbFutureQueue::new(db));
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+
+        let element_index = Arc::new(RocksDbElementIndex::new(
+            db.clone(),
+            options,
+            session_state.clone(),
+        ));
+        let result_index = Arc::new(RocksDbResultIndex::new(db.clone(), session_state.clone()));
+        let future_queue = Arc::new(RocksDbFutureQueue::new(db, session_state));
 
         Ok(IndexSet {
             element_index: element_index.clone(),
             archive_index: element_index,
             result_index,
             future_queue,
-            session_control: Arc::new(NoOpSessionControl),
+            session_control,
         })
     }
 
