@@ -23,7 +23,9 @@ use drasi_core::{
     query::QueryBuilder,
 };
 use drasi_functions_cypher::CypherFunctionSet;
-use drasi_index_garnet::{element_index::GarnetElementIndex, result_index::GarnetResultIndex};
+use drasi_index_garnet::{
+    element_index::GarnetElementIndex, result_index::GarnetResultIndex, GarnetSessionState,
+};
 use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     open_unified_db,
@@ -120,8 +122,9 @@ async fn main() {
         builder = match test_run_config.element_index_type {
             IndexType::Memory => builder,
             IndexType::Redis => {
-                let element_index =
-                    GarnetElementIndex::new(&query_id, redis_connection.clone().unwrap(), false);
+                let con = redis_connection.clone().unwrap();
+                let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+                let element_index = GarnetElementIndex::new(&query_id, con, false, session_state);
 
                 builder.with_element_index(Arc::new(element_index))
             }
@@ -144,7 +147,9 @@ async fn main() {
         builder = match test_run_config.result_index_type {
             IndexType::Memory => builder,
             IndexType::Redis => {
-                let ari = GarnetResultIndex::new(&query_id, redis_connection.clone().unwrap());
+                let con = redis_connection.clone().unwrap();
+                let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+                let ari = GarnetResultIndex::new(&query_id, con, session_state);
 
                 builder.with_result_index(Arc::new(ari))
             }
