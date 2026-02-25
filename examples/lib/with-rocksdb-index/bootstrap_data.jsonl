@@ -1,0 +1,5 @@
+{"kind": "Header", "start_time": "2024-01-15T09:30:00-05:00", "description": "Initial stock prices for DrasiLib Builder example"}
+{"kind": "Node", "id": "price_AAPL", "labels": ["stock_prices"], "properties": {"symbol": "AAPL", "price": 175.50, "previous_close": 173.00, "volume": 5000000}}
+{"kind": "Node", "id": "price_MSFT", "labels": ["stock_prices"], "properties": {"symbol": "MSFT", "price": 380.25, "previous_close": 382.00, "volume": 2500000}}
+{"kind": "Node", "id": "price_GOOGL", "labels": ["stock_prices"], "properties": {"symbol": "GOOGL", "price": 142.80, "previous_close": 140.50, "volume": 1200000}}
+{"kind": "Finish", "description": "Bootstrap complete - 3 stocks loaded"}

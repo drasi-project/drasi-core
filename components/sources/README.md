@@ -339,8 +339,6 @@ The unified event envelope:
 pub enum SourceEvent {
     Change(SourceChange),              // Data change
     Control(SourceControl),            // Query coordination
-    BootstrapStart { query_id: String },
-    BootstrapEnd { query_id: String },
 }
 ```
 

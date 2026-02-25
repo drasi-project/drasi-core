@@ -16,7 +16,7 @@ use anyhow::Result;
 use log::info;
 use std::sync::Arc;
 
-use crate::channels::{ComponentStatus, EventReceivers};
+use crate::channels::{ComponentStatus, ComponentType, EventReceivers};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -79,6 +79,11 @@ impl LifecycleManager {
     /// to process component events. Can only be called once.
     pub async fn start_event_processors(&mut self) {
         if let Some(receivers) = self.event_receivers.take() {
+            // Clone manager references for the event processor task
+            let source_manager = self.source_manager.clone();
+            let query_manager = self.query_manager.clone();
+            let reaction_manager = self.reaction_manager.clone();
+
             // Start component event processor
             let component_rx = receivers.component_event_rx;
             tokio::spawn(async move {
@@ -89,8 +94,21 @@ impl LifecycleManager {
                         event.component_type,
                         event.component_id,
                         event.status,
-                        event.message.unwrap_or_default()
+                        event.message.clone().unwrap_or_default()
                     );
+
+                    // Record the event in the appropriate manager's history
+                    match event.component_type {
+                        ComponentType::Source => {
+                            source_manager.record_event(event).await;
+                        }
+                        ComponentType::Query => {
+                            query_manager.record_event(event).await;
+                        }
+                        ComponentType::Reaction => {
+                            reaction_manager.record_event(event).await;
+                        }
+                    }
                 }
             });
 
@@ -168,7 +186,10 @@ impl LifecycleManager {
 
         for id in reaction_ids {
             let status = self.reaction_manager.get_reaction_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
                     error!("Error stopping reaction {id}: {e}");
                 }
@@ -188,7 +209,10 @@ impl LifecycleManager {
 
         for id in query_ids {
             let status = self.query_manager.get_query_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.query_manager.stop_query(id.clone()).await {
                     error!("Error stopping query {id}: {e}");
                 }
@@ -208,7 +232,10 @@ impl LifecycleManager {
 
         for id in source_ids {
             let status = self.source_manager.get_source_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.source_manager.stop_source(id.clone()).await {
                     error!("Error stopping source {id}: {e}");
                 }

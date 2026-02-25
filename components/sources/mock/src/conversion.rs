@@ -15,10 +15,10 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-/// Safely convert JSON values to Element values.
+/// Converts a JSON value to an Element value with error context.
 ///
-/// This function provides safe conversion from JSON to Element values
-/// with proper error handling instead of using unwrap().
+/// This is the "strict" conversion that returns a `Result`, allowing the caller
+/// to handle conversion failures explicitly.
 ///
 /// # Arguments
 ///
@@ -26,26 +26,33 @@ use serde_json::Value;
 ///
 /// # Returns
 ///
-/// Returns the converted Element value or an error with context.
+/// The converted [`ElementValue`](drasi_core::models::ElementValue), or an error
+/// with context describing what failed.
+///
+/// # Errors
+///
+/// Returns an error if the JSON value cannot be converted to an Element value
+/// (e.g., unsupported JSON structure).
 #[allow(dead_code)]
 pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::models::ElementValue> {
     drasi_lib::sources::convert_json_to_element_value(json_value)
         .with_context(|| format!("Failed to convert JSON value to Element value: {json_value:?}"))
 }
 
-/// Convert JSON to Element value with a default fallback.
+/// Converts a JSON value to an Element value, returning a default on failure.
 ///
-/// This function attempts to convert a JSON value to an Element value,
-/// returning a default value if the conversion fails.
+/// This is the "lenient" conversion that never fails. Useful when you have a
+/// sensible default and don't want to handle errors explicitly.
 ///
 /// # Arguments
 ///
 /// * `json_value` - The JSON value to convert
-/// * `default` - The default Element value to use if conversion fails
+/// * `default` - The fallback value to use if conversion fails
 ///
 /// # Returns
 ///
-/// Returns the converted Element value or the provided default.
+/// The converted [`ElementValue`](drasi_core::models::ElementValue), or `default`
+/// if conversion fails (with a warning logged).
 pub fn json_to_element_value_or_default(
     json_value: &Value,
     default: drasi_core::models::ElementValue,
@@ -59,10 +66,11 @@ pub fn json_to_element_value_or_default(
     }
 }
 
-/// Batch convert multiple JSON values to Element values.
+/// Converts multiple JSON values to Element values, filtering failures.
 ///
-/// This function converts multiple JSON values, collecting successful conversions
-/// and logging failures.
+/// This is useful for batch processing where some values may be invalid.
+/// Invalid values are logged and skipped rather than causing the entire
+/// operation to fail.
 ///
 /// # Arguments
 ///
@@ -70,8 +78,8 @@ pub fn json_to_element_value_or_default(
 ///
 /// # Returns
 ///
-/// Returns a vector of successfully converted Element values.
-/// Failed conversions are logged but do not stop the process.
+/// A vector containing only the successfully converted values.
+/// Failed conversions are logged at `debug` level and excluded from the result.
 #[allow(dead_code)]
 pub fn batch_json_to_element_values<'a>(
     values: impl Iterator<Item = &'a Value>,
@@ -81,8 +89,8 @@ pub fn batch_json_to_element_values<'a>(
             match drasi_lib::sources::convert_json_to_element_value(json_value) {
                 Ok(value) => Some(value),
                 Err(e) => {
-                    log::error!(
-                        "Skipping invalid JSON value during batch conversion: {json_value:?}, error: {e}"
+                    log::debug!(
+                        "Skipping unconvertible JSON value during batch conversion: {json_value:?}, error: {e}"
                     );
                     None
                 }
@@ -113,6 +121,25 @@ mod tests {
     }
 
     #[test]
+    fn test_safe_json_to_element_value_with_null() {
+        let null_val = json!(null);
+        let result = safe_json_to_element_value(&null_val);
+        assert!(result.is_ok());
+        assert!(matches!(
+            result.unwrap(),
+            drasi_core::models::ElementValue::Null
+        ));
+    }
+
+    #[test]
+    fn test_safe_json_to_element_value_with_array() {
+        let array = json!([1, 2, 3]);
+        let result = safe_json_to_element_value(&array);
+        // Arrays should convert successfully to a list
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_json_to_element_value_or_default() {
         let valid = json!(42);
         let default = drasi_core::models::ElementValue::Null;
@@ -125,10 +152,53 @@ mod tests {
     }
 
     #[test]
+    fn test_json_to_element_value_or_default_with_float() {
+        let float_val = json!(3.5);
+        let default = drasi_core::models::ElementValue::Integer(0);
+        let result = json_to_element_value_or_default(&float_val, default);
+        // Should convert to Float, not use default
+        assert!(matches!(result, drasi_core::models::ElementValue::Float(_)));
+    }
+
+    #[test]
+    fn test_json_to_element_value_or_default_with_string() {
+        let string_val = json!("hello");
+        let default = drasi_core::models::ElementValue::Null;
+        let result = json_to_element_value_or_default(&string_val, default);
+        assert!(matches!(
+            result,
+            drasi_core::models::ElementValue::String(_)
+        ));
+    }
+
+    #[test]
     fn test_batch_json_to_element_values() {
         let values = [json!(1), json!("test"), json!(true), json!(null)];
         let results = batch_json_to_element_values(values.iter());
         // Should have converted all valid values
         assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_batch_json_to_element_values_with_mixed_types() {
+        let values = [
+            json!(42),
+            json!("string"),
+            json!(true),
+            json!(3.5),
+            json!(null),
+            json!([1, 2, 3]),
+            json!({"key": "value"}),
+        ];
+        let results = batch_json_to_element_values(values.iter());
+        // All these JSON types should convert successfully
+        assert_eq!(results.len(), 7);
+    }
+
+    #[test]
+    fn test_batch_json_to_element_values_empty_iterator() {
+        let values: [serde_json::Value; 0] = [];
+        let results = batch_json_to_element_values(values.iter());
+        assert!(results.is_empty());
     }
 }
