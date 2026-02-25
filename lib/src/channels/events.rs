@@ -184,6 +184,8 @@ pub enum SourceControl {
         rel_labels: Vec<String>,
         operation: ControlOperation,
     },
+    /// Signal from FutureQueueSource that one or more future items are due.
+    FuturesDue,
 }
 
 /// Control operation types

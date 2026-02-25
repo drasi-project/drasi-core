@@ -300,24 +300,13 @@ impl GarnetElementIndex {
             )));
         }
 
-        let has_session = { self.session_state.lock()?.is_some() };
-
-        if has_session {
-            let mut guard = self.session_state.lock()?;
-            let buffer = guard
-                .as_mut()
-                .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
-            buffer.zset_add(key, element_bytes, metadata.effective_from as f64);
-            Ok(())
-        } else {
-            let mut con = self.connection.clone();
-            if let Err(err) = con
-                .zadd::<String, u64, &Vec<Vec<u8>>, isize>(key, element, metadata.effective_from)
-                .await
-            {
-                return Err(IndexError::other(err));
-            };
-            Ok(())
-        }
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.zset_add(key, element_bytes, metadata.effective_from as f64);
+        Ok(())
     }
 }

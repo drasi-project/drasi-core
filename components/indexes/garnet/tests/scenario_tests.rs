@@ -53,11 +53,21 @@ impl GarnetQueryConfig {
         }
     }
 
-    pub async fn build_future_queue(&self, query_id: &str) -> GarnetFutureQueue {
+    pub async fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (
+        GarnetFutureQueue,
+        Arc<dyn drasi_core::interface::SessionControl>,
+    ) {
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
-        GarnetFutureQueue::new(query_id, connection, session_state)
+        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        (
+            GarnetFutureQueue::new(query_id, connection, session_state),
+            session_control,
+        )
     }
 
     pub fn get_element_index(&self) -> Arc<dyn ElementIndex> {
@@ -330,43 +340,43 @@ mod index {
     #[tokio::test]
     async fn future_queue_push_always() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_push_not_exists() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_clear_removes_all() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_push_overwrite() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 }
@@ -825,7 +835,7 @@ mod session {
 
         let element_ref = ElementReference::new("source1", "node1");
 
-        // Write v1 directly (no session — goes straight to Redis)
+        // Write v1 within a session
         let node_v1 = Element::Node {
             metadata: ElementMetadata {
                 reference: element_ref.clone(),
@@ -834,7 +844,9 @@ mod session {
             },
             properties: ElementPropertyMap::new(),
         };
+        session_control.begin().await.unwrap();
         element_index.set_element(&node_v1, &vec![]).await.unwrap();
+        session_control.commit().await.unwrap();
 
         // Within a session: delete then reinsert with different effective_from
         let node_v2 = Element::Node {

@@ -84,123 +84,81 @@ impl FutureQueue for GarnetFutureQueue {
         let index_key = self.get_index_key(position_in_query, group_signature);
         let queue_key = self.get_queue_key();
 
-        let has_session = { self.session_state.lock()?.is_some() };
-
-        if has_session {
-            let should_push = match push_type {
-                PushType::Always => true,
-                PushType::IfNotExists => {
-                    // Check buffer for the index key, then fall through to Redis
-                    let buffer_result = {
-                        let guard = self.session_state.lock()?;
-                        let buffer = guard.as_ref().ok_or_else(|| {
-                            IndexError::other(std::io::Error::other("session lost"))
-                        })?;
-                        match buffer.set_get_deltas(&index_key) {
-                            BufferReadResult::Found(deltas) => {
-                                if !deltas.added.is_empty() {
-                                    Some(true) // has members, exists
-                                } else {
-                                    None // no added members in buffer, check Redis
-                                }
+        let should_push = match push_type {
+            PushType::Always => true,
+            PushType::IfNotExists => {
+                // Check buffer for the index key, then fall through to Redis
+                let buffer_result = {
+                    let guard = self.session_state.lock()?;
+                    let buffer = guard.as_ref().ok_or_else(|| {
+                        IndexError::other(std::io::Error::other(
+                            "write operation requires an active session",
+                        ))
+                    })?;
+                    match buffer.set_get_deltas(&index_key) {
+                        BufferReadResult::Found(deltas) => {
+                            if !deltas.added.is_empty() {
+                                Some(true) // has members, exists
+                            } else {
+                                None // no added members in buffer, check Redis
                             }
-                            BufferReadResult::KeyDeleted => Some(false), // deleted, doesn't exist
-                            BufferReadResult::NotInBuffer => None,       // check Redis
                         }
-                    };
+                        BufferReadResult::KeyDeleted => Some(false), // deleted, doesn't exist
+                        BufferReadResult::NotInBuffer => None,       // check Redis
+                    }
+                };
 
-                    match buffer_result {
-                        Some(exists) => !exists,
-                        None => {
-                            // Safety: ContinuousQuery::change_lock serializes all
-                            // process_source_change calls, so no concurrent buffer
-                            // mutations can occur between drop and re-lock.
-                            let mut con = self.connection.clone();
-                            let exists: bool = match con.exists(&index_key).await {
-                                Ok(v) => v,
-                                Err(e) => return Err(IndexError::other(e)),
-                            };
-                            !exists
-                        }
+                match buffer_result {
+                    Some(exists) => !exists,
+                    None => {
+                        // Safety: ContinuousQuery::change_lock serializes all
+                        // process_source_change calls, so no concurrent buffer
+                        // mutations can occur between drop and re-lock.
+                        let mut con = self.connection.clone();
+                        let exists: bool = match con.exists(&index_key).await {
+                            Ok(v) => v,
+                            Err(e) => return Err(IndexError::other(e)),
+                        };
+                        !exists
                     }
                 }
-                PushType::Overwrite => {
-                    self.remove(position_in_query, group_signature).await?;
-                    true
-                }
-            };
-
-            if should_push {
-                let future_ref_bytes = (&future_ref).to_redis_args();
-                let context_ref = StoredFutureElementRefWithContext {
-                    future_ref,
-                    position_in_query: position_in_query as u32,
-                    group_signature,
-                };
-                let context_ref_bytes = context_ref.to_redis_args();
-
-                let mut guard = self.session_state.lock()?;
-                let buffer = guard
-                    .as_mut()
-                    .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
-
-                // Serialize the members for buffer storage
-                let ref_bytes_flat = future_ref_bytes
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
-                let ctx_bytes_flat = context_ref_bytes
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
-                buffer.set_add(index_key, ref_bytes_flat);
-                buffer.zset_add(queue_key, ctx_bytes_flat, due_time as f64);
             }
-
-            Ok(should_push)
-        } else {
-            // Non-session path: current behavior
-            let mut con = self.connection.clone();
-
-            let should_push = match push_type {
-                PushType::Always => true,
-                PushType::IfNotExists => {
-                    let exists: bool = match con.exists(&index_key).await {
-                        Ok(v) => v,
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                    !exists
-                }
-                PushType::Overwrite => {
-                    self.remove(position_in_query, group_signature).await?;
-                    true
-                }
-            };
-
-            if should_push {
-                let _: usize = match con.sadd(&index_key, &future_ref).await {
-                    Ok(v) => v,
-                    Err(e) => return Err(IndexError::other(e)),
-                };
-
-                let _: usize = match con
-                    .zadd(
-                        &queue_key,
-                        StoredFutureElementRefWithContext {
-                            future_ref,
-                            position_in_query: position_in_query as u32,
-                            group_signature,
-                        },
-                        due_time,
-                    )
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return Err(IndexError::other(e)),
-                };
+            PushType::Overwrite => {
+                self.remove(position_in_query, group_signature).await?;
+                true
             }
-            Ok(should_push)
+        };
+
+        if should_push {
+            let future_ref_bytes = (&future_ref).to_redis_args();
+            let context_ref = StoredFutureElementRefWithContext {
+                future_ref,
+                position_in_query: position_in_query as u32,
+                group_signature,
+            };
+            let context_ref_bytes = context_ref.to_redis_args();
+
+            let mut guard = self.session_state.lock()?;
+            let buffer = guard.as_mut().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                ))
+            })?;
+
+            // Serialize the members for buffer storage
+            let ref_bytes_flat = future_ref_bytes
+                .into_iter()
+                .next()
+                .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
+            let ctx_bytes_flat = context_ref_bytes
+                .into_iter()
+                .next()
+                .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
+            buffer.set_add(index_key, ref_bytes_flat);
+            buffer.zset_add(queue_key, ctx_bytes_flat, due_time as f64);
         }
+
+        Ok(should_push)
     }
 
     async fn remove(
@@ -211,127 +169,111 @@ impl FutureQueue for GarnetFutureQueue {
         let index_key = self.get_index_key(position_in_query, group_signature);
         let queue_key = self.get_queue_key();
 
-        let has_session = { self.session_state.lock()?.is_some() };
+        // Get members from Redis, then merge with buffer deltas
+        let mut con = self.connection.clone();
+        let redis_members: Vec<StoredFutureElementRef> = match con.smembers(&index_key).await {
+            Ok(v) => v,
+            Err(e) => return Err(IndexError::other(e)),
+        };
 
-        if has_session {
-            // Get members from Redis, then merge with buffer deltas
-            let mut con = self.connection.clone();
-            let redis_members: Vec<StoredFutureElementRef> = match con.smembers(&index_key).await {
-                Ok(v) => v,
-                Err(e) => return Err(IndexError::other(e)),
-            };
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
 
-            let mut guard = self.session_state.lock()?;
-            let buffer = guard
-                .as_mut()
-                .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
+        // Collect all members: Redis members + buffer additions - buffer removals
+        let mut all_members: Vec<StoredFutureElementRef> = Vec::new();
 
-            // Collect all members: Redis members + buffer additions - buffer removals
-            let mut all_members: Vec<StoredFutureElementRef> = Vec::new();
-
-            match buffer.set_get_deltas(&index_key) {
-                BufferReadResult::Found(deltas) => {
-                    // Add Redis members not in buffer's removed set
-                    for m in redis_members {
-                        let m_bytes = (&m).to_redis_args();
-                        let mb = m_bytes.into_iter().next().ok_or_else(|| {
-                            IndexError::other(std::io::Error::other("empty redis args"))
-                        })?;
-                        if !deltas.removed.contains(&mb) {
-                            all_members.push(m);
-                        }
-                    }
-                    // Add buffer's added members (as StoredFutureElementRef)
-                    for added_bytes in &deltas.added {
-                        if let Ok(member) = StoredFutureElementRef::decode(added_bytes.as_slice()) {
-                            all_members.push(member);
-                        }
+        match buffer.set_get_deltas(&index_key) {
+            BufferReadResult::Found(deltas) => {
+                // Add Redis members not in buffer's removed set
+                for m in redis_members {
+                    let m_bytes = (&m).to_redis_args();
+                    let mb = m_bytes.into_iter().next().ok_or_else(|| {
+                        IndexError::other(std::io::Error::other("empty redis args"))
+                    })?;
+                    if !deltas.removed.contains(&mb) {
+                        all_members.push(m);
                     }
                 }
-                BufferReadResult::KeyDeleted => {
-                    // Key was deleted — nothing to collect
+                // Add buffer's added members (as StoredFutureElementRef)
+                for added_bytes in &deltas.added {
+                    if let Ok(member) = StoredFutureElementRef::decode(added_bytes.as_slice()) {
+                        all_members.push(member);
+                    }
                 }
-                BufferReadResult::NotInBuffer => {
-                    all_members = redis_members;
-                }
             }
-
-            // Remove each member from the queue sorted set
-            for m in all_members {
-                let ctx = StoredFutureElementRefWithContext {
-                    future_ref: m,
-                    position_in_query: position_in_query as u32,
-                    group_signature,
-                };
-                let ctx_bytes = ctx.to_redis_args();
-                let bytes = ctx_bytes
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
-                buffer.zset_remove(queue_key.clone(), bytes);
+            BufferReadResult::KeyDeleted => {
+                // Key was deleted — nothing to collect
             }
-
-            // Delete the index key
-            buffer.del(index_key);
-
-            Ok(())
-        } else {
-            // Non-session path: current behavior
-            let mut con = self.connection.clone();
-
-            let members: Vec<StoredFutureElementRef> = match con.smembers(&index_key).await {
-                Ok(v) => v,
-                Err(e) => return Err(IndexError::other(e)),
-            };
-
-            let members = members
-                .into_iter()
-                .map(|v| StoredFutureElementRefWithContext {
-                    future_ref: v,
-                    position_in_query: position_in_query as u32,
-                    group_signature,
-                })
-                .collect::<Vec<StoredFutureElementRefWithContext>>();
-
-            if !members.is_empty() {
-                let _: usize = match con.zrem(&queue_key, members).await {
-                    Ok(v) => v,
-                    Err(e) => return Err(IndexError::other(e)),
-                };
+            BufferReadResult::NotInBuffer => {
+                all_members = redis_members;
             }
-
-            let _: usize = match con.del(&index_key).await {
-                Ok(v) => v,
-                Err(e) => return Err(IndexError::other(e)),
-            };
-
-            Ok(())
         }
+
+        // Remove each member from the queue sorted set
+        for m in all_members {
+            let ctx = StoredFutureElementRefWithContext {
+                future_ref: m,
+                position_in_query: position_in_query as u32,
+                group_signature,
+            };
+            let ctx_bytes = ctx.to_redis_args();
+            let bytes = ctx_bytes
+                .into_iter()
+                .next()
+                .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
+            buffer.zset_remove(queue_key.clone(), bytes);
+        }
+
+        // Delete the index key
+        buffer.del(index_key);
+
+        Ok(())
     }
 
-    /// Pop runs outside the session (called by future consumer poller, not during
-    /// process_source_change). No buffer awareness needed for this phase.
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+        // Session-aware path: read head non-destructively and buffer removals.
+        // process_due_futures() holds change_lock, so only one pop per session.
         let mut con = self.connection.clone();
-        let result: Vec<(StoredFutureElementRefWithContext, f64)> =
-            match con.zpopmin(self.get_queue_key(), 1).await {
-                Ok(v) => v,
-                Err(e) => return Err(IndexError::other(e)),
-            };
+        let queue_key = self.get_queue_key();
+
+        // Read head non-destructively via ZRANGEBYSCORE ... LIMIT 0 1 WITHSCORES
+        let result: Vec<(StoredFutureElementRefWithContext, f64)> = match con
+            .zrangebyscore_limit_withscores(&queue_key, 0, "+inf", 0, 1)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return Err(IndexError::other(e)),
+        };
 
         match result.first() {
             None => Ok(None),
             Some((v, _)) => {
-                let _: usize = match con
-                    .srem(
-                        self.get_index_key(v.position_in_query as usize, v.group_signature),
-                        &v.future_ref,
-                    )
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return Err(IndexError::other(e)),
-                };
+                let index_key =
+                    self.get_index_key(v.position_in_query as usize, v.group_signature);
+
+                // Buffer ZREM (queue sorted set) and SREM (index set)
+                let ctx_bytes = v.to_redis_args();
+                let ctx_bytes_flat = ctx_bytes.into_iter().next().ok_or_else(|| {
+                    IndexError::other(std::io::Error::other("empty redis args"))
+                })?;
+
+                let ref_bytes = (&v.future_ref).to_redis_args();
+                let ref_bytes_flat = ref_bytes.into_iter().next().ok_or_else(|| {
+                    IndexError::other(std::io::Error::other("empty redis args"))
+                })?;
+
+                let mut guard = self.session_state.lock()?;
+                let buffer = guard.as_mut().ok_or_else(|| {
+                    IndexError::other(std::io::Error::other(
+                        "write operation requires an active session",
+                    ))
+                })?;
+                buffer.zset_remove(queue_key, ctx_bytes_flat);
+                buffer.set_remove(index_key, ref_bytes_flat);
 
                 let result = v.into();
                 Ok(Some(result))

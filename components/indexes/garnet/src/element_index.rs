@@ -255,8 +255,6 @@ impl GarnetElementIndex {
         pipeline: &mut Pipeline,
         new_element: &StoredElement,
     ) -> Result<(), IndexError> {
-        let has_session = { self.session_state.lock()?.is_some() };
-
         match new_element {
             StoredElement::Node(n) => {
                 let join_spec_by_label = self.join_spec_by_label.read().await;
@@ -303,21 +301,8 @@ impl GarnetElementIndex {
                                             ))
                                         })?;
 
-                                    let did_insert = if has_session {
-                                        self.buffered_sadd(&pj_key, ref_bytes_flat).await?
-                                    } else {
-                                        let mut con = self.connection.clone();
-                                        match con
-                                            .sadd::<String, &StoredElementReference, usize>(
-                                                pj_key.clone(),
-                                                &element_reference,
-                                            )
-                                            .await
-                                        {
-                                            Ok(count) => count > 0,
-                                            Err(e) => return Err(IndexError::other(e)),
-                                        }
-                                    };
+                                    let did_insert =
+                                        self.buffered_sadd(&pj_key, ref_bytes_flat).await?;
 
                                     if did_insert {
                                         //remove old partial joins
@@ -352,25 +337,9 @@ impl GarnetElementIndex {
                                                     &qjk2.property,
                                                 );
 
-                                            let others = if has_session {
-                                                self.buffered_smembers_refs(&other_pj_key).await?
-                                            } else {
-                                                let mut con = self.connection.clone();
-                                                let mut scan_results = Vec::new();
-                                                let mut scan = match con
-                                                    .sscan::<String, StoredElementReference>(
-                                                        other_pj_key,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(s) => s,
-                                                    Err(e) => return Err(IndexError::other(e)),
-                                                };
-                                                while let Some(other) = scan.next_item().await {
-                                                    scan_results.push(other);
-                                                }
-                                                scan_results
-                                            };
+                                            let others = self
+                                                .buffered_smembers_refs(&other_pj_key)
+                                                .await?;
 
                                             for other in others {
                                                 let in_out =
@@ -477,8 +446,6 @@ impl GarnetElementIndex {
         join_key: &QueryJoinKey,
         value: &StoredValue,
     ) -> Result<(), IndexError> {
-        let has_session = { self.session_state.lock()?.is_some() };
-
         let pj_key = self.key_formatter.get_partial_join_key(
             &query_join.id,
             value,
@@ -492,18 +459,7 @@ impl GarnetElementIndex {
             .next()
             .ok_or_else(|| IndexError::other(std::io::Error::other("empty redis args")))?;
 
-        let did_remove = if has_session {
-            self.buffered_srem(&pj_key, ref_bytes_flat).await?
-        } else {
-            let mut con = self.connection.clone();
-            match con
-                .srem::<&str, &StoredElementReference, usize>(&pj_key, old_element)
-                .await
-            {
-                Ok(count) => count > 0,
-                Err(e) => return Err(IndexError::other(e)),
-            }
-        };
+        let did_remove = self.buffered_srem(&pj_key, ref_bytes_flat).await?;
 
         if did_remove {
             for qjk2 in &query_join.keys {
@@ -518,23 +474,7 @@ impl GarnetElementIndex {
                     &qjk2.property,
                 );
 
-                let others = if has_session {
-                    self.buffered_smembers_refs(&other_pj_key).await?
-                } else {
-                    let mut con = self.connection.clone();
-                    let mut scan_results = Vec::new();
-                    let mut scan = match con
-                        .sscan::<String, StoredElementReference>(other_pj_key)
-                        .await
-                    {
-                        Ok(s) => s,
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                    while let Some(other) = scan.next_item().await {
-                        scan_results.push(other);
-                    }
-                    scan_results
-                };
+                let others = self.buffered_smembers_refs(&other_pj_key).await?;
 
                 for other in others {
                     let in_out = get_join_virtual_ref(old_element, &other);
@@ -557,8 +497,6 @@ impl GarnetElementIndex {
         element: StoredElement,
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
-        let has_session = { self.session_state.lock()?.is_some() };
-
         let container = StoredElementContainer::new(element);
         let element_as_redis_args = container.to_redis_args();
         let element = container.element.unwrap();
@@ -569,7 +507,7 @@ impl GarnetElementIndex {
 
         // Read prev_slots: check buffer first, then Redis.
         // Extract buffer check into a sync block so MutexGuard is dropped before any await.
-        let prev_slots = if has_session {
+        let prev_slots = {
             let buffer_result = {
                 let guard = self.session_state.lock()?;
                 guard.as_ref().map(|b| b.hash_get(&element_key, "slots"))
@@ -590,26 +528,18 @@ impl GarnetElementIndex {
                     }
                 }
             }
-        } else {
-            let mut con = self.connection.clone();
-            match con
-                .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
-                .await
-            {
-                Ok(Some(prev)) => Some(BitSet::from_bytes(prev.as_slice())),
-                Ok(None) => None,
-                Err(e) => return Err(IndexError::other(e)),
-            }
         };
 
         let new_slots = slots_to_bitset(slot_affinity);
         let slots_bytes = new_slots.clone().into_bit_vec().to_bytes();
 
-        if has_session {
+        {
             let mut guard = self.session_state.lock()?;
-            let buffer = guard
-                .as_mut()
-                .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
+            let buffer = guard.as_mut().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                ))
+            })?;
 
             // Flatten element_as_redis_args to a single byte vec
             let element_bytes: Vec<u8> = element_as_redis_args
@@ -666,52 +596,6 @@ impl GarnetElementIndex {
 
                         buffer.set_add(inbound_key, element_ref_string.as_bytes().to_vec());
                         buffer.set_add(outbound_key, element_ref_string.as_bytes().to_vec());
-                    }
-                }
-            }
-            drop(guard);
-        } else {
-            pipeline
-                .hset(&element_key, "e", &element_as_redis_args)
-                .ignore();
-            pipeline
-                .hset(&element_key, "slots", slots_bytes.to_redis_args())
-                .ignore();
-
-            if let StoredElement::Relation(rel) = &element {
-                let mut slots_changed = true;
-
-                if let Some(prev_slots) = prev_slots {
-                    if prev_slots == new_slots {
-                        slots_changed = false;
-                    }
-
-                    if slots_changed {
-                        for slot in prev_slots.into_iter() {
-                            let inbound_key = self
-                                .key_formatter
-                                .get_stored_inbound_key(&rel.in_node, slot);
-                            let outbound_key = self
-                                .key_formatter
-                                .get_stored_outbound_key(&rel.out_node, slot);
-
-                            pipeline.srem(&inbound_key, &element_ref_string).ignore();
-                            pipeline.srem(&outbound_key, &element_ref_string).ignore();
-                        }
-                    }
-                }
-
-                if slots_changed {
-                    for slot in slot_affinity {
-                        let inbound_key = self
-                            .key_formatter
-                            .get_stored_inbound_key(&rel.in_node, *slot);
-                        let outbound_key = self
-                            .key_formatter
-                            .get_stored_outbound_key(&rel.out_node, *slot);
-
-                        pipeline.sadd(&inbound_key, &element_ref_string).ignore();
-                        pipeline.sadd(&outbound_key, &element_ref_string).ignore();
                     }
                 }
             }
@@ -778,11 +662,10 @@ impl GarnetElementIndex {
         element_ref: &StoredElementReference,
     ) -> Result<(), IndexError> {
         let element_key = self.key_formatter.get_stored_element_key(element_ref);
-        let has_session = { self.session_state.lock()?.is_some() };
 
         // Read prev_slots: check buffer first, then Redis.
         // Extract buffer check into sync block so MutexGuard is dropped before any await.
-        let prev_slots = if has_session {
+        let prev_slots = {
             let buffer_result = {
                 let guard = self.session_state.lock()?;
                 guard.as_ref().map(|b| b.hash_get(&element_key, "slots"))
@@ -802,27 +685,19 @@ impl GarnetElementIndex {
                     }
                 }
             }
-        } else {
-            let mut con = self.connection.clone();
-            match con
-                .hget::<&str, &str, Option<Vec<u8>>>(&element_key, "slots")
-                .await
-            {
-                Ok(Some(prev)) => Some(BitSet::from_bytes(prev.as_slice())),
-                Ok(None) => None,
-                Err(e) => return Err(IndexError::other(e)),
-            }
         };
 
         // Read old element BEFORE marking as deleted so get_element_internal
         // can still find it in the buffer/Redis.
         let old_element = self.get_element_internal(element_key.as_str()).await?;
 
-        if has_session {
+        {
             let mut guard = self.session_state.lock()?;
-            let buffer = guard
-                .as_mut()
-                .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
+            let buffer = guard.as_mut().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                ))
+            })?;
             buffer.del(element_key.clone());
 
             if let Some(prev_slots) = &prev_slots {
@@ -834,21 +709,6 @@ impl GarnetElementIndex {
 
                     buffer.del(inbound_key);
                     buffer.del(outbound_key);
-                }
-            }
-            drop(guard);
-        } else {
-            pipeline.del(&element_key).ignore();
-
-            if let Some(prev_slots) = &prev_slots {
-                for slot in prev_slots.into_iter() {
-                    let inbound_key = self.key_formatter.get_stored_inbound_key(element_ref, slot);
-                    let outbound_key = self
-                        .key_formatter
-                        .get_stored_outbound_key(element_ref, slot);
-
-                    pipeline.del(&inbound_key).ignore();
-                    pipeline.del(&outbound_key).ignore();
                 }
             }
         }
@@ -923,48 +783,25 @@ impl ElementIndex for GarnetElementIndex {
         slot_affinity: &Vec<usize>,
     ) -> Result<(), IndexError> {
         let stored: StoredElement = element.into();
-        let has_session = { self.session_state.lock()?.is_some() };
-
         let mut pipeline = redis::pipe();
-        if !has_session {
-            pipeline.atomic();
-        }
 
         self.set_element_internal(&mut pipeline, stored, slot_affinity)
             .await?;
 
-        if !has_session {
-            let mut con = self.connection.clone();
-            if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
-                return Err(IndexError::other(err));
-            }
-        }
         // Session mode: all writes went to buffer, pipeline is empty
-
         Ok(())
     }
 
     #[tracing::instrument(skip_all, err)]
     async fn delete_element(&self, element_ref: &ElementReference) -> Result<(), IndexError> {
         let stored_element_ref: StoredElementReference = element_ref.into();
-        let has_session = { self.session_state.lock()?.is_some() };
-
         let mut pipeline = redis::pipe();
-        if !has_session {
-            pipeline.atomic();
-        }
 
         log::debug!("Deleting element: {stored_element_ref:?}");
         self.delete_element_internal(&mut pipeline, &stored_element_ref)
             .await?;
 
-        if !has_session {
-            let mut con = self.connection.clone();
-            if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
-                return Err(IndexError::other(err));
-            }
-        }
-
+        // Session mode: all writes went to buffer, pipeline is empty
         Ok(())
     }
 

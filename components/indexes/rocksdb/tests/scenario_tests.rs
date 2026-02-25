@@ -48,14 +48,18 @@ impl RocksDbQueryConfig {
     }
 
     #[allow(clippy::unwrap_used)]
-    pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
+    pub fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (RocksDbFutureQueue, Arc<dyn drasi_core::interface::SessionControl>) {
         let options = RocksIndexOptions {
             archive_enabled: true,
             direct_io: false,
         };
         let db = open_unified_db(&self.url, query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-        RocksDbFutureQueue::new(db, session_state)
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        (RocksDbFutureQueue::new(db, session_state), session_control)
     }
 }
 
@@ -279,35 +283,39 @@ mod index {
     #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) =
+            test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_not_exists() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) =
+            test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_clear_removes_all() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        let (fqi, sc) =
+            test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_overwrite() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) =
+            test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 

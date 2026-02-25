@@ -113,44 +113,28 @@ impl AccumulatorIndex for GarnetResultIndex {
         let set_id = get_hash_key(&owner, &key);
         let ari_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
 
-        {
-            let mut guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_mut() {
-                match value {
-                    None => {
-                        buffer.del(ari_key);
-                    }
-                    Some(v) => {
-                        let stored: StoredValueAccumulator = v.into();
-                        let bytes = redis::ToRedisArgs::to_redis_args(&stored);
-                        let b = bytes.into_iter().next().ok_or_else(|| {
-                            IndexError::other(std::io::Error::other(
-                                "StoredValueAccumulator serialized to empty Redis args",
-                            ))
-                        })?;
-                        buffer.string_set(ari_key, b);
-                    }
-                }
-                return Ok(());
-            }
-        }
-
-        let mut con = self.connection.clone();
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
         match value {
-            None => match con.del::<String, isize>(ari_key).await {
-                Ok(_) => Ok(()),
-                Err(e) => Err(IndexError::other(e)),
-            },
+            None => {
+                buffer.del(ari_key);
+            }
             Some(v) => {
-                match con
-                    .set::<String, StoredValueAccumulator, ()>(ari_key, v.into())
-                    .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
+                let stored: StoredValueAccumulator = v.into();
+                let bytes = redis::ToRedisArgs::to_redis_args(&stored);
+                let b = bytes.into_iter().next().ok_or_else(|| {
+                    IndexError::other(std::io::Error::other(
+                        "StoredValueAccumulator serialized to empty Redis args",
+                    ))
+                })?;
+                buffer.string_set(ari_key, b);
             }
         }
+        Ok(())
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
@@ -311,87 +295,62 @@ impl LazySortedSetStore for GarnetResultIndex {
         let set_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
         let val_key = format!("{}:{}", set_key, value.0);
 
-        let has_session = { self.session_state.lock()?.is_some() };
-
-        if has_session {
-            // Read current count: check buffer first, then Redis.
-            // No INCR in buffer — always store absolute values.
-            //
-            // Safety: ContinuousQuery::change_lock serializes all
-            // process_source_change calls, so no concurrent buffer
-            // mutations can occur between lock/drop/re-lock cycles.
-            let buffer_result = {
-                let guard = self.session_state.lock()?;
-                if let Some(buffer) = guard.as_ref() {
-                    match buffer.string_get(&val_key) {
-                        BufferReadResult::Found(bytes) => Some(Some(bytes)),
-                        BufferReadResult::KeyDeleted => Some(None),
-                        BufferReadResult::NotInBuffer => None,
-                    }
-                } else {
-                    return Err(IndexError::other(std::io::Error::other("session lost")));
+        // Read current count: check buffer first, then Redis.
+        // No INCR in buffer — always store absolute values.
+        //
+        // Safety: ContinuousQuery::change_lock serializes all
+        // process_source_change calls, so no concurrent buffer
+        // mutations can occur between lock/drop/re-lock cycles.
+        let buffer_result = {
+            let guard = self.session_state.lock()?;
+            if let Some(buffer) = guard.as_ref() {
+                match buffer.string_get(&val_key) {
+                    BufferReadResult::Found(bytes) => Some(Some(bytes)),
+                    BufferReadResult::KeyDeleted => Some(None),
+                    BufferReadResult::NotInBuffer => None,
                 }
-            }; // guard dropped here
-
-            let current_count = match buffer_result {
-                Some(Some(bytes)) => {
-                    let s = String::from_utf8(bytes).map_err(IndexError::other)?;
-                    s.parse::<isize>().map_err(IndexError::other)?
-                }
-                Some(None) => 0,
-                None => {
-                    let mut con = self.connection.clone();
-                    match con.get::<&str, Option<isize>>(&val_key).await {
-                        Ok(v) => v.unwrap_or(0),
-                        Err(e) => return Err(IndexError::other(e)),
-                    }
-                }
-            };
-
-            let new_count = current_count + delta;
-
-            {
-                let mut guard = self.session_state.lock()?;
-                let buffer = guard
-                    .as_mut()
-                    .ok_or_else(|| IndexError::other(std::io::Error::other("session lost")))?;
-
-                if new_count == 0 {
-                    buffer.del(val_key);
-                    buffer.zset_remove(set_key, value.0.to_string().into_bytes());
-                } else {
-                    buffer.string_set(val_key, new_count.to_string().into_bytes());
-                    buffer.zset_add(set_key, value.0.to_string().into_bytes(), value.0);
-                }
-            }
-
-            Ok(())
-        } else {
-            // Non-session path: current behavior
-            let mut con = self.connection.clone();
-            let current_count = match con.get::<&str, Option<isize>>(&val_key).await {
-                Ok(v) => v.unwrap_or(0),
-                Err(e) => return Err(IndexError::other(e)),
-            };
-
-            let mut pipeline = redis::pipe();
-
-            if (current_count + delta) == 0 {
-                pipeline.del::<&str>(&val_key).ignore();
-                pipeline.zrem::<&str, f64>(&set_key, value.0).ignore();
             } else {
-                pipeline.incr::<String, isize>(val_key, delta).ignore();
-                pipeline
-                    .zadd::<String, f64, f64>(set_key, value.0, value.0)
-                    .ignore();
+                return Err(IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                )));
             }
+        }; // guard dropped here
 
-            if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
-                return Err(IndexError::other(err));
+        let current_count = match buffer_result {
+            Some(Some(bytes)) => {
+                let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                s.parse::<isize>().map_err(IndexError::other)?
             }
+            Some(None) => 0,
+            None => {
+                let mut con = self.connection.clone();
+                match con.get::<&str, Option<isize>>(&val_key).await {
+                    Ok(v) => v.unwrap_or(0),
+                    Err(e) => return Err(IndexError::other(e)),
+                }
+            }
+        };
 
-            Ok(())
+        let new_count = current_count + delta;
+
+        {
+            let mut guard = self.session_state.lock()?;
+            let buffer = guard.as_mut().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                ))
+            })?;
+
+            if new_count == 0 {
+                buffer.del(val_key);
+                buffer.zset_remove(set_key, value.0.to_string().into_bytes());
+            } else {
+                buffer.string_set(val_key, new_count.to_string().into_bytes());
+                buffer.zset_add(set_key, value.0.to_string().into_bytes(), value.0);
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -433,26 +392,14 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
         let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
 
-        {
-            let mut guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_mut() {
-                buffer.string_set(seq_key, sequence.to_string().into_bytes());
-                buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
-                return Ok(());
-            }
-        }
-
-        let mut con = self.connection.clone();
-        let mut pipeline = redis::pipe();
-        pipeline.set::<String, u64>(seq_key, sequence).ignore();
-        pipeline
-            .set::<String, String>(scid_key, source_change_id.to_string())
-            .ignore();
-
-        if let Err(err) = pipeline.query_async::<_, ()>(&mut con).await {
-            return Err(IndexError::other(err));
-        }
-
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.string_set(seq_key, sequence.to_string().into_bytes());
+        buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
         Ok(())
     }
 
