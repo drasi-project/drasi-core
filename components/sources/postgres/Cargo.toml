@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-postgres"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL source plugin for Drasi"
