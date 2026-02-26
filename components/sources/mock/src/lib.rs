@@ -138,10 +138,17 @@ mod tests;
 pub use config::{DataType, MockSourceConfig};
 pub use mock::{MockSource, MockSourceBuilder};
 
-/// Dynamic plugin entry point.
+/// Dynamic plugin entry point (legacy dylib).
 ///
+
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin! {
-    drasi_plugin_sdk::PluginRegistration::new()
-        .with_source(Box::new(descriptor::MockSourceDescriptor))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mock-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MockSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

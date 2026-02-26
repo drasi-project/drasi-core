@@ -13,7 +13,7 @@ categories = ["development-tools::debugging"]
 workspace = true
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-plugin-runtime = { workspace = true }

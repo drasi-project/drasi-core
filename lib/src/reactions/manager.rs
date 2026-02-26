@@ -526,4 +526,9 @@ impl ReactionManager {
 
         Some(self.event_history.write().await.subscribe(id))
     }
+
+    /// Get a shared reference to the event history.
+    pub fn event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
+        Arc::clone(&self.event_history)
+    }
 }

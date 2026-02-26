@@ -42,8 +42,14 @@ pub use mssql::{MsSqlBootstrapProvider, MsSqlBootstrapProviderBuilder};
 
 /// Dynamic plugin entry point.
 ///
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin! {
-    drasi_plugin_sdk::PluginRegistration::new()
-        .with_bootstrapper(Box::new(descriptor::MsSqlBootstrapDescriptor))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mssql-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MsSqlBootstrapDescriptor],
+);

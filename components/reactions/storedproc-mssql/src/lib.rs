@@ -53,8 +53,14 @@ pub use reaction::MsSqlStoredProcReaction;
 
 /// Dynamic plugin entry point.
 ///
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin! {
-    drasi_plugin_sdk::PluginRegistration::new()
-        .with_reaction(Box::new(descriptor::MsSqlStoredProcReactionDescriptor))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "storedproc-mssql-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MsSqlStoredProcReactionDescriptor],
+    bootstrap_descriptors = [],
+);

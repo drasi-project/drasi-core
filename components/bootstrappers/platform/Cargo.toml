@@ -24,7 +24,7 @@ keywords = ["drasi", "plugin", "bootstrap", "platform"]
 categories = ["network-programming"]
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib", "cdylib"]
 
 [lints]
 workspace = true

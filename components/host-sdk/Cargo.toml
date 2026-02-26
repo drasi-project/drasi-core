@@ -1,0 +1,22 @@
+[package]
+name = "drasi-host-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side SDK for loading and interacting with Drasi cdylib plugins"
+license = "Apache-2.0"
+
+[dependencies]
+drasi-lib = { workspace = true }
+drasi-core = { workspace = true }
+drasi-plugin-sdk = { workspace = true }
+libloading = "0.8"
+async-trait = "0.1"
+anyhow = "1.0"
+tokio = { version = "1", features = ["rt", "sync"] }
+serde_json = "1.0"
+log = "0.4"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

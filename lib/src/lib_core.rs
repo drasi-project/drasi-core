@@ -21,7 +21,7 @@ use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
-use crate::managers::ComponentLogRegistry;
+use crate::managers::{ComponentEventHistory, ComponentLogRegistry};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -486,6 +486,32 @@ impl DrasiLib {
     /// ```
     pub fn middleware_registry(&self) -> Arc<MiddlewareTypeRegistry> {
         Arc::clone(&self.middleware_registry)
+    }
+
+    /// Get access to the component log registry.
+    ///
+    /// The log registry captures structured log messages from components and
+    /// supports live streaming via subscriptions. This is used by the REST API
+    /// to serve log streams and by dynamic plugin loading to wire plugin logs
+    /// into the same registry as statically-linked components.
+    pub fn log_registry(&self) -> Arc<ComponentLogRegistry> {
+        Arc::clone(&self.log_registry)
+    }
+
+    /// Get access to the source event history.
+    ///
+    /// Contains lifecycle events (starting, running, stopped, error) for sources.
+    /// Used by the REST API to report source status and by dynamic plugin loading
+    /// to wire plugin lifecycle events into the same history.
+    pub fn source_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
+        self.source_manager.event_history()
+    }
+
+    /// Get access to the reaction event history.
+    ///
+    /// Contains lifecycle events (starting, running, stopped, error) for reactions.
+    pub fn reaction_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
+        self.reaction_manager.event_history()
     }
 
     // ============================================================================

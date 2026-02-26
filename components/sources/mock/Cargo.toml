@@ -10,7 +10,7 @@ keywords = ["drasi", "plugin", "source", "mock", "testing"]
 categories = ["development-tools::testing"]
 
 [lib]
-crate-type = ["lib", "dylib"]
+crate-type = ["lib", "cdylib"]
 
 [lints]
 workspace = true

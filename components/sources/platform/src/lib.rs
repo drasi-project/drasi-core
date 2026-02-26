@@ -1560,8 +1560,14 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
 
 /// Dynamic plugin entry point.
 ///
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin! {
-    drasi_plugin_sdk::PluginRegistration::new()
-        .with_source(Box::new(descriptor::PlatformSourceDescriptor))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "platform-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::PlatformSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

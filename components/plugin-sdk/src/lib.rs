@@ -205,6 +205,7 @@
 
 pub mod config_value;
 pub mod descriptor;
+pub mod ffi;
 pub mod mapper;
 pub mod prelude;
 pub mod registration;
@@ -217,44 +218,263 @@ pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
-/// Export the standard dynamic-plugin entry points.
+/// Re-export tokio so the `export_plugin!` macro can reference it
+/// without requiring plugins to declare a direct tokio dependency.
+#[doc(hidden)]
+pub use tokio as __tokio;
+
+/// Export dynamic plugin entry points with FFI vtables.
 ///
-/// This macro generates both:
-/// - `drasi_plugin_init` — returns the [`PluginRegistration`] (called by the server)
-/// - `drasi_plugin_build_hash` — returns the build hash as a C string (pre-check
-///   by the server before calling `drasi_plugin_init`, to catch ABI mismatches early)
+/// Generates:
+/// - `drasi_plugin_metadata()` → version info for validation
+/// - `drasi_plugin_init()` → `FfiPluginRegistration` with vtable factories
+/// - Plugin-local tokio runtime, FfiLogger, lifecycle callbacks
 ///
 /// # Usage
 ///
 /// ```rust,ignore
-/// use drasi_plugin_sdk::prelude::*;
-///
-/// export_plugin! {
-///     PluginRegistration::new()
-///         .with_source(Box::new(MySourceDescriptor))
-/// }
+/// drasi_plugin_sdk::export_plugin!(
+///     plugin_id = "postgres",
+///     core_version = "0.1.0",
+///     lib_version = "0.3.8",
+///     plugin_version = "1.0.0",
+///     source_descriptors = [PostgresSourceDescriptor],
+///     reaction_descriptors = [],
+///     bootstrap_descriptors = [PostgresBootstrapDescriptor],
+/// );
 /// ```
-///
-/// The macro is gated on `#[cfg(feature = "dynamic-plugin")]` at the call site,
-/// so it only emits symbols when building as a shared library.
 #[macro_export]
 macro_rules! export_plugin {
-    ($registration:expr) => {
-        #[no_mangle]
-        pub extern "C" fn drasi_plugin_init() -> *mut $crate::PluginRegistration {
-            Box::into_raw(Box::new($registration))
+    // ── Declarative form: descriptors listed inline ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ] $(,)?
+    ) => {
+        fn __auto_create_plugin_vtables() -> (
+            Vec<$crate::ffi::SourcePluginVtable>,
+            Vec<$crate::ffi::ReactionPluginVtable>,
+            Vec<$crate::ffi::BootstrapPluginVtable>,
+        ) {
+            let source_descs = vec![
+                $( $crate::ffi::build_source_plugin_vtable(
+                    $source_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            let reaction_descs = vec![
+                $( $crate::ffi::build_reaction_plugin_vtable(
+                    $reaction_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            let bootstrap_descs = vec![
+                $( $crate::ffi::build_bootstrap_plugin_vtable(
+                    $bootstrap_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            (source_descs, reaction_descs, bootstrap_descs)
         }
 
+        $crate::export_plugin!(
+            @internal
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            init_fn = __auto_create_plugin_vtables,
+        );
+    };
+
+    // ── Internal form: custom init function ──
+    (
+        @internal
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        init_fn = $init_fn:ident $(,)?
+    ) => {
+        // ── Tokio runtime (accessible to plugin code) ──
+        pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
+            use ::std::sync::OnceLock;
+            static RT: OnceLock<$crate::__tokio::runtime::Runtime> = OnceLock::new();
+            RT.get_or_init(|| {
+                $crate::__tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name(concat!($plugin_id, "-worker"))
+                    .build()
+                    .expect("Failed to create plugin tokio runtime")
+            })
+        }
+
+        struct __SendPtr(*mut ::std::ffi::c_void);
+        unsafe impl Send for __SendPtr {}
+
+        /// Async executor dispatching to this plugin's tokio runtime.
+        pub extern "C" fn __plugin_executor(
+            future_ptr: *mut ::std::ffi::c_void,
+        ) -> *mut ::std::ffi::c_void {
+            let boxed: Box<
+                ::std::pin::Pin<
+                    Box<dyn ::std::future::Future<Output = *mut ::std::ffi::c_void> + Send>,
+                >,
+            > = unsafe { Box::from_raw(future_ptr as *mut _) };
+            let handle = __plugin_runtime().handle().clone();
+            let result = ::std::thread::spawn(move || {
+                let raw = handle.block_on(*boxed);
+                __SendPtr(raw)
+            })
+            .join()
+            .expect("Plugin executor thread panicked");
+            result.0
+        }
+
+        /// Run an async future on the plugin runtime, blocking until complete.
+        #[allow(dead_code)]
+        pub fn plugin_block_on<F>(f: F) -> F::Output
+        where
+            F: ::std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            let handle = __plugin_runtime().handle().clone();
+            ::std::thread::spawn(move || handle.block_on(f))
+                .join()
+                .expect("plugin_block_on: spawned thread panicked")
+        }
+
+        // ── Log/lifecycle callback storage ──
+        static __LOG_CB: ::std::sync::atomic::AtomicPtr<()> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+        static __LOG_CTX: ::std::sync::atomic::AtomicPtr<::std::ffi::c_void> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+        static __LIFECYCLE_CB: ::std::sync::atomic::AtomicPtr<()> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+        static __LIFECYCLE_CTX: ::std::sync::atomic::AtomicPtr<::std::ffi::c_void> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+
+        // Note: FfiLogger (log::Log) is no longer used. All log crate events are
+        // bridged to tracing via tracing-log's LogTracer, then handled by
+        // FfiTracingLayer which has access to span context for correct routing.
+
+        extern "C" fn __set_log_callback_impl(
+            ctx: *mut ::std::ffi::c_void,
+            callback: $crate::ffi::LogCallbackFn,
+        ) {
+            __LOG_CTX.store(ctx, ::std::sync::atomic::Ordering::Release);
+            __LOG_CB.store(callback as *mut (), ::std::sync::atomic::Ordering::Release);
+
+            // Set up tracing subscriber with LogTracer bridge.
+            // LogTracer redirects log crate events → tracing, and FfiTracingLayer
+            // forwards all tracing events (including log-bridged ones) through FFI
+            // with span context for correct routing.
+            $crate::ffi::tracing_bridge::init_tracing_subscriber(
+                &__LOG_CB,
+                &__LOG_CTX,
+                $plugin_id,
+            );
+        }
+
+        extern "C" fn __set_lifecycle_callback_impl(
+            ctx: *mut ::std::ffi::c_void,
+            callback: $crate::ffi::LifecycleCallbackFn,
+        ) {
+            __LIFECYCLE_CTX.store(ctx, ::std::sync::atomic::Ordering::Release);
+            __LIFECYCLE_CB.store(
+                callback as *mut (),
+                ::std::sync::atomic::Ordering::Release,
+            );
+        }
+
+        /// Emit a lifecycle event to the host.
+        pub fn __emit_lifecycle(
+            component_id: &str,
+            event_type: $crate::ffi::FfiLifecycleEventType,
+            message: &str,
+        ) {
+            let ptr = __LIFECYCLE_CB.load(::std::sync::atomic::Ordering::Acquire);
+            if !ptr.is_null() {
+                let cb: $crate::ffi::LifecycleCallbackFn =
+                    unsafe { ::std::mem::transmute(ptr) };
+                let ctx = __LIFECYCLE_CTX.load(::std::sync::atomic::Ordering::Acquire);
+                let event = $crate::ffi::FfiLifecycleEvent {
+                    component_id: $crate::ffi::FfiStr::from_str(component_id),
+                    component_type: $crate::ffi::FfiStr::from_str("plugin"),
+                    event_type,
+                    message: $crate::ffi::FfiStr::from_str(message),
+                    timestamp_us: $crate::ffi::now_us(),
+                };
+                cb(ctx, &event);
+            }
+        }
+
+        // ── Plugin metadata ──
+        static __PLUGIN_METADATA: $crate::ffi::PluginMetadata = $crate::ffi::PluginMetadata {
+            sdk_version: $crate::ffi::FfiStr {
+                ptr: $crate::ffi::FFI_SDK_VERSION.as_ptr() as *const ::std::os::raw::c_char,
+                len: $crate::ffi::FFI_SDK_VERSION.len(),
+            },
+            core_version: $crate::ffi::FfiStr {
+                ptr: $core_ver.as_ptr() as *const ::std::os::raw::c_char,
+                len: $core_ver.len(),
+            },
+            lib_version: $crate::ffi::FfiStr {
+                ptr: $lib_ver.as_ptr() as *const ::std::os::raw::c_char,
+                len: $lib_ver.len(),
+            },
+            plugin_version: $crate::ffi::FfiStr {
+                ptr: $plugin_ver.as_ptr() as *const ::std::os::raw::c_char,
+                len: $plugin_ver.len(),
+            },
+            target_triple: $crate::ffi::FfiStr {
+                ptr: $crate::ffi::TARGET_TRIPLE.as_ptr() as *const ::std::os::raw::c_char,
+                len: $crate::ffi::TARGET_TRIPLE.len(),
+            },
+        };
+
+        /// Returns plugin metadata for version validation. Called BEFORE init.
         #[no_mangle]
-        pub extern "C" fn drasi_plugin_build_hash() -> *const u8 {
-            // Return a pointer to a null-terminated C string containing the build hash.
-            // The static ensures the pointer remains valid for the lifetime of the process.
-            static BUILD_HASH_CSTR: std::sync::LazyLock<std::ffi::CString> =
-                std::sync::LazyLock::new(|| {
-                    std::ffi::CString::new(drasi_plugin_runtime::BUILD_HASH)
-                        .expect("BUILD_HASH contains no interior NUL bytes")
+        pub extern "C" fn drasi_plugin_metadata() -> *const $crate::ffi::PluginMetadata {
+            &__PLUGIN_METADATA
+        }
+
+        /// Plugin entry point. Called AFTER metadata validation passes.
+        #[no_mangle]
+        pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
+            match ::std::panic::catch_unwind(|| {
+                let _ = __plugin_runtime();
+                let (mut source_descs, mut reaction_descs, mut bootstrap_descs) = $init_fn();
+
+                let registration = Box::new($crate::ffi::FfiPluginRegistration {
+                    source_plugins: source_descs.as_mut_ptr(),
+                    source_plugin_count: source_descs.len(),
+                    reaction_plugins: reaction_descs.as_mut_ptr(),
+                    reaction_plugin_count: reaction_descs.len(),
+                    bootstrap_plugins: bootstrap_descs.as_mut_ptr(),
+                    bootstrap_plugin_count: bootstrap_descs.len(),
+                    set_log_callback: __set_log_callback_impl,
+                    set_lifecycle_callback: __set_lifecycle_callback_impl,
                 });
-            BUILD_HASH_CSTR.as_ptr() as *const u8
+                ::std::mem::forget(source_descs);
+                ::std::mem::forget(reaction_descs);
+                ::std::mem::forget(bootstrap_descs);
+                Box::into_raw(registration)
+            }) {
+                Ok(ptr) => ptr,
+                Err(_) => ::std::ptr::null_mut(),
+            }
         }
     };
 }

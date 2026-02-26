@@ -241,8 +241,14 @@ mod tests {
 
 /// Dynamic plugin entry point.
 ///
+/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
-drasi_plugin_sdk::export_plugin! {
-    drasi_plugin_sdk::PluginRegistration::new()
-        .with_reaction(Box::new(descriptor::GrpcReactionDescriptor))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "grpc-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::GrpcReactionDescriptor],
+    bootstrap_descriptors = [],
+);
