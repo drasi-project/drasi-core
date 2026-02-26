@@ -1,6 +1,6 @@
 # Drasi Plugin SDK
 
-The Drasi Plugin SDK provides traits, types, and utilities for building plugins for the [Drasi Server](https://github.com/drasi-project/drasi-server). Plugins extend the server with new data sources, reactions, and bootstrap providers.
+The Drasi Plugin SDK provides traits, types, and utilities for building plugins for the any application that implements the [Host SDK](../host-sdk/). Plugins extend the server with new data sources, reactions, and bootstrap providers.
 
 Plugins can be compiled directly into the server binary (**static linking**) or built as shared libraries for **dynamic loading** at runtime.
 
@@ -10,8 +10,8 @@ Add the SDK to your plugin crate:
 
 ```toml
 [dependencies]
-drasi-plugin-sdk = "0.1"
-drasi-lib = "0.1"
+drasi-plugin-sdk = { workspace = true }
+drasi-lib = { workspace = true }
 ```
 
 Import the prelude:
@@ -26,9 +26,9 @@ The SDK defines three plugin categories, each with a corresponding descriptor tr
 
 | Plugin Type | Trait | Purpose |
 |---|---|---|
-| **Source** | [`SourcePluginDescriptor`] | Ingests data from external systems (databases, APIs, queues) |
-| **Reaction** | [`ReactionPluginDescriptor`] | Consumes query results and performs side effects (webhooks, logging, stored procedures) |
-| **Bootstrap** | [`BootstrapPluginDescriptor`] | Provides initial data snapshots so queries start with a complete view |
+| **Source** | `SourcePluginDescriptor` | Ingests data from external systems (databases, APIs, queues) |
+| **Reaction** | `ReactionPluginDescriptor` | Consumes query results and performs side effects (webhooks, logging, stored procedures) |
+| **Bootstrap** | `BootstrapPluginDescriptor` | Provides initial data snapshots so queries start with a complete view |
 
 ## Writing a Plugin
 
@@ -106,9 +106,11 @@ impl SourcePluginDescriptor for MySourceDescriptor {
 }
 ```
 
-### 3. Create a plugin registration
+### 3. Register the plugin
 
-Bundle your descriptors into a `PluginRegistration`. A single plugin crate can register multiple descriptors of different types.
+#### For static plugins
+
+Bundle your descriptors into a `PluginRegistration` and pass them to the server at startup:
 
 ```rust
 use drasi_plugin_sdk::prelude::*;
@@ -120,6 +122,22 @@ pub fn register() -> PluginRegistration {
 }
 ```
 
+#### For dynamic plugins
+
+Use the `export_plugin!` macro, which generates the FFI entry points, a dedicated tokio runtime, and log/lifecycle callback wiring:
+
+```rust
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [MyBootstrapDescriptor],
+);
+```
+
 ## Static vs. Dynamic Plugins
 
 ### Static Linking
@@ -128,44 +146,52 @@ Compile the plugin crate directly into the server binary. Call your `register()`
 
 ### Dynamic Loading
 
-Build the plugin as a shared library (`cdylib`) that the server discovers and loads from a plugins directory at runtime. This allows deploying new plugins without recompiling the server.
+Build the plugin as a `cdylib` shared library that the server discovers and loads at runtime. This allows deploying new plugins without recompiling the server.
 
 #### Step 1: Configure crate type
 
 ```toml
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
-drasi-plugin-sdk = "0.1"  # Must match the server's version exactly
-drasi-lib = "0.1"
+drasi-plugin-sdk = { workspace = true }
+drasi-lib = { workspace = true }
 ```
 
-#### Step 2: Export the entry point
+The dual `["lib", "cdylib"]` crate type allows the crate to be used both as a normal Rust dependency (for static builds) and as a shared library (for dynamic loading).
 
-Every dynamic plugin must export a `drasi_plugin_init` function with C ABI:
+#### Step 2: Use the `export_plugin!` macro
+
+The `export_plugin!` macro generates everything needed for dynamic loading:
+
+- `drasi_plugin_metadata()` — Returns version info for validation **before** initialization
+- `drasi_plugin_init()` — Returns an `FfiPluginRegistration` with FFI vtable factories
+- A dedicated tokio runtime for the plugin
+- Log and lifecycle callback bridges (tracing integration via `FfiTracingLayer`)
 
 ```rust
-use drasi_plugin_sdk::prelude::*;
-
-#[no_mangle]
-pub extern "C" fn drasi_plugin_init() -> *mut PluginRegistration {
-    let registration = PluginRegistration::new()
-        .with_source(Box::new(MySourceDescriptor))
-        .with_reaction(Box::new(MyReactionDescriptor));
-    Box::into_raw(Box::new(registration))
-}
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "postgres",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [PostgresSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [PostgresBootstrapDescriptor],
+);
 ```
 
-- `#[no_mangle]` and `extern "C"` are required so the server can locate the symbol.
-- The `PluginRegistration` must be heap-allocated with `Box::new` and returned as a raw pointer via `Box::into_raw`. The server takes ownership by calling `Box::from_raw`.
-- `PluginRegistration::new()` automatically embeds the `SDK_VERSION` constant. The server checks this at load time and rejects plugins built with a different version.
+Each descriptor is wrapped in an FFI vtable (`SourcePluginVtable`, `ReactionPluginVtable`, `BootstrapPluginVtable`) that provides `#[repr(C)]` function pointers. When the host calls a factory method (e.g., `create_source_fn`), the plugin constructs a trait object and wraps it in a component vtable (`SourceVtable`, `ReactionVtable`, `BootstrapProviderVtable`) with its own FFI-safe function pointers.
 
 #### Step 3: Build and deploy
 
 ```bash
-cargo build --release
-cp target/release/libmy_plugin.so /path/to/server/plugins/
+# Build with dynamic plugin feature enabled
+cargo build --release --features dynamic-plugin
+
+# Copy the shared library to the server's binary directory
+cp target/release/libdrasi_source_my_plugin.so /path/to/server/
 ```
 
 #### Compatibility requirements
@@ -174,6 +200,31 @@ Both the plugin and the server **must** be compiled with:
 
 - The **same Rust toolchain version** — the Rust ABI is not stable across compiler versions.
 - The **same `drasi-plugin-sdk` version** — the server compares `SDK_VERSION` at load time and rejects mismatches.
+- The **same target triple** — validated via `PluginMetadata::target_triple`.
+
+The server performs a two-phase load:
+
+1. **Metadata validation** — calls `drasi_plugin_metadata()` to check SDK version, build hash, and target triple.
+2. **Initialization** — calls `drasi_plugin_init()` only if metadata validation passes.
+
+## FFI Architecture
+
+Dynamic plugins communicate with the host through `#[repr(C)]` vtable structs (stable C ABI). The FFI layer is organized into several modules:
+
+| Module | Description |
+|---|---|
+| `ffi::types` | Core FFI-safe primitives (`FfiStr`, `FfiResult`, `FfiOwnedStr`, etc.). Re-exported from the `drasi-ffi-primitives` crate. |
+| `ffi::vtables` | `#[repr(C)]` vtable structs for all component types, generated with the `ffi_vtable!` macro |
+| `ffi::vtable_gen` | Functions that wrap trait objects into vtables (e.g., `build_source_vtable`) |
+| `ffi::callbacks` | Log and lifecycle callback types (`LogCallbackFn`, `LifecycleCallbackFn`) |
+| `ffi::metadata` | `PluginMetadata` struct and version constants for load-time validation |
+| `ffi::tracing_bridge` | Bridges tracing/log events from the plugin to the host via FFI callbacks |
+| `ffi::identity` | FFI types for `IdentityProvider` injection into plugins |
+| `ffi::identity_proxy` | Plugin-side proxy that implements `IdentityProvider` over an FFI vtable |
+| `ffi::state_store_proxy` | Plugin-side proxy that implements `StateStoreProvider` over an FFI vtable |
+| `ffi::bootstrap_proxy` | Plugin-side proxy that implements `BootstrapProvider` over an FFI vtable |
+
+Each plugin gets its own tokio runtime (created by the `export_plugin!` macro). Async operations are dispatched via the `AsyncExecutorFn` callback, which ensures futures run on the plugin's runtime rather than the host's.
 
 ## Configuration Values
 
@@ -243,7 +294,7 @@ let tags: Vec<String> = mapper.resolve_string_vec(&dto.tags)?;
 | Resolver | Handles | Behavior |
 |---|---|---|
 | `EnvironmentVariableResolver` | `ConfigValue::EnvironmentVariable` | Reads `std::env::var()`, falls back to default |
-| `SecretResolver` | `ConfigValue::Secret` | Returns `NotImplemented` (future: pluggable secret store) |
+| `SecretResolver` | `ConfigValue::Secret` | Delegates to a pluggable `SecretResolver` registered via `register_secret_resolver()` |
 
 ### Custom resolvers
 
@@ -313,8 +364,9 @@ fn config_schema_name(&self) -> &str {
 |---|---|
 | `config_value` | `ConfigValue<T>` enum, type aliases, and OpenAPI schema wrappers |
 | `descriptor` | Plugin descriptor traits (`SourcePluginDescriptor`, `ReactionPluginDescriptor`, `BootstrapPluginDescriptor`) |
+| `ffi` | FFI layer for dynamic plugin loading — vtables, callbacks, proxies, tracing bridge |
 | `mapper` | `DtoMapper` service and `ConfigMapper` trait for DTO-to-domain conversions |
-| `registration` | `PluginRegistration` struct and `SDK_VERSION` constant |
+| `registration` | `PluginRegistration` struct, `SDK_VERSION`, `BUILD_HASH`, and `TOKIO_VERSION` constants |
 | `resolver` | `ValueResolver` trait and built-in implementations |
 | `prelude` | Convenience re-exports for plugin authors |
 

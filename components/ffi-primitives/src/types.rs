@@ -158,9 +158,9 @@ impl FfiResult {
     /// Wrap a panic payload into an FfiResult error.
     pub fn from_panic(payload: Box<dyn std::any::Any + Send>) -> Self {
         let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-            format!("plugin panic: {}", s)
+            format!("plugin panic: {s}")
         } else if let Some(s) = payload.downcast_ref::<String>() {
-            format!("plugin panic: {}", s)
+            format!("plugin panic: {s}")
         } else {
             "plugin panic: <unknown>".to_string()
         };

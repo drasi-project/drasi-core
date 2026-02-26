@@ -12,11 +12,11 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    println!("cargo:rustc-env=DRASI_RUSTC_VERSION={}", rustc_version);
+    println!("cargo:rustc-env=DRASI_RUSTC_VERSION={rustc_version}");
 
     // Capture the target triple for plugin metadata validation
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
-    println!("cargo:rustc-env=TARGET_TRIPLE={}", target);
+    println!("cargo:rustc-env=TARGET_TRIPLE={target}");
 
     // Compute build compatibility hash from rustc version, crate version,
     // target triple, and build profile. Used to reject plugins built with
