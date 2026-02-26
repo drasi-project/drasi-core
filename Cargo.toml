@@ -40,6 +40,7 @@ members = [
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/qdrant",
 
   # Index Plugins
   "components/indexes/rocksdb",
