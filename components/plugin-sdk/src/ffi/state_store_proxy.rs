@@ -45,7 +45,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 FfiStr::from_str(key),
             )
             .into_result()
-            .map_err(|e| drasi_lib::StateStoreError::Other(e))
+            .map_err(drasi_lib::StateStoreError::Other)
         }
     }
 
@@ -60,7 +60,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 value.len(),
             )
             .into_result()
-            .map_err(|e| drasi_lib::StateStoreError::Other(e))
+            .map_err(drasi_lib::StateStoreError::Other)
         }
     }
 
@@ -74,7 +74,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
             )
             .into_result()
             .map(|_| true)
-            .map_err(|e| drasi_lib::StateStoreError::Other(e))
+            .map_err(drasi_lib::StateStoreError::Other)
         }
     }
 
@@ -86,7 +86,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 FfiStr::from_str(store_id),
                 FfiStr::from_str(key),
             );
-            result.into_result().map(|_| true).or_else(|_| Ok(false))
+            result.into_result().map(|_| true).or(Ok(false))
         }
     }
 
@@ -149,7 +149,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
         unsafe {
             let vtable = &*self.vtable;
             let result = (vtable.store_exists_fn)(vtable.state, FfiStr::from_str(store_id));
-            result.into_result().map(|_| true).or_else(|_| Ok(false))
+            result.into_result().map(|_| true).or(Ok(false))
         }
     }
 
@@ -170,7 +170,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
             let vtable = &*self.vtable;
             (vtable.sync_fn)(vtable.state)
                 .into_result()
-                .map_err(|e| drasi_lib::StateStoreError::Other(e))
+                .map_err(drasi_lib::StateStoreError::Other)
         }
     }
 }

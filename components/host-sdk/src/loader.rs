@@ -116,7 +116,7 @@ impl PluginLoader {
                     }
                 }
             } else {
-                log::warn!("Cannot read plugin directory for pattern: {}", glob_str);
+                log::warn!("Cannot read plugin directory for pattern: {glob_str}");
             }
         }
 
@@ -257,8 +257,7 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
                 let plugin_ver = meta.plugin_version.to_string();
                 let target = meta.target_triple.to_string();
                 Some(format!(
-                    "sdk={} core={} plugin={} target={}",
-                    sdk_ver, core_ver, plugin_ver, target
+                    "sdk={sdk_ver} core={core_ver} plugin={plugin_ver} target={target}"
                 ))
             } else {
                 None
@@ -365,7 +364,7 @@ fn matches_pattern(filename: &str, pattern: &str) -> bool {
     let full_pattern = if pattern.contains('.') {
         pattern.to_string()
     } else {
-        format!("{}{}", pattern, ext)
+        format!("{pattern}{ext}")
     };
 
     // Simple wildcard matching
@@ -381,11 +380,11 @@ fn matches_pattern(filename: &str, pattern: &str) -> bool {
 /// Helper to get the platform-specific plugin file path.
 pub fn plugin_path(dir: &Path, name: &str) -> PathBuf {
     if cfg!(target_os = "macos") {
-        dir.join(format!("lib{}.dylib", name))
+        dir.join(format!("lib{name}.dylib"))
     } else if cfg!(target_os = "windows") {
-        dir.join(format!("{}.dll", name))
+        dir.join(format!("{name}.dll"))
     } else {
-        dir.join(format!("lib{}.so", name))
+        dir.join(format!("lib{name}.so"))
     }
 }
 

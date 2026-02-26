@@ -232,9 +232,7 @@ impl Visit for MessageVisitor {
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        } else if self.message.is_empty() {
+        if field.name() == "message" || self.message.is_empty() {
             self.message = value.to_string();
         }
     }

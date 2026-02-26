@@ -44,7 +44,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
     ) -> anyhow::Result<usize> {
         // Extract vtable fields under the lock, then release immediately
         let (vtable_state, vtable_bootstrap_fn) = {
-            let vtable = self.vtable.lock().unwrap();
+            let vtable = self.vtable.lock().expect("vtable mutex poisoned");
             (vtable.state, vtable.bootstrap_fn)
         };
 

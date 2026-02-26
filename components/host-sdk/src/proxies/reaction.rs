@@ -73,8 +73,8 @@ impl Reaction for ReactionProxy {
 
     fn query_ids(&self) -> Vec<String> {
         let arr = (self.vtable.query_ids_fn)(self.vtable.state as *const c_void);
-        let ids = unsafe { arr.into_vec() };
-        ids
+
+        unsafe { arr.into_vec() }
     }
 
     fn auto_start(&self) -> bool {
@@ -251,8 +251,7 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(
-                "Plugin factory returned null for reaction '{}'",
-                id
+                "Plugin factory returned null for reaction '{id}'"
             ));
         }
 

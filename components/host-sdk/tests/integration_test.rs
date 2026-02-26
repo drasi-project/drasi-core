@@ -50,11 +50,11 @@ fn plugin_dir() -> PathBuf {
 fn plugin_filename(crate_name: &str) -> String {
     let lib_name = crate_name.replace('-', "_");
     if cfg!(target_os = "macos") {
-        format!("lib{}.dylib", lib_name)
+        format!("lib{lib_name}.dylib")
     } else if cfg!(target_os = "windows") {
-        format!("{}.dll", lib_name)
+        format!("{lib_name}.dll")
     } else {
-        format!("lib{}.so", lib_name)
+        format!("lib{lib_name}.so")
     }
 }
 
@@ -373,8 +373,7 @@ async fn test_mock_source_start_stop_lifecycle() {
     let status = source.status().await;
     assert!(
         matches!(status, ComponentStatus::Stopped),
-        "Initial status should be Stopped, got: {:?}",
-        status
+        "Initial status should be Stopped, got: {status:?}"
     );
 
     // Start
@@ -382,8 +381,7 @@ async fn test_mock_source_start_stop_lifecycle() {
     let status = source.status().await;
     assert!(
         matches!(status, ComponentStatus::Running),
-        "After start, status should be Running, got: {:?}",
-        status
+        "After start, status should be Running, got: {status:?}"
     );
 
     // Stop
@@ -391,8 +389,7 @@ async fn test_mock_source_start_stop_lifecycle() {
     let status = source.status().await;
     assert!(
         matches!(status, ComponentStatus::Stopped),
-        "After stop, status should be Stopped, got: {:?}",
-        status
+        "After stop, status should be Stopped, got: {status:?}"
     );
 }
 
@@ -670,8 +667,7 @@ fn test_load_nonexistent_file_returns_error() {
     let err = result.err().unwrap().to_string();
     assert!(
         err.contains("Failed to load") || err.contains("cannot open"),
-        "Error should mention loading failure: {}",
-        err
+        "Error should mention loading failure: {err}"
     );
 }
 
@@ -800,7 +796,7 @@ async fn test_drop_source_instance_does_not_crash() {
     // Create and immediately drop multiple instances
     for i in 0..5 {
         let source = plugin.source_plugins[0]
-            .create_source(&format!("drop-test-{}", i), &config, false)
+            .create_source(&format!("drop-test-{i}"), &config, false)
             .await
             .unwrap();
         drop(source);
@@ -910,8 +906,7 @@ async fn test_plugin_logs_routed_to_log_registry() {
     }
     assert!(
         log_count > 0,
-        "Expected at least one log message in ComponentLogRegistry for key {:?}",
-        log_key,
+        "Expected at least one log message in ComponentLogRegistry for key {log_key:?}",
     );
 
     // Also check the diagnostic store (captured_logs) for completeness
@@ -1008,13 +1003,11 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     let statuses: Vec<_> = our_events.iter().map(|e| &e.status).collect();
     assert!(
         statuses.contains(&&ComponentStatus::Starting),
-        "Expected Starting event, got: {:?}",
-        statuses
+        "Expected Starting event, got: {statuses:?}"
     );
     assert!(
         statuses.contains(&&ComponentStatus::Running),
-        "Expected Running/Started event, got: {:?}",
-        statuses
+        "Expected Running/Started event, got: {statuses:?}"
     );
 
     // Also check the diagnostic store for completeness
@@ -1126,8 +1119,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
         .any(|l| l.level == drasi_plugin_sdk::ffi::FfiLogLevel::Info);
     assert!(
         has_info,
-        "Expected at least one INFO log, got: {:?}",
-        our_logs
+        "Expected at least one INFO log, got: {our_logs:?}"
     );
 }
 
@@ -1488,8 +1480,7 @@ async fn test_identity_provider_error_propagation() {
             let err_msg = e.to_string();
             assert!(
                 err_msg.contains("Authentication service unavailable"),
-                "Error message should contain original error, got: {}",
-                err_msg
+                "Error message should contain original error, got: {err_msg}"
             );
         }
     }
@@ -1537,10 +1528,7 @@ async fn test_source_with_null_identity_provider() {
     let dir = plugin_dir();
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
-        eprintln!(
-            "Skipping test: mock source plugin not found at {:?}",
-            mock_path
-        );
+        eprintln!("Skipping test: mock source plugin not found at {mock_path:?}");
         return;
     }
 
@@ -1580,10 +1568,7 @@ async fn test_source_with_identity_provider_injection() {
     let dir = plugin_dir();
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
-        eprintln!(
-            "Skipping test: mock source plugin not found at {:?}",
-            mock_path
-        );
+        eprintln!("Skipping test: mock source plugin not found at {mock_path:?}");
         return;
     }
 

@@ -45,7 +45,7 @@ impl IdentityProviderVtableBuilder {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to create runtime: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e}"))?;
 
                 rt.block_on(provider_clone.get_credentials())
             })

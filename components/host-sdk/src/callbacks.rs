@@ -168,6 +168,14 @@ fn ffi_lifecycle_to_component_status(event_type: FfiLifecycleEventType) -> Compo
 /// FfiLogEntry carries a non-empty `instance_id` and `component_id`, logs are
 /// pushed into the registry with the correct composite key so they appear in
 /// the REST API's log streaming endpoints.
+/// # Safety
+/// `entry` must be a valid pointer to an `FfiLogEntry`. `ctx` may be null (logs
+/// are still forwarded to the host log framework), or must point to a valid
+/// `CallbackContext` for registry routing.
+///
+/// This function's signature matches `LogCallbackFn` (non-unsafe `extern "C"`).
+/// Raw pointer dereferences are guarded by `unsafe` blocks inside the body.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
     let entry = unsafe { &*entry };
     let plugin_id = unsafe { entry.plugin_id.to_string() };
@@ -218,6 +226,10 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
 }
 
 /// Host lifecycle callback that routes plugin events into DrasiLib's ComponentEventHistory.
+/// # Safety
+/// `event` must be a valid pointer to an `FfiLifecycleEvent`. `ctx` may be null
+/// or must point to a valid `CallbackContext`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
     let event = unsafe { &*event };
     let component_id = unsafe { event.component_id.to_string() };
@@ -225,13 +237,7 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
     let message = unsafe { event.message.to_string() };
     let event_type = event.event_type;
 
-    log::debug!(
-        "Lifecycle: {} ({}) {:?} {}",
-        component_id,
-        component_type_str,
-        event_type,
-        message
-    );
+    log::debug!("Lifecycle: {component_id} ({component_type_str}) {event_type:?} {message}");
 
     // Always capture for diagnostics
     captured_lifecycles()
@@ -299,6 +305,10 @@ pub fn default_lifecycle_callback_fn() -> LifecycleCallbackFn {
 /// This callback is set during SourceProxy.initialize() via FfiRuntimeContext.
 /// It uses the `instance_id` and `component_id` from the FfiLogEntry (set by
 /// the plugin's TLS-aware FfiLogger) to construct the correct ComponentLogKey.
+/// # Safety
+/// `entry` must be a valid pointer to an `FfiLogEntry`. `ctx` may be null or
+/// must point to a valid `InstanceCallbackContext`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
     let entry = unsafe { &*entry };
     let plugin_id = unsafe { entry.plugin_id.to_string() };
@@ -362,6 +372,10 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
 
 /// Per-instance lifecycle callback that sends events through the SourceManager's
 /// event channel, so they flow through the same path as static source events.
+/// # Safety
+/// `event` must be a valid pointer to an `FfiLifecycleEvent`. `ctx` may be null
+/// or must point to a valid `InstanceCallbackContext`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
     let event = unsafe { &*event };
     let component_id = unsafe { event.component_id.to_string() };
@@ -370,11 +384,7 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
     let event_type = event.event_type;
 
     log::debug!(
-        "Lifecycle [instance]: {} ({}) {:?} {}",
-        component_id,
-        component_type_str,
-        event_type,
-        message
+        "Lifecycle [instance]: {component_id} ({component_type_str}) {event_type:?} {message}"
     );
 
     // Capture for diagnostics
@@ -413,7 +423,7 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
                 .unwrap();
             rt.block_on(async {
                 if let Err(e) = tx.send(component_event).await {
-                    log::error!("Failed to send lifecycle event: {}", e);
+                    log::error!("Failed to send lifecycle event: {e}");
                 }
             });
         })

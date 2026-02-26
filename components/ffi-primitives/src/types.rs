@@ -41,6 +41,16 @@ pub struct FfiStr {
 }
 
 impl FfiStr {
+    /// Create an `FfiStr` that borrows the given `&str` data.
+    ///
+    /// This is a zero-copy operation — the pointer and length reference the
+    /// original string's memory. The caller must ensure the source `&str`
+    /// outlives this `FfiStr`.
+    ///
+    /// Note: This is NOT the same as `std::str::FromStr` (which parses owned
+    /// data). We suppress the lint because the semantics are fundamentally
+    /// different — this is a borrowed pointer wrap, not a parse operation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self {
             ptr: s.as_ptr() as *const c_char,
@@ -265,7 +275,7 @@ impl FfiGetResult {
 pub fn now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock is before UNIX epoch")
         .as_micros() as i64
 }
 

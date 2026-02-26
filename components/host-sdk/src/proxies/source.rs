@@ -363,8 +363,7 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(
-                "Plugin factory returned null for source '{}'",
-                id
+                "Plugin factory returned null for source '{id}'"
             ));
         }
 

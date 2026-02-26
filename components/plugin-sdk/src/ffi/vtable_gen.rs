@@ -345,7 +345,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         match result {
             Ok(sub) => wrap_subscription_response(sub, w.vtable_executor),
             Err(e) => {
-                log::error!("Subscribe failed: {}", e);
+                log::error!("Subscribe failed: {e}");
                 std::ptr::null_mut()
             }
         }
@@ -680,7 +680,7 @@ pub fn build_source_vtable_from_boxed(
                 wrap_subscription_response(sub, executor)
             }
             Err(e) => {
-                log::error!("Subscribe failed: {}", e);
+                log::error!("Subscribe failed: {e}");
                 std::ptr::null_mut()
             }
         }
@@ -1491,7 +1491,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse config JSON for source '{}': {}", id_str, e);
+                log::error!("Failed to parse config JSON for source '{id_str}': {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -1522,7 +1522,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
                 Box::into_raw(Box::new(vtable))
             }
             Err(e) => {
-                log::error!("Failed to create source '{}': {}", id_str, e);
+                log::error!("Failed to create source '{id_str}': {e}");
                 std::ptr::null_mut()
             }
         }
@@ -1620,11 +1620,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         let query_ids: Vec<String> = match serde_json::from_str(&query_ids_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!(
-                    "Failed to parse query_ids JSON for reaction '{}': {}",
-                    id_str,
-                    e
-                );
+                log::error!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -1632,11 +1628,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!(
-                    "Failed to parse config JSON for reaction '{}': {}",
-                    id_str,
-                    e
-                );
+                log::error!("Failed to parse config JSON for reaction '{id_str}': {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -1668,7 +1660,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
                 Box::into_raw(Box::new(vtable))
             }
             Err(e) => {
-                log::error!("Failed to create reaction '{}': {}", id_str, e);
+                log::error!("Failed to create reaction '{id_str}': {e}");
                 std::ptr::null_mut()
             }
         }
@@ -1764,7 +1756,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse bootstrap config JSON: {}", e);
+                log::error!("Failed to parse bootstrap config JSON: {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -1772,7 +1764,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse source config JSON: {}", e);
+                log::error!("Failed to parse source config JSON: {e}");
                 return std::ptr::null_mut();
             }
         };
@@ -1797,7 +1789,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
                 Box::into_raw(Box::new(vtable))
             }
             Err(e) => {
-                log::error!("Failed to create bootstrap provider: {}", e);
+                log::error!("Failed to create bootstrap provider: {e}");
                 std::ptr::null_mut()
             }
         }
@@ -1902,8 +1894,7 @@ fn build_reaction_runtime_context(
             id: &str,
         ) -> anyhow::Result<Arc<dyn drasi_lib::queries::Query>> {
             anyhow::bail!(
-                "QueryProvider not available in dynamic plugin mode. Query '{}' subscriptions are managed by the host.",
-                id
+                "QueryProvider not available in dynamic plugin mode. Query '{id}' subscriptions are managed by the host."
             )
         }
     }
@@ -1936,9 +1927,9 @@ fn wrap_subscription_response(
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .expect("failed to create tokio runtime for change_receiver_recv");
         let event = {
-            let mut rx = r.inner.lock().unwrap();
+            let mut rx = r.inner.lock().expect("change receiver mutex poisoned");
             rt.block_on(rx.recv())
         };
         match event {
@@ -2003,9 +1994,9 @@ fn wrap_subscription_response(
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("failed to create tokio runtime for bootstrap_recv");
             let event = {
-                let mut rx = r.inner.lock().unwrap();
+                let mut rx = r.inner.lock().expect("bootstrap receiver mutex poisoned");
                 rt.block_on(rx.recv())
             };
             match event {

@@ -97,7 +97,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         );
 
         if count < 0 {
-            return Err(anyhow::anyhow!("Bootstrap failed with code {}", count));
+            return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
         }
 
         Ok(count as usize)
