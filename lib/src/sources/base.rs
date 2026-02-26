@@ -421,13 +421,14 @@ impl SourceBase {
                 .map(|c| c.instance_id.clone())
                 .unwrap_or_default();
 
-            // Spawn bootstrap task with tracing span for proper log routing
+            // Spawn bootstrap task with tracing span for log routing
             let span = tracing::info_span!(
                 "source_bootstrap",
                 instance_id = %instance_id,
                 component_id = %source_id,
                 component_type = "source"
             );
+
             tokio::spawn(
                 async move {
                     match provider
@@ -450,6 +451,9 @@ impl SourceBase {
                 }
                 .instrument(span),
             );
+
+            // Yield to allow the spawned task to start
+            tokio::task::yield_now().await;
 
             Ok(Some(bootstrap_rx))
         } else {
