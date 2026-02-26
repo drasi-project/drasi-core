@@ -158,6 +158,8 @@ pub struct FfiRuntimeContext {
     pub lifecycle_callback: Option<super::callbacks::LifecycleCallbackFn>,
     /// Opaque context for per-instance lifecycle callback.
     pub lifecycle_ctx: *mut c_void,
+    /// Nullable — identity provider for credential injection.
+    pub identity_provider: *const super::identity::IdentityProviderVtable,
 }
 
 // ============================================================================

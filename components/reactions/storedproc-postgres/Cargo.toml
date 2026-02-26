@@ -27,7 +27,6 @@ categories = ["database"]
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 
 # Async runtime

@@ -251,10 +251,20 @@ impl Source for SourceProxy {
             *guard = Some(per_instance_ctx);
         }
 
+        let identity_vtable = context
+            .identity_provider
+            .as_ref()
+            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip.clone()));
+
+        let ip_ptr = identity_vtable
+            .map(|v| Box::into_raw(Box::new(v)) as *const _)
+            .unwrap_or(std::ptr::null());
+
         let ffi_ctx = FfiRuntimeContext {
             instance_id: instance_id_ffi,
             component_id: component_id_ffi,
             state_store: ss_ptr,
+            identity_provider: ip_ptr,
             log_callback: Some(crate::callbacks::instance_log_callback),
             log_ctx: ctx_ptr,
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),

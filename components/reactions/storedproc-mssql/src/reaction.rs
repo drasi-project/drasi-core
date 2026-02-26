@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
@@ -39,7 +39,7 @@ use crate::parser::ParameterParser;
 pub struct MsSqlStoredProcReaction {
     base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
-    executor: Arc<MsSqlExecutor>,
+    executor: RwLock<Option<Arc<MsSqlExecutor>>>,
     parser: ParameterParser,
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -107,19 +107,23 @@ impl MsSqlStoredProcReaction {
         // Validate configuration
         config.validate()?;
 
-        // Create database executor
-        let executor = Arc::new(MsSqlExecutor::new(&config).await?);
-
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
 
+        let base = ReactionBase::new(params);
+
+        // If config has identity_provider, store it in base for unified access
+        if let Some(ip) = &config.identity_provider {
+            base.set_identity_provider(Arc::from(ip.clone_box())).await;
+        }
+
         Ok(Self {
-            base: ReactionBase::new(params),
+            base,
             config,
-            executor,
+            executor: RwLock::new(None),
             parser: ParameterParser::new(),
             task_handle: Arc::new(Mutex::new(None)),
         })
@@ -167,9 +171,8 @@ impl MsSqlStoredProcReaction {
     }
 
     /// Spawn the processing task that handles query results
-    fn spawn_processing_task(&self) -> JoinHandle<()> {
+    fn spawn_processing_task(&self, executor: Arc<MsSqlExecutor>) -> JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
-        let executor = self.executor.clone();
         let parser = self.parser.clone();
         let config = self.config.clone();
         let reaction_id = self.base.id.clone();
@@ -296,14 +299,21 @@ impl Reaction for MsSqlStoredProcReaction {
             self.base.id, self.config.database
         );
 
+        // Create executor (deferred to start so identity_provider from context is available)
+        let identity_provider = self.base.identity_provider().await;
+        let executor = Arc::new(MsSqlExecutor::new(&self.config, identity_provider).await?);
+
         // Test database connection
-        self.executor.test_connection().await?;
+        executor.test_connection().await?;
+
+        // Store executor for later use
+        *self.executor.write().await = Some(executor.clone());
 
         // Subscribe to all queries
         self.base.subscribe_to_queries().await?;
 
         // Spawn processing task
-        let task = self.spawn_processing_task();
+        let task = self.spawn_processing_task(executor);
         *self.task_handle.lock().await = Some(task);
 
         info!(

@@ -1831,12 +1831,21 @@ fn build_source_runtime_context(ffi_ctx: &FfiRuntimeContext) -> (SourceRuntimeCo
             vtable: ffi_ctx.state_store,
         }))
     };
+    let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
+        if ffi_ctx.identity_provider.is_null() {
+            None
+        } else {
+            Some(Arc::new(unsafe {
+                super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
+            }))
+        };
     let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
         status_tx,
         state_store,
+        identity_provider,
     };
     (ctx, status_rx)
 }
@@ -1855,6 +1864,14 @@ fn build_reaction_runtime_context(
             vtable: ffi_ctx.state_store,
         }))
     };
+    let identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>> =
+        if ffi_ctx.identity_provider.is_null() {
+            None
+        } else {
+            Some(Arc::new(unsafe {
+                super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
+            }))
+        };
     let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     // Stub QueryProvider — the host manages query subscriptions for cdylib reactions
@@ -1878,6 +1895,7 @@ fn build_reaction_runtime_context(
         status_tx,
         state_store,
         query_provider: Arc::new(StubQueryProvider),
+        identity_provider,
     };
     (ctx, status_rx)
 }

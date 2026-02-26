@@ -30,6 +30,8 @@
 
 pub mod bootstrap_proxy;
 pub mod callbacks;
+pub mod identity;
+pub mod identity_proxy;
 pub mod metadata;
 pub mod state_store_proxy;
 pub mod tracing_bridge;
@@ -61,4 +63,9 @@ pub use vtables::{
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
+pub use identity::{
+    credentials_to_ffi, FfiCredentialType, FfiCredentials, FfiCredentialsResult,
+    IdentityProviderVtable,
+};
+pub use identity_proxy::FfiIdentityProviderProxy;
 pub use state_store_proxy::FfiStateStoreProxy;

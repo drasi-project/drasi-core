@@ -16,7 +16,6 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
 anyhow = "1.0"

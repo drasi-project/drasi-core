@@ -22,11 +22,13 @@
 //! - Callback types for log/lifecycle event capture
 
 pub mod callbacks;
+pub mod identity_bridge;
 pub mod loader;
 pub mod proxies;
 pub mod state_store_bridge;
 
 pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
+pub use identity_bridge::IdentityProviderVtableBuilder;
 pub use loader::{LoadedPlugin, PluginLoader, PluginLoaderConfig};
 pub use proxies::bootstrap_provider::{BootstrapProviderProxy, BootstrapPluginProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};

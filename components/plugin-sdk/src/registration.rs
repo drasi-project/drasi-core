@@ -73,6 +73,17 @@ use crate::descriptor::{
 /// compiled against the exact same version of the `drasi-plugin-sdk` crate.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Pinned Tokio version for compatibility validation.
+///
+/// Plugins report this in their metadata so the server can verify they were
+/// built against a compatible Tokio version.
+pub const TOKIO_VERSION: &str = "1.44.1";
+
+/// Build compatibility hash, computed at compile time by `build.rs`.
+///
+/// Components: rustc version, crate version, target triple, profile.
+pub const BUILD_HASH: &str = env!("DRASI_BUILD_HASH");
+
 /// Contains the descriptors provided by a plugin.
 ///
 /// A plugin can register any combination of source, reaction, and bootstrap descriptors.
@@ -132,8 +143,8 @@ impl PluginRegistration {
         Self {
             sdk_version: SDK_VERSION,
             rust_version: env!("DRASI_RUSTC_VERSION"),
-            tokio_version: drasi_plugin_runtime::TOKIO_VERSION,
-            build_hash: drasi_plugin_runtime::BUILD_HASH,
+            tokio_version: TOKIO_VERSION,
+            build_hash: BUILD_HASH,
             sources: Vec::new(),
             reactions: Vec::new(),
             bootstrappers: Vec::new(),

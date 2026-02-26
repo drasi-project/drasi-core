@@ -30,7 +30,6 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"

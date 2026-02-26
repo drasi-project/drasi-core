@@ -61,6 +61,7 @@
 use std::sync::Arc;
 
 use crate::channels::ComponentEventSender;
+use crate::identity::IdentityProvider;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -99,6 +100,13 @@ pub struct SourceRuntimeContext {
     /// This is `Some` if a state store provider was configured on DrasiLib,
     /// otherwise `None`. Sources can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
+
+    /// Optional identity provider for credential injection.
+    ///
+    /// This is `Some` if the host has configured an identity provider for this component.
+    /// Sources can use this to obtain authentication credentials (passwords, tokens,
+    /// certificates) for connecting to external systems.
+    pub identity_provider: Option<Arc<dyn IdentityProvider>>,
 }
 
 impl SourceRuntimeContext {
@@ -124,6 +132,7 @@ impl SourceRuntimeContext {
             source_id: source_id.into(),
             status_tx,
             state_store,
+            identity_provider: None,
         }
     }
 
@@ -210,6 +219,13 @@ pub struct ReactionRuntimeContext {
     /// Reactions use this to get query instances and subscribe to their results.
     /// This is always available (not optional) since reactions require queries.
     pub query_provider: Arc<dyn QueryProvider>,
+
+    /// Optional identity provider for credential injection.
+    ///
+    /// This is `Some` if the host has configured an identity provider for this component.
+    /// Reactions can use this to obtain authentication credentials (passwords, tokens,
+    /// certificates) for connecting to external systems.
+    pub identity_provider: Option<Arc<dyn IdentityProvider>>,
 }
 
 impl ReactionRuntimeContext {
@@ -238,6 +254,7 @@ impl ReactionRuntimeContext {
             status_tx,
             state_store,
             query_provider,
+            identity_provider: None,
         }
     }
 

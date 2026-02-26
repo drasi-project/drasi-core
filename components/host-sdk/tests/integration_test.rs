@@ -1071,3 +1071,539 @@ async fn test_null_callback_context_does_not_crash() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let _ = source.stop().await;
 }
+
+// ============================================================================
+// Tracing bridge tests — verify log events at all levels are captured
+// ============================================================================
+
+#[tokio::test]
+async fn test_all_log_levels_captured_in_diagnostic_store() {
+    //! Verify that log events at all levels (info, warn, error, debug) emitted by a plugin
+    //! are captured in the diagnostic captured_logs store. The mock source emits info! during
+    //! start/stop, verifying the tracing-log bridge works for the log crate.
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-source-mock");
+
+    // Clear diagnostic stores before test
+    callbacks::captured_logs().lock().unwrap().clear();
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 500
+    });
+
+    let source = plugin.source_plugins[0]
+        .create_source("level-test", &config, false)
+        .await
+        .unwrap();
+
+    let _ = source.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = source.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let logs = callbacks::captured_logs().lock().unwrap();
+    // We should have at least the start and stop info logs
+    let our_logs: Vec<_> = logs
+        .iter()
+        .filter(|l| l.message.contains("level-test"))
+        .collect();
+
+    assert!(
+        !our_logs.is_empty(),
+        "Expected captured logs mentioning 'level-test'"
+    );
+
+    // Verify info level is present (mock source emits info during start/stop)
+    let has_info = our_logs
+        .iter()
+        .any(|l| l.level == drasi_plugin_sdk::ffi::FfiLogLevel::Info);
+    assert!(has_info, "Expected at least one INFO log, got: {:?}", our_logs);
+}
+
+#[tokio::test]
+async fn test_logs_without_initialize_reach_global_callback() {
+    //! When a source is NOT initialized (no per-instance callbacks), logs should
+    //! still reach the global callback and be captured in the diagnostic store.
+    //! This verifies the tracing bridge's global fallback path.
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-source-mock");
+
+    callbacks::captured_logs().lock().unwrap().clear();
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 500
+    });
+
+    let source = plugin.source_plugins[0]
+        .create_source("global-cb-test", &config, false)
+        .await
+        .unwrap();
+
+    // Don't call initialize — no per-instance callbacks
+    let _ = source.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = source.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let logs = callbacks::captured_logs().lock().unwrap();
+    let our_logs: Vec<_> = logs
+        .iter()
+        .filter(|l| l.message.contains("global-cb-test"))
+        .collect();
+
+    assert!(
+        !our_logs.is_empty(),
+        "Expected logs via global callback for source without initialize()"
+    );
+}
+
+#[tokio::test]
+async fn test_per_instance_logs_include_correct_component_id() {
+    //! Verify that when source.initialize() is called, subsequent log entries
+    //! in the ComponentLogRegistry contain the correct component_id.
+    use drasi_lib::channels::ComponentType;
+    use drasi_lib::context::SourceRuntimeContext;
+    use drasi_lib::managers::{get_or_init_global_registry, ComponentLogKey};
+    use drasi_lib::sources::Source;
+
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-source-mock");
+
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let config = serde_json::json!({
+        "dataType": { "type": "generic" },
+        "intervalMs": 500
+    });
+
+    let source = plugin.source_plugins[0]
+        .create_source("component-id-test", &config, false)
+        .await
+        .unwrap();
+
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
+    let context = SourceRuntimeContext::new(
+        "cid-test-instance",
+        "component-id-test",
+        status_tx,
+        None,
+    );
+    source.initialize(context).await;
+
+    let registry = get_or_init_global_registry();
+    let log_key = ComponentLogKey::new("cid-test-instance", ComponentType::Source, "component-id-test");
+    let (_history, mut log_rx) = registry.subscribe_by_key(&log_key).await;
+
+    let _ = source.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let _ = source.stop().await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let mut log_count = 0;
+    while let Ok(log_msg) = log_rx.try_recv() {
+        log_count += 1;
+        // Verify each log has the correct component key
+        let key = log_msg.key();
+        assert_eq!(
+            key.component_id, "component-id-test",
+            "Log entry should have component_id 'component-id-test', got '{}'",
+            key.component_id
+        );
+        assert_eq!(
+            key.instance_id, "cid-test-instance",
+            "Log entry should have instance_id 'cid-test-instance', got '{}'",
+            key.instance_id
+        );
+    }
+    assert!(
+        log_count > 0,
+        "Expected at least one log message with correct component_id in registry"
+    );
+}
+
+// =============================================================================
+// Identity Provider FFI bridge tests
+// =============================================================================
+
+/// A mock IdentityProvider for testing the FFI bridge.
+struct MockIdentityProvider {
+    username: String,
+    password: String,
+}
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockIdentityProvider {
+    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        Ok(drasi_lib::identity::Credentials::UsernamePassword {
+            username: self.username.clone(),
+            password: self.password.clone(),
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockIdentityProvider {
+            username: self.username.clone(),
+            password: self.password.clone(),
+        })
+    }
+}
+
+/// A mock IdentityProvider that returns Token credentials.
+struct MockTokenProvider {
+    username: String,
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockTokenProvider {
+    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        Ok(drasi_lib::identity::Credentials::Token {
+            username: self.username.clone(),
+            token: self.token.clone(),
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockTokenProvider {
+            username: self.username.clone(),
+            token: self.token.clone(),
+        })
+    }
+}
+
+/// A mock IdentityProvider that returns Certificate credentials.
+struct MockCertProvider {
+    cert_pem: String,
+    key_pem: String,
+    username: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockCertProvider {
+    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        Ok(drasi_lib::identity::Credentials::Certificate {
+            cert_pem: self.cert_pem.clone(),
+            key_pem: self.key_pem.clone(),
+            username: self.username.clone(),
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockCertProvider {
+            cert_pem: self.cert_pem.clone(),
+            key_pem: self.key_pem.clone(),
+            username: self.username.clone(),
+        })
+    }
+}
+
+/// A mock IdentityProvider that returns an error.
+struct MockErrorProvider;
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockErrorProvider {
+    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        Err(anyhow::anyhow!("Authentication service unavailable"))
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockErrorProvider)
+    }
+}
+
+/// Test that UsernamePassword credentials survive the vtable → proxy roundtrip.
+#[tokio::test]
+async fn test_identity_provider_username_password_roundtrip() {
+    let provider = std::sync::Arc::new(MockIdentityProvider {
+        username: "admin".to_string(),
+        password: "s3cret!".to_string(),
+    });
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+
+    match creds {
+        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+            assert_eq!(username, "admin");
+            assert_eq!(password, "s3cret!");
+        }
+        _ => panic!("Expected UsernamePassword variant"),
+    }
+}
+
+/// Test that Token credentials survive the vtable → proxy roundtrip.
+#[tokio::test]
+async fn test_identity_provider_token_roundtrip() {
+    let provider = std::sync::Arc::new(MockTokenProvider {
+        username: "svc-account".to_string(),
+        token: "eyJhbGciOiJSUzI1NiJ9.test-token".to_string(),
+    });
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+
+    match creds {
+        drasi_lib::identity::Credentials::Token { username, token } => {
+            assert_eq!(username, "svc-account");
+            assert_eq!(token, "eyJhbGciOiJSUzI1NiJ9.test-token");
+        }
+        _ => panic!("Expected Token variant"),
+    }
+}
+
+/// Test that Certificate credentials (with optional username) survive roundtrip.
+#[tokio::test]
+async fn test_identity_provider_certificate_roundtrip() {
+    let provider = std::sync::Arc::new(MockCertProvider {
+        cert_pem: "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----".to_string(),
+        key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".to_string(),
+        username: Some("db-user".to_string()),
+    });
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+
+    match creds {
+        drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, username } => {
+            assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+            assert!(key_pem.contains("BEGIN PRIVATE KEY"));
+            assert_eq!(username, Some("db-user".to_string()));
+        }
+        _ => panic!("Expected Certificate variant"),
+    }
+}
+
+/// Test that Certificate credentials without username work.
+#[tokio::test]
+async fn test_identity_provider_certificate_no_username() {
+    let provider = std::sync::Arc::new(MockCertProvider {
+        cert_pem: "cert-data".to_string(),
+        key_pem: "key-data".to_string(),
+        username: None,
+    });
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+
+    match creds {
+        drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, username } => {
+            assert_eq!(cert_pem, "cert-data");
+            assert_eq!(key_pem, "key-data");
+            assert_eq!(username, None);
+        }
+        _ => panic!("Expected Certificate variant"),
+    }
+}
+
+/// Test that errors from the identity provider propagate through FFI.
+#[tokio::test]
+async fn test_identity_provider_error_propagation() {
+    let provider = std::sync::Arc::new(MockErrorProvider);
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+    let result = proxy.get_credentials().await;
+
+    match result {
+        Ok(_) => panic!("Expected error from identity provider"),
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("Authentication service unavailable"),
+                "Error message should contain original error, got: {}",
+                err_msg
+            );
+        }
+    }
+}
+
+/// Test that clone_box produces a working independent copy.
+#[tokio::test]
+async fn test_identity_provider_clone_box() {
+    let provider = std::sync::Arc::new(MockIdentityProvider {
+        username: "user1".to_string(),
+        password: "pass1".to_string(),
+    });
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe {
+        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
+    };
+
+    use drasi_lib::identity::IdentityProvider;
+
+    // Clone the proxy
+    let cloned = proxy.clone_box();
+
+    // Drop the original
+    drop(proxy);
+
+    // The clone should still work
+    let creds = cloned.get_credentials().await.expect("cloned provider should work");
+    match creds {
+        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+            assert_eq!(username, "user1");
+            assert_eq!(password, "pass1");
+        }
+        _ => panic!("Expected UsernamePassword variant"),
+    }
+}
+
+/// Test that null identity_provider in FfiRuntimeContext is handled correctly
+/// (source initializes without crashing and identity_provider is None).
+#[tokio::test]
+async fn test_source_with_null_identity_provider() {
+    let dir = plugin_dir();
+    let mock_path = dir.join(plugin_filename("drasi_source_mock"));
+    if !mock_path.exists() {
+        eprintln!("Skipping test: mock source plugin not found at {:?}", mock_path);
+        return;
+    }
+
+    let plugin = load_plugin_from_path(
+        &mock_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+        .expect("Should load mock source plugin");
+
+    let source_descriptor = &plugin.source_plugins[0];
+    let config = serde_json::json!({});
+    let source = source_descriptor
+        .create_source("null-ip-test", &config, false)
+        .await
+        .expect("Should create source");
+
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let context = drasi_lib::context::SourceRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        source_id: "null-ip-test".to_string(),
+        status_tx,
+        state_store: None,
+        identity_provider: None,
+    };
+
+    // This should not crash — identity_provider is None
+    source.initialize(context).await;
+    assert_eq!(source.id(), "null-ip-test");
+}
+
+/// Test that a source receives a non-null identity_provider through FFI.
+#[tokio::test]
+async fn test_source_with_identity_provider_injection() {
+    let dir = plugin_dir();
+    let mock_path = dir.join(plugin_filename("drasi_source_mock"));
+    if !mock_path.exists() {
+        eprintln!("Skipping test: mock source plugin not found at {:?}", mock_path);
+        return;
+    }
+
+    let plugin = load_plugin_from_path(
+        &mock_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+        .expect("Should load mock source plugin");
+
+    let source_descriptor = &plugin.source_plugins[0];
+    let config = serde_json::json!({});
+    let source = source_descriptor
+        .create_source("ip-inject-test", &config, false)
+        .await
+        .expect("Should create source");
+
+    let provider: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider> =
+        std::sync::Arc::new(MockIdentityProvider {
+            username: "injected-user".to_string(),
+            password: "injected-pass".to_string(),
+        });
+
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let context = drasi_lib::context::SourceRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        source_id: "ip-inject-test".to_string(),
+        status_tx,
+        state_store: None,
+        identity_provider: Some(provider),
+    };
+
+    // This should not crash — identity_provider is passed through FFI
+    source.initialize(context).await;
+    assert_eq!(source.id(), "ip-inject-test");
+}

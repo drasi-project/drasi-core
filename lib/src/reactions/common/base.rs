@@ -40,6 +40,7 @@ use crate::channels::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
 };
 use crate::context::ReactionRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
@@ -121,6 +122,10 @@ pub struct ReactionBase {
     pub processing_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     /// Sender for shutdown signal to processing task
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Optional identity provider for credential management.
+    /// Set either programmatically (via `set_identity_provider`) or automatically
+    /// from the runtime context during `initialize()`.
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
 }
 
 impl ReactionBase {
@@ -142,6 +147,7 @@ impl ReactionBase {
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -166,6 +172,14 @@ impl ReactionBase {
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
         }
+
+        // Store identity provider from context if not already set programmatically
+        if let Some(ip) = context.identity_provider.as_ref() {
+            let mut guard = self.identity_provider.write().await;
+            if guard.is_none() {
+                *guard = Some(ip.clone());
+            }
+        }
     }
 
     /// Get the runtime context if initialized.
@@ -180,6 +194,24 @@ impl ReactionBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
+    }
+
+    /// Get the identity provider if set.
+    ///
+    /// Returns the identity provider set either programmatically via
+    /// `set_identity_provider()` or from the runtime context during `initialize()`.
+    /// Programmatically-set providers take precedence over context providers.
+    pub async fn identity_provider(&self) -> Option<Arc<dyn IdentityProvider>> {
+        self.identity_provider.read().await.clone()
+    }
+
+    /// Set the identity provider programmatically.
+    ///
+    /// This is typically called during reaction construction when the provider
+    /// is available from configuration (e.g., `with_identity_provider()` builder).
+    /// Providers set this way take precedence over context-injected providers.
+    pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(provider);
     }
 
     /// Get whether this reaction should auto-start
@@ -215,6 +247,7 @@ impl ReactionBase {
             subscription_tasks: self.subscription_tasks.clone(),
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
+            identity_provider: self.identity_provider.clone(),
         }
     }
 

@@ -30,7 +30,6 @@ workspace = true
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-drasi-plugin-runtime = { workspace = true }
 drasi-lib.workspace = true
 drasi-reaction-grpc.workspace = true
 anyhow = "1.0"
