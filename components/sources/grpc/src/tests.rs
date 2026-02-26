@@ -378,4 +378,29 @@ mod proto_conversion {
             _ => panic!("Expected String"),
         }
     }
+
+    /// Validates that gRPC source converts nanosecond wire timestamps to
+    /// milliseconds when constructing ElementMetadata.
+    #[test]
+    fn test_proto_metadata_converts_nanos_to_millis() {
+        use drasi_core::models::validate_effective_from;
+
+        // Simulate a nanosecond timestamp from protobuf (Feb 2026)
+        let nanos: u64 = 1_771_000_000_000_000_000;
+        let proto_meta = proto::ElementMetadata {
+            reference: Some(proto::ElementReference {
+                source_id: "src".to_string(),
+                element_id: "e1".to_string(),
+            }),
+            labels: vec!["Test".to_string()],
+            effective_from: nanos,
+        };
+
+        let core_meta = convert_proto_metadata_to_core(&proto_meta, "test-src").unwrap();
+        assert!(
+            validate_effective_from(core_meta.effective_from).is_ok(),
+            "gRPC effective_from ({}) should be in millisecond range after ns->ms conversion",
+            core_meta.effective_from
+        );
+    }
 }

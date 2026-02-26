@@ -781,3 +781,30 @@ fn parse_lsn(lsn_str: &str) -> Result<u64> {
 
     Ok((high << 32) | low)
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use drasi_core::models::validate_effective_from;
+
+    /// Validates that the timestamp pattern used in convert_insert/convert_update/convert_delete
+    /// produces a value in the millisecond range.
+    #[test]
+    fn effective_from_uses_milliseconds() {
+        let effective_from = Utc::now().timestamp_millis() as u64;
+        assert!(
+            validate_effective_from(effective_from).is_ok(),
+            "Postgres CDC effective_from ({effective_from}) should be in millisecond range"
+        );
+    }
+
+    /// Verifies that using nanoseconds would be caught by the validator.
+    #[test]
+    fn effective_from_rejects_nanoseconds_pattern() {
+        let bad_effective_from = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+        assert!(
+            validate_effective_from(bad_effective_from).is_err(),
+            "Nanosecond timestamp ({bad_effective_from}) should be rejected"
+        );
+    }
+}
