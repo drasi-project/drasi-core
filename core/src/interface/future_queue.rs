@@ -60,14 +60,15 @@ pub trait FutureQueue: Send + Sync {
 
 #[async_trait]
 pub trait FutureQueueConsumer: Send + Sync {
-    async fn on_due(
-        &self,
-        future_ref: &FutureElementRef,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    async fn on_error(
-        &self,
-        future_ref: &FutureElementRef,
-        error: Box<dyn std::error::Error + Send + Sync>,
-    );
+    /// Called when the polling loop determines items are due.
+    /// The consumer is responsible for calling `ContinuousQuery::process_due_futures()`
+    /// internally, which atomically pops and processes within a session.
+    async fn on_items_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Called when `on_items_due` returns an error.
+    async fn on_error(&self, error: Box<dyn std::error::Error + Send + Sync>);
+
+    /// Returns the current time in milliseconds since epoch.
+    /// Retained so tests can override the clock via `AutoFutureQueueConsumer::with_now_override()`.
     fn now(&self) -> u64;
 }

@@ -331,34 +331,40 @@ mod unit_tests {
 mod index {
     use crate::index;
     use drasi_core::{
-        in_memory_index::in_memory_future_queue::InMemoryFutureQueue, interface::FutureQueue,
+        in_memory_index::in_memory_future_queue::InMemoryFutureQueue,
+        interface::{FutureQueue, NoOpSessionControl},
     };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn future_queue_push_always() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_always(&fqi).await;
+        index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_push_not_exists() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_not_exists(&fqi).await;
+        index::future_queue::push_not_exists(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_clear_removes_all() {
         let fqi = InMemoryFutureQueue::new();
-        index::future_queue::clear_removes_all(&fqi).await;
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
+        index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     async fn future_queue_push_overwrite() {
         let fqi = InMemoryFutureQueue::new();
+        let sc: Arc<dyn drasi_core::interface::SessionControl> = Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        index::future_queue::push_overwrite(&fqi).await;
+        index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 
