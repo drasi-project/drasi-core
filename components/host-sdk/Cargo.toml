@@ -6,6 +6,7 @@ description = "Host-side SDK for loading and interacting with Drasi cdylib plugi
 license = "Apache-2.0"
 
 [dependencies]
+drasi-ffi-primitives = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
 drasi-plugin-sdk = { workspace = true }
