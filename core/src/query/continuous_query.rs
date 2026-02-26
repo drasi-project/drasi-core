@@ -34,7 +34,9 @@ use crate::{
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
-    interface::{ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock},
+    interface::{
+        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock, SessionControl,
+    },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
     path_solver::{
@@ -56,6 +58,8 @@ pub struct ContinuousQuery {
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
+    #[allow(dead_code)]
+    session_control: Arc<dyn SessionControl>,
 }
 
 impl ContinuousQuery {
@@ -69,6 +73,7 @@ impl ContinuousQuery {
         part_evaluator: Arc<QueryPartEvaluator>,
         future_queue: Arc<dyn FutureQueue>,
         source_pipelines: SourceMiddlewarePipelineCollection,
+        session_control: Arc<dyn SessionControl>,
     ) -> Self {
         Self {
             expression_evaluator,
@@ -82,6 +87,7 @@ impl ContinuousQuery {
             future_queue_task: Mutex::new(None),
             change_lock: Mutex::new(()),
             source_pipelines,
+            session_control,
         }
     }
 
@@ -142,7 +148,7 @@ impl ContinuousQuery {
 
                             aggregation_results.insert(ctx);
                         }
-                        QueryPartEvaluationContext::Updating { before, after } => {
+                        QueryPartEvaluationContext::Updating { before, after, .. } => {
                             if before == after {
                                 return;
                             }
@@ -324,12 +330,14 @@ impl ContinuousQuery {
                     QueryPartEvaluationContext::Updating {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 )),
                 None => result.changes.push((
                     *sig,
                     QueryPartEvaluationContext::Removing {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 )),
             }
@@ -341,6 +349,7 @@ impl ContinuousQuery {
                     *sig,
                     QueryPartEvaluationContext::Adding {
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 ))
             }
@@ -491,7 +500,46 @@ impl ContinuousQuery {
             contexts = result.clone();
         }
 
-        Ok(result.into_iter().map(|(ctx, _)| ctx).collect())
+        Ok(result
+            .into_iter()
+            .map(|(ctx, cc)| match ctx {
+                QueryPartEvaluationContext::Adding { after, .. } => {
+                    QueryPartEvaluationContext::Adding {
+                        after,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Updating { before, after, .. } => {
+                    QueryPartEvaluationContext::Updating {
+                        before,
+                        after,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Removing { before, .. } => {
+                    QueryPartEvaluationContext::Removing {
+                        before,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    ..
+                } => QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    row_signature: cc.after_grouping_hash,
+                },
+                QueryPartEvaluationContext::Noop => QueryPartEvaluationContext::Noop,
+            })
+            .collect())
     }
 
     #[tracing::instrument(skip_all, err, level = "debug")]
@@ -660,6 +708,7 @@ impl CollapsedAggregationResults {
             grouping_keys,
             default_before,
             default_after,
+            ..
         } = context
         {
             let after_key = extract_grouping_value_hash(&grouping_keys, &after);
@@ -684,6 +733,7 @@ impl CollapsedAggregationResults {
                                     default_after,
                                     after,
                                     grouping_keys,
+                                    row_signature: after_key,
                                 },
                                 before_key,
                             ),
@@ -700,6 +750,7 @@ impl CollapsedAggregationResults {
                                 grouping_keys,
                                 default_before,
                                 default_after,
+                                row_signature: after_key,
                             },
                             before_key,
                         ),
@@ -725,7 +776,27 @@ impl CollapsedAggregationResults {
     }
 
     fn into_result_vec(self) -> Vec<QueryPartEvaluationContext> {
-        self.data.into_iter().map(|(_, (v, _))| v).collect()
+        self.data
+            .into_iter()
+            .map(|(after_key, (ctx, _))| match ctx {
+                QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    ..
+                } => QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    row_signature: after_key,
+                },
+                other => other,
+            })
+            .collect()
     }
 }
 

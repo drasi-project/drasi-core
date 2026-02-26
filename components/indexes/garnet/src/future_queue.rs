@@ -26,40 +26,31 @@ use crate::{
     ClearByPattern,
 };
 
-/// Redis key structure:
+/// Redis key structure (hash-tagged for cluster compatibility):
 ///
-/// fqi:{query_id} -> {full future_ref}  (sorted set by due_time)
-/// fqi:{query_id}:{position_in_query}:{group_signature} -> {future_ref}  (set)
+/// fqi:{<query_id>} -> {full future_ref}  (sorted set by due_time)
+/// fqi:{<query_id>}:{position_in_query}:{group_signature} -> {future_ref}  (set)
 pub struct GarnetFutureQueue {
     query_id: Arc<str>,
     connection: MultiplexedConnection,
 }
 
 impl GarnetFutureQueue {
-    pub async fn connect(query_id: &str, url: &str) -> Result<Self, IndexError> {
-        let client = match redis::Client::open(url) {
-            Ok(client) => client,
-            Err(e) => return Err(IndexError::connection_failed(e)),
-        };
-
-        let connection = match client.get_multiplexed_async_connection().await {
-            Ok(con) => con,
-            Err(e) => return Err(IndexError::connection_failed(e)),
-        };
-
-        Ok(Self {
+    /// Create a new GarnetFutureQueue from a shared connection.
+    pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
+        Self {
             query_id: Arc::from(query_id),
             connection,
-        })
+        }
     }
 
     fn get_queue_key(&self) -> String {
-        format!("fqi:{}", self.query_id)
+        format!("fqi:{{{}}}", self.query_id)
     }
 
     fn get_index_key(&self, position_in_query: usize, group_signature: u64) -> String {
         format!(
-            "fqi:{}:{}:{}",
+            "fqi:{{{}}}:{}:{}",
             self.query_id, position_in_query, group_signature
         )
     }
@@ -223,8 +214,15 @@ impl FutureQueue for GarnetFutureQueue {
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
+        // Delete the main queue sorted set key (not matched by the :* pattern below)
+        let mut con = self.connection.clone();
+        let _: () = con
+            .del(self.get_queue_key())
+            .await
+            .map_err(IndexError::other)?;
+        // Delete secondary index keys
         self.connection
-            .clear(format!("fqi:{}:*", self.query_id))
+            .clear(format!("fqi:{{{}}}:*", self.query_id))
             .await
     }
 }

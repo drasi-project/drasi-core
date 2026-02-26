@@ -188,6 +188,146 @@ pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Te
     TestMockSource::new(id, event_tx).unwrap()
 }
 
+/// A test mock source that provides a bootstrap channel for testing the bootstrap gate.
+///
+/// Unlike `TestMockSource` (which returns `bootstrap_receiver: None`), this source
+/// accepts a pre-created `BootstrapEventReceiver` and returns it from `subscribe()`,
+/// allowing tests to control bootstrap timing.
+pub struct TestBootstrapMockSource {
+    id: String,
+    auto_start: bool,
+    status: Arc<RwLock<ComponentStatus>>,
+    event_tx: ComponentEventSender,
+    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    bootstrap_rx: Arc<tokio::sync::Mutex<Option<BootstrapEventReceiver>>>,
+}
+
+impl TestBootstrapMockSource {
+    pub fn new(
+        id: String,
+        event_tx: ComponentEventSender,
+        bootstrap_rx: BootstrapEventReceiver,
+    ) -> Result<Self> {
+        Ok(Self {
+            id,
+            auto_start: true,
+            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            event_tx,
+            dispatchers: Arc::new(RwLock::new(Vec::new())),
+            bootstrap_rx: Arc::new(tokio::sync::Mutex::new(Some(bootstrap_rx))),
+        })
+    }
+}
+
+#[async_trait]
+impl Source for TestBootstrapMockSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn type_name(&self) -> &str {
+        "mock-bootstrap"
+    }
+
+    fn properties(&self) -> HashMap<String, serde_json::Value> {
+        HashMap::new()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.auto_start
+    }
+
+    async fn start(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Starting;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Starting,
+            timestamp: chrono::Utc::now(),
+            message: Some("Starting source".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        *self.status.write().await = ComponentStatus::Running;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Running,
+            timestamp: chrono::Utc::now(),
+            message: Some("Source started".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        *self.status.write().await = ComponentStatus::Stopping;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Stopping,
+            timestamp: chrono::Utc::now(),
+            message: Some("Stopping source".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        *self.status.write().await = ComponentStatus::Stopped;
+
+        let event = ComponentEvent {
+            component_id: self.id.clone(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Stopped,
+            timestamp: chrono::Utc::now(),
+            message: Some("Source stopped".to_string()),
+        };
+        let _ = self.event_tx.send(event).await;
+
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.status.read().await.clone()
+    }
+
+    async fn subscribe(
+        &self,
+        settings: crate::config::SourceSubscriptionSettings,
+    ) -> Result<SubscriptionResponse> {
+        let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(100);
+        let receiver = dispatcher.create_receiver().await?;
+
+        self.dispatchers.write().await.push(Box::new(dispatcher));
+
+        Ok(SubscriptionResponse {
+            query_id: settings.query_id,
+            source_id: self.id.clone(),
+            receiver,
+            bootstrap_receiver: self.bootstrap_rx.lock().await.take(),
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
+        // TestBootstrapMockSource already has event_tx from constructor
+    }
+}
+
+/// Helper to create a TestBootstrapMockSource instance
+pub fn create_test_bootstrap_mock_source(
+    id: String,
+    event_tx: ComponentEventSender,
+    bootstrap_rx: BootstrapEventReceiver,
+) -> TestBootstrapMockSource {
+    TestBootstrapMockSource::new(id, event_tx, bootstrap_rx).unwrap()
+}
+
 /// A test source that uses SourceBase for logging integration tests.
 ///
 /// This source uses the full SourceBase infrastructure including logger support.

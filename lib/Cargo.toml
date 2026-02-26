@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-lib"
-version = "0.3.6"
+version = "0.3.8"
 edition.workspace = true
 authors = ["Drasi Project"]
 description = "Drasi Lib"
@@ -29,9 +29,13 @@ workspace = true
 
 [features]
 default = []
+azure-identity = ["dep:azure_identity", "dep:azure_core", "dep:reqwest"]
+aws-identity = ["dep:aws-config", "dep:aws-sdk-rds", "dep:aws-sdk-sts"]
+all-identity = ["azure-identity", "aws-identity"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
+middleware-bundled-jq = ["drasi-middleware/bundled-jq"]
 middleware-decoder = ["drasi-middleware/decoder"]
 middleware-map = ["drasi-middleware/map"]
 middleware-parse-json = ["drasi-middleware/parse_json"]
@@ -81,6 +85,14 @@ ordered-float = "3.7"
 rand = "0.8"
 futures = "0.3"
 
+azure_identity = { version = "0.31", optional = true, default-features = false, features = ["tokio"] }
+azure_core = { version = "0.31", optional = true, default-features = false, features = ["tokio", "reqwest"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls"] }
+
+aws-config = { version = "1.5", optional = true }
+aws-sdk-rds = { version = "1.77", optional = true }
+aws-sdk-sts = { version = "1.50", optional = true }
+
 [dev-dependencies]
 # Testing utilities
 tempfile = "3.8"
@@ -92,5 +104,4 @@ pretty_assertions = "1.4"
 test-case = "3.3"
 
 # Additional testing dependencies
-futures = "0.3"
 rstest = "0.18"

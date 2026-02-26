@@ -186,7 +186,10 @@ impl LifecycleManager {
 
         for id in reaction_ids {
             let status = self.reaction_manager.get_reaction_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
                     error!("Error stopping reaction {id}: {e}");
                 }
@@ -206,7 +209,10 @@ impl LifecycleManager {
 
         for id in query_ids {
             let status = self.query_manager.get_query_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.query_manager.stop_query(id.clone()).await {
                     error!("Error stopping query {id}: {e}");
                 }
@@ -226,7 +232,10 @@ impl LifecycleManager {
 
         for id in source_ids {
             let status = self.source_manager.get_source_status(id.clone()).await;
-            if matches!(status, Ok(ComponentStatus::Running)) {
+            if matches!(
+                status,
+                Ok(ComponentStatus::Running | ComponentStatus::Starting)
+            ) {
                 if let Err(e) = self.source_manager.stop_source(id.clone()).await {
                     error!("Error stopping source {id}: {e}");
                 }

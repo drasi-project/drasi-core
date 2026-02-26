@@ -31,21 +31,61 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{
-    ElementArchiveIndex, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError, ResultIndex,
-};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
+use rocksdb::{OptimisticTransactionDB, Options};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::element_index::{RocksDbElementIndex, RocksIndexOptions};
-use crate::future_queue::RocksDbFutureQueue;
-use crate::result_index::RocksDbResultIndex;
+use crate::element_index::{self, RocksDbElementIndex, RocksIndexOptions};
+use crate::future_queue::{self, RocksDbFutureQueue};
+use crate::result_index::{self, RocksDbResultIndex};
+
+/// Open a unified RocksDB database with all column families needed for a query.
+///
+/// This creates a single `OptimisticTransactionDB` instance containing all
+/// column families for element index, result index, and future queue.
+///
+/// # Arguments
+///
+/// * `path` - Base directory for RocksDB data files
+/// * `query_id` - Unique identifier for the query
+/// * `options` - RocksDB index options (archive, direct I/O)
+///
+/// # Directory Structure
+///
+/// Data is stored at `{path}/{query_id}/` (single unified directory).
+pub fn open_unified_db(
+    path: &str,
+    query_id: &str,
+    options: &RocksIndexOptions,
+) -> Result<Arc<OptimisticTransactionDB>, IndexError> {
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(true);
+    db_opts.create_missing_column_families(true);
+    db_opts.set_db_write_buffer_size(128 * 1024 * 1024);
+    db_opts.set_use_direct_reads(options.direct_io);
+    db_opts.set_use_direct_io_for_flush_and_compaction(options.direct_io);
+
+    let db_path = PathBuf::from(path).join(query_id);
+    let db_path = match db_path.to_str() {
+        Some(p) => p.to_string(),
+        None => return Err(IndexError::NotSupported),
+    };
+
+    let mut cfs = element_index::element_cf_descriptors(options);
+    cfs.extend(result_index::result_cf_descriptors());
+    cfs.extend(future_queue::future_queue_cf_descriptors());
+
+    let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
+        .map_err(IndexError::other)?;
+    Ok(Arc::new(db))
+}
 
 /// RocksDB index backend provider.
 ///
 /// This provider creates RocksDB-backed indexes for persistent storage.
-/// Data survives restarts, so queries using this backend do not require
-/// re-bootstrapping.
+/// All indexes for a query share a single `OptimisticTransactionDB` instance,
+/// reducing resource overhead and enabling cross-index atomic transactions.
 ///
 /// # Configuration
 ///
@@ -58,10 +98,7 @@ use crate::result_index::RocksDbResultIndex;
 /// RocksDB creates the following directory structure:
 /// ```text
 /// {path}/
-///   {query_id}/
-///     elements/    - Element index data
-///     aggregations/ - Result index data
-///     fqi/         - Future queue data
+///   {query_id}/   - Single unified database with all column families
 /// ```
 pub struct RocksDbIndexProvider {
     path: PathBuf,
@@ -109,78 +146,31 @@ impl RocksDbIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for RocksDbIndexProvider {
-    async fn create_element_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementIndex>, IndexError> {
+    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
         let path = self.path.to_string_lossy().to_string();
         let options = RocksIndexOptions {
             archive_enabled: self.enable_archive,
             direct_io: self.direct_io,
         };
 
-        let index = RocksDbElementIndex::new(query_id, &path, options).map_err(|e| {
+        let db = open_unified_db(&path, query_id, &options).map_err(|e| {
             log::error!(
-                "Failed to create RocksDB element index for query '{query_id}' at path '{path}': {e}"
+                "Failed to open unified RocksDB for query '{query_id}' at path '{path}': {e}"
             );
             e
         })?;
 
-        Ok(Arc::new(index))
-    }
+        let element_index = Arc::new(RocksDbElementIndex::new(db.clone(), options));
+        let result_index = Arc::new(RocksDbResultIndex::new(db.clone()));
+        let future_queue = Arc::new(RocksDbFutureQueue::new(db));
 
-    async fn create_archive_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementArchiveIndex>, IndexError> {
-        // RocksDB shares the element index and archive index in the same instance
-        // The archive functionality is enabled/disabled via RocksIndexOptions
-        let path = self.path.to_string_lossy().to_string();
-        let options = RocksIndexOptions {
-            archive_enabled: self.enable_archive,
-            direct_io: self.direct_io,
-        };
-
-        let index = RocksDbElementIndex::new(query_id, &path, options).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB archive index for query '{query_id}' at path '{path}': {e}"
-            );
-            e
-        })?;
-
-        Ok(Arc::new(index))
-    }
-
-    async fn create_result_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ResultIndex>, IndexError> {
-        let path = self.path.to_string_lossy().to_string();
-
-        let index = RocksDbResultIndex::new(query_id, &path).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB result index for query '{query_id}' at path '{path}': {e}"
-            );
-            e
-        })?;
-
-        Ok(Arc::new(index))
-    }
-
-    async fn create_future_queue(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn FutureQueue>, IndexError> {
-        let path = self.path.to_string_lossy().to_string();
-
-        let queue = RocksDbFutureQueue::new(query_id, &path).map_err(|e| {
-            log::error!(
-                "Failed to create RocksDB future queue for query '{query_id}' at path '{path}': {e}"
-            );
-            e
-        })?;
-
-        Ok(Arc::new(queue))
+        Ok(IndexSet {
+            element_index: element_index.clone(),
+            archive_index: element_index,
+            result_index,
+            future_queue,
+            session_control: Arc::new(NoOpSessionControl),
+        })
     }
 
     fn is_volatile(&self) -> bool {
@@ -231,71 +221,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rocksdb_create_element_index() {
-        let temp_dir = TempDir::new().unwrap();
-        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-
-        let result = provider.create_element_index("test_query").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_create_archive_index() {
-        let temp_dir = TempDir::new().unwrap();
+    async fn test_rocksdb_create_index_set() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
 
-        let result = provider.create_archive_index("test_query").await;
+        let result = provider.create_index_set("test_query").await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_rocksdb_create_result_index() {
-        let temp_dir = TempDir::new().unwrap();
+    async fn test_rocksdb_create_index_set_multiple_queries() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
 
-        let result = provider.create_result_index("test_query").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_create_future_queue() {
-        let temp_dir = TempDir::new().unwrap();
-        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-
-        let result = provider.create_future_queue("test_query").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_create_all_indexes() {
-        let temp_dir = TempDir::new().unwrap();
-        let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
-
-        // Create all index types with unique query IDs to avoid conflicts
-        // since RocksDB creates separate directories per query
-        let element_result = provider.create_element_index("query_element").await;
-        let archive_result = provider.create_archive_index("query_archive").await;
-        let result_result = provider.create_result_index("query_result").await;
-        let queue_result = provider.create_future_queue("query_queue").await;
-
-        assert!(element_result.is_ok());
-        assert!(archive_result.is_ok());
-        assert!(result_result.is_ok());
-        assert!(queue_result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_rocksdb_multiple_queries() {
-        let temp_dir = TempDir::new().unwrap();
-        let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
-
-        // Create indexes for multiple queries
-        let result1 = provider.create_element_index("query1").await;
-        let result2 = provider.create_element_index("query2").await;
-        let result3 = provider.create_element_index("query3").await;
+        let result1 = provider.create_index_set("query1").await;
+        let result2 = provider.create_index_set("query2").await;
+        let result3 = provider.create_index_set("query3").await;
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
         assert!(result3.is_ok());
+    }
+
+    #[test]
+    fn test_open_unified_db() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+
+        let path = temp_dir.path().to_string_lossy().to_string();
+        let result = open_unified_db(&path, "test_query", &options);
+        assert!(result.is_ok());
     }
 }
