@@ -83,6 +83,9 @@ jobs:
         cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
 
+    - name: Run host-sdk integration tests
+      run: make test-host-sdk
+
     - name: Publish Test Results
       uses: EnricoMi/publish-unit-test-result-action@567cc7f8dcea3eba5da355f6ebc95663310d8a07 # v2.17.0
       with:
