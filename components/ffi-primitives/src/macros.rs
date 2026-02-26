@@ -226,9 +226,7 @@ macro_rules! vtable_fn_getter {
         $bound:ident : $trait:path,
         |$w:ident| $body:expr
     ) => {
-        extern "C" fn $fn_name<$bound: $trait + 'static>(
-            state: *const ::std::ffi::c_void,
-        ) -> bool {
+        extern "C" fn $fn_name<$bound: $trait + 'static>(state: *const ::std::ffi::c_void) -> bool {
             let $w = unsafe { &*(state as *const $wrapper) };
             $body
         }

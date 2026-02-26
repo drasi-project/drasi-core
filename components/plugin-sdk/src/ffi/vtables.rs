@@ -166,201 +166,113 @@ pub struct FfiRuntimeContext {
 // Source vtable
 // ============================================================================
 
-/// FFI-safe vtable for a Source instance.
-#[repr(C)]
-pub struct SourceVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a Source instance.
+    pub struct SourceVtable {
+        // Identity
+        fn id_fn(state: *const) -> FfiStr,
+        fn type_name_fn(state: *const) -> FfiStr,
+        fn auto_start_fn(state: *const) -> bool,
+        fn dispatch_mode_fn(state: *const) -> FfiDispatchMode,
 
-    // Identity
-    pub id_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub type_name_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub auto_start_fn: extern "C" fn(state: *const c_void) -> bool,
-    pub dispatch_mode_fn: extern "C" fn(state: *const c_void) -> FfiDispatchMode,
+        // Lifecycle
+        fn start_fn(state: *mut) -> FfiResult,
+        fn stop_fn(state: *mut) -> FfiResult,
+        fn status_fn(state: *const) -> FfiComponentStatus,
+        fn deprovision_fn(state: *mut) -> FfiResult,
 
-    // Lifecycle
-    pub start_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
-    pub stop_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
-    pub status_fn: extern "C" fn(state: *const c_void) -> FfiComponentStatus,
-    pub deprovision_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
+        // Initialization
+        fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
-    // Initialization
-    pub initialize_fn: extern "C" fn(state: *mut c_void, ctx: *const FfiRuntimeContext),
+        // Subscriptions
+        /// Subscribe with query_id, node_labels JSON, relation_labels JSON.
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr) -> *mut FfiSubscriptionResponse,
 
-    // Subscriptions
-    /// Subscribe with query_id, node_labels JSON, relation_labels JSON.
-    pub subscribe_fn: extern "C" fn(
-        state: *mut c_void,
-        source_id: FfiStr,
-        enable_bootstrap: bool,
-        query_id: FfiStr,
-        nodes_json: FfiStr,
-        relations_json: FfiStr,
-    ) -> *mut FfiSubscriptionResponse,
-
-    /// Host calls this to inject an external bootstrap provider (from another plugin).
-    /// The vtable pointer is owned by the source after this call.
-    pub set_bootstrap_provider_fn:
-        extern "C" fn(state: *mut c_void, provider: *mut BootstrapProviderVtable),
-
-    // Cleanup
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+        /// Host calls this to inject an external bootstrap provider (from another plugin).
+        fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
+    }
 }
-
-unsafe impl Send for SourceVtable {}
-unsafe impl Sync for SourceVtable {}
 
 // ============================================================================
 // Reaction vtable
 // ============================================================================
 
-/// FFI-safe vtable for a Reaction instance.
-#[repr(C)]
-pub struct ReactionVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a Reaction instance.
+    pub struct ReactionVtable {
+        // Identity
+        fn id_fn(state: *const) -> FfiStr,
+        fn type_name_fn(state: *const) -> FfiStr,
+        fn auto_start_fn(state: *const) -> bool,
+        fn query_ids_fn(state: *const) -> FfiStringArray,
 
-    // Identity
-    pub id_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub type_name_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub auto_start_fn: extern "C" fn(state: *const c_void) -> bool,
-    pub query_ids_fn: extern "C" fn(state: *const c_void) -> FfiStringArray,
+        // Lifecycle
+        fn start_fn(state: *mut) -> FfiResult,
+        fn stop_fn(state: *mut) -> FfiResult,
+        fn status_fn(state: *const) -> FfiComponentStatus,
+        fn deprovision_fn(state: *mut) -> FfiResult,
 
-    // Lifecycle
-    pub start_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
-    pub stop_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
-    pub status_fn: extern "C" fn(state: *const c_void) -> FfiComponentStatus,
-    pub deprovision_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
-
-    // Initialization
-    pub initialize_fn: extern "C" fn(state: *mut c_void, ctx: *const FfiRuntimeContext),
-
-    // Cleanup
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+        // Initialization
+        fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
+    }
 }
-
-unsafe impl Send for ReactionVtable {}
-unsafe impl Sync for ReactionVtable {}
 
 // ============================================================================
 // Bootstrap provider vtable
 // ============================================================================
 
-/// FFI-safe vtable for a BootstrapProvider.
-/// The bootstrap plugin creates this; the host wraps it and passes it to the source plugin.
-#[repr(C)]
-pub struct BootstrapProviderVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
-    /// Perform bootstrap. Sends records via the FfiBootstrapSender.
-    /// Returns the count of records sent (>= 0), or negative on error.
-    ///
-    /// Parameters:
-    /// - `query_id` — the subscribing query's ID
-    /// - `node_labels` / `node_labels_count` — node labels to bootstrap
-    /// - `relation_labels` / `relation_labels_count` — relation labels to bootstrap
-    /// - `request_id` — unique request ID for this bootstrap operation
-    /// - `server_id` — the server/instance ID
-    /// - `source_id` — the source ID this bootstrap is for
-    /// - `sender` — FFI sender for bootstrap events
-    pub bootstrap_fn: extern "C" fn(
-        state: *mut c_void,
-        query_id: FfiStr,
-        node_labels: *const FfiStr,
-        node_labels_count: usize,
-        relation_labels: *const FfiStr,
-        relation_labels_count: usize,
-        request_id: FfiStr,
-        server_id: FfiStr,
-        source_id: FfiStr,
-        sender: *mut FfiBootstrapSender,
-    ) -> i64,
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a BootstrapProvider.
+    /// The bootstrap plugin creates this; the host wraps it and passes it to the source plugin.
+    pub struct BootstrapProviderVtable {
+        /// Perform bootstrap. Sends records via the FfiBootstrapSender.
+        /// Returns the count of records sent (>= 0), or negative on error.
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, sender: *mut FfiBootstrapSender) -> i64,
+    }
 }
-
-unsafe impl Send for BootstrapProviderVtable {}
-unsafe impl Sync for BootstrapProviderVtable {}
 
 // ============================================================================
 // Plugin descriptor vtables — factories that create Source/Reaction instances
 // ============================================================================
 
-/// FFI-safe vtable for a SourcePluginDescriptor (factory).
-/// The host calls `create_source_fn` to construct a SourceVtable from config.
-#[repr(C)]
-pub struct SourcePluginVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a SourcePluginDescriptor (factory).
+    /// The host calls `create_source_fn` to construct a SourceVtable from config.
+    pub struct SourcePluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
 
-    pub kind_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_version_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_schema_json_fn: extern "C" fn(state: *const c_void) -> FfiOwnedStr,
-    pub config_schema_name_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-
-    pub create_source_fn: extern "C" fn(
-        state: *mut c_void,
-        id: FfiStr,
-        config_json: FfiStr,
-        auto_start: bool,
-    ) -> *mut SourceVtable,
-
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+        fn create_source_fn(state: *mut, id: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut SourceVtable,
+    }
 }
 
-unsafe impl Send for SourcePluginVtable {}
-unsafe impl Sync for SourcePluginVtable {}
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a ReactionPluginDescriptor (factory).
+    pub struct ReactionPluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
 
-/// FFI-safe vtable for a ReactionPluginDescriptor (factory).
-#[repr(C)]
-pub struct ReactionPluginVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
-
-    pub kind_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_version_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_schema_json_fn: extern "C" fn(state: *const c_void) -> FfiOwnedStr,
-    pub config_schema_name_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-
-    /// Factory: create a ReactionVtable from JSON config.
-    /// `query_ids_json` — JSON array of query IDs.
-    pub create_reaction_fn: extern "C" fn(
-        state: *mut c_void,
-        id: FfiStr,
-        query_ids_json: FfiStr,
-        config_json: FfiStr,
-        auto_start: bool,
-    ) -> *mut ReactionVtable,
-
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+        /// Factory: create a ReactionVtable from JSON config.
+        fn create_reaction_fn(state: *mut, id: FfiStr, query_ids_json: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut ReactionVtable,
+    }
 }
 
-unsafe impl Send for ReactionPluginVtable {}
-unsafe impl Sync for ReactionPluginVtable {}
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a BootstrapPluginDescriptor (factory).
+    pub struct BootstrapPluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
 
-/// FFI-safe vtable for a BootstrapPluginDescriptor (factory).
-#[repr(C)]
-pub struct BootstrapPluginVtable {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
-
-    pub kind_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_version_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-    pub config_schema_json_fn: extern "C" fn(state: *const c_void) -> FfiOwnedStr,
-    pub config_schema_name_fn: extern "C" fn(state: *const c_void) -> FfiStr,
-
-    /// Factory: create a BootstrapProviderVtable from JSON config.
-    /// Takes both the bootstrap-specific config and the parent source config.
-    pub create_bootstrap_provider_fn: extern "C" fn(
-        state: *mut c_void,
-        config_json: FfiStr,
-        source_config_json: FfiStr,
-    ) -> *mut BootstrapProviderVtable,
-
-    pub drop_fn: extern "C" fn(state: *mut c_void),
+        /// Factory: create a BootstrapProviderVtable from JSON config.
+        fn create_bootstrap_provider_fn(state: *mut, config_json: FfiStr, source_config_json: FfiStr) -> *mut BootstrapProviderVtable,
+    }
 }
-
-unsafe impl Send for BootstrapPluginVtable {}
-unsafe impl Sync for BootstrapPluginVtable {}
 
 // ============================================================================
 // State store vtable — reverse direction (host → plugin)
