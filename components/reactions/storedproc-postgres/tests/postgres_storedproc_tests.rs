@@ -547,7 +547,7 @@ async fn test_postgres_executor_connection() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await;
+    let executor = PostgresExecutor::new(&config, None).await;
     assert!(executor.is_ok(), "Should create executor successfully");
 
     let executor = executor.unwrap();
@@ -589,7 +589,7 @@ async fn test_postgres_executor_procedure_execution() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Execute the stored procedure
     let params = vec![json!("sensor-001"), json!(25.5)];
@@ -651,7 +651,7 @@ async fn test_postgres_executor_multiple_operations() {
         ..Default::default()
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Execute ADD
     executor
@@ -717,7 +717,7 @@ async fn test_postgres_parser_with_executor() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Parse command with data
@@ -866,7 +866,7 @@ async fn test_postgres_executor_with_special_characters() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Test with special characters (potential SQL injection)
     let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
@@ -994,7 +994,7 @@ async fn test_postgres_executor_retry_on_failure() {
         retry_attempts: 2,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Try to execute non-existent procedure (should fail after retries)
     let result = executor
@@ -1081,7 +1081,7 @@ async fn test_default_template_applies_to_all_queries() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test that default template is used for query1
@@ -1205,7 +1205,7 @@ async fn test_route_overrides_default_template() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Execute with route-specific template
@@ -1373,7 +1373,7 @@ async fn test_executor_with_various_data_types() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test with various data types using ParameterParser
@@ -1490,7 +1490,7 @@ async fn test_executor_with_string_numbers() {
         retry_attempts: 3,
     };
 
-    let executor = PostgresExecutor::new(&config).await.unwrap();
+    let executor = PostgresExecutor::new(&config, None).await.unwrap();
 
     // Test with string that looks like a number (simulating MockSource behavior)
     let params = vec![json!("25.789")];

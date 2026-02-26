@@ -506,7 +506,7 @@ async fn test_mysql_executor_connection() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await;
+    let executor = MySqlExecutor::new(&config, None).await;
     assert!(executor.is_ok(), "Should create executor successfully");
 
     let executor = executor.unwrap();
@@ -547,7 +547,7 @@ async fn test_mysql_executor_procedure_execution() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     // Execute the stored procedure
     let params = vec![json!("sensor-001"), json!(25.5)];
@@ -609,7 +609,7 @@ async fn test_mysql_executor_multiple_operations() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     // Execute ADD
     executor
@@ -673,7 +673,7 @@ async fn test_mysql_parser_with_executor() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Parse command with data in the new @after context format
@@ -821,7 +821,7 @@ async fn test_mysql_executor_with_special_characters() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     // Test with special characters (potential SQL injection)
     let params = vec![json!("sensor'; DROP TABLE sensor_log; --"), json!(25.5)];
@@ -947,7 +947,7 @@ async fn test_mysql_executor_retry_on_failure() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     // Try to execute non-existent procedure (should fail after retries)
     let result = executor
