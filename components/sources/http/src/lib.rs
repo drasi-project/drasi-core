@@ -1845,8 +1845,8 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
-                        assert_eq!(out_node.element_id.as_ref(), "user-1");
-                        assert_eq!(in_node.element_id.as_ref(), "user-2");
+                        assert_eq!(in_node.element_id.as_ref(), "user-1");
+                        assert_eq!(out_node.element_id.as_ref(), "user-2");
                     }
                     _ => panic!("Expected Relation element"),
                 },
