@@ -708,9 +708,41 @@ pub fn decode_column_value_text(
             // text, varchar, name
             Ok(ElementValue::String(Arc::from(text)))
         }
-        1114 | 1184 => {
-            // timestamp, timestamptz
-            Ok(ElementValue::String(Arc::from(text)))
+        1114 => {
+            // timestamp (without timezone)
+            // Try parsing as NaiveDateTime first, then fall back to zoned formats
+            if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
+                Ok(ElementValue::LocalDateTime(dt))
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
+                Ok(ElementValue::LocalDateTime(dt))
+            } else if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else {
+                // Fall back to string if parsing fails
+                Ok(ElementValue::String(Arc::from(text)))
+            }
+        }
+        1184 => {
+            // timestamptz — always produce ZonedDateTime to match CDC binary path.
+            // Try offset-aware formats first, then treat offset-less text as UTC.
+            if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
+                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
+            } else if let Ok(dt) =
+                NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f")
+            {
+                // No offset in text but OID says timestamptz — assume UTC
+                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
+            } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
+                // No offset in text but OID says timestamptz — assume UTC
+                Ok(ElementValue::ZonedDateTime(dt.and_utc().fixed_offset()))
+            } else {
+                // Fall back to string if parsing fails
+                Ok(ElementValue::String(Arc::from(text)))
+            }
         }
         1082 => {
             // date
@@ -786,4 +818,162 @@ fn decode_numeric(data: &[u8]) -> Result<Decimal> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use drasi_core::models::ElementValue;
+
+    // ── decode_column_value_text: timestamp (OID 1114) ─────────────────
+
+    #[test]
+    fn decode_timestamp_with_fractional_seconds() {
+        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1114).unwrap();
+        let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_micro_opt(10, 30, 45, 123456)
+            .unwrap();
+        assert_eq!(ev, ElementValue::LocalDateTime(expected));
+    }
+
+    #[test]
+    fn decode_timestamp_without_fractional_seconds() {
+        let ev = decode_column_value_text("2024-06-15 10:30:45", 1114).unwrap();
+        let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        assert_eq!(ev, ElementValue::LocalDateTime(expected));
+    }
+
+    #[test]
+    fn decode_timestamp_with_leading_trailing_whitespace() {
+        let ev = decode_column_value_text("  2024-06-15 10:30:45  ", 1114).unwrap();
+        let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        assert_eq!(ev, ElementValue::LocalDateTime(expected));
+    }
+
+    // ── decode_column_value_text: timestamptz (OID 1184) ───────────────
+
+    #[test]
+    fn decode_timestamptz_rfc3339() {
+        let ev = decode_column_value_text("2024-06-15T10:30:45+01:00", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 3600);
+                assert_eq!(dt.naive_local().to_string(), "2024-06-15 10:30:45");
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_with_offset_format() {
+        let ev = decode_column_value_text("2024-06-15 10:30:45.123456+0200", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 7200); // +02:00
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_utc_via_rfc3339() {
+        let ev = decode_column_value_text("2024-06-15T10:30:45+00:00", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 0);
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
+    }
+
+    // ── decode_column_value_text: timestamp OID with ambiguous input ───
+
+    #[test]
+    fn decode_timestamptz_oid_with_plain_datetime_string_assumes_utc() {
+        // OID 1184 (timestamptz) but the string has no tz info → ZonedDateTime (UTC)
+        // This matches the CDC binary path which always produces ZonedDateTime for OID 1184
+        let ev = decode_column_value_text("2024-06-15 10:30:45", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
+                assert_eq!(dt.naive_local().to_string(), "2024-06-15 10:30:45");
+            }
+            other => {
+                panic!("Expected ZonedDateTime for timestamptz OID with no tz info, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn decode_timestamptz_oid_with_fractional_no_offset_assumes_utc() {
+        // OID 1184 with fractional seconds but no offset → ZonedDateTime (UTC)
+        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1184).unwrap();
+        match ev {
+            ElementValue::ZonedDateTime(dt) => {
+                assert_eq!(dt.offset().local_minus_utc(), 0, "Expected UTC offset");
+            }
+            other => panic!("Expected ZonedDateTime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_timestamp_oid_with_rfc3339_string() {
+        // OID 1114 (timestamp) but the string has tz info → ZonedDateTime
+        let ev = decode_column_value_text("2024-06-15T10:30:45+05:00", 1114).unwrap();
+        assert!(
+            matches!(ev, ElementValue::ZonedDateTime(_)),
+            "Expected ZonedDateTime for rfc3339 input on timestamp OID, got {ev:?}"
+        );
+    }
+
+    #[test]
+    fn decode_unparseable_timestamp_falls_back_to_string() {
+        let ev = decode_column_value_text("not-a-date", 1114).unwrap();
+        assert!(
+            matches!(ev, ElementValue::String(_)),
+            "Expected String fallback, got {ev:?}"
+        );
+    }
+
+    // ── decode_column_value_text: non-timestamp types still work ───────
+
+    #[test]
+    fn decode_bool_text() {
+        assert_eq!(
+            decode_column_value_text("true", 16).unwrap(),
+            ElementValue::Bool(true)
+        );
+        assert_eq!(
+            decode_column_value_text("t", 16).unwrap(),
+            ElementValue::Bool(true)
+        );
+        assert_eq!(
+            decode_column_value_text("f", 16).unwrap(),
+            ElementValue::Bool(false)
+        );
+    }
+
+    #[test]
+    fn decode_int4_text() {
+        assert_eq!(
+            decode_column_value_text("42", 23).unwrap(),
+            ElementValue::Integer(42)
+        );
+    }
+
+    #[test]
+    fn decode_text_type() {
+        assert_eq!(
+            decode_column_value_text("hello world", 25).unwrap(),
+            ElementValue::String(Arc::from("hello world"))
+        );
+    }
 }
