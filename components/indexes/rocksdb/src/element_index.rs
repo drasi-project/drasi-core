@@ -18,7 +18,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use async_stream::stream;
 use async_trait::async_trait;
 use bit_set::BitSet;
 use drasi_core::{
@@ -102,16 +101,16 @@ impl ElementIndex for RocksDbElementIndex {
         let element_key = hash_element_ref(element_ref);
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
-            let txn_guard = context.session_state.lock()?;
-            let stored = get_element_internal(context.clone(), &element_key, txn_guard.as_ref())?;
-
-            match stored {
-                Some(stored) => {
-                    let element: Element = stored.into();
-                    Ok(Some(Arc::new(element)))
+            context.session_state.with_txn(|txn| {
+                let stored = get_element_internal(context.clone(), &element_key, txn)?;
+                match stored {
+                    Some(stored) => {
+                        let element: Element = stored.into();
+                        Ok(Some(Arc::new(element)))
+                    }
+                    None => Ok(None),
                 }
-                None => Ok(None),
-            }
+            })
         });
 
         match task.await {
@@ -147,7 +146,7 @@ impl ElementIndex for RocksDbElementIndex {
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
             context.session_state.with_txn(|txn| {
-                delete_element_internal(context.clone(), txn, &element_key, Some(txn))
+                delete_element_internal(context.clone(), txn, &element_key)
             })
         });
 
@@ -167,33 +166,27 @@ impl ElementIndex for RocksDbElementIndex {
         let context = self.context.clone();
         let task = task::spawn_blocking(move || {
             let slot_cf = context.db.cf_handle(SLOT_CF).expect("Slot CF not found");
-            let txn_guard = context.session_state.lock()?;
 
-            let prev_slots = match txn_guard.as_ref() {
-                Some(txn) => match txn.get_cf(&slot_cf, element_key) {
+            context.session_state.with_txn(|txn| {
+                let prev_slots = match txn.get_cf(&slot_cf, element_key) {
                     Ok(Some(prev_slots)) => BitSet::from_bytes(&prev_slots),
                     Ok(None) => return Ok(None),
                     Err(e) => return Err(IndexError::other(e)),
-                },
-                None => match context.db.get_cf(&slot_cf, element_key) {
-                    Ok(Some(prev_slots)) => BitSet::from_bytes(&prev_slots),
-                    Ok(None) => return Ok(None),
-                    Err(e) => return Err(IndexError::other(e)),
-                },
-            };
+                };
 
-            if !prev_slots.contains(slot) {
-                return Ok(None);
-            }
-
-            match get_element_internal(context.clone(), &element_key, txn_guard.as_ref()) {
-                Ok(Some(stored)) => {
-                    let element: Element = stored.into();
-                    Ok(Some(Arc::new(element)))
+                if !prev_slots.contains(slot) {
+                    return Ok(None);
                 }
-                Ok(None) => Ok(None),
-                Err(e) => Err(e),
-            }
+
+                match get_element_internal(context.clone(), &element_key, txn) {
+                    Ok(Some(stored)) => {
+                        let element: Element = stored.into();
+                        Ok(Some(Arc::new(element)))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(e),
+                }
+            })
         });
 
         match task.await {
@@ -202,7 +195,6 @@ impl ElementIndex for RocksDbElementIndex {
         }
     }
 
-    #[allow(clippy::unwrap_used)]
     #[tracing::instrument(skip_all, err)]
     async fn get_slot_elements_by_inbound(
         &self,
@@ -212,105 +204,52 @@ impl ElementIndex for RocksDbElementIndex {
         let context = self.context.clone();
         let element_key = hash_element_ref(inbound_ref);
 
-        // Check if a session is active. If so, use buffered approach to avoid
-        // deadlock (stream consumer may call other index methods that need the lock).
-        let has_session = {
-            let guard = context.session_state.lock()?;
-            guard.is_some()
-        };
+        let task = task::spawn_blocking(move || {
+            let inbound_cf = context
+                .db
+                .cf_handle(INBOUND_CF)
+                .expect("Inbound CF not found");
+            let prefix = encode_inout_prefix(&element_key, slot);
 
-        if has_session {
-            let task = task::spawn_blocking(move || {
-                let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
-                let prefix = encode_inout_prefix(&element_key, slot);
-                let txn_guard = context.session_state.lock()?;
+            context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
-
-                // Session is active: use txn iterator for read-your-own-writes.
-                // We hold txn_guard for the entire iteration.
-                if let Some(txn) = txn_guard.as_ref() {
-                    for item in txn.prefix_iterator_cf(&inbound_cf, prefix) {
-                        match item {
-                            Ok((key, _)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let relation_key = decode_inout_key_relation(&key);
-                                match get_element_internal(
-                                    context.clone(),
-                                    &relation_key,
-                                    Some(txn),
-                                ) {
-                                    Ok(Some(stored)) => {
-                                        let element: Element = stored.into();
-                                        results.push(Ok(Arc::new(element)));
-                                    }
-                                    Ok(None) => {
-                                        log::debug!(
-                                            "Garbage collecting reference of deleted element: {element_key:?}"
-                                        );
-                                        let _ = txn.delete_cf(&inbound_cf, key);
-                                        continue;
-                                    }
-                                    Err(e) => results.push(Err(e)),
-                                };
-                            }
-                            Err(e) => results.push(Err(IndexError::other(e))),
-                        }
-                    }
-                }
-                Ok(results)
-            });
-
-            let results = match task.await {
-                Ok(result) => result?,
-                Err(e) => return Err(IndexError::other(e)),
-            };
-
-            Ok(Box::pin(futures::stream::iter(results)))
-        } else {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-
-            task::spawn_blocking(move || {
-                let inbound_cf = context.db.cf_handle(INBOUND_CF).unwrap();
-                let prefix = encode_inout_prefix(&element_key, slot);
-
-                for item in context.db.prefix_iterator_cf(&inbound_cf, prefix) {
+                for item in txn.prefix_iterator_cf(&inbound_cf, prefix) {
                     match item {
                         Ok((key, _)) => {
                             if !key.starts_with(&prefix) {
                                 break;
                             }
                             let relation_key = decode_inout_key_relation(&key);
-                            match get_element_internal(context.clone(), &relation_key, None) {
+                            match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
                                     let element: Element = stored.into();
-                                    tx.blocking_send(Ok(Arc::new(element))).unwrap()
+                                    results.push(Ok(Arc::new(element)));
                                 }
                                 Ok(None) => {
                                     log::debug!(
                                         "Garbage collecting reference of deleted element: {element_key:?}"
                                     );
-                                    _ = context.db.delete_cf(&inbound_cf, key);
+                                    let _ = txn.delete_cf(&inbound_cf, key);
                                     continue;
                                 }
-                                Err(e) => tx.blocking_send(Err(e)).unwrap(),
+                                Err(e) => results.push(Err(e)),
                             };
                         }
-                        Err(e) => tx.blocking_send(Err(IndexError::other(e))).unwrap(),
+                        Err(e) => results.push(Err(IndexError::other(e))),
                     }
                 }
-            });
+                Ok(results)
+            })
+        });
 
-            Ok(Box::pin(stream! {
-                while let Some(item) = rx.recv().await {
-                    yield item;
-                }
-            }))
-        }
+        let results = match task.await {
+            Ok(result) => result?,
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        Ok(Box::pin(futures::stream::iter(results)))
     }
 
-    #[allow(clippy::unwrap_used)]
     #[tracing::instrument(skip_all, err)]
     async fn get_slot_elements_by_outbound(
         &self,
@@ -320,98 +259,50 @@ impl ElementIndex for RocksDbElementIndex {
         let context = self.context.clone();
         let element_key = hash_element_ref(outbound_ref);
 
-        let has_session = {
-            let guard = context.session_state.lock()?;
-            guard.is_some()
-        };
+        let task = task::spawn_blocking(move || {
+            let outbound_cf = context
+                .db
+                .cf_handle(OUTBOUND_CF)
+                .expect("Outbound CF not found");
+            let prefix = encode_inout_prefix(&element_key, slot);
 
-        if has_session {
-            let task = task::spawn_blocking(move || {
-                let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
-                let prefix = encode_inout_prefix(&element_key, slot);
-                let txn_guard = context.session_state.lock()?;
+            context.session_state.with_txn(|txn| {
                 let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
-
-                if let Some(txn) = txn_guard.as_ref() {
-                    for item in txn.prefix_iterator_cf(&outbound_cf, prefix) {
-                        match item {
-                            Ok((key, _)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let relation_key = decode_inout_key_relation(&key);
-                                match get_element_internal(
-                                    context.clone(),
-                                    &relation_key,
-                                    Some(txn),
-                                ) {
-                                    Ok(Some(stored)) => {
-                                        let element: Element = stored.into();
-                                        results.push(Ok(Arc::new(element)));
-                                    }
-                                    Ok(None) => {
-                                        log::debug!(
-                                            "Garbage collecting reference of deleted element: {element_key:?}"
-                                        );
-                                        let _ = txn.delete_cf(&outbound_cf, key);
-                                        continue;
-                                    }
-                                    Err(e) => results.push(Err(e)),
-                                };
-                            }
-                            Err(e) => results.push(Err(IndexError::other(e))),
-                        }
-                    }
-                }
-                Ok(results)
-            });
-
-            let results = match task.await {
-                Ok(result) => result?,
-                Err(e) => return Err(IndexError::other(e)),
-            };
-
-            Ok(Box::pin(futures::stream::iter(results)))
-        } else {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-
-            task::spawn_blocking(move || {
-                let outbound_cf = context.db.cf_handle(OUTBOUND_CF).unwrap();
-                let prefix = encode_inout_prefix(&element_key, slot);
-
-                for item in context.db.prefix_iterator_cf(&outbound_cf, prefix) {
+                for item in txn.prefix_iterator_cf(&outbound_cf, prefix) {
                     match item {
                         Ok((key, _)) => {
                             if !key.starts_with(&prefix) {
                                 break;
                             }
                             let relation_key = decode_inout_key_relation(&key);
-                            match get_element_internal(context.clone(), &relation_key, None) {
+                            match get_element_internal(context.clone(), &relation_key, txn) {
                                 Ok(Some(stored)) => {
                                     let element: Element = stored.into();
-                                    tx.blocking_send(Ok(Arc::new(element))).unwrap()
+                                    results.push(Ok(Arc::new(element)));
                                 }
                                 Ok(None) => {
                                     log::debug!(
                                         "Garbage collecting reference of deleted element: {element_key:?}"
                                     );
-                                    _ = context.db.delete_cf(&outbound_cf, key);
+                                    let _ = txn.delete_cf(&outbound_cf, key);
                                     continue;
                                 }
-                                Err(e) => tx.blocking_send(Err(e)).unwrap(),
+                                Err(e) => results.push(Err(e)),
                             };
                         }
-                        Err(e) => tx.blocking_send(Err(IndexError::other(e))).unwrap(),
+                        Err(e) => results.push(Err(IndexError::other(e))),
                     }
                 }
-            });
+                Ok(results)
+            })
+        });
 
-            Ok(Box::pin(stream! {
-                while let Some(item) = rx.recv().await {
-                    yield item;
-                }
-            }))
-        }
+        let results = match task.await {
+            Ok(result) => result?,
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        Ok(Box::pin(futures::stream::iter(results)))
     }
 
     async fn clear(&self) -> Result<(), IndexError> {
@@ -522,24 +413,17 @@ pub(crate) fn element_cf_descriptors(
 fn get_element_internal(
     context: Arc<Context>,
     element_key: &ReferenceHash,
-    txn: Option<&Transaction<'_, OptimisticTransactionDB>>,
+    txn: &Transaction<'_, OptimisticTransactionDB>,
 ) -> Result<Option<StoredElement>, IndexError> {
     let element_cf = context
         .db
         .cf_handle(ELEMENTS_CF)
         .expect("Element CF not found");
 
-    let element = match txn {
-        Some(txn) => match txn.get_cf(&element_cf, element_key) {
-            Ok(Some(element)) => element,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(IndexError::other(e)),
-        },
-        None => match context.db.get_cf(&element_cf, element_key) {
-            Ok(Some(element)) => element,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(IndexError::other(e)),
-        },
+    let element = match txn.get_cf(&element_cf, element_key) {
+        Ok(Some(element)) => element,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(IndexError::other(e)),
     };
 
     let element = match StoredElementContainer::decode(element.as_slice()) {
@@ -554,7 +438,6 @@ fn delete_element_internal(
     context: Arc<Context>,
     txn: &Transaction<'_, OptimisticTransactionDB>,
     element_key: &ReferenceHash,
-    read_txn: Option<&Transaction<'_, OptimisticTransactionDB>>,
 ) -> Result<(), IndexError> {
     let element_cf = context
         .db
@@ -576,8 +459,7 @@ fn delete_element_internal(
         Err(e) => return Err(IndexError::other(e)),
     };
 
-    // Use session txn for reads to ensure read-your-own-writes within a session
-    match get_element_internal(context.clone(), element_key, read_txn) {
+    match get_element_internal(context.clone(), element_key, txn) {
         Ok(Some(old_element)) => delete_source_joins(context.clone(), txn, &old_element)?,
         Ok(None) => (),
         Err(e) => return Err(IndexError::other(e)),
@@ -803,8 +685,21 @@ fn update_source_joins(
                                 // The new element was already written to the txn, so reading
                                 // through the txn would return the new value and the property
                                 // comparison below would always see "no change".
-                                let old_element =
-                                    get_element_internal(context.clone(), &element_key, None)?;
+                                let element_cf = context
+                                    .db
+                                    .cf_handle(ELEMENTS_CF)
+                                    .expect("Element CF not found");
+                                let old_element = match context.db.get_cf(&element_cf, element_key)
+                                {
+                                    Ok(Some(data)) => {
+                                        match StoredElementContainer::decode(data.as_slice()) {
+                                            Ok(container) => container.element,
+                                            Err(e) => return Err(IndexError::other(e)),
+                                        }
+                                    }
+                                    Ok(None) => None,
+                                    Err(e) => return Err(IndexError::other(e)),
+                                };
 
                                 if let Some(StoredElement::Node(old)) = &old_element {
                                     if let Some(old_value) = old.properties.get(&qjk.property) {
@@ -1039,13 +934,11 @@ fn delete_source_join(
                     context.clone(),
                     txn,
                     &hash_stored_element_ref(&in_out),
-                    Some(txn),
                 )?;
                 delete_element_internal(
                     context.clone(),
                     txn,
                     &hash_stored_element_ref(&out_in),
-                    Some(txn),
                 )?;
             }
         }

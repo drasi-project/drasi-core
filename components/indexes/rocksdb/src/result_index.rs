@@ -78,28 +78,25 @@ impl AccumulatorIndex for RocksDbResultIndex {
 
         let task = task::spawn_blocking(move || {
             let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
-            let txn_guard = session_state.lock()?;
 
-            let data = match txn_guard.as_ref() {
-                Some(txn) => txn.get_cf(&values_cf, set_id.to_be_bytes()),
-                None => db.get_cf(&values_cf, set_id.to_be_bytes()),
-            };
-
-            match data {
-                Ok(Some(v)) => {
-                    let value = match StoredValueAccumulatorContainer::decode(v.as_slice()) {
-                        Ok(container) => match container.value {
-                            Some(value) => value,
-                            None => return Err(IndexError::CorruptedData),
-                        },
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                    let value: ValueAccumulator = value.into();
-                    Ok(Some(value))
+            session_state.with_txn(|txn| {
+                let data = txn.get_cf(&values_cf, set_id.to_be_bytes());
+                match data {
+                    Ok(Some(v)) => {
+                        let value = match StoredValueAccumulatorContainer::decode(v.as_slice()) {
+                            Ok(container) => match container.value {
+                                Some(value) => value,
+                                None => return Err(IndexError::CorruptedData),
+                            },
+                            Err(e) => return Err(IndexError::other(e)),
+                        };
+                        let value: ValueAccumulator = value.into();
+                        Ok(Some(value))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(IndexError::other(e)),
                 }
-                Ok(None) => Ok(None),
-                Err(e) => Err(IndexError::other(e)),
-            }
+            })
         });
 
         match task.await {
@@ -183,68 +180,54 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let prefix = set_id.to_be_bytes();
-            let txn_guard = session_state.lock()?;
 
-            match value {
-                Some(value) => {
-                    let from_key = encode_next_set_value_key(set_id, value);
-                    let iter: Box<
-                        dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
-                    > = match txn_guard.as_ref() {
-                        Some(txn) => Box::new(txn.iterator_cf(
+            session_state.with_txn(|txn| {
+                match value {
+                    Some(value) => {
+                        let from_key = encode_next_set_value_key(set_id, value);
+                        for item in txn.iterator_cf(
                             &set_cf,
                             IteratorMode::From(&from_key, Direction::Forward),
-                        )),
-                        None => Box::new(db.iterator_cf(
-                            &set_cf,
-                            IteratorMode::From(&from_key, Direction::Forward),
-                        )),
-                    };
-                    for item in iter {
-                        match item {
-                            Ok((key, count)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let value = decode_set_value_key(&key)?;
-                                let count = decode_count(&count)?;
-                                if count == 0 {
-                                    continue;
-                                }
+                        ) {
+                            match item {
+                                Ok((key, count)) => {
+                                    if !key.starts_with(&prefix) {
+                                        break;
+                                    }
+                                    let value = decode_set_value_key(&key)?;
+                                    let count = decode_count(&count)?;
+                                    if count == 0 {
+                                        continue;
+                                    }
 
-                                return Ok(Some((value, count)));
+                                    return Ok(Some((value, count)));
+                                }
+                                Err(e) => return Err(IndexError::other(e)),
                             }
-                            Err(e) => return Err(IndexError::other(e)),
                         }
                     }
-                }
-                None => {
-                    let iter: Box<
-                        dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
-                    > = match txn_guard.as_ref() {
-                        Some(txn) => Box::new(txn.prefix_iterator_cf(&set_cf, prefix)),
-                        None => Box::new(db.prefix_iterator_cf(&set_cf, prefix)),
-                    };
-                    for item in iter {
-                        match item {
-                            Ok((key, count)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let value = decode_set_value_key(&key)?;
-                                let count = decode_count(&count)?;
-                                if count == 0 {
-                                    continue;
-                                }
+                    None => {
+                        for item in txn.prefix_iterator_cf(&set_cf, prefix) {
+                            match item {
+                                Ok((key, count)) => {
+                                    if !key.starts_with(&prefix) {
+                                        break;
+                                    }
+                                    let value = decode_set_value_key(&key)?;
+                                    let count = decode_count(&count)?;
+                                    if count == 0 {
+                                        continue;
+                                    }
 
-                                return Ok(Some((value, count)));
+                                    return Ok(Some((value, count)));
+                                }
+                                Err(e) => return Err(IndexError::other(e)),
                             }
-                            Err(e) => return Err(IndexError::other(e)),
                         }
                     }
-                }
-            };
-            Ok(None)
+                };
+                Ok(None)
+            })
         });
 
         match task.await {
@@ -264,18 +247,15 @@ impl LazySortedSetStore for RocksDbResultIndex {
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
-            let txn_guard = session_state.lock()?;
 
-            let data = match txn_guard.as_ref() {
-                Some(txn) => txn.get_cf(&set_cf, key),
-                None => db.get_cf(&set_cf, key),
-            };
-
-            match data {
-                Ok(Some(v)) => decode_count(&v),
-                Ok(None) => Ok(0),
-                Err(e) => Err(IndexError::other(e)),
-            }
+            session_state.with_txn(|txn| {
+                let data = txn.get_cf(&set_cf, key);
+                match data {
+                    Ok(Some(v)) => decode_count(&v),
+                    Ok(None) => Ok(0),
+                    Err(e) => Err(IndexError::other(e)),
+                }
+            })
         });
 
         match task.await {
@@ -347,42 +327,37 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         let session_state = self.session_state.clone();
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
-            let txn_guard = session_state.lock()?;
 
-            let seq_data = match txn_guard.as_ref() {
-                Some(txn) => txn.get_cf(&metadata_cf, "sequence"),
-                None => db.get_cf(&metadata_cf, "sequence"),
-            };
+            session_state.with_txn(|txn| {
+                let seq_data = txn.get_cf(&metadata_cf, "sequence");
+                match seq_data {
+                    Ok(Some(v)) => {
+                        let seq_bytes: [u8; 8] = match v.try_into() {
+                            Ok(v) => v,
+                            Err(_) => return Err(IndexError::CorruptedData),
+                        };
+                        let sequence: u64 = u64::from_be_bytes(seq_bytes);
 
-            match seq_data {
-                Ok(Some(v)) => {
-                    let seq_bytes: [u8; 8] = match v.try_into() {
-                        Ok(v) => v,
-                        Err(_) => return Err(IndexError::CorruptedData),
-                    };
-                    let sequence: u64 = u64::from_be_bytes(seq_bytes);
+                        let source_change_id_data =
+                            txn.get_cf(&metadata_cf, "source_change_id");
 
-                    let source_change_id_data = match txn_guard.as_ref() {
-                        Some(txn) => txn.get_cf(&metadata_cf, "source_change_id"),
-                        None => db.get_cf(&metadata_cf, "source_change_id"),
-                    };
-
-                    let source_change_id: Arc<str> = match source_change_id_data {
-                        Ok(Some(v)) => match String::from_utf8(v) {
-                            Ok(v) => Arc::from(v),
+                        let source_change_id: Arc<str> = match source_change_id_data {
+                            Ok(Some(v)) => match String::from_utf8(v) {
+                                Ok(v) => Arc::from(v),
+                                Err(e) => return Err(IndexError::other(e)),
+                            },
+                            Ok(None) => Arc::from(""),
                             Err(e) => return Err(IndexError::other(e)),
-                        },
-                        Ok(None) => Arc::from(""),
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                    Ok(ResultSequence {
-                        sequence,
-                        source_change_id,
-                    })
+                        };
+                        Ok(ResultSequence {
+                            sequence,
+                            source_change_id,
+                        })
+                    }
+                    Ok(None) => Ok(ResultSequence::default()),
+                    Err(e) => Err(IndexError::other(e)),
                 }
-                Ok(None) => Ok(ResultSequence::default()),
-                Err(e) => Err(IndexError::other(e)),
-            }
+            })
         });
 
         match task.await {

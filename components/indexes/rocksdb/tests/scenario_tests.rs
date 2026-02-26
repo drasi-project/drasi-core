@@ -473,7 +473,9 @@ mod session {
 
         session_control.rollback().unwrap();
 
-        // Verify nothing persisted
+        // Verify nothing persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_none(), "element should not persist after rollback");
 
@@ -482,6 +484,8 @@ mod session {
             acc.is_none(),
             "accumulator should not persist after rollback"
         );
+
+        session_control.rollback().unwrap();
 
         let due = future_queue.peek_due_time().await.unwrap();
         assert!(due.is_none(), "future queue should be empty after rollback");
@@ -541,7 +545,9 @@ mod session {
 
         session_control.commit().await.unwrap();
 
-        // Verify data persisted
+        // Verify data persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
 
@@ -551,6 +557,8 @@ mod session {
             ValueAccumulator::Count { value } => assert_eq!(value, 42),
             other => panic!("expected Count, got {other:?}"),
         }
+
+        session_control.rollback().unwrap();
 
         let due = future_queue.peek_due_time().await.unwrap();
         assert_eq!(due, Some(20));

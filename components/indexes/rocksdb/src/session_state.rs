@@ -124,7 +124,7 @@ impl RocksDbSessionState {
         match guard.as_ref() {
             Some(txn) => f(txn),
             None => Err(IndexError::other(SessionStateError(
-                "write operation requires an active session".to_string(),
+                "operation requires an active session".to_string(),
             ))),
         }
     }
