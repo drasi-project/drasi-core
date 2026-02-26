@@ -31,12 +31,13 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
 use std::sync::Arc;
 
 use crate::element_index::GarnetElementIndex;
 use crate::future_queue::GarnetFutureQueue;
 use crate::result_index::GarnetResultIndex;
+use crate::session_state::{GarnetSessionControl, GarnetSessionState};
 
 /// Garnet/Redis index backend provider.
 ///
@@ -127,20 +128,28 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             .await
             .map_err(IndexError::connection_failed)?;
 
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+
         let element_index = Arc::new(GarnetElementIndex::new(
             query_id,
             connection.clone(),
             self.enable_archive,
+            session_state.clone(),
         ));
-        let result_index = Arc::new(GarnetResultIndex::new(query_id, connection.clone()));
-        let future_queue = Arc::new(GarnetFutureQueue::new(query_id, connection));
+        let result_index = Arc::new(GarnetResultIndex::new(
+            query_id,
+            connection.clone(),
+            session_state.clone(),
+        ));
+        let future_queue = Arc::new(GarnetFutureQueue::new(query_id, connection, session_state));
 
         Ok(IndexSet {
             element_index: element_index.clone(),
             archive_index: element_index,
             result_index,
             future_queue,
-            session_control: Arc::new(NoOpSessionControl),
+            session_control,
         })
     }
 

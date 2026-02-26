@@ -35,7 +35,8 @@ use crate::{
         QueryPartEvaluator,
     },
     interface::{
-        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock, SessionControl,
+        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock,
+        SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
@@ -58,7 +59,6 @@ pub struct ContinuousQuery {
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
-    #[allow(dead_code)]
     session_control: Arc<dyn SessionControl>,
 }
 
@@ -98,6 +98,7 @@ impl ContinuousQuery {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         //println!("-> process_source_change {:?}", change);
         let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
         let mut result = Vec::new();
 
         let changes = self.execute_source_middleware(change).await?;
@@ -117,7 +118,7 @@ impl ContinuousQuery {
             let mut aggregation_results = CollapsedAggregationResults::new();
 
             for (solution_signature, part_context) in solution_changes.changes {
-                let change_results = self
+                let change_results = match self
                     .project_solution(
                         part_context,
                         &ChangeContext {
@@ -131,7 +132,15 @@ impl ContinuousQuery {
                             after_grouping_hash: solution_signature,
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(EvaluationError::DivideByZero) => {
+                        log::debug!("Skipping solution due to DivideByZero in projection");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 change_results.into_iter().for_each(|ctx| {
                     match &ctx {
                         QueryPartEvaluationContext::Aggregation {
@@ -164,6 +173,7 @@ impl ContinuousQuery {
             }
         }
         //println!("--> process_source_change result {:?}", result);
+        guard.commit().await?;
         Ok(result)
     }
 
