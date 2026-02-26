@@ -34,7 +34,6 @@ pub enum AuthModeDto {
     AzureAd,
 }
 
-
 /// Encryption mode DTO (mirrors [`EncryptionMode`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[schema(as = EncryptionMode)]
@@ -46,7 +45,6 @@ pub enum EncryptionModeDto {
     #[default]
     NotSupported,
 }
-
 
 /// Table key configuration DTO (mirrors [`TableKeyConfig`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -154,7 +152,13 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = MsSqlBootstrapSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
     }
 
     async fn create_bootstrap_provider(

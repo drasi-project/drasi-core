@@ -94,33 +94,29 @@ impl PluginLoader {
                         .unwrap_or_default();
 
                     if matches_pattern(&file_name, pattern) {
-                        match self.load_plugin(&path, log_ctx, log_callback, lifecycle_ctx, lifecycle_callback) {
+                        match self.load_plugin(
+                            &path,
+                            log_ctx,
+                            log_callback,
+                            lifecycle_ctx,
+                            lifecycle_callback,
+                        ) {
                             Ok(plugin) => {
                                 log::info!(
                                     "Loaded plugin: {} ({})",
                                     path.display(),
-                                    plugin
-                                        .metadata_info
-                                        .as_deref()
-                                        .unwrap_or("no metadata")
+                                    plugin.metadata_info.as_deref().unwrap_or("no metadata")
                                 );
                                 plugins.push(plugin);
                             }
                             Err(e) => {
-                                log::error!(
-                                    "Failed to load plugin {}: {}",
-                                    path.display(),
-                                    e
-                                );
+                                log::error!("Failed to load plugin {}: {}", path.display(), e);
                             }
                         }
                     }
                 }
             } else {
-                log::warn!(
-                    "Cannot read plugin directory for pattern: {}",
-                    glob_str
-                );
+                log::warn!("Cannot read plugin directory for pattern: {}", glob_str);
             }
         }
 
@@ -136,7 +132,13 @@ impl PluginLoader {
         lifecycle_ctx: *mut c_void,
         lifecycle_callback: LifecycleCallbackFn,
     ) -> anyhow::Result<LoadedPlugin> {
-        load_plugin_from_path(path, log_ctx, log_callback, lifecycle_ctx, lifecycle_callback)
+        load_plugin_from_path(
+            path,
+            log_ctx,
+            log_callback,
+            lifecycle_ctx,
+            lifecycle_callback,
+        )
     }
 }
 
@@ -166,8 +168,9 @@ pub fn load_plugin_from_path(
 
     // Step 2: Call drasi_plugin_init()
     let init_fn: Symbol<unsafe extern "C" fn() -> *mut FfiPluginRegistration> = unsafe {
-        lib.get(b"drasi_plugin_init")
-            .map_err(|e| anyhow::anyhow!("Missing drasi_plugin_init in {}: {}", path.display(), e))?
+        lib.get(b"drasi_plugin_init").map_err(|e| {
+            anyhow::anyhow!("Missing drasi_plugin_init in {}: {}", path.display(), e)
+        })?
     };
 
     let reg_ptr = unsafe { init_fn() };
@@ -392,15 +395,30 @@ mod tests {
 
     #[test]
     fn test_matches_pattern_prefix_wildcard() {
-        assert!(matches_pattern("libdrasi_source_mock.so", "libdrasi_source_*"));
-        assert!(matches_pattern("libdrasi_source_http.so", "libdrasi_source_*"));
-        assert!(!matches_pattern("libdrasi_reaction_log.so", "libdrasi_source_*"));
+        assert!(matches_pattern(
+            "libdrasi_source_mock.so",
+            "libdrasi_source_*"
+        ));
+        assert!(matches_pattern(
+            "libdrasi_source_http.so",
+            "libdrasi_source_*"
+        ));
+        assert!(!matches_pattern(
+            "libdrasi_reaction_log.so",
+            "libdrasi_source_*"
+        ));
     }
 
     #[test]
     fn test_matches_pattern_exact() {
-        assert!(matches_pattern("libdrasi_source_mock.so", "libdrasi_source_mock"));
-        assert!(!matches_pattern("libdrasi_source_http.so", "libdrasi_source_mock"));
+        assert!(matches_pattern(
+            "libdrasi_source_mock.so",
+            "libdrasi_source_mock"
+        ));
+        assert!(!matches_pattern(
+            "libdrasi_source_http.so",
+            "libdrasi_source_mock"
+        ));
     }
 
     #[test]

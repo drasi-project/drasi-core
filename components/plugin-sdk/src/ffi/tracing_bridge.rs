@@ -126,14 +126,13 @@ where
         // 1. TLS InstanceLogContext (set during start/stop vtable calls)
         // 2. Tracing span hierarchy (set by .instrument(span) in background tasks)
         // 3. Empty (global fallback — logs still reach host but without routing)
-        let (instance_id, component_id) =
-            if let Some(inst_ctx) = current_instance_log_ctx() {
-                (inst_ctx.instance_id.clone(), inst_ctx.component_id.clone())
-            } else if let Some(ref info) = span_info {
-                (info.instance_id.clone(), info.component_id.clone())
-            } else {
-                (String::new(), String::new())
-            };
+        let (instance_id, component_id) = if let Some(inst_ctx) = current_instance_log_ctx() {
+            (inst_ctx.instance_id.clone(), inst_ctx.component_id.clone())
+        } else if let Some(ref info) = span_info {
+            (info.instance_id.clone(), info.component_id.clone())
+        } else {
+            (String::new(), String::new())
+        };
 
         // Use per-instance callback if TLS context has one
         if let Some(inst_ctx) = current_instance_log_ctx() {

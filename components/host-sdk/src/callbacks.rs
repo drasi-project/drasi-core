@@ -234,11 +234,14 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
     );
 
     // Always capture for diagnostics
-    captured_lifecycles().lock().unwrap().push(CapturedLifecycle {
-        component_id: component_id.clone(),
-        event_type,
-        message: message.clone(),
-    });
+    captured_lifecycles()
+        .lock()
+        .unwrap()
+        .push(CapturedLifecycle {
+            component_id: component_id.clone(),
+            event_type,
+            message: message.clone(),
+        });
 
     // Route into DrasiLib's ComponentEventHistory if context is available
     if !ctx.is_null() {
@@ -308,7 +311,11 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
     log::log!(
         ffi_log_level_to_std_level(level),
         "[plugin:{}] {}",
-        if component_id.is_empty() { &plugin_id } else { &component_id },
+        if component_id.is_empty() {
+            &plugin_id
+        } else {
+            &component_id
+        },
         message
     );
 
@@ -355,10 +362,7 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
 
 /// Per-instance lifecycle callback that sends events through the SourceManager's
 /// event channel, so they flow through the same path as static source events.
-pub extern "C" fn instance_lifecycle_callback(
-    ctx: *mut c_void,
-    event: *const FfiLifecycleEvent,
-) {
+pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
     let event = unsafe { &*event };
     let component_id = unsafe { event.component_id.to_string() };
     let component_type_str = unsafe { event.component_type.to_string() };
@@ -374,11 +378,14 @@ pub extern "C" fn instance_lifecycle_callback(
     );
 
     // Capture for diagnostics
-    captured_lifecycles().lock().unwrap().push(CapturedLifecycle {
-        component_id: component_id.clone(),
-        event_type,
-        message: message.clone(),
-    });
+    captured_lifecycles()
+        .lock()
+        .unwrap()
+        .push(CapturedLifecycle {
+            component_id: component_id.clone(),
+            event_type,
+            message: message.clone(),
+        });
 
     // Send through the event channel (same path as static sources)
     if !ctx.is_null() {

@@ -164,7 +164,10 @@ extern "C" fn ss_set_many(
             (key, val)
         })
         .collect();
-    let refs: Vec<(&str, &[u8])> = entries.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    let refs: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_slice()))
+        .collect();
     match block_on(provider.set_many(&store_id, &refs)) {
         Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::err(e.to_string()),

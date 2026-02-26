@@ -63,7 +63,6 @@ pub enum AuthModeDto {
     AzureAd,
 }
 
-
 impl FromStr for AuthModeDto {
     type Err = String;
 
@@ -98,7 +97,6 @@ pub enum EncryptionModeDto {
     NotSupported,
 }
 
-
 impl FromStr for EncryptionModeDto {
     type Err = String;
 
@@ -131,7 +129,6 @@ pub enum StartPositionDto {
     #[default]
     Current,
 }
-
 
 impl FromStr for StartPositionDto {
     type Err = String;
@@ -207,7 +204,13 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = MsSqlSourceSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
     }
 
     async fn create_source(

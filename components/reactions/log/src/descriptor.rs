@@ -98,7 +98,13 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = LogReactionSchemas::openapi();
-        serde_json::to_string(&api.components.as_ref().expect("OpenAPI components missing").schemas).expect("Failed to serialize config schema")
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
     }
 
     async fn create_reaction(

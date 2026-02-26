@@ -372,8 +372,7 @@ unsafe impl Sync for BootstrapPluginVtable {}
 pub struct StateStoreVtable {
     pub state: *mut c_void,
     // Basic operations
-    pub get_fn:
-        extern "C" fn(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiGetResult,
+    pub get_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiGetResult,
     pub set_fn: extern "C" fn(
         state: *mut c_void,
         store_id: FfiStr,
@@ -381,8 +380,7 @@ pub struct StateStoreVtable {
         value: *const u8,
         value_len: usize,
     ) -> FfiResult,
-    pub delete_fn:
-        extern "C" fn(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult,
+    pub delete_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult,
     pub contains_key_fn:
         extern "C" fn(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult,
     // Batch operations (keys passed as FfiStr arrays)
@@ -409,10 +407,8 @@ pub struct StateStoreVtable {
     ) -> i64,
     // Store-level operations
     pub clear_store_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
-    pub list_keys_fn:
-        extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiStringArray,
-    pub store_exists_fn:
-        extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiResult,
+    pub list_keys_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiStringArray,
+    pub store_exists_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> FfiResult,
     pub key_count_fn: extern "C" fn(state: *mut c_void, store_id: FfiStr) -> i64,
     pub sync_fn: extern "C" fn(state: *mut c_void) -> FfiResult,
     // Cleanup
@@ -441,6 +437,8 @@ pub struct FfiPluginRegistration {
     pub set_log_callback:
         extern "C" fn(ctx: *mut ::std::ffi::c_void, callback: super::callbacks::LogCallbackFn),
     /// Host calls this to provide a lifecycle event callback with an opaque context pointer.
-    pub set_lifecycle_callback:
-        extern "C" fn(ctx: *mut ::std::ffi::c_void, callback: super::callbacks::LifecycleCallbackFn),
+    pub set_lifecycle_callback: extern "C" fn(
+        ctx: *mut ::std::ffi::c_void,
+        callback: super::callbacks::LifecycleCallbackFn,
+    ),
 }

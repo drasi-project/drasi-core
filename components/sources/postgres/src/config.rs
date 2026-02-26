@@ -37,7 +37,6 @@ pub enum SslMode {
     Require,
 }
 
-
 impl std::fmt::Display for SslMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

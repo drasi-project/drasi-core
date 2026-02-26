@@ -91,7 +91,6 @@ pub enum AuthMode {
     AzureAd,
 }
 
-
 impl std::fmt::Display for AuthMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -116,7 +115,6 @@ pub enum EncryptionMode {
     NotSupported,
 }
 
-
 /// Starting position when no LSN is found in the state store
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -128,7 +126,6 @@ pub enum StartPosition {
     #[default]
     Current,
 }
-
 
 impl std::fmt::Display for EncryptionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

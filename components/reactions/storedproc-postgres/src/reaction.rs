@@ -134,7 +134,9 @@ impl PostgresStoredProcReaction {
         let guard = self.executor.read().await;
         match guard.as_ref() {
             Some(executor) => executor.test_connection().await,
-            None => Err(anyhow::anyhow!("Executor not initialized — call start() first")),
+            None => Err(anyhow::anyhow!(
+                "Executor not initialized — call start() first"
+            )),
         }
     }
 

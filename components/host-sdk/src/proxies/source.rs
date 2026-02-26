@@ -44,10 +44,8 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
     let send_ptr = drasi_plugin_sdk::ffi::SendMutPtr(future_ptr);
     let result = std::thread::spawn(move || {
         let boxed_future = unsafe {
-            Box::from_raw(
-                send_ptr.as_ptr()
-                    as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>,
-            )
+            Box::from_raw(send_ptr.as_ptr()
+                as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>)
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -79,8 +77,7 @@ unsafe impl Sync for SourceProxy {}
 
 impl SourceProxy {
     pub fn new(vtable: SourceVtable, library: Arc<Library>) -> Self {
-        let cached_id =
-            unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
+        let cached_id = unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
         Self {
@@ -188,7 +185,11 @@ impl Source for SourceProxy {
         } else {
             let ffi_cr = unsafe { *Box::from_raw(ffi_resp.receiver) };
             Box::new(ChangeReceiverProxy::new(ffi_cr))
-                as Box<dyn drasi_lib::channels::ChangeReceiver<drasi_lib::channels::events::SourceEventWrapper>>
+                as Box<
+                    dyn drasi_lib::channels::ChangeReceiver<
+                        drasi_lib::channels::events::SourceEventWrapper,
+                    >,
+                >
         };
 
         let bootstrap_receiver = if ffi_resp.bootstrap_receiver.is_null() {
@@ -274,10 +275,7 @@ impl Source for SourceProxy {
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
     }
 
-    async fn set_bootstrap_provider(
-        &self,
-        provider: Box<dyn BootstrapProvider + 'static>,
-    ) {
+    async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
         // Wrap the host-side BootstrapProvider into a BootstrapProviderVtable
         // using the SDK's vtable generation.
         // The host executor runs futures on the current tokio runtime via std::thread::spawn.
@@ -314,8 +312,7 @@ unsafe impl Sync for SourcePluginProxy {}
 
 impl SourcePluginProxy {
     pub fn new(vtable: SourcePluginVtable, library: Arc<Library>) -> Self {
-        let cached_kind =
-            unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
+        let cached_kind = unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_version =
             unsafe { (vtable.config_version_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_schema_name =

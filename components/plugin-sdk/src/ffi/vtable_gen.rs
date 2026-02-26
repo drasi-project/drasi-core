@@ -26,20 +26,20 @@ use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_lib::channels::events::{
+    BootstrapEvent, BootstrapEventSender, ComponentEventReceiver, SourceEvent, SourceEventWrapper,
+};
 use drasi_lib::channels::ChangeReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
-use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender, ComponentEventReceiver, SourceEvent, SourceEventWrapper};
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
-use drasi_lib::{
-    ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider,
-};
-use drasi_core::models::{ElementMetadata, SourceChange};
+use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider};
 
 use super::bootstrap_proxy::FfiBootstrapProviderProxy;
-use super::callbacks::FfiLifecycleEventType;
 use super::callbacks::FfiLifecycleEvent;
+use super::callbacks::FfiLifecycleEventType;
 use super::state_store_proxy::FfiStateStoreProxy;
 use super::types::*;
 use super::vtables::*;
@@ -183,10 +183,14 @@ pub fn build_source_vtable<T: Source + 'static>(
         event_type: FfiLifecycleEventType,
         message: &str,
     ) {
-        let cb_ptr = w.instance_lifecycle_cb.load(std::sync::atomic::Ordering::Acquire);
+        let cb_ptr = w
+            .instance_lifecycle_cb
+            .load(std::sync::atomic::Ordering::Acquire);
         if !cb_ptr.is_null() {
             let cb: super::callbacks::LifecycleCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-            let ctx = w.instance_lifecycle_ctx.load(std::sync::atomic::Ordering::Acquire);
+            let ctx = w
+                .instance_lifecycle_ctx
+                .load(std::sync::atomic::Ordering::Acquire);
             let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
             let event = FfiLifecycleEvent {
                 component_id: FfiStr::from_str(&w.cached_id),
@@ -203,13 +207,17 @@ pub fn build_source_vtable<T: Source + 'static>(
     }
 
     /// Build an InstanceLogContext from the wrapper's per-instance state.
-    fn build_instance_log_ctx<T: Source + 'static>(w: &SourceWrapper<T>) -> Option<InstanceLogContext> {
+    fn build_instance_log_ctx<T: Source + 'static>(
+        w: &SourceWrapper<T>,
+    ) -> Option<InstanceLogContext> {
         let cb_ptr = w.instance_log_cb.load(std::sync::atomic::Ordering::Acquire);
         if cb_ptr.is_null() {
             return None;
         }
         let cb: super::callbacks::LogCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-        let ctx = w.instance_log_ctx.load(std::sync::atomic::Ordering::Acquire);
+        let ctx = w
+            .instance_log_ctx
+            .load(std::sync::atomic::Ordering::Acquire);
         let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
         Some(InstanceLogContext {
             instance_id,
@@ -228,9 +236,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             let handle = (w.runtime_handle)().handle().clone();
             let result = std::thread::spawn({
                 let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-                move || {
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-                }
+                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
             })
             .join()
             .expect("source start thread panicked");
@@ -256,9 +262,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             let handle = (w.runtime_handle)().handle().clone();
             let result = std::thread::spawn({
                 let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-                move || {
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-                }
+                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
             })
             .join()
             .expect("source stop thread panicked");
@@ -319,10 +323,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         let nodes_str = unsafe { nodes_json.to_string() };
         let rels_str = unsafe { relations_json.to_string() };
 
-        let nodes: HashSet<String> =
-            serde_json::from_str(&nodes_str).unwrap_or_default();
-        let relations: HashSet<String> =
-            serde_json::from_str(&rels_str).unwrap_or_default();
+        let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
+        let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -358,24 +360,18 @@ pub fn build_source_vtable<T: Source + 'static>(
 
         // Capture per-instance callbacks from the runtime context
         if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb.store(
-                log_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
-            );
-            w.instance_log_ctx.store(
-                ffi_ctx.log_ctx,
-                std::sync::atomic::Ordering::Release,
-            );
+            w.instance_log_cb
+                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+            w.instance_log_ctx
+                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
             w.instance_lifecycle_cb.store(
                 lifecycle_cb as *mut (),
                 std::sync::atomic::Ordering::Release,
             );
-            w.instance_lifecycle_ctx.store(
-                ffi_ctx.lifecycle_ctx,
-                std::sync::atomic::Ordering::Release,
-            );
+            w.instance_lifecycle_ctx
+                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
         }
 
         // Store instance_id for log context
@@ -509,10 +505,14 @@ pub fn build_source_vtable_from_boxed(
         event_type: FfiLifecycleEventType,
         message: &str,
     ) {
-        let cb_ptr = w.instance_lifecycle_cb.load(std::sync::atomic::Ordering::Acquire);
+        let cb_ptr = w
+            .instance_lifecycle_cb
+            .load(std::sync::atomic::Ordering::Acquire);
         if !cb_ptr.is_null() {
             let cb: super::callbacks::LifecycleCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-            let ctx = w.instance_lifecycle_ctx.load(std::sync::atomic::Ordering::Acquire);
+            let ctx = w
+                .instance_lifecycle_ctx
+                .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
                 component_id: FfiStr::from_str(&w.cached_id),
                 component_type: FfiStr::from_str("source"),
@@ -528,9 +528,13 @@ pub fn build_source_vtable_from_boxed(
 
     fn build_dyn_source_log_ctx(w: &DynSourceWrapper) -> Option<InstanceLogContext> {
         let cb_ptr = w.instance_log_cb.load(std::sync::atomic::Ordering::Acquire);
-        if cb_ptr.is_null() { return None; }
+        if cb_ptr.is_null() {
+            return None;
+        }
         let cb: super::callbacks::LogCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-        let ctx = w.instance_log_ctx.load(std::sync::atomic::Ordering::Acquire);
+        let ctx = w
+            .instance_log_ctx
+            .load(std::sync::atomic::Ordering::Acquire);
         let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
         Some(InstanceLogContext {
             instance_id,
@@ -648,10 +652,8 @@ pub fn build_source_vtable_from_boxed(
         let nodes_str = unsafe { nodes_json.to_string() };
         let rels_str = unsafe { relations_json.to_string() };
 
-        let nodes: HashSet<String> =
-            serde_json::from_str(&nodes_str).unwrap_or_default();
-        let relations: HashSet<String> =
-            serde_json::from_str(&rels_str).unwrap_or_default();
+        let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
+        let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
 
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
@@ -674,8 +676,7 @@ pub fn build_source_vtable_from_boxed(
 
         match result {
             Ok(sub) => {
-                let executor =
-                    unsafe { &*(state as *const DynSourceWrapper) }.vtable_executor;
+                let executor = unsafe { &*(state as *const DynSourceWrapper) }.vtable_executor;
                 wrap_subscription_response(sub, executor)
             }
             Err(e) => {
@@ -690,12 +691,18 @@ pub fn build_source_vtable_from_boxed(
         let ffi_ctx = unsafe { &*ctx };
 
         if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb.store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx.store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+            w.instance_log_cb
+                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+            w.instance_log_ctx
+                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(lifecycle_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_lifecycle_ctx.store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+            w.instance_lifecycle_cb.store(
+                lifecycle_cb as *mut (),
+                std::sync::atomic::Ordering::Release,
+            );
+            w.instance_lifecycle_ctx
+                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Ok(mut iid) = w.instance_id.write() {
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
@@ -832,10 +839,14 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         event_type: FfiLifecycleEventType,
         message: &str,
     ) {
-        let cb_ptr = w.instance_lifecycle_cb.load(std::sync::atomic::Ordering::Acquire);
+        let cb_ptr = w
+            .instance_lifecycle_cb
+            .load(std::sync::atomic::Ordering::Acquire);
         if !cb_ptr.is_null() {
             let cb: super::callbacks::LifecycleCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-            let ctx = w.instance_lifecycle_ctx.load(std::sync::atomic::Ordering::Acquire);
+            let ctx = w
+                .instance_lifecycle_ctx
+                .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
                 component_id: FfiStr::from_str(&w.cached_id),
                 component_type: FfiStr::from_str("reaction"),
@@ -849,13 +860,17 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         }
     }
 
-    fn build_reaction_log_ctx<T: Reaction + 'static>(w: &ReactionWrapper<T>) -> Option<InstanceLogContext> {
+    fn build_reaction_log_ctx<T: Reaction + 'static>(
+        w: &ReactionWrapper<T>,
+    ) -> Option<InstanceLogContext> {
         let cb_ptr = w.instance_log_cb.load(std::sync::atomic::Ordering::Acquire);
         if cb_ptr.is_null() {
             return None;
         }
         let cb: super::callbacks::LogCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-        let ctx = w.instance_log_ctx.load(std::sync::atomic::Ordering::Acquire);
+        let ctx = w
+            .instance_log_ctx
+            .load(std::sync::atomic::Ordering::Acquire);
         let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
         Some(InstanceLogContext {
             instance_id,
@@ -874,9 +889,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             let handle = (w.runtime_handle)().handle().clone();
             let result = std::thread::spawn({
                 let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || {
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-                }
+                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
             })
             .join()
             .expect("reaction start thread panicked");
@@ -902,9 +915,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             let handle = (w.runtime_handle)().handle().clone();
             let result = std::thread::spawn({
                 let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || {
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-                }
+                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
             })
             .join()
             .expect("reaction stop thread panicked");
@@ -960,24 +971,18 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
 
         // Capture per-instance callbacks
         if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb.store(
-                log_cb as *mut (),
-                std::sync::atomic::Ordering::Release,
-            );
-            w.instance_log_ctx.store(
-                ffi_ctx.log_ctx,
-                std::sync::atomic::Ordering::Release,
-            );
+            w.instance_log_cb
+                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+            w.instance_log_ctx
+                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
             w.instance_lifecycle_cb.store(
                 lifecycle_cb as *mut (),
                 std::sync::atomic::Ordering::Release,
             );
-            w.instance_lifecycle_ctx.store(
-                ffi_ctx.lifecycle_ctx,
-                std::sync::atomic::Ordering::Release,
-            );
+            w.instance_lifecycle_ctx
+                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Ok(mut iid) = w.instance_id.write() {
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
@@ -1079,10 +1084,14 @@ pub fn build_reaction_vtable_from_boxed(
         event_type: FfiLifecycleEventType,
         message: &str,
     ) {
-        let cb_ptr = w.instance_lifecycle_cb.load(std::sync::atomic::Ordering::Acquire);
+        let cb_ptr = w
+            .instance_lifecycle_cb
+            .load(std::sync::atomic::Ordering::Acquire);
         if !cb_ptr.is_null() {
             let cb: super::callbacks::LifecycleCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-            let ctx = w.instance_lifecycle_ctx.load(std::sync::atomic::Ordering::Acquire);
+            let ctx = w
+                .instance_lifecycle_ctx
+                .load(std::sync::atomic::Ordering::Acquire);
             let event = FfiLifecycleEvent {
                 component_id: FfiStr::from_str(&w.cached_id),
                 component_type: FfiStr::from_str("reaction"),
@@ -1098,9 +1107,13 @@ pub fn build_reaction_vtable_from_boxed(
 
     fn build_dyn_reaction_log_ctx(w: &DynReactionWrapper) -> Option<InstanceLogContext> {
         let cb_ptr = w.instance_log_cb.load(std::sync::atomic::Ordering::Acquire);
-        if cb_ptr.is_null() { return None; }
+        if cb_ptr.is_null() {
+            return None;
+        }
         let cb: super::callbacks::LogCallbackFn = unsafe { std::mem::transmute(cb_ptr) };
-        let ctx = w.instance_log_ctx.load(std::sync::atomic::Ordering::Acquire);
+        let ctx = w
+            .instance_log_ctx
+            .load(std::sync::atomic::Ordering::Acquire);
         let instance_id = w.instance_id.read().map(|s| s.clone()).unwrap_or_default();
         Some(InstanceLogContext {
             instance_id,
@@ -1209,12 +1222,18 @@ pub fn build_reaction_vtable_from_boxed(
         let ffi_ctx = unsafe { &*ctx };
 
         if let Some(log_cb) = ffi_ctx.log_callback {
-            w.instance_log_cb.store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_log_ctx.store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
+            w.instance_log_cb
+                .store(log_cb as *mut (), std::sync::atomic::Ordering::Release);
+            w.instance_log_ctx
+                .store(ffi_ctx.log_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Some(lifecycle_cb) = ffi_ctx.lifecycle_callback {
-            w.instance_lifecycle_cb.store(lifecycle_cb as *mut (), std::sync::atomic::Ordering::Release);
-            w.instance_lifecycle_ctx.store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
+            w.instance_lifecycle_cb.store(
+                lifecycle_cb as *mut (),
+                std::sync::atomic::Ordering::Release,
+            );
+            w.instance_lifecycle_ctx
+                .store(ffi_ctx.lifecycle_ctx, std::sync::atomic::Ordering::Release);
         }
         if let Ok(mut iid) = w.instance_id.write() {
             *iid = unsafe { ffi_ctx.instance_id.to_string() };
@@ -1344,7 +1363,10 @@ pub fn build_bootstrap_provider_vtable(
                         }
                     }
                 });
-                let _ = inner.inner.bootstrap(request, &context, tokio_tx, None).await;
+                let _ = inner
+                    .inner
+                    .bootstrap(request, &context, tokio_tx, None)
+                    .await;
                 let _ = forward_handle.await;
             })
         });
@@ -1430,9 +1452,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
     lifecycle_emitter: LifecycleEmitterFn,
     runtime: fn() -> &'static tokio::runtime::Runtime,
 ) -> SourcePluginVtable {
-    extern "C" fn kind_fn<T: SourcePluginDescriptor + 'static>(
-        state: *const c_void,
-    ) -> FfiStr {
+    extern "C" fn kind_fn<T: SourcePluginDescriptor + 'static>(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const SourcePluginWrapper<T>) };
         FfiStr::from_str(&w.cached_kind)
     }
@@ -1471,11 +1491,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!(
-                    "Failed to parse config JSON for source '{}': {}",
-                    id_str,
-                    e
-                );
+                log::error!("Failed to parse config JSON for source '{}': {}", id_str, e);
                 return std::ptr::null_mut();
             }
         };
@@ -1485,7 +1501,11 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
             let inner = unsafe { &*(state as *const SourcePluginWrapper<T>) };
             let id_owned = id_str.clone();
             move || {
-                handle.block_on(inner.inner.create_source(&id_owned, &config_value, auto_start))
+                handle.block_on(
+                    inner
+                        .inner
+                        .create_source(&id_owned, &config_value, auto_start),
+                )
             }
         })
         .join()
@@ -1559,9 +1579,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
     lifecycle_emitter: LifecycleEmitterFn,
     runtime: fn() -> &'static tokio::runtime::Runtime,
 ) -> ReactionPluginVtable {
-    extern "C" fn kind_fn<T: ReactionPluginDescriptor + 'static>(
-        state: *const c_void,
-    ) -> FfiStr {
+    extern "C" fn kind_fn<T: ReactionPluginDescriptor + 'static>(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
         FfiStr::from_str(&w.cached_kind)
     }
@@ -1628,11 +1646,12 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
             let inner = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
             let id_owned = id_str.clone();
             move || {
-                handle.block_on(
-                    inner
-                        .inner
-                        .create_reaction(&id_owned, query_ids, &config_value, auto_start),
-                )
+                handle.block_on(inner.inner.create_reaction(
+                    &id_owned,
+                    query_ids,
+                    &config_value,
+                    auto_start,
+                ))
             }
         })
         .join()
@@ -1707,9 +1726,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
     lifecycle_emitter: LifecycleEmitterFn,
     runtime: fn() -> &'static tokio::runtime::Runtime,
 ) -> BootstrapPluginVtable {
-    extern "C" fn kind_fn<T: BootstrapPluginDescriptor + 'static>(
-        state: *const c_void,
-    ) -> FfiStr {
+    extern "C" fn kind_fn<T: BootstrapPluginDescriptor + 'static>(state: *const c_void) -> FfiStr {
         let w = unsafe { &*(state as *const BootstrapPluginWrapper<T>) };
         FfiStr::from_str(&w.cached_kind)
     }
@@ -1751,14 +1768,14 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
                 return std::ptr::null_mut();
             }
         };
-        let source_config_value: serde_json::Value =
-            match serde_json::from_str(&source_config_str) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!("Failed to parse source config JSON: {}", e);
-                    return std::ptr::null_mut();
-                }
-            };
+        let source_config_value: serde_json::Value = match serde_json::from_str(&source_config_str)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("Failed to parse source config JSON: {}", e);
+                return std::ptr::null_mut();
+            }
+        };
 
         let handle = (w.runtime_handle)().handle().clone();
         let result = std::thread::spawn({
@@ -1821,7 +1838,9 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
 // ============================================================================
 
 /// Build a SourceRuntimeContext from FFI runtime context.
-fn build_source_runtime_context(ffi_ctx: &FfiRuntimeContext) -> (SourceRuntimeContext, ComponentEventReceiver) {
+fn build_source_runtime_context(
+    ffi_ctx: &FfiRuntimeContext,
+) -> (SourceRuntimeContext, ComponentEventReceiver) {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
     let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
@@ -1925,14 +1944,12 @@ fn wrap_subscription_response(
         match event {
             Ok(wrapper) => {
                 let op = match &wrapper.event {
-                    drasi_lib::channels::events::SourceEvent::Change(change) => {
-                        match change {
-                            SourceChange::Insert { .. } => FfiChangeOp::Insert,
-                            SourceChange::Update { .. } => FfiChangeOp::Update,
-                            SourceChange::Delete { .. } => FfiChangeOp::Delete,
-                            SourceChange::Future { .. } => FfiChangeOp::Update,
-                        }
-                    }
+                    drasi_lib::channels::events::SourceEvent::Change(change) => match change {
+                        SourceChange::Insert { .. } => FfiChangeOp::Insert,
+                        SourceChange::Update { .. } => FfiChangeOp::Update,
+                        SourceChange::Delete { .. } => FfiChangeOp::Delete,
+                        SourceChange::Future { .. } => FfiChangeOp::Update,
+                    },
                     _ => FfiChangeOp::Update,
                 };
                 let source_id_str = wrapper.source_id.clone();

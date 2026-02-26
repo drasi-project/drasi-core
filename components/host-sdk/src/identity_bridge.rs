@@ -23,10 +23,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use drasi_lib::identity::IdentityProvider;
-use drasi_plugin_sdk::ffi::{
-    credentials_to_ffi, FfiCredentialsResult,
-    IdentityProviderVtable,
-};
+use drasi_plugin_sdk::ffi::{credentials_to_ffi, FfiCredentialsResult, IdentityProviderVtable};
 
 /// Builds an `IdentityProviderVtable` from a host-side `Arc<dyn IdentityProvider>`.
 pub struct IdentityProviderVtableBuilder;

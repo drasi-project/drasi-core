@@ -21,7 +21,7 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-use super::types::{FfiStr, now_us};
+use super::types::{now_us, FfiStr};
 use super::vtables::{BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapSender};
 use drasi_lib::bootstrap::BootstrapProvider;
 
@@ -81,7 +81,8 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         }
 
         // Use std::sync::mpsc so the vtable thread can send without async
-        let (std_tx, std_rx) = std::sync::mpsc::channel::<drasi_lib::channels::events::BootstrapEvent>();
+        let (std_tx, std_rx) =
+            std::sync::mpsc::channel::<drasi_lib::channels::events::BootstrapEvent>();
 
         let sender_state = Box::new(SenderState { tx: std_tx });
         let ffi_sender = Box::new(FfiBootstrapSender {
@@ -98,8 +99,10 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             let ffi_query_id = FfiStr::from_str(&query_id);
             let ffi_node_labels: Vec<FfiStr> =
                 node_labels.iter().map(|s| FfiStr::from_str(s)).collect();
-            let ffi_rel_labels: Vec<FfiStr> =
-                relation_labels.iter().map(|s| FfiStr::from_str(s)).collect();
+            let ffi_rel_labels: Vec<FfiStr> = relation_labels
+                .iter()
+                .map(|s| FfiStr::from_str(s))
+                .collect();
             let ffi_request_id = FfiStr::from_str(&request_id);
             let ffi_server_id = FfiStr::from_str(&server_id);
             let ffi_source_id = FfiStr::from_str(&source_id);

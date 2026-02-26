@@ -30,7 +30,7 @@ pub mod state_store_bridge;
 pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
 pub use identity_bridge::IdentityProviderVtableBuilder;
 pub use loader::{LoadedPlugin, PluginLoader, PluginLoaderConfig};
-pub use proxies::bootstrap_provider::{BootstrapProviderProxy, BootstrapPluginProxy};
+pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
 pub use state_store_bridge::StateStoreVtableBuilder;

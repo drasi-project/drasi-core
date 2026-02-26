@@ -186,7 +186,9 @@ impl FfiCredentialsResult {
 unsafe fn libc_free(ptr: *mut c_void) {
     if !ptr.is_null() {
         // CString::into_raw allocates via Rust allocator, so we reconstruct and drop
-        drop(std::ffi::CString::from_raw(ptr as *mut std::os::raw::c_char));
+        drop(std::ffi::CString::from_raw(
+            ptr as *mut std::os::raw::c_char,
+        ));
     }
 }
 
@@ -196,14 +198,20 @@ pub fn credentials_to_ffi(creds: drasi_lib::identity::Credentials) -> FfiCredent
         drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
             FfiCredentials {
                 credential_type: FfiCredentialType::UsernamePassword,
-                field1: std::ffi::CString::new(username).unwrap_or_default().into_raw(),
-                field2: std::ffi::CString::new(password).unwrap_or_default().into_raw(),
+                field1: std::ffi::CString::new(username)
+                    .unwrap_or_default()
+                    .into_raw(),
+                field2: std::ffi::CString::new(password)
+                    .unwrap_or_default()
+                    .into_raw(),
                 field3: std::ptr::null_mut(),
             }
         }
         drasi_lib::identity::Credentials::Token { username, token } => FfiCredentials {
             credential_type: FfiCredentialType::Token,
-            field1: std::ffi::CString::new(username).unwrap_or_default().into_raw(),
+            field1: std::ffi::CString::new(username)
+                .unwrap_or_default()
+                .into_raw(),
             field2: std::ffi::CString::new(token).unwrap_or_default().into_raw(),
             field3: std::ptr::null_mut(),
         },
@@ -213,8 +221,12 @@ pub fn credentials_to_ffi(creds: drasi_lib::identity::Credentials) -> FfiCredent
             username,
         } => FfiCredentials {
             credential_type: FfiCredentialType::Certificate,
-            field1: std::ffi::CString::new(cert_pem).unwrap_or_default().into_raw(),
-            field2: std::ffi::CString::new(key_pem).unwrap_or_default().into_raw(),
+            field1: std::ffi::CString::new(cert_pem)
+                .unwrap_or_default()
+                .into_raw(),
+            field2: std::ffi::CString::new(key_pem)
+                .unwrap_or_default()
+                .into_raw(),
             field3: username
                 .map(|u| std::ffi::CString::new(u).unwrap_or_default().into_raw())
                 .unwrap_or(std::ptr::null_mut()),

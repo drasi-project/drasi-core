@@ -44,8 +44,7 @@ unsafe impl Sync for ReactionProxy {}
 
 impl ReactionProxy {
     pub fn new(vtable: ReactionVtable, library: Arc<Library>) -> Self {
-        let cached_id =
-            unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
+        let cached_id = unsafe { (vtable.id_fn)(vtable.state as *const c_void).to_string() };
         let cached_type_name =
             unsafe { (vtable.type_name_fn)(vtable.state as *const c_void).to_string() };
         Self {
@@ -198,8 +197,7 @@ unsafe impl Sync for ReactionPluginProxy {}
 
 impl ReactionPluginProxy {
     pub fn new(vtable: ReactionPluginVtable, library: Arc<Library>) -> Self {
-        let cached_kind =
-            unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
+        let cached_kind = unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_version =
             unsafe { (vtable.config_version_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_schema_name =

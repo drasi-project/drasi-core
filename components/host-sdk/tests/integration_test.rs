@@ -467,7 +467,10 @@ fn test_plugin_loader_empty_directory() {
         )
         .unwrap();
 
-    assert!(plugins.is_empty(), "Empty directory should yield no plugins");
+    assert!(
+        plugins.is_empty(),
+        "Empty directory should yield no plugins"
+    );
 }
 
 #[test]
@@ -513,10 +516,7 @@ fn test_plugin_loader_skips_non_plugin_files() {
         )
         .unwrap();
 
-    assert!(
-        plugins.is_empty(),
-        "Non-library files should not be loaded"
-    );
+    assert!(plugins.is_empty(), "Non-library files should not be loaded");
 }
 
 #[test]
@@ -689,10 +689,7 @@ fn test_load_invalid_file_returns_error() {
         callbacks::default_lifecycle_callback_fn(),
     );
 
-    assert!(
-        result.is_err(),
-        "Loading a non-library file should fail"
-    );
+    assert!(result.is_err(), "Loading a non-library file should fail");
 }
 
 #[tokio::test]
@@ -728,10 +725,7 @@ async fn test_create_source_with_invalid_config() {
     if let Err(e) = &result {
         // Good — invalid config was rejected
         let msg = e.to_string();
-        assert!(
-            !msg.is_empty(),
-            "Error should have a descriptive message"
-        );
+        assert!(!msg.is_empty(), "Error should have a descriptive message");
     }
     // If it succeeds, that's also acceptable (plugin chose defaults)
 }
@@ -888,17 +882,17 @@ async fn test_plugin_logs_routed_to_log_registry() {
     let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
 
     // Initialize with a real SourceRuntimeContext — this wires per-instance callbacks
-    let context = SourceRuntimeContext::new(
-        "log-test-instance",
-        "log-test-source",
-        status_tx,
-        None,
-    );
+    let context =
+        SourceRuntimeContext::new("log-test-instance", "log-test-source", status_tx, None);
     source.initialize(context).await;
 
     // Subscribe to logs BEFORE starting (like the API does)
     let registry = get_or_init_global_registry();
-    let log_key = ComponentLogKey::new("log-test-instance", ComponentType::Source, "log-test-source");
+    let log_key = ComponentLogKey::new(
+        "log-test-instance",
+        ComponentType::Source,
+        "log-test-source",
+    );
     let (_history, mut log_rx) = registry.subscribe_by_key(&log_key).await;
 
     // Starting the source should trigger log output from the plugin
@@ -1130,7 +1124,11 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let has_info = our_logs
         .iter()
         .any(|l| l.level == drasi_plugin_sdk::ffi::FfiLogLevel::Info);
-    assert!(has_info, "Expected at least one INFO log, got: {:?}", our_logs);
+    assert!(
+        has_info,
+        "Expected at least one INFO log, got: {:?}",
+        our_logs
+    );
 }
 
 #[tokio::test]
@@ -1218,16 +1216,16 @@ async fn test_per_instance_logs_include_correct_component_id() {
         .unwrap();
 
     let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
-    let context = SourceRuntimeContext::new(
-        "cid-test-instance",
-        "component-id-test",
-        status_tx,
-        None,
-    );
+    let context =
+        SourceRuntimeContext::new("cid-test-instance", "component-id-test", status_tx, None);
     source.initialize(context).await;
 
     let registry = get_or_init_global_registry();
-    let log_key = ComponentLogKey::new("cid-test-instance", ComponentType::Source, "component-id-test");
+    let log_key = ComponentLogKey::new(
+        "cid-test-instance",
+        ComponentType::Source,
+        "component-id-test",
+    );
     let (_history, mut log_rx) = registry.subscribe_by_key(&log_key).await;
 
     let _ = source.start().await;
@@ -1358,12 +1356,13 @@ async fn test_identity_provider_username_password_roundtrip() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+    let creds = proxy
+        .get_credentials()
+        .await
+        .expect("get_credentials should succeed");
 
     match creds {
         drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
@@ -1385,12 +1384,13 @@ async fn test_identity_provider_token_roundtrip() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+    let creds = proxy
+        .get_credentials()
+        .await
+        .expect("get_credentials should succeed");
 
     match creds {
         drasi_lib::identity::Credentials::Token { username, token } => {
@@ -1413,15 +1413,20 @@ async fn test_identity_provider_certificate_roundtrip() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+    let creds = proxy
+        .get_credentials()
+        .await
+        .expect("get_credentials should succeed");
 
     match creds {
-        drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, username } => {
+        drasi_lib::identity::Credentials::Certificate {
+            cert_pem,
+            key_pem,
+            username,
+        } => {
             assert!(cert_pem.contains("BEGIN CERTIFICATE"));
             assert!(key_pem.contains("BEGIN PRIVATE KEY"));
             assert_eq!(username, Some("db-user".to_string()));
@@ -1442,15 +1447,20 @@ async fn test_identity_provider_certificate_no_username() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let creds = proxy.get_credentials().await.expect("get_credentials should succeed");
+    let creds = proxy
+        .get_credentials()
+        .await
+        .expect("get_credentials should succeed");
 
     match creds {
-        drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, username } => {
+        drasi_lib::identity::Credentials::Certificate {
+            cert_pem,
+            key_pem,
+            username,
+        } => {
             assert_eq!(cert_pem, "cert-data");
             assert_eq!(key_pem, "key-data");
             assert_eq!(username, None);
@@ -1467,9 +1477,7 @@ async fn test_identity_provider_error_propagation() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
     let result = proxy.get_credentials().await;
@@ -1498,9 +1506,7 @@ async fn test_identity_provider_clone_box() {
     let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
     let vtable_ptr = Box::into_raw(Box::new(vtable));
 
-    let proxy = unsafe {
-        drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr)
-    };
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
 
@@ -1511,7 +1517,10 @@ async fn test_identity_provider_clone_box() {
     drop(proxy);
 
     // The clone should still work
-    let creds = cloned.get_credentials().await.expect("cloned provider should work");
+    let creds = cloned
+        .get_credentials()
+        .await
+        .expect("cloned provider should work");
     match creds {
         drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
             assert_eq!(username, "user1");
@@ -1528,7 +1537,10 @@ async fn test_source_with_null_identity_provider() {
     let dir = plugin_dir();
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
-        eprintln!("Skipping test: mock source plugin not found at {:?}", mock_path);
+        eprintln!(
+            "Skipping test: mock source plugin not found at {:?}",
+            mock_path
+        );
         return;
     }
 
@@ -1539,7 +1551,7 @@ async fn test_source_with_null_identity_provider() {
         std::ptr::null_mut(),
         callbacks::default_lifecycle_callback_fn(),
     )
-        .expect("Should load mock source plugin");
+    .expect("Should load mock source plugin");
 
     let source_descriptor = &plugin.source_plugins[0];
     let config = serde_json::json!({});
@@ -1568,7 +1580,10 @@ async fn test_source_with_identity_provider_injection() {
     let dir = plugin_dir();
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
-        eprintln!("Skipping test: mock source plugin not found at {:?}", mock_path);
+        eprintln!(
+            "Skipping test: mock source plugin not found at {:?}",
+            mock_path
+        );
         return;
     }
 
@@ -1579,7 +1594,7 @@ async fn test_source_with_identity_provider_injection() {
         std::ptr::null_mut(),
         callbacks::default_lifecycle_callback_fn(),
     )
-        .expect("Should load mock source plugin");
+    .expect("Should load mock source plugin");
 
     let source_descriptor = &plugin.source_plugins[0];
     let config = serde_json::json!({});

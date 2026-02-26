@@ -86,10 +86,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
                 FfiStr::from_str(store_id),
                 FfiStr::from_str(key),
             );
-            result
-                .into_result()
-                .map(|_| true)
-                .or_else(|_| Ok(false))
+            result.into_result().map(|_| true).or_else(|_| Ok(false))
         }
     }
 
@@ -108,11 +105,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
         Ok(result)
     }
 
-    async fn set_many(
-        &self,
-        store_id: &str,
-        entries: &[(&str, &[u8])],
-    ) -> StateStoreResult<()> {
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
         // Fall back to individual sets for simplicity
         for (key, value) in entries {
             self.set(store_id, key, value.to_vec()).await?;
@@ -155,12 +148,8 @@ impl StateStoreProvider for FfiStateStoreProxy {
     async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
         unsafe {
             let vtable = &*self.vtable;
-            let result =
-                (vtable.store_exists_fn)(vtable.state, FfiStr::from_str(store_id));
-            result
-                .into_result()
-                .map(|_| true)
-                .or_else(|_| Ok(false))
+            let result = (vtable.store_exists_fn)(vtable.state, FfiStr::from_str(store_id));
+            result.into_result().map(|_| true).or_else(|_| Ok(false))
         }
     }
 
@@ -169,9 +158,7 @@ impl StateStoreProvider for FfiStateStoreProxy {
             let vtable = &*self.vtable;
             let result = (vtable.key_count_fn)(vtable.state, FfiStr::from_str(store_id));
             if result < 0 {
-                Err(drasi_lib::StateStoreError::Other(
-                    "key_count failed".into(),
-                ))
+                Err(drasi_lib::StateStoreError::Other("key_count failed".into()))
             } else {
                 Ok(result as usize)
             }

@@ -88,16 +88,15 @@ impl BootstrapReceiverProxy {
             return None;
         }
         let ffi_event = unsafe { &*ptr };
-        let event =
-            unsafe { *Box::from_raw(ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent) };
+        let event = unsafe {
+            *Box::from_raw(ffi_event.opaque as *mut drasi_lib::channels::events::BootstrapEvent)
+        };
         unsafe { drop(Box::from_raw(ptr)) };
         Some(event)
     }
 
     /// Convert into a tokio mpsc Receiver by spawning a forwarding task.
-    pub fn into_mpsc_receiver(
-        self,
-    ) -> drasi_lib::channels::events::BootstrapEventReceiver {
+    pub fn into_mpsc_receiver(self) -> drasi_lib::channels::events::BootstrapEventReceiver {
         let (tx, rx) = tokio::sync::mpsc::channel(256);
         std::thread::spawn(move || {
             while let Some(event) = self.recv() {

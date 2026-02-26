@@ -61,7 +61,10 @@ impl BootstrapProvider for BootstrapProviderProxy {
         // Build FfiStr arrays for node/relation labels
         let node_label_strs: Vec<String> = request.node_labels.clone();
         let rel_label_strs: Vec<String> = request.relation_labels.clone();
-        let node_ffi: Vec<FfiStr> = node_label_strs.iter().map(|s| FfiStr::from_str(s)).collect();
+        let node_ffi: Vec<FfiStr> = node_label_strs
+            .iter()
+            .map(|s| FfiStr::from_str(s))
+            .collect();
         let rel_ffi: Vec<FfiStr> = rel_label_strs.iter().map(|s| FfiStr::from_str(s)).collect();
 
         let query_id_ffi = FfiStr::from_str(&request.query_id);
@@ -136,8 +139,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
             return -1;
         }
         let ffi_event = unsafe { &*event };
-        let bootstrap_event =
-            unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
+        let bootstrap_event = unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
         // Free the FFI envelope but not the opaque (we took ownership)
         unsafe { drop(Box::from_raw(event)) };
         match tx.send(bootstrap_event) {
@@ -147,7 +149,11 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut std::sync::mpsc::Sender<BootstrapEvent>)) };
+        unsafe {
+            drop(Box::from_raw(
+                state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
+            ))
+        };
     }
 
     FfiBootstrapSender {
@@ -175,8 +181,7 @@ unsafe impl Sync for BootstrapPluginProxy {}
 
 impl BootstrapPluginProxy {
     pub fn new(vtable: BootstrapPluginVtable, library: Arc<Library>) -> Self {
-        let cached_kind =
-            unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
+        let cached_kind = unsafe { (vtable.kind_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_version =
             unsafe { (vtable.config_version_fn)(vtable.state as *const c_void).to_string() };
         let cached_config_schema_name =
