@@ -69,7 +69,7 @@ impl Float {
 
     pub(crate) fn as_f64(&self) -> Option<f64> {
         match self.value {
-            n if n.is_finite() => Some(n),
+            n if !n.is_nan() => Some(n),
             _ => None,
         }
     }
@@ -83,10 +83,10 @@ impl Float {
 
     #[inline]
     pub fn from_f64(f: f64) -> Option<Float> {
-        if f.is_finite() {
-            Some(Float { value: f })
-        } else {
+        if f.is_nan() {
             None
+        } else {
+            Some(Float { value: f })
         }
     }
 
@@ -102,7 +102,10 @@ impl Float {
 
 impl From<Float> for Number {
     fn from(val: Float) -> Self {
-        Number::from_f64(val.value).expect("a finite float")
+        // This should only be called for finite floats
+        // The From<VariableValue> for Value trait checks finiteness before calling this
+        // If infinity somehow reaches here, we panic to catch the bug
+        Number::from_f64(val.value).expect("Float must be finite when converting to JSON Number. This is a bug - infinity/NaN should be converted to null before reaching this point.")
     }
 }
 

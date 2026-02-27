@@ -80,6 +80,12 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
         VariableValue::Null => serde_json::Value::Null,
         VariableValue::Bool(b) => serde_json::Value::Bool(*b),
         VariableValue::Float(f) => {
+            // Handle infinity and NaN by converting to null
+            // JSON doesn't support infinity in mathematical contexts
+            if !f.is_f64() {
+                serde_json::Value::Null
+            } else {
+                // For finite values, convert to string to preserve precision
             if f.is_f64() {
                 // from_f64 returns None for NaN/Infinity, but is_f64() already checks finiteness
                 let s = f.to_string();
@@ -92,6 +98,7 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
                 serde_json::Value::String(f.to_string())
             }
         }
+    }
         VariableValue::Integer(i) => {
             if let Some(val) = i.as_i64() {
                 serde_json::Value::Number(serde_json::Number::from(val))
