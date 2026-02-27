@@ -351,29 +351,25 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
 
 /// Simple glob-like pattern matching (supports `*` wildcards).
 fn matches_pattern(filename: &str, pattern: &str) -> bool {
-    // Handle platform-specific extensions
-    let ext = if cfg!(target_os = "macos") {
-        ".dylib"
-    } else if cfg!(target_os = "windows") {
-        ".dll"
-    } else {
-        ".so"
-    };
+    let known_exts = [".dylib", ".so", ".dll"];
 
-    // Add extension to pattern if not present
-    let full_pattern = if pattern.contains('.') {
-        pattern.to_string()
-    } else {
-        format!("{pattern}{ext}")
-    };
+    // Strip known extension from filename and pattern so matching is platform-agnostic
+    let stem = known_exts
+        .iter()
+        .find_map(|ext| filename.strip_suffix(ext))
+        .unwrap_or(filename);
+    let pat = known_exts
+        .iter()
+        .find_map(|ext| pattern.strip_suffix(ext))
+        .unwrap_or(pattern);
 
     // Simple wildcard matching
-    if let Some(prefix) = full_pattern.strip_suffix('*') {
-        filename.starts_with(prefix)
-    } else if let Some((prefix, suffix)) = full_pattern.split_once('*') {
-        filename.starts_with(prefix) && filename.ends_with(suffix)
+    if let Some(prefix) = pat.strip_suffix('*') {
+        stem.starts_with(prefix)
+    } else if let Some((prefix, suffix)) = pat.split_once('*') {
+        stem.starts_with(prefix) && stem.ends_with(suffix)
     } else {
-        filename == full_pattern
+        stem == pat
     }
 }
 
