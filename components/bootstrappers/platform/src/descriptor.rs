@@ -29,7 +29,7 @@ fn default_timeout_seconds() -> ConfigValue<u64> {
 
 /// Configuration DTO for the Platform bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = PlatformBootstrapConfig)]
+#[schema(as = bootstrap::platform::PlatformBootstrapConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformBootstrapConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,7 +61,7 @@ impl BootstrapPluginDescriptor for PlatformBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "PlatformBootstrapConfig"
+        "bootstrap.platform.PlatformBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

@@ -23,7 +23,7 @@ use crate::{MySqlStoredProcReaction, QueryConfig, TemplateSpec};
 
 /// DTO for a template specification (stored procedure command).
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = StoredProcTemplateSpec)]
+#[schema(as = reaction::storedproc_mysql::StoredProcTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StoredProcTemplateSpecDto {
     /// Handlebars template string for the stored procedure command.
@@ -32,7 +32,7 @@ pub struct StoredProcTemplateSpecDto {
 
 /// DTO for per-query stored procedure template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = StoredProcQueryConfig)]
+#[schema(as = reaction::storedproc_mysql::StoredProcQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StoredProcQueryConfigDto {
     /// Template for ADD operations.
@@ -50,7 +50,7 @@ pub struct StoredProcQueryConfigDto {
 
 /// Configuration DTO for the MySQL stored procedure reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = MySqlStoredProcReactionConfig)]
+#[schema(as = reaction::storedproc_mysql::MySqlStoredProcReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct MySqlStoredProcReactionConfigDto {
     /// Database hostname or IP address.
@@ -133,7 +133,7 @@ impl ReactionPluginDescriptor for MySqlStoredProcReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "MySqlStoredProcReactionConfig"
+        "reaction.storedproc_mysql.MySqlStoredProcReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

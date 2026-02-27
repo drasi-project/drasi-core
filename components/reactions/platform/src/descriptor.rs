@@ -22,7 +22,7 @@ use crate::PlatformReactionBuilder;
 
 /// Configuration DTO for the platform reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = PlatformReactionConfig)]
+#[schema(as = reaction::platform::PlatformReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformReactionConfigDto {
     /// Redis connection URL.
@@ -83,7 +83,7 @@ impl ReactionPluginDescriptor for PlatformReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "PlatformReactionConfig"
+        "reaction.platform.PlatformReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

@@ -175,13 +175,14 @@ pub trait SourcePluginDescriptor: Send + Sync {
     ///
     /// This name is used as the key in the OpenAPI `components/schemas` map.
     /// It should match the `#[schema(as = ...)]` annotation on the DTO, or the
-    /// struct name if no alias is set.
+    /// struct name if no alias is set. Use a `category.kind.TypeName` namespace
+    /// to avoid collisions (e.g., `"source.postgres.PostgresSourceConfig"`).
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// fn config_schema_name(&self) -> &str {
-    ///     "PostgresSourceConfig"
+    ///     "source.postgres.PostgresSourceConfig"
     /// }
     /// ```
     fn config_schema_name(&self) -> &str;

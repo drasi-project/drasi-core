@@ -24,7 +24,7 @@ use crate::NoOpBootstrapProvider;
 
 /// Empty configuration DTO for the NoOp bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = NoOpBootstrapConfig)]
+#[schema(as = bootstrap::noop::NoOpBootstrapConfig)]
 pub struct NoOpBootstrapConfigDto {}
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ impl BootstrapPluginDescriptor for NoOpBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "NoOpBootstrapConfig"
+        "bootstrap.noop.NoOpBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

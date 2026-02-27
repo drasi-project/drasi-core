@@ -24,7 +24,7 @@ use crate::ApplicationBootstrapProvider;
 
 /// Empty configuration DTO for the Application bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = ApplicationBootstrapConfig)]
+#[schema(as = bootstrap::application::ApplicationBootstrapConfig)]
 pub struct ApplicationBootstrapConfigDto {}
 
 // ── Descriptor ───────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ impl BootstrapPluginDescriptor for ApplicationBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "ApplicationBootstrapConfig"
+        "bootstrap.application.ApplicationBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

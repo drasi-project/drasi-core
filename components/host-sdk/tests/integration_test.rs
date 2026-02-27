@@ -175,7 +175,7 @@ fn test_mock_source_descriptor_kind() {
     let descriptor = &plugin.source_plugins[0];
     assert_eq!(descriptor.kind(), "mock");
     assert_eq!(descriptor.config_version(), "1.0.0");
-    assert_eq!(descriptor.config_schema_name(), "MockSourceConfig");
+    assert_eq!(descriptor.config_schema_name(), "source.mock.MockSourceConfig");
 }
 
 #[test]
@@ -197,7 +197,7 @@ fn test_log_reaction_descriptor_kind() {
     let descriptor = &plugin.reaction_plugins[0];
     assert_eq!(descriptor.kind(), "log");
     assert_eq!(descriptor.config_version(), "1.0.0");
-    assert_eq!(descriptor.config_schema_name(), "LogReactionConfig");
+    assert_eq!(descriptor.config_schema_name(), "reaction.log.LogReactionConfig");
 }
 
 // ============================================================================

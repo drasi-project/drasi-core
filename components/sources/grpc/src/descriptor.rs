@@ -20,7 +20,7 @@ use utoipa::OpenApi;
 
 /// gRPC source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = GrpcSourceConfig)]
+#[schema(as = source::grpc::GrpcSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GrpcSourceConfigDto {
     #[serde(default = "default_grpc_host")]
@@ -63,7 +63,7 @@ impl SourcePluginDescriptor for GrpcSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "GrpcSourceConfig"
+        "source.grpc.GrpcSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {

@@ -21,7 +21,7 @@ use utoipa::OpenApi;
 
 /// PostgreSQL source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = PostgresSourceConfig)]
+#[schema(as = source::postgres::PostgresSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PostgresSourceConfigDto {
     #[serde(default = "default_postgres_host")]
@@ -39,15 +39,15 @@ pub struct PostgresSourceConfigDto {
     #[serde(default = "default_publication_name")]
     pub publication_name: String,
     #[serde(default = "default_ssl_mode")]
-    #[schema(value_type = ConfigValue<SslMode>)]
+    #[schema(value_type = ConfigValue<source::postgres::SslMode>)]
     pub ssl_mode: ConfigValue<SslModeDto>,
     #[serde(default)]
-    #[schema(value_type = Vec<TableKeyConfig>)]
+    #[schema(value_type = Vec<source::postgres::TableKeyConfig>)]
     pub table_keys: Vec<TableKeyConfigDto>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = SslMode)]
+#[schema(as = source::postgres::SslMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum SslModeDto {
@@ -81,7 +81,7 @@ impl From<SslModeDto> for SslMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = TableKeyConfig)]
+#[schema(as = source::postgres::TableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableKeyConfigDto {
     pub table: String,
@@ -130,7 +130,7 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "PostgresSourceConfig"
+        "source.postgres.PostgresSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {
