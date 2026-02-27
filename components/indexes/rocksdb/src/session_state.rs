@@ -114,21 +114,18 @@ impl RocksDbSessionState {
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
 
-    /// Execute `f` against the active session transaction if one exists,
-    /// otherwise create an auto-commit transaction, run `f`, and commit.
+    /// Execute `f` against the active session transaction.
+    /// Returns an error if no session is active.
     pub(crate) fn with_txn<R>(
         &self,
         f: impl FnOnce(&Transaction<'_, OptimisticTransactionDB>) -> Result<R, IndexError>,
     ) -> Result<R, IndexError> {
         let guard = self.lock()?;
-        if let Some(txn) = guard.as_ref() {
-            f(txn)
-        } else {
-            drop(guard);
-            let txn = self.db.transaction();
-            let result = f(&txn)?;
-            txn.commit().map_err(IndexError::other)?;
-            Ok(result)
+        match guard.as_ref() {
+            Some(txn) => f(txn),
+            None => Err(IndexError::other(SessionStateError(
+                "operation requires an active session".to_string(),
+            ))),
         }
     }
 }

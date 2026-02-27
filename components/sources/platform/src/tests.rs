@@ -1309,6 +1309,7 @@ mod control_events {
                 assert!(rel_labels.contains(&"WORKS_FOR".to_string()));
                 assert_eq!(operation, &ControlOperation::Insert);
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 
@@ -1340,6 +1341,7 @@ mod control_events {
             SourceControl::Subscription { operation, .. } => {
                 assert_eq!(operation, &ControlOperation::Update);
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 
@@ -1371,6 +1373,7 @@ mod control_events {
             SourceControl::Subscription { operation, .. } => {
                 assert_eq!(operation, &ControlOperation::Delete);
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 
@@ -1407,6 +1410,7 @@ mod control_events {
                 assert!(node_labels.is_empty());
                 assert!(rel_labels.is_empty());
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 
@@ -1441,6 +1445,7 @@ mod control_events {
                 assert!(node_labels.is_empty());
                 assert!(rel_labels.is_empty());
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 
@@ -1513,12 +1518,14 @@ mod control_events {
             SourceControl::Subscription { query_id, .. } => {
                 assert_eq!(query_id, "query1");
             }
+            other => panic!("unexpected control: {other:?}"),
         }
 
         match &results[1] {
             SourceControl::Subscription { query_id, .. } => {
                 assert_eq!(query_id, "query2");
             }
+            other => panic!("unexpected control: {other:?}"),
         }
     }
 }
