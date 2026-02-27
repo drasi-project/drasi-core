@@ -146,6 +146,103 @@ Result: [Removing {
 
 More examples can be found under the [examples](examples) folder.
 
+## Building Dynamic Plugins
+
+Drasi Core includes an `xtask` build tool for building and publishing dynamic plugins (shared libraries loaded at runtime by [Drasi Server](https://github.com/drasi-project/drasi-server)).
+
+### Prerequisites
+
+- Rust toolchain (see `rust-toolchain.toml`)
+- System dependencies: `jq`, `libjq-dev`, `protobuf-compiler` (Linux) or `jq`, `protobuf` (macOS)
+
+### Build Commands
+
+```bash
+# List all discovered plugin crates
+make list-plugins
+
+# Build all plugins (debug)
+make build-plugins
+
+# Build all plugins (release)
+make build-plugins-release
+
+# Build for a specific target (cross-compilation)
+cargo run -p xtask -- build-plugins --release --target aarch64-unknown-linux-gnu
+```
+
+Built plugins are placed under `target/<profile>/` (or `target/<triple>/<profile>/` for cross-builds).
+
+### Running Host-SDK Integration Tests
+
+```bash
+# Build test plugins and run integration tests
+make test-host-sdk
+```
+
+## Publishing Plugins to an OCI Registry
+
+Plugins are published as OCI artifacts to a container registry (default: `ghcr.io/drasi-project`). Each architecture is published with a per-arch tag suffix, and a final merge step creates a multi-arch manifest index.
+
+### Authentication
+
+Set the following environment variables:
+
+```bash
+export OCI_REGISTRY_USERNAME=<your-github-username>
+export OCI_REGISTRY_PASSWORD=<your-pat-with-write-packages-scope>
+```
+
+The PAT needs the `write:packages` scope, and your GitHub account needs write access to the target org's packages.
+
+### Publish Workflow
+
+**1. Build and publish per-architecture:**
+
+```bash
+# Dry run (no push)
+make publish-plugins-dry-run ARCH_SUFFIX=linux-amd64
+
+# Publish release build for a single architecture
+make publish-plugins-release ARCH_SUFFIX=linux-amd64
+
+# Publish with a pre-release label
+make publish-plugins-release ARCH_SUFFIX=linux-amd64 PRE_RELEASE=dev.1
+
+# Publish to a custom registry
+make publish-plugins-release ARCH_SUFFIX=linux-amd64 REGISTRY=ghcr.io/my-org
+```
+
+**2. Merge per-arch tags into a multi-arch manifest index:**
+
+After publishing all architectures, create the manifest index:
+
+```bash
+# Merge all default architectures (linux-amd64, linux-arm64, windows-amd64, darwin-amd64, darwin-arm64)
+make merge-manifests
+
+# Merge with pre-release label
+make merge-manifests PRE_RELEASE=dev.1
+
+# Dry run
+make merge-manifests-dry-run
+
+# Merge specific architectures only
+make merge-manifests MERGE_ARCHS="linux-amd64 linux-arm64"
+```
+
+### Per-Architecture Tag Format
+
+Each plugin is tagged with its own version from `Cargo.toml`:
+
+- Per-arch: `ghcr.io/drasi-project/source/postgres:0.1.8-linux-amd64`
+- Merged: `ghcr.io/drasi-project/source/postgres:0.1.8`
+- Pre-release: `ghcr.io/drasi-project/source/postgres:0.1.8-dev.1`
+
+### CI Workflow
+
+The `.github/workflows/publish-plugins.yml` workflow automates the full publish pipeline across 5 architectures (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`) with a final manifest merge step. Trigger it via `workflow_dispatch` in the GitHub Actions UI.
+
 ## Storage implementations
 
 Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementations for Redis, Garnet and RocksDB.

@@ -1,0 +1,186 @@
+name: Publish Plugins
+
+on:
+  workflow_dispatch:
+    inputs:
+      pre_release:
+        description: 'Pre-release label (e.g., "dev.1", "rc.1"). Leave empty for stable release.'
+        required: false
+        type: string
+        default: ''
+      registry:
+        description: 'OCI registry to publish to'
+        required: false
+        type: string
+        default: 'ghcr.io/drasi-project'
+      dry_run:
+        description: 'Dry run only (no publishing)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  packages: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-publish:
+    name: Build & Publish (${{ matrix.arch_suffix }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest-8-cores
+            arch_suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest-8-cores
+            arch_suffix: linux-arm64
+            cross: true
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest-8-cores
+            arch_suffix: windows-amd64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            arch_suffix: darwin-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            arch_suffix: darwin-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq protobuf
+
+      - name: Set JQ_LIB_DIR (Linux)
+        if: runner.os == 'Linux'
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Set JQ_LIB_DIR (macOS)
+        if: runner.os == 'macOS'
+        run: echo "JQ_LIB_DIR=$(brew --prefix jq)/lib" >> $GITHUB_ENV
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build plugins
+        run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
+
+      - name: Publish plugins (per-architecture tag)
+        if: ${{ !inputs.dry_run }}
+        env:
+          OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }}"
+          if [ -n "${{ inputs.pre_release }}" ]; then
+            ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
+          fi
+          cargo run -p xtask -- publish-plugins $ARGS
+
+      - name: Publish plugins (dry run)
+        if: ${{ inputs.dry_run }}
+        run: |
+          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --dry-run"
+          if [ -n "${{ inputs.pre_release }}" ]; then
+            ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
+          fi
+          cargo run -p xtask -- publish-plugins $ARGS
+
+  merge-manifests:
+    name: Merge Multi-Arch Manifests
+    needs: build-and-publish
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Merge manifest indexes
+        env:
+          OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS="--registry ${{ inputs.registry }}"
+          if [ -n "${{ inputs.pre_release }}" ]; then
+            ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
+          fi
+          cargo run -p xtask -- merge-manifests $ARGS \
+            --arch linux-amd64 \
+            --arch linux-arm64 \
+            --arch windows-amd64 \
+            --arch darwin-amd64 \
+            --arch darwin-arm64
+
+  set-public-visibility:
+    name: Set Package Visibility to Public
+    needs: merge-manifests
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Set packages to public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REGISTRY="${{ inputs.registry }}"
+          ORG="${REGISTRY#*/}"
+          PLUGINS=$(cargo run -p xtask -- list-plugins 2>/dev/null | grep '^\s' | awk '{print $1}')
+          for PLUGIN in $PLUGINS; do
+            ENCODED=$(echo "$PLUGIN" | sed 's|/|%2F|g')
+            echo "Setting ${ORG}/${PLUGIN} to public..."
+            gh api --method PATCH \
+              "/orgs/${ORG}/packages/container/${ENCODED}" \
+              -f visibility=public \
+              2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
+          done

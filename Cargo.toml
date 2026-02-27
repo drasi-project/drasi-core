@@ -60,6 +60,9 @@ members = [
   # Host SDK (host-side plugin loading and proxy types)
   "components/host-sdk",
 
+  # Build tooling
+  "xtask",
+
   # Internal
   "shared-tests",
   "query-perf",
@@ -73,6 +76,7 @@ exclude = [
   "query-perf",
   "examples/query",
   "lib-integration-tests",
+  "xtask",
 ]
 
 resolver = "2"

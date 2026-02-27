@@ -25,6 +25,8 @@ pub mod callbacks;
 pub mod identity_bridge;
 pub mod loader;
 pub mod proxies;
+#[cfg(feature = "registry")]
+pub mod registry;
 pub mod state_store_bridge;
 
 pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
