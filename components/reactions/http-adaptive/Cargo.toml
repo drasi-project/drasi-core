@@ -31,6 +31,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
+drasi-reaction-http.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -49,5 +50,5 @@ utoipa = { workspace = true }
 
 
 [features]
-default = ["dynamic-plugin"]
+# default = []
 dynamic-plugin = []

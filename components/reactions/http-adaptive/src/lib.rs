@@ -40,8 +40,7 @@ pub use config::HttpAdaptiveReactionConfig;
 pub use http_adaptive::AdaptiveHttpReaction;
 
 use drasi_lib::reactions::common::AdaptiveBatchConfig;
-
-use config::QueryConfig;
+use drasi_reaction_http::QueryConfig;
 use std::collections::HashMap;
 
 /// Builder for HTTP Adaptive reaction

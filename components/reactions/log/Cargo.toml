@@ -35,4 +35,5 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [features]
+# default = []
 dynamic-plugin = []

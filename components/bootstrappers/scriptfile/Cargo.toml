@@ -50,4 +50,5 @@ redis = { version = "0.25", features = ["tokio-comp"] }
 
 
 [features]
+# default = []
 dynamic-plugin = []
