@@ -37,6 +37,7 @@ use rocksdb::{
 use tokio::task;
 
 use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContainer};
+use crate::RocksDbSessionState;
 
 /// RocksDB accumulator index store
 ///
@@ -45,6 +46,7 @@ use crate::storage_models::{StoredValueAccumulator, StoredValueAccumulatorContai
 ///     - sorted-sets [set_id + value] -> count {8 byte prefix (set_id)}
 pub struct RocksDbResultIndex {
     db: Arc<OptimisticTransactionDB>,
+    session_state: Arc<RocksDbSessionState>,
 }
 
 const VALUES_CF: &str = "values";
@@ -57,8 +59,8 @@ impl RocksDbResultIndex {
     ///
     /// The database must already have the required column families created.
     /// Use `open_unified_db()` to open a database with all required CFs.
-    pub fn new(db: Arc<OptimisticTransactionDB>) -> Self {
-        RocksDbResultIndex { db }
+    pub fn new(db: Arc<OptimisticTransactionDB>, session_state: Arc<RocksDbSessionState>) -> Self {
+        RocksDbResultIndex { db, session_state }
     }
 }
 
@@ -71,25 +73,30 @@ impl AccumulatorIndex for RocksDbResultIndex {
         owner: &ResultOwner,
     ) -> Result<Option<ValueAccumulator>, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let set_id = get_hash_key(owner, key);
 
         let task = task::spawn_blocking(move || {
             let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
-            match db.get_cf(&values_cf, set_id.to_be_bytes()) {
-                Ok(Some(v)) => {
-                    let value = match StoredValueAccumulatorContainer::decode(v.as_slice()) {
-                        Ok(container) => match container.value {
-                            Some(value) => value,
-                            None => return Err(IndexError::CorruptedData),
-                        },
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                    let value: ValueAccumulator = value.into();
-                    Ok(Some(value))
+
+            session_state.with_txn(|txn| {
+                let data = txn.get_cf(&values_cf, set_id.to_be_bytes());
+                match data {
+                    Ok(Some(v)) => {
+                        let value = match StoredValueAccumulatorContainer::decode(v.as_slice()) {
+                            Ok(container) => match container.value {
+                                Some(value) => value,
+                                None => return Err(IndexError::CorruptedData),
+                            },
+                            Err(e) => return Err(IndexError::other(e)),
+                        };
+                        let value: ValueAccumulator = value.into();
+                        Ok(Some(value))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(IndexError::other(e)),
                 }
-                Ok(None) => Ok(None),
-                Err(e) => Err(IndexError::other(e)),
-            }
+            })
         });
 
         match task.await {
@@ -106,24 +113,23 @@ impl AccumulatorIndex for RocksDbResultIndex {
         value: Option<ValueAccumulator>,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let set_id = get_hash_key(&owner, &key);
 
         let task = task::spawn_blocking(move || {
             let values_cf = db.cf_handle(VALUES_CF).expect("values cf not found");
-            match value {
-                None => match db.delete_cf(&values_cf, set_id.to_be_bytes()) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(IndexError::other(e)),
-                },
+
+            session_state.with_txn(|txn| match value {
+                None => txn
+                    .delete_cf(&values_cf, set_id.to_be_bytes())
+                    .map_err(IndexError::other),
                 Some(v) => {
                     let value: StoredValueAccumulator = v.into();
                     let value = value.serialize();
-                    match db.put_cf(&values_cf, set_id.to_be_bytes(), &value) {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(IndexError::other(e)),
-                    }
+                    txn.put_cf(&values_cf, set_id.to_be_bytes(), &value)
+                        .map_err(IndexError::other)
                 }
-            }
+            })
         });
 
         match task.await {
@@ -169,60 +175,58 @@ impl LazySortedSetStore for RocksDbResultIndex {
         value: Option<OrderedFloat<f64>>,
     ) -> Result<Option<(OrderedFloat<f64>, isize)>, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
 
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let prefix = set_id.to_be_bytes();
 
-            match value {
-                Some(value) => {
-                    let iter = db.iterator_cf(
-                        &set_cf,
-                        IteratorMode::From(
-                            &encode_next_set_value_key(set_id, value),
-                            Direction::Forward,
-                        ),
-                    );
-                    for item in iter {
-                        match item {
-                            Ok((key, count)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let value = decode_set_value_key(&key)?;
-                                let count = decode_count(&count)?;
-                                if count == 0 {
-                                    continue;
-                                }
+            session_state.with_txn(|txn| {
+                match value {
+                    Some(value) => {
+                        let from_key = encode_next_set_value_key(set_id, value);
+                        for item in txn
+                            .iterator_cf(&set_cf, IteratorMode::From(&from_key, Direction::Forward))
+                        {
+                            match item {
+                                Ok((key, count)) => {
+                                    if !key.starts_with(&prefix) {
+                                        break;
+                                    }
+                                    let value = decode_set_value_key(&key)?;
+                                    let count = decode_count(&count)?;
+                                    if count == 0 {
+                                        continue;
+                                    }
 
-                                return Ok(Some((value, count)));
+                                    return Ok(Some((value, count)));
+                                }
+                                Err(e) => return Err(IndexError::other(e)),
                             }
-                            Err(e) => return Err(IndexError::other(e)),
                         }
                     }
-                }
-                None => {
-                    let iter = db.prefix_iterator_cf(&set_cf, prefix);
-                    for item in iter {
-                        match item {
-                            Ok((key, count)) => {
-                                if !key.starts_with(&prefix) {
-                                    break;
-                                }
-                                let value = decode_set_value_key(&key)?;
-                                let count = decode_count(&count)?;
-                                if count == 0 {
-                                    continue;
-                                }
+                    None => {
+                        for item in txn.prefix_iterator_cf(&set_cf, prefix) {
+                            match item {
+                                Ok((key, count)) => {
+                                    if !key.starts_with(&prefix) {
+                                        break;
+                                    }
+                                    let value = decode_set_value_key(&key)?;
+                                    let count = decode_count(&count)?;
+                                    if count == 0 {
+                                        continue;
+                                    }
 
-                                return Ok(Some((value, count)));
+                                    return Ok(Some((value, count)));
+                                }
+                                Err(e) => return Err(IndexError::other(e)),
                             }
-                            Err(e) => return Err(IndexError::other(e)),
                         }
                     }
-                }
-            };
-            Ok(None)
+                };
+                Ok(None)
+            })
         });
 
         match task.await {
@@ -238,14 +242,19 @@ impl LazySortedSetStore for RocksDbResultIndex {
         value: OrderedFloat<f64>,
     ) -> Result<isize, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
-            match db.get_cf(&set_cf, key) {
-                Ok(Some(v)) => decode_count(&v),
-                Ok(None) => Ok(0),
-                Err(e) => Err(IndexError::other(e)),
-            }
+
+            session_state.with_txn(|txn| {
+                let data = txn.get_cf(&set_cf, key);
+                match data {
+                    Ok(Some(v)) => decode_count(&v),
+                    Ok(None) => Ok(0),
+                    Err(e) => Err(IndexError::other(e)),
+                }
+            })
         });
 
         match task.await {
@@ -262,14 +271,16 @@ impl LazySortedSetStore for RocksDbResultIndex {
         delta: isize,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
 
         let task = task::spawn_blocking(move || {
             let set_cf = db.cf_handle(SETS_CF).expect("sorted-sets cf not found");
             let key = encode_set_value_key(set_id, value);
-            match db.merge_cf(&set_cf, key, encode_count(delta)) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(IndexError::other(e)),
-            }
+
+            session_state.with_txn(|txn| {
+                txn.merge_cf(&set_cf, key, encode_count(delta))
+                    .map_err(IndexError::other)
+            })
         });
 
         match task.await {
@@ -287,20 +298,21 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let source_change_id = source_change_id.to_string();
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
-            let mut batch = rocksdb::WriteBatchWithTransaction::default();
-            batch.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes());
-            batch.put_cf(
-                &metadata_cf,
-                "source_change_id",
-                source_change_id.as_bytes(),
-            );
-            match db.write(batch) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(IndexError::other(e)),
-            }
+
+            session_state.with_txn(|txn| {
+                txn.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes())
+                    .map_err(IndexError::other)?;
+                txn.put_cf(
+                    &metadata_cf,
+                    "source_change_id",
+                    source_change_id.as_bytes(),
+                )
+                .map_err(IndexError::other)
+            })
         });
 
         match task.await {
@@ -311,18 +323,23 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let db = self.db.clone();
+        let session_state = self.session_state.clone();
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
-            match db.get_cf(&metadata_cf, "sequence") {
-                Ok(Some(v)) => {
-                    let seq_bytes: [u8; 8] = match v.try_into() {
-                        Ok(v) => v,
-                        Err(_) => return Err(IndexError::CorruptedData),
-                    };
-                    let sequence: u64 = u64::from_be_bytes(seq_bytes);
 
-                    let source_change_id: Arc<str> =
-                        match db.get_cf(&metadata_cf, "source_change_id") {
+            session_state.with_txn(|txn| {
+                let seq_data = txn.get_cf(&metadata_cf, "sequence");
+                match seq_data {
+                    Ok(Some(v)) => {
+                        let seq_bytes: [u8; 8] = match v.try_into() {
+                            Ok(v) => v,
+                            Err(_) => return Err(IndexError::CorruptedData),
+                        };
+                        let sequence: u64 = u64::from_be_bytes(seq_bytes);
+
+                        let source_change_id_data = txn.get_cf(&metadata_cf, "source_change_id");
+
+                        let source_change_id: Arc<str> = match source_change_id_data {
                             Ok(Some(v)) => match String::from_utf8(v) {
                                 Ok(v) => Arc::from(v),
                                 Err(e) => return Err(IndexError::other(e)),
@@ -330,14 +347,15 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                             Ok(None) => Arc::from(""),
                             Err(e) => return Err(IndexError::other(e)),
                         };
-                    Ok(ResultSequence {
-                        sequence,
-                        source_change_id,
-                    })
+                        Ok(ResultSequence {
+                            sequence,
+                            source_change_id,
+                        })
+                    }
+                    Ok(None) => Ok(ResultSequence::default()),
+                    Err(e) => Err(IndexError::other(e)),
                 }
-                Ok(None) => Ok(ResultSequence::default()),
-                Err(e) => Err(IndexError::other(e)),
-            }
+            })
         });
 
         match task.await {

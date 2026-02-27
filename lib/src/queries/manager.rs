@@ -44,7 +44,7 @@ use crate::managers::{
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::Source;
-use crate::sources::{FutureQueueSource, SourceManager, FUTURE_QUEUE_SOURCE_ID};
+use crate::sources::SourceManager;
 use tracing::Instrument;
 
 /// Default query configuration
@@ -139,6 +139,106 @@ enum BootstrapPhase {
     Completed,
 }
 
+/// Dispatch query evaluation results to the current result set and all subscribed reactions.
+///
+/// Shared between the regular event processing path and the future queue drain path.
+async fn dispatch_query_results(
+    results: &[QueryPartEvaluationContext],
+    source_id: &str,
+    query_id: &str,
+    current_results: &RwLock<Vec<serde_json::Value>>,
+    dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
+    profiling: crate::profiling::ProfilingMetadata,
+) {
+    // Convert Drasi results to our QueryResult format
+    let converted_results: Vec<ResultDiff> = results
+        .iter()
+        .map(|ctx| match ctx {
+            QueryPartEvaluationContext::Adding { after, .. } => ResultDiff::Add {
+                data: convert_query_variables_to_json(after),
+            },
+            QueryPartEvaluationContext::Removing { before, .. } => ResultDiff::Delete {
+                data: convert_query_variables_to_json(before),
+            },
+            QueryPartEvaluationContext::Updating { before, after, .. } => ResultDiff::Update {
+                data: convert_query_variables_to_json(after),
+                before: convert_query_variables_to_json(before),
+                after: convert_query_variables_to_json(after),
+                grouping_keys: None,
+            },
+            QueryPartEvaluationContext::Aggregation { before, after, .. } => {
+                ResultDiff::Aggregation {
+                    before: before.as_ref().map(convert_query_variables_to_json),
+                    after: convert_query_variables_to_json(after),
+                }
+            }
+            QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+        })
+        .collect();
+
+    // Update the current result set based on the changes
+    let mut result_set = current_results.write().await;
+    for result in &converted_results {
+        match result {
+            ResultDiff::Add { data } => {
+                result_set.push(data.clone());
+            }
+            ResultDiff::Delete { data } => {
+                result_set.retain(|item| item != data);
+            }
+            ResultDiff::Update { before, after, .. } => {
+                if let Some(pos) = result_set.iter().position(|item| item == before) {
+                    result_set[pos] = after.clone();
+                } else {
+                    warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
+                    result_set.retain(|item| item != before);
+                    result_set.push(after.clone());
+                }
+            }
+            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+        }
+    }
+    drop(result_set);
+
+    let query_result = QueryResult::with_profiling(
+        query_id.to_string(),
+        chrono::Utc::now(),
+        converted_results,
+        {
+            let mut meta = HashMap::new();
+            meta.insert(
+                "source_id".to_string(),
+                serde_json::Value::String(source_id.to_string()),
+            );
+            meta.insert(
+                "processed_by".to_string(),
+                serde_json::Value::String("drasi-core".to_string()),
+            );
+            meta.insert(
+                "result_count".to_string(),
+                serde_json::Value::Number(results.len().into()),
+            );
+            meta
+        },
+        profiling,
+    );
+
+    debug!(
+        "Query '{}' sending {} results to reactions",
+        query_id,
+        results.len()
+    );
+
+    // Dispatch query result to all subscribed reactions
+    let arc_result = Arc::new(query_result);
+    let dispatchers = dispatchers.read().await;
+    for dispatcher in dispatchers.iter() {
+        if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+            debug!("Failed to dispatch result for query '{query_id}': {e}");
+        }
+    }
+}
+
 pub struct DrasiQuery {
     // DrasiLib instance ID for log routing isolation
     instance_id: String,
@@ -161,8 +261,6 @@ pub struct DrasiQuery {
     index_factory: Arc<crate::indexes::IndexFactory>,
     // Middleware registry for query middleware
     middleware_registry: Arc<MiddlewareTypeRegistry>,
-    // Future queue source (if using temporal queries)
-    future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
 }
 
 impl DrasiQuery {
@@ -193,7 +291,6 @@ impl DrasiQuery {
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
             middleware_registry,
-            future_queue_source: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -288,7 +385,7 @@ impl Query for DrasiQuery {
         }
 
         // Build indexes - either from configured backend or default in-memory
-        let future_queue = if let Some(backend_ref) = &self.base.config.storage_backend {
+        if let Some(backend_ref) = &self.base.config.storage_backend {
             debug!(
                 "Query '{}' using storage backend: {:?}",
                 self.base.config.id, backend_ref
@@ -300,27 +397,17 @@ impl Query for DrasiQuery {
                 .await
                 .context("Failed to build index set")?;
 
-            let future_queue = index_set.future_queue.clone();
-
             builder = builder
                 .with_element_index(index_set.element_index)
                 .with_archive_index(index_set.archive_index)
                 .with_result_index(index_set.result_index)
                 .with_future_queue(index_set.future_queue)
                 .with_session_control(index_set.session_control);
-
-            future_queue
         } else {
             debug!(
                 "Query '{}' using default in-memory indexes",
                 self.base.config.id
             );
-            // Create explicit in-memory future queue so we can access it for FutureQueueSource
-            let future_queue = Arc::new(
-                drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue::new(),
-            );
-            builder = builder.with_future_queue(future_queue.clone());
-            future_queue
         };
 
         let continuous_query = match builder.try_build().await {
@@ -394,39 +481,6 @@ impl Query for DrasiQuery {
             };
 
         // Subscribe to each source sequentially
-        // Also includes FutureQueueSource for temporal query support
-
-        // Set up FutureQueueSource for temporal query support
-        // This creates a virtual source that polls the future queue and emits due elements
-        // as source events, integrating temporal queries into the standard source subscription
-        // mechanism. Events preserve their original source_id from the FutureElementRef.
-        debug!(
-            "Query '{}' setting up FutureQueueSource for temporal queries",
-            self.base.config.id
-        );
-
-        let future_queue_source = Arc::new(FutureQueueSource::new(
-            future_queue,
-            self.base.config.id.clone(),
-        ));
-
-        // Start the FutureQueueSource
-        if let Err(e) = future_queue_source.start().await {
-            error!(
-                "Query '{}' failed to start FutureQueueSource: {}",
-                self.base.config.id, e
-            );
-            *self.base.status.write().await = ComponentStatus::Error;
-            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
-        }
-
-        info!(
-            "Query '{}' FutureQueueSource started successfully",
-            self.base.config.id
-        );
-
-        // Store the FutureQueueSource for cleanup
-        *self.future_queue_source.write().await = Some(future_queue_source.clone());
 
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
@@ -443,7 +497,7 @@ impl Query for DrasiQuery {
         let mut bootstrap_channels = Vec::new();
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Build list of sources to subscribe to (regular sources + FutureQueueSource)
+        // Build list of sources to subscribe to
         let mut sources_to_subscribe: Vec<(String, Arc<dyn Source>, SourceSubscriptionSettings)> =
             Vec::new();
 
@@ -473,19 +527,6 @@ impl Query for DrasiQuery {
                 }
             }
         }
-
-        // Add FutureQueueSource
-        sources_to_subscribe.push((
-            FUTURE_QUEUE_SOURCE_ID.to_string(),
-            future_queue_source as Arc<dyn Source>,
-            SourceSubscriptionSettings {
-                source_id: FUTURE_QUEUE_SOURCE_ID.to_string(),
-                enable_bootstrap: false,
-                query_id: self.base.config.id.clone(),
-                nodes: HashSet::new(),
-                relations: HashSet::new(),
-            },
-        ));
 
         for (source_id, source, settings) in sources_to_subscribe {
             let subscription_response = match source.subscribe(settings.clone()).await {
@@ -845,7 +886,29 @@ impl Query for DrasiQuery {
             bootstrap_gate.notify_one();
         }
 
-        // NEW: Spawn event processor task that reads from priority queue
+        // Create and subscribe to FutureQueueSource (peek-only signaler)
+        let fq_source = crate::sources::future_queue_source::FutureQueueSource::new(
+            continuous_query.future_queue(),
+            self.base.config.id.clone(),
+        );
+        let fq_receiver = fq_source
+            .subscribe()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to FutureQueueSource: {e}"))?;
+
+        // Spawn forwarder task (same pattern as other sources)
+        {
+            let fq_priority_queue = self.priority_queue.clone();
+            let fq_forwarder = tokio::spawn(async move {
+                let mut receiver = fq_receiver;
+                while let Ok(event) = receiver.recv().await {
+                    fq_priority_queue.enqueue_wait(event).await;
+                }
+            });
+            self.subscription_tasks.write().await.push(fq_forwarder);
+        }
+
+        // Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
@@ -920,6 +983,11 @@ impl Query for DrasiQuery {
                     }
                 }
 
+                // Start FutureQueueSource after bootstrap completes
+                if let Err(e) = fq_source.start().await {
+                    error!("Query '{query_id}' failed to start FutureQueueSource: {e}");
+                }
+
                 info!("Query '{query_id}' starting priority queue event processor");
 
                 loop {
@@ -931,9 +999,7 @@ impl Query for DrasiQuery {
                         break;
                     }
 
-                    // Use select to wait for either an event OR shutdown signal
-                    let arc_event = tokio::select! {
-                        // Check for shutdown signal first (biased)
+                    tokio::select! {
                         biased;
 
                         _ = &mut shutdown_rx => {
@@ -944,176 +1010,91 @@ impl Query for DrasiQuery {
                         }
 
                         // Dequeue events from priority queue (blocks until available)
-                        event = priority_queue.dequeue() => event,
-                    };
+                        arc_event = priority_queue.dequeue() => {
+                            // Try to extract without cloning if we have sole ownership (zero-copy path).
+                            let (source_id, event, _timestamp, profiling_opt) =
+                                match SourceEventWrapper::try_unwrap_arc(arc_event) {
+                                    Ok(parts) => parts,
+                                    Err(arc) => {
+                                        (
+                                            arc.source_id.clone(),
+                                            arc.event.clone(),
+                                            arc.timestamp,
+                                            arc.profiling.clone(),
+                                        )
+                                    }
+                                };
 
-                    // Try to extract without cloning if we have sole ownership (zero-copy path).
-                    // This succeeds in Channel dispatch mode where each query has its own event copy.
-                    // Falls back to cloning in Broadcast mode where events are shared.
-                    let (source_id, event, _timestamp, profiling_opt) =
-                        match SourceEventWrapper::try_unwrap_arc(arc_event) {
-                            Ok(parts) => parts,
-                            Err(arc) => {
-                                // Shared reference - must clone the data we need
-                                (
-                                    arc.source_id.clone(),
-                                    arc.event.clone(),
-                                    arc.timestamp,
-                                    arc.profiling.clone(),
-                                )
-                            }
-                        };
+                            debug!("Query '{query_id}' processing event from source '{source_id}'");
 
-                    debug!("Query '{query_id}' processing event from source '{source_id}'");
-
-                    // Extract the SourceChange from the SourceEvent (now owned, no clone needed)
-                    let source_change = match event {
-                        SourceEvent::Change(change) => change,
-                        SourceEvent::Control(_) => {
-                            debug!(
-                                "Query '{query_id}' ignoring control event from source '{source_id}'"
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Use profiling metadata from source event or create new
-                    let mut profiling =
-                        profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
-
-                    // Capture query_receive_ns timestamp
-                    profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
-
-                    // Process the change through the actual Drasi continuous query
-                    profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
-
-                    match continuous_query_for_processor
-                        .process_source_change(source_change)
-                        .await
-                    {
-                        Ok(results) => {
-                            profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
-                            if !results.is_empty() {
-                                debug!(
-                                    "Query '{}' received {} results from drasi-core",
-                                    query_id,
-                                    results.len()
-                                );
-
-                                // Convert Drasi results to our QueryResult format
-                                let converted_results: Vec<ResultDiff> = results
-                                    .iter()
-                                    .map(|ctx| match ctx {
-                                        QueryPartEvaluationContext::Adding { after, .. } => {
-                                            debug!("Query '{query_id}' got Adding context");
-                                            ResultDiff::Add {
-                                                data: convert_query_variables_to_json(after),
+                            match event {
+                                SourceEvent::Control(SourceControl::FuturesDue) => {
+                                    // Drain all due futures atomically within sessions
+                                    loop {
+                                        match continuous_query_for_processor.process_due_futures().await {
+                                            Ok(Some(due_result)) => {
+                                                if !due_result.results.is_empty() {
+                                                    let profiling = crate::profiling::ProfilingMetadata::new();
+                                                    dispatch_query_results(
+                                                        &due_result.results,
+                                                        &due_result.source_id,
+                                                        &query_id,
+                                                        &current_results,
+                                                        &base_dispatchers,
+                                                        profiling,
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                            Ok(None) => break,
+                                            Err(e) => {
+                                                error!("Query '{query_id}' failed to process due futures: {e}");
+                                                break;
                                             }
                                         }
-                                    QueryPartEvaluationContext::Removing { before, .. } => {
-                                        debug!(
-                                            "Query '{query_id}' got Removing context"
-                                        );
-                                        ResultDiff::Delete {
-                                            data: convert_query_variables_to_json(before),
-                                        }
                                     }
-                                    QueryPartEvaluationContext::Updating { before, after, .. } => {
-                                        debug!("Query '{query_id}' got Updating context");
-                                        ResultDiff::Update {
-                                            data: convert_query_variables_to_json(after),
-                                            before: convert_query_variables_to_json(before),
-                                            after: convert_query_variables_to_json(after),
-                                            grouping_keys: None,
-                                        }
-                                    }
-                                    QueryPartEvaluationContext::Aggregation {
-                                        before, after, ..
-                                    } => {
-                                        ResultDiff::Aggregation {
-                                            before: before.as_ref().map(convert_query_variables_to_json),
-                                            after: convert_query_variables_to_json(after),
-                                        }
-                                    }
-                                    QueryPartEvaluationContext::Noop => {
-                                        ResultDiff::Noop
-                                    }
-                                })
-                                .collect();
-
-                            // Update the current result set based on the changes
-                            let mut result_set = current_results.write().await;
-                            for result in &converted_results {
-                                match result {
-                                    ResultDiff::Add { data } => {
-                                        result_set.push(data.clone());
-                                    }
-                                    ResultDiff::Delete { data } => {
-                                        result_set.retain(|item| item != data);
-                                    }
-                                    ResultDiff::Update { before, after, .. } => {
-                                        if let Some(pos) =
-                                            result_set.iter().position(|item| item == before)
-                                        {
-                                            result_set[pos] = after.clone();
-                                        } else {
-                                            warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
-                                            result_set.retain(|item| item != before);
-                                            result_set.push(after.clone());
-                                        }
-                                    }
-                                    ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                                    continue;
                                 }
-                            }
-                            drop(result_set);
+                                SourceEvent::Change(source_change) => {
+                                    let mut profiling =
+                                        profiling_opt.unwrap_or_else(crate::profiling::ProfilingMetadata::new);
+                                    profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
+                                    profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
-                            profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
-
-                            let query_result = QueryResult::with_profiling(
-                                query_id.clone(),
-                                chrono::Utc::now(),
-                                converted_results,
-                                {
-                                    let mut meta = HashMap::new();
-                                    meta.insert(
-                                        "source_id".to_string(),
-                                        serde_json::Value::String(source_id.clone()),
-                                    );
-                                    meta.insert(
-                                        "processed_by".to_string(),
-                                        serde_json::Value::String("drasi-core".to_string()),
-                                    );
-                                    meta.insert(
-                                        "result_count".to_string(),
-                                        serde_json::Value::Number(results.len().into()),
-                                    );
-                                    meta
-                                },
-                                profiling,
-                            );
-
-                            debug!(
-                                "Query '{}' sending {} results to reactions",
-                                query_id,
-                                results.len()
-                            );
-
-                            // Dispatch query result to all subscribed reactions
-                            let arc_result = Arc::new(query_result);
-                            let dispatchers = base_dispatchers.read().await;
-                            for dispatcher in dispatchers.iter() {
-                                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await
-                                {
-                                    debug!("Failed to dispatch result for query '{query_id}': {e}");
+                                    match continuous_query_for_processor
+                                        .process_source_change(source_change)
+                                        .await
+                                    {
+                                        Ok(results) => {
+                                            profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
+                                            if !results.is_empty() {
+                                                profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
+                                                dispatch_query_results(
+                                                    &results,
+                                                    &source_id,
+                                                    &query_id,
+                                                    &current_results,
+                                                    &base_dispatchers,
+                                                    profiling,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Query '{query_id}' failed to process source change: {e}");
+                                        }
+                                    }
+                                }
+                                SourceEvent::Control(_) => {
+                                    debug!("Query '{query_id}' ignoring control event from source '{source_id}'");
+                                    continue;
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("Query '{query_id}' failed to process source change: {e}");
-                    }
                 }
-            }
+
+                fq_source.stop().await;
 
             info!("Query '{query_id}' processing task exited");
         }
@@ -1132,17 +1113,6 @@ impl Query for DrasiQuery {
         self.base
             .emit_status_event(ComponentStatus::Stopping, Some("Stopping query"))
             .await;
-
-        // Stop the FutureQueueSource if it exists
-        if let Some(future_queue_source) = self.future_queue_source.write().await.take() {
-            debug!("Query '{}' stopping FutureQueueSource", self.base.config.id);
-            if let Err(e) = future_queue_source.stop().await {
-                error!(
-                    "Query '{}' failed to stop FutureQueueSource: {}",
-                    self.base.config.id, e
-                );
-            }
-        }
 
         // Abort bootstrap tasks and supervisor
         let bootstrap_aborts: Vec<_> = {
