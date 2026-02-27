@@ -34,7 +34,10 @@
 //! # }
 //! ```
 
+pub mod config;
+pub mod connection;
+pub mod keys;
 pub mod mssql;
 
-pub use drasi_source_mssql::{AuthMode, EncryptionMode, MsSqlSourceConfig, TableKeyConfig};
+pub use config::{AuthMode, EncryptionMode, MsSqlBootstrapConfig, TableKeyConfig};
 pub use mssql::{MsSqlBootstrapProvider, MsSqlBootstrapProviderBuilder};

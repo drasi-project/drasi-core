@@ -16,15 +16,15 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use crate::config::{validate_sql_identifier, MsSqlBootstrapConfig};
+use crate::connection::MsSqlBootstrapConnection;
+use crate::keys::PrimaryKeyCache;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
-use drasi_source_mssql::{
-    validate_sql_identifier, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
-};
 use log::{debug, info, warn};
 use ordered_float::OrderedFloat;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use tiberius::Row;
 ///
 /// Reads initial table snapshots for bootstrapping continuous queries.
 pub struct MsSqlBootstrapProvider {
-    config: MsSqlSourceConfig,
+    config: MsSqlBootstrapConfig,
     source_id: String,
 }
 
@@ -44,7 +44,7 @@ impl MsSqlBootstrapProvider {
     /// # Arguments
     /// * `source_id` - Identifier for the source
     /// * `config` - MS SQL configuration
-    pub fn new(source_id: impl Into<String>, config: MsSqlSourceConfig) -> Self {
+    pub fn new(source_id: impl Into<String>, config: MsSqlBootstrapConfig) -> Self {
         Self {
             config,
             source_id: source_id.into(),
@@ -73,7 +73,7 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         );
 
         // Create bootstrap handler
-        let mut handler = MsSqlBootstrapHandler::new(self.config.clone(), self.source_id.clone());
+        let mut handler = BootstrapHandler::new(self.config.clone(), self.source_id.clone());
 
         // Store query_id before moving request
         let query_id = request.query_id.clone();
@@ -89,7 +89,7 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
 
 /// Builder for MS SQL bootstrap provider
 pub struct MsSqlBootstrapProviderBuilder {
-    config: MsSqlSourceConfig,
+    config: MsSqlBootstrapConfig,
     source_id: String,
 }
 
@@ -97,7 +97,7 @@ impl MsSqlBootstrapProviderBuilder {
     /// Create a new builder with defaults
     pub fn new() -> Self {
         Self {
-            config: MsSqlSourceConfig::default(),
+            config: MsSqlBootstrapConfig::default(),
             source_id: "mssql-bootstrap".to_string(),
         }
     }
@@ -164,14 +164,14 @@ impl Default for MsSqlBootstrapProviderBuilder {
 }
 
 /// Handles bootstrap operations for MS SQL source
-struct MsSqlBootstrapHandler {
-    config: MsSqlSourceConfig,
+struct BootstrapHandler {
+    config: MsSqlBootstrapConfig,
     source_id: String,
     pk_cache: PrimaryKeyCache,
 }
 
-impl MsSqlBootstrapHandler {
-    fn new(config: MsSqlSourceConfig, source_id: String) -> Self {
+impl BootstrapHandler {
+    fn new(config: MsSqlBootstrapConfig, source_id: String) -> Self {
         Self {
             config,
             source_id,
@@ -192,7 +192,7 @@ impl MsSqlBootstrapHandler {
         );
 
         // Connect to MS SQL
-        let mut connection = MsSqlConnection::connect(&self.config).await?;
+        let mut connection = MsSqlBootstrapConnection::connect(&self.config).await?;
         let client = connection.client_mut();
 
         // Discover primary keys for all configured tables
