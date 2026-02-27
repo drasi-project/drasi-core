@@ -48,14 +48,21 @@ impl RocksDbQueryConfig {
     }
 
     #[allow(clippy::unwrap_used)]
-    pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
+    pub fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (
+        RocksDbFutureQueue,
+        Arc<dyn drasi_core::interface::SessionControl>,
+    ) {
         let options = RocksIndexOptions {
             archive_enabled: true,
             direct_io: false,
         };
         let db = open_unified_db(&self.url, query_id, &options).unwrap();
         let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-        RocksDbFutureQueue::new(db, session_state)
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        (RocksDbFutureQueue::new(db, session_state), session_control)
     }
 }
 
@@ -279,35 +286,35 @@ mod index {
     #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_not_exists() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_clear_removes_all() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_overwrite() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 
@@ -465,7 +472,9 @@ mod session {
 
         session_control.rollback();
 
-        // Verify nothing persisted
+        // Verify nothing persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_none(), "element should not persist after rollback");
 
@@ -474,6 +483,8 @@ mod session {
             acc.is_none(),
             "accumulator should not persist after rollback"
         );
+
+        session_control.rollback().unwrap();
 
         let due = future_queue.peek_due_time().await.unwrap();
         assert!(due.is_none(), "future queue should be empty after rollback");
@@ -533,7 +544,9 @@ mod session {
 
         session_control.commit().await.unwrap();
 
-        // Verify data persisted
+        // Verify data persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
 
@@ -543,6 +556,8 @@ mod session {
             ValueAccumulator::Count { value } => assert_eq!(value, 42),
             other => panic!("expected Count, got {other:?}"),
         }
+
+        session_control.rollback().unwrap();
 
         let due = future_queue.peek_due_time().await.unwrap();
         assert_eq!(due, Some(20));

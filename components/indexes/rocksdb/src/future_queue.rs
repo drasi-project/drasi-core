@@ -244,23 +244,8 @@ impl FutureQueue for RocksDbFutureQueue {
                 .expect("fqueue Column family not found");
 
             let read_opts = ReadOptions::default();
-
             let mut iter = db.iterator_cf_opt(&queue_cf, read_opts, rocksdb::IteratorMode::Start);
-
-            if let Some(head) = iter.next() {
-                match head {
-                    Ok((key, _)) => {
-                        let due_time = u64::from_be_bytes(match key[0..8].try_into() {
-                            Ok(v) => v,
-                            Err(_) => return Err(IndexError::CorruptedData),
-                        });
-                        Ok(Some(due_time))
-                    }
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            } else {
-                Ok(None)
-            }
+            parse_peek_head(iter.next())
         });
 
         match task.await {
@@ -294,6 +279,25 @@ impl FutureQueue for RocksDbFutureQueue {
             Ok(v) => v,
             Err(e) => Err(IndexError::other(e)),
         }
+    }
+}
+
+fn parse_peek_head(
+    head: Option<Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
+) -> Result<Option<ElementTimestamp>, IndexError> {
+    if let Some(item) = head {
+        match item {
+            Ok((key, _)) => {
+                let due_time = u64::from_be_bytes(match key[0..8].try_into() {
+                    Ok(v) => v,
+                    Err(_) => return Err(IndexError::CorruptedData),
+                });
+                Ok(Some(due_time))
+            }
+            Err(e) => Err(IndexError::other(e)),
+        }
+    } else {
+        Ok(None)
     }
 }
 
