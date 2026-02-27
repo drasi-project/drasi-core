@@ -19,10 +19,46 @@ use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
 use utoipa::OpenApi;
 
+use crate::config::{CallSpec, QueryConfig};
 use crate::HttpAdaptiveReactionBuilder;
 
-// Re-use the HTTP DTO types for call specs and query configs.
-pub use drasi_reaction_http::descriptor::{CallSpecDto, HttpQueryConfigDto};
+/// DTO for an HTTP call specification.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = CallSpec)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CallSpecDto {
+    /// URL path or absolute URL (supports Handlebars templates).
+    pub url: String,
+
+    /// HTTP method (GET, POST, PUT, DELETE, PATCH).
+    pub method: String,
+
+    /// Request body as a Handlebars template.
+    #[serde(default)]
+    pub body: String,
+
+    /// Additional HTTP headers.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+/// DTO for per-query HTTP call configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = HttpQueryConfig)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HttpQueryConfigDto {
+    /// HTTP call specification for ADD operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<CallSpecDto>,
+
+    /// HTTP call specification for UPDATE operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<CallSpecDto>,
+
+    /// HTTP call specification for DELETE operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<CallSpecDto>,
+}
 
 /// Configuration DTO for the HTTP adaptive reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -68,8 +104,8 @@ pub struct HttpAdaptiveReactionConfigDto {
     pub adaptive_batch_timeout_ms: Option<ConfigValue<u64>>,
 }
 
-fn map_call_spec(dto: &CallSpecDto) -> drasi_reaction_http::CallSpec {
-    drasi_reaction_http::CallSpec {
+fn map_call_spec(dto: &CallSpecDto) -> CallSpec {
+    CallSpec {
         url: dto.url.clone(),
         method: dto.method.clone(),
         body: dto.body.clone(),
@@ -77,8 +113,8 @@ fn map_call_spec(dto: &CallSpecDto) -> drasi_reaction_http::CallSpec {
     }
 }
 
-fn map_query_config(dto: &HttpQueryConfigDto) -> drasi_reaction_http::QueryConfig {
-    drasi_reaction_http::QueryConfig {
+fn map_query_config(dto: &HttpQueryConfigDto) -> QueryConfig {
+    QueryConfig {
         added: dto.added.as_ref().map(map_call_spec),
         updated: dto.updated.as_ref().map(map_call_spec),
         deleted: dto.deleted.as_ref().map(map_call_spec),

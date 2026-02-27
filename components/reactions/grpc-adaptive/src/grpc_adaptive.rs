@@ -29,10 +29,10 @@ struct RunInternalParams {
     base: ReactionBase,
 }
 
-// Use the proto module and helpers from the grpc-reaction plugin
-use drasi_reaction_grpc::{
-    convert_json_to_proto_struct, ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem,
-    ReactionServiceClient,
+// Use the proto module and helpers from this crate
+use crate::helpers::convert_json_to_proto_struct;
+use crate::proto::{
+    ProcessResultsRequest, ProtoQueryResult, ProtoQueryResultItem, ReactionServiceClient,
 };
 
 #[cfg(test)]
