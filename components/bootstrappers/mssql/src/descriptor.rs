@@ -24,7 +24,7 @@ use crate::{AuthMode, EncryptionMode, MsSqlBootstrapProvider, MsSqlSourceConfig,
 
 /// Authentication mode DTO (mirrors [`AuthMode`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = AuthMode)]
+#[schema(as = bootstrap::mssql::AuthMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum AuthModeDto {
@@ -36,7 +36,7 @@ pub enum AuthModeDto {
 
 /// Encryption mode DTO (mirrors [`EncryptionMode`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = EncryptionMode)]
+#[schema(as = bootstrap::mssql::EncryptionMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum EncryptionModeDto {
@@ -48,7 +48,7 @@ pub enum EncryptionModeDto {
 
 /// Table key configuration DTO (mirrors [`TableKeyConfig`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = MsSqlTableKeyConfig)]
+#[schema(as = bootstrap::mssql::MsSqlTableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MsSqlTableKeyConfigDto {
     pub table: String,
@@ -81,7 +81,7 @@ fn default_trust_server_certificate() -> ConfigValue<bool> {
 
 /// Configuration DTO for the MS SQL bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = MsSqlBootstrapConfig)]
+#[schema(as = bootstrap::mssql::MsSqlBootstrapConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MsSqlBootstrapConfigDto {
     #[serde(default = "default_host")]
@@ -103,14 +103,14 @@ pub struct MsSqlBootstrapConfigDto {
     pub password: ConfigValue<String>,
 
     #[serde(default = "default_auth_mode")]
-    #[schema(value_type = ConfigValue<AuthMode>)]
+    #[schema(value_type = ConfigValue<bootstrap::mssql::AuthMode>)]
     pub auth_mode: ConfigValue<AuthModeDto>,
 
     #[serde(default)]
     pub tables: Vec<String>,
 
     #[serde(default = "default_encryption")]
-    #[schema(value_type = ConfigValue<EncryptionMode>)]
+    #[schema(value_type = ConfigValue<bootstrap::mssql::EncryptionMode>)]
     pub encryption: ConfigValue<EncryptionModeDto>,
 
     #[serde(default = "default_trust_server_certificate")]
@@ -118,7 +118,7 @@ pub struct MsSqlBootstrapConfigDto {
     pub trust_server_certificate: ConfigValue<bool>,
 
     #[serde(default)]
-    #[schema(value_type = Vec<MsSqlTableKeyConfig>)]
+    #[schema(value_type = Vec<bootstrap::mssql::MsSqlTableKeyConfig>)]
     pub table_keys: Vec<MsSqlTableKeyConfigDto>,
 }
 
@@ -147,7 +147,7 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "MsSqlBootstrapConfig"
+        "bootstrap.mssql.MsSqlBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

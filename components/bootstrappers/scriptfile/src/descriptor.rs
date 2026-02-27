@@ -25,7 +25,7 @@ use crate::ScriptFileBootstrapProvider;
 
 /// Configuration DTO for the ScriptFile bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = ScriptFileBootstrapConfig)]
+#[schema(as = bootstrap::scriptfile::ScriptFileBootstrapConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScriptFileBootstrapConfigDto {
     #[serde(default)]
@@ -52,7 +52,7 @@ impl BootstrapPluginDescriptor for ScriptFileBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "ScriptFileBootstrapConfig"
+        "bootstrap.scriptfile.ScriptFileBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

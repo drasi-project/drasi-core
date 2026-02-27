@@ -23,7 +23,7 @@ use crate::LogReactionBuilder;
 
 /// DTO for a template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = LogTemplateSpec)]
+#[schema(as = reaction::log::LogTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TemplateSpecDto {
     /// Handlebars template string.
@@ -33,7 +33,7 @@ pub struct TemplateSpecDto {
 
 /// DTO for per-query template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = LogQueryConfig)]
+#[schema(as = reaction::log::LogQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct QueryConfigDto {
     /// Template for ADD operations.
@@ -51,7 +51,7 @@ pub struct QueryConfigDto {
 
 /// Configuration DTO for the log reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = LogReactionConfig)]
+#[schema(as = reaction::log::LogReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct LogReactionConfigDto {
     /// Query-specific template configurations.
@@ -93,7 +93,7 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "LogReactionConfig"
+        "reaction.log.LogReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

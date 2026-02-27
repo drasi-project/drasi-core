@@ -25,7 +25,7 @@ use crate::ApplicationReactionBuilder;
 /// The application reaction is primarily used for programmatic in-process
 /// subscriptions and has minimal configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = ApplicationReactionConfig)]
+#[schema(as = reaction::application::ApplicationReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationReactionConfigDto {}
 
@@ -47,7 +47,7 @@ impl ReactionPluginDescriptor for ApplicationReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "ApplicationReactionConfig"
+        "reaction.application.ApplicationReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

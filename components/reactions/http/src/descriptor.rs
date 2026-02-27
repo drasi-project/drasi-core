@@ -23,7 +23,7 @@ use crate::HttpReactionBuilder;
 
 /// DTO for an HTTP call specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = CallSpec)]
+#[schema(as = reaction::http::CallSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CallSpecDto {
     /// URL path or absolute URL (supports Handlebars templates).
@@ -43,7 +43,7 @@ pub struct CallSpecDto {
 
 /// DTO for per-query HTTP call configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = HttpQueryConfig)]
+#[schema(as = reaction::http::HttpQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HttpQueryConfigDto {
     /// HTTP call specification for ADD operations.
@@ -61,7 +61,7 @@ pub struct HttpQueryConfigDto {
 
 /// Configuration DTO for the HTTP reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = HttpReactionConfig)]
+#[schema(as = reaction::http::HttpReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpReactionConfigDto {
     /// Base URL for HTTP requests.
@@ -118,7 +118,7 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "HttpReactionConfig"
+        "reaction.http.HttpReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

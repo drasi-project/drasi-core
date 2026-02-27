@@ -26,7 +26,7 @@ use crate::PostgresBootstrapProvider;
 
 /// SSL mode DTO (mirrors [`SslMode`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = SslMode)]
+#[schema(as = bootstrap::postgres::SslMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum SslModeDto {
@@ -38,7 +38,7 @@ pub enum SslModeDto {
 
 /// Table key configuration DTO (mirrors [`TableKeyConfig`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = TableKeyConfig)]
+#[schema(as = bootstrap::postgres::TableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableKeyConfigDto {
     pub table: String,
@@ -71,7 +71,7 @@ fn default_ssl_mode() -> ConfigValue<SslModeDto> {
 
 /// Configuration DTO for the PostgreSQL bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = PostgresBootstrapConfig)]
+#[schema(as = bootstrap::postgres::PostgresBootstrapConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PostgresBootstrapConfigDto {
     #[serde(default = "default_host")]
@@ -102,11 +102,11 @@ pub struct PostgresBootstrapConfigDto {
     pub publication_name: String,
 
     #[serde(default = "default_ssl_mode")]
-    #[schema(value_type = ConfigValue<SslMode>)]
+    #[schema(value_type = ConfigValue<bootstrap::postgres::SslMode>)]
     pub ssl_mode: ConfigValue<SslModeDto>,
 
     #[serde(default)]
-    #[schema(value_type = Vec<TableKeyConfig>)]
+    #[schema(value_type = Vec<bootstrap::postgres::TableKeyConfig>)]
     pub table_keys: Vec<TableKeyConfigDto>,
 }
 
@@ -130,7 +130,7 @@ impl BootstrapPluginDescriptor for PostgresBootstrapDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "PostgresBootstrapConfig"
+        "bootstrap.postgres.PostgresBootstrapConfig"
     }
 
     fn config_schema_json(&self) -> String {

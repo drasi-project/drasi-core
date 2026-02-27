@@ -20,7 +20,7 @@ use utoipa::OpenApi;
 
 /// Platform source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = PlatformSourceConfig)]
+#[schema(as = source::platform::PlatformSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlatformSourceConfigDto {
     pub redis_url: ConfigValue<String>,
@@ -65,7 +65,7 @@ impl SourcePluginDescriptor for PlatformSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "PlatformSourceConfig"
+        "source.platform.PlatformSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {

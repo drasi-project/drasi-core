@@ -24,7 +24,7 @@ fn default_sensor_count() -> u32 {
 
 /// Type of data to generate from the mock source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
-#[schema(as = DataType)]
+#[schema(as = source::mock::DataType)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum DataTypeDto {
     Counter,
@@ -38,11 +38,11 @@ pub enum DataTypeDto {
 
 /// Mock source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = MockSourceConfig)]
+#[schema(as = source::mock::MockSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MockSourceConfigDto {
     #[serde(default)]
-    #[schema(value_type = DataType)]
+    #[schema(value_type = source::mock::DataType)]
     pub data_type: DataTypeDto,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: ConfigValue<u64>,
@@ -70,7 +70,7 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "MockSourceConfig"
+        "source.mock.MockSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {

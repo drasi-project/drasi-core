@@ -27,7 +27,7 @@ use utoipa::OpenApi;
 
 /// HTTP source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = HttpSourceConfig)]
+#[schema(as = source::http::HttpSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpSourceConfigDto {
     pub host: ConfigValue<String>,
@@ -49,7 +49,7 @@ pub struct HttpSourceConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_enabled: Option<ConfigValue<bool>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<WebhookConfig>)]
+    #[schema(value_type = Option<source::http::WebhookConfig>)]
     pub webhooks: Option<WebhookConfigDto>,
 }
 
@@ -58,21 +58,21 @@ fn default_http_timeout_ms() -> ConfigValue<u64> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = WebhookConfig)]
+#[schema(as = source::http::WebhookConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookConfigDto {
     #[serde(default)]
-    #[schema(value_type = ErrorBehavior)]
+    #[schema(value_type = source::http::ErrorBehavior)]
     pub error_behavior: ErrorBehaviorDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<CorsConfig>)]
+    #[schema(value_type = Option<source::http::CorsConfig>)]
     pub cors: Option<CorsConfigDto>,
-    #[schema(value_type = Vec<WebhookRoute>)]
+    #[schema(value_type = Vec<source::http::WebhookRoute>)]
     pub routes: Vec<WebhookRouteDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = CorsConfig)]
+#[schema(as = source::http::CorsConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct CorsConfigDto {
     #[serde(default = "default_cors_enabled")]
@@ -123,7 +123,7 @@ fn default_cors_max_age() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, utoipa::ToSchema)]
-#[schema(as = ErrorBehavior)]
+#[schema(as = source::http::ErrorBehavior)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorBehaviorDto {
     #[default]
@@ -133,20 +133,20 @@ pub enum ErrorBehaviorDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = WebhookRoute)]
+#[schema(as = source::http::WebhookRoute)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookRouteDto {
     pub path: ConfigValue<String>,
     #[serde(default = "default_methods")]
-    #[schema(value_type = Vec<HttpMethod>)]
+    #[schema(value_type = Vec<source::http::HttpMethod>)]
     pub methods: Vec<HttpMethodDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<AuthConfig>)]
+    #[schema(value_type = Option<source::http::AuthConfig>)]
     pub auth: Option<AuthConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<ErrorBehavior>)]
+    #[schema(value_type = Option<source::http::ErrorBehavior>)]
     pub error_behavior: Option<ErrorBehaviorDto>,
-    #[schema(value_type = Vec<WebhookMapping>)]
+    #[schema(value_type = Vec<source::http::WebhookMapping>)]
     pub mappings: Vec<WebhookMappingDto>,
 }
 
@@ -155,7 +155,7 @@ fn default_methods() -> Vec<HttpMethodDto> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
-#[schema(as = HttpMethod)]
+#[schema(as = source::http::HttpMethod)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethodDto {
     Get,
@@ -166,35 +166,35 @@ pub enum HttpMethodDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = AuthConfig)]
+#[schema(as = source::http::AuthConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<SignatureConfig>)]
+    #[schema(value_type = Option<source::http::SignatureConfig>)]
     pub signature: Option<SignatureConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<BearerConfig>)]
+    #[schema(value_type = Option<source::http::BearerConfig>)]
     pub bearer: Option<BearerConfigDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = SignatureConfig)]
+#[schema(as = source::http::SignatureConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureConfigDto {
     #[serde(rename = "type")]
-    #[schema(value_type = SignatureAlgorithm)]
+    #[schema(value_type = source::http::SignatureAlgorithm)]
     pub algorithm: SignatureAlgorithmDto,
     pub secret_env: ConfigValue<String>,
     pub header: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<ConfigValue<String>>,
     #[serde(default)]
-    #[schema(value_type = SignatureEncoding)]
+    #[schema(value_type = source::http::SignatureEncoding)]
     pub encoding: SignatureEncodingDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = SignatureAlgorithm)]
+#[schema(as = source::http::SignatureAlgorithm)]
 #[serde(rename_all = "kebab-case")]
 pub enum SignatureAlgorithmDto {
     HmacSha1,
@@ -202,7 +202,7 @@ pub enum SignatureAlgorithmDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, utoipa::ToSchema)]
-#[schema(as = SignatureEncoding)]
+#[schema(as = source::http::SignatureEncoding)]
 #[serde(rename_all = "lowercase")]
 pub enum SignatureEncodingDto {
     #[default]
@@ -211,38 +211,38 @@ pub enum SignatureEncodingDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = BearerConfig)]
+#[schema(as = source::http::BearerConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct BearerConfigDto {
     pub token_env: ConfigValue<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = WebhookMapping)]
+#[schema(as = source::http::WebhookMapping)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookMappingDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<MappingCondition>)]
+    #[schema(value_type = Option<source::http::MappingCondition>)]
     pub when: Option<MappingConditionDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<OperationType>)]
+    #[schema(value_type = Option<source::http::OperationType>)]
     pub operation: Option<OperationTypeDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_from: Option<ConfigValue<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<HashMap<String, OperationType>>)]
+    #[schema(value_type = Option<HashMap<String, source::http::OperationType>>)]
     pub operation_map: Option<HashMap<String, OperationTypeDto>>,
-    #[schema(value_type = ElementType)]
+    #[schema(value_type = source::http::ElementType)]
     pub element_type: ElementTypeDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<EffectiveFromConfig>)]
+    #[schema(value_type = Option<source::http::EffectiveFromConfig>)]
     pub effective_from: Option<EffectiveFromConfigDto>,
-    #[schema(value_type = ElementTemplate)]
+    #[schema(value_type = source::http::ElementTemplate)]
     pub template: ElementTemplateDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = MappingCondition)]
+#[schema(as = source::http::MappingCondition)]
 #[serde(rename_all = "camelCase")]
 pub struct MappingConditionDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,7 +258,7 @@ pub struct MappingConditionDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = OperationType)]
+#[schema(as = source::http::OperationType)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationTypeDto {
     Insert,
@@ -267,7 +267,7 @@ pub enum OperationTypeDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = ElementType)]
+#[schema(as = source::http::ElementType)]
 #[serde(rename_all = "lowercase")]
 pub enum ElementTypeDto {
     Node,
@@ -275,7 +275,7 @@ pub enum ElementTypeDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = EffectiveFromConfig)]
+#[schema(as = source::http::EffectiveFromConfig)]
 #[serde(untagged)]
 pub enum EffectiveFromConfigDto {
     Simple(ConfigValue<String>),
@@ -286,7 +286,7 @@ pub enum EffectiveFromConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = TimestampFormat)]
+#[schema(as = source::http::TimestampFormat)]
 #[serde(rename_all = "snake_case")]
 pub enum TimestampFormatDto {
     Iso8601,
@@ -296,7 +296,7 @@ pub enum TimestampFormatDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = ElementTemplate)]
+#[schema(as = source::http::ElementTemplate)]
 #[serde(rename_all = "camelCase")]
 pub struct ElementTemplateDto {
     pub id: ConfigValue<String>,
@@ -561,7 +561,7 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "HttpSourceConfig"
+        "source.http.HttpSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {

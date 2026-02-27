@@ -23,7 +23,7 @@ use crate::GrpcReactionBuilder;
 
 /// Configuration DTO for the gRPC reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = GrpcReactionConfig)]
+#[schema(as = reaction::grpc::GrpcReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct GrpcReactionConfigDto {
     /// gRPC server endpoint URL.
@@ -83,7 +83,7 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "GrpcReactionConfig"
+        "reaction.grpc.GrpcReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

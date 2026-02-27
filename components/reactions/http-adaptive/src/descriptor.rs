@@ -26,7 +26,7 @@ pub use drasi_reaction_http::descriptor::{CallSpecDto, HttpQueryConfigDto};
 
 /// Configuration DTO for the HTTP adaptive reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = HttpAdaptiveReactionConfig)]
+#[schema(as = reaction::http_adaptive::HttpAdaptiveReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpAdaptiveReactionConfigDto {
     /// Base URL for HTTP requests.
@@ -103,7 +103,7 @@ impl ReactionPluginDescriptor for HttpAdaptiveReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "HttpAdaptiveReactionConfig"
+        "reaction.http_adaptive.HttpAdaptiveReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

@@ -22,7 +22,7 @@ use crate::ProfilerReactionBuilder;
 
 /// Configuration DTO for the profiler reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = ProfilerReactionConfig)]
+#[schema(as = reaction::profiler::ProfilerReactionConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProfilerReactionConfigDto {
     /// Window size for profiling statistics.
@@ -54,7 +54,7 @@ impl ReactionPluginDescriptor for ProfilerReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "ProfilerReactionConfig"
+        "reaction.profiler.ProfilerReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

@@ -24,7 +24,7 @@ use crate::SseReactionBuilder;
 
 /// DTO for an SSE template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = SseTemplateSpec)]
+#[schema(as = reaction::sse::SseTemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SseTemplateSpecDto {
     /// Handlebars template string.
@@ -38,7 +38,7 @@ pub struct SseTemplateSpecDto {
 
 /// DTO for per-query SSE template configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = SseQueryConfig)]
+#[schema(as = reaction::sse::SseQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SseQueryConfigDto {
     /// Template for ADD operations.
@@ -56,7 +56,7 @@ pub struct SseQueryConfigDto {
 
 /// Configuration DTO for the SSE reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = SseReactionConfig)]
+#[schema(as = reaction::sse::SseReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct SseReactionConfigDto {
     /// Host to bind SSE server.
@@ -123,7 +123,7 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "SseReactionConfig"
+        "reaction.sse.SseReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {

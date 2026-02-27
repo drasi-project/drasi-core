@@ -21,7 +21,7 @@ use utoipa::OpenApi;
 
 /// MS SQL source configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = MsSqlSourceConfig)]
+#[schema(as = source::mssql::MsSqlSourceConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MsSqlSourceConfigDto {
     #[serde(default = "default_mssql_host")]
@@ -53,7 +53,7 @@ pub struct MsSqlSourceConfigDto {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = AuthMode)]
+#[schema(as = source::mssql::AuthMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum AuthModeDto {
@@ -87,7 +87,7 @@ impl From<AuthModeDto> for AuthMode {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = EncryptionMode)]
+#[schema(as = source::mssql::EncryptionMode)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum EncryptionModeDto {
@@ -121,7 +121,7 @@ impl From<EncryptionModeDto> for EncryptionMode {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = StartPosition)]
+#[schema(as = source::mssql::StartPosition)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum StartPositionDto {
@@ -152,7 +152,7 @@ impl From<StartPositionDto> for StartPosition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
-#[schema(as = TableKeyConfig)]
+#[schema(as = source::mssql::TableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TableKeyConfigDto {
     pub table: String,
@@ -199,7 +199,7 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "MsSqlSourceConfig"
+        "source.mssql.MsSqlSourceConfig"
     }
 
     fn config_schema_json(&self) -> String {
