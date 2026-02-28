@@ -197,11 +197,14 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
     );
 
     // Always capture for diagnostics
-    captured_logs().lock().unwrap().push(CapturedLog {
-        level,
-        plugin_id: plugin_id.clone(),
-        message: message.clone(),
-    });
+    captured_logs()
+        .lock()
+        .expect("captured_logs lock poisoned")
+        .push(CapturedLog {
+            level,
+            plugin_id: plugin_id.clone(),
+            message: message.clone(),
+        });
 
     // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
     if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
@@ -218,7 +221,7 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("failed to build tokio runtime for log callback");
             rt.block_on(registry.log(log_message));
         })
         .join();
@@ -242,7 +245,7 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
     // Always capture for diagnostics
     captured_lifecycles()
         .lock()
-        .unwrap()
+        .expect("captured_lifecycles lock poisoned")
         .push(CapturedLifecycle {
             component_id: component_id.clone(),
             event_type,
@@ -277,7 +280,7 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("failed to build tokio runtime for lifecycle callback");
             rt.block_on(async {
                 event_history.write().await.record_event(component_event);
             });
@@ -330,11 +333,14 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
     );
 
     // Capture for diagnostics
-    captured_logs().lock().unwrap().push(CapturedLog {
-        level,
-        plugin_id: plugin_id.clone(),
-        message: message.clone(),
-    });
+    captured_logs()
+        .lock()
+        .expect("captured_logs lock poisoned")
+        .push(CapturedLog {
+            level,
+            plugin_id: plugin_id.clone(),
+            message: message.clone(),
+        });
 
     // Route into ComponentLogRegistry
     if !ctx.is_null() {
@@ -363,7 +369,7 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("failed to build tokio runtime for instance log callback");
             rt.block_on(registry.log(log_message));
         })
         .join();
@@ -390,7 +396,7 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
     // Capture for diagnostics
     captured_lifecycles()
         .lock()
-        .unwrap()
+        .expect("captured_lifecycles lock poisoned")
         .push(CapturedLifecycle {
             component_id: component_id.clone(),
             event_type,
@@ -420,7 +426,7 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+                .expect("failed to build tokio runtime for instance lifecycle callback");
             rt.block_on(async {
                 if let Err(e) = tx.send(component_event).await {
                     log::error!("Failed to send lifecycle event: {e}");

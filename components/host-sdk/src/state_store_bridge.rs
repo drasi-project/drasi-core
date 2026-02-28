@@ -65,7 +65,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+        .expect("failed to build tokio runtime for state store bridge");
     rt.block_on(f)
 }
 

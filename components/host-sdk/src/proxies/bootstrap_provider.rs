@@ -123,7 +123,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .expect("failed to build tokio runtime for bootstrap provider proxy");
         for event in std_rx {
             if rt.block_on(event_tx.send(event)).is_err() {
                 break;

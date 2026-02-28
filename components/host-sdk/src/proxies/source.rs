@@ -50,7 +50,7 @@ extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .expect("failed to build tokio runtime for source proxy");
         // Wrap the result in SendMutPtr to satisfy Send bound
         drasi_plugin_sdk::ffi::SendMutPtr(rt.block_on(*boxed_future))
     })

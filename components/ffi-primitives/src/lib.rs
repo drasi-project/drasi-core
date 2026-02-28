@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 //! `drasi-ffi-primitives` — Core FFI-safe types and vtable generation macros.
 //!
 //! This crate provides the fundamental `#[repr(C)]` types and declarative macros

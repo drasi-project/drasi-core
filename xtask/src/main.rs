@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -587,7 +589,7 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 }
             };
 
-            let stem = name.strip_suffix(".metadata.json").unwrap();
+            let stem = name.strip_suffix(".metadata.json").expect("filename must end with .metadata.json");
             let ext = if metadata.target_triple.contains("windows") {
                 "dll"
             } else if metadata.target_triple.contains("apple")
@@ -923,7 +925,7 @@ async fn publish_directory_entry(
         None,
     );
 
-    let manifest = oci_client::manifest::OciImageManifest::build(&[layer.clone()], &config, None);
+    let manifest = oci_client::manifest::OciImageManifest::build(std::slice::from_ref(&layer), &config, None);
 
     let response = client
         .push(&reference, &[layer], config, auth, Some(manifest))
