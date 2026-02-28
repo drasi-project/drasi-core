@@ -24,7 +24,7 @@ keywords = ["drasi", "plugin", "platform"]
 categories = ["database"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib"]
 
 [lints]
 workspace = true
@@ -48,8 +48,3 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
-
-
-[features]
-# default = []
-dynamic-plugin = []

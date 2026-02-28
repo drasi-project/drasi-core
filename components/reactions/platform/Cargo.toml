@@ -27,7 +27,7 @@ categories = ["network-programming"]
 workspace = true
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -46,8 +46,3 @@ prost-types = "0.12"
 ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-
-
-[features]
-# default = []
-dynamic-plugin = []

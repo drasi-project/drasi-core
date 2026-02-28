@@ -24,7 +24,7 @@ keywords = ["drasi", "plugin", "bootstrap", "platform"]
 categories = ["network-programming"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+crate-type = ["lib"]
 
 [lints]
 workspace = true
@@ -49,8 +49,3 @@ ordered-float = "3.0"
 tokio-postgres = "0.7"
 postgres-types = "0.2"
 redis = { version = "0.25", features = ["tokio-comp"] }
-
-
-[features]
-# default = []
-dynamic-plugin = []
