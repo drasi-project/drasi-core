@@ -653,6 +653,18 @@ fn publish_plugins(args: &[String]) {
         std::process::exit(1);
     }
 
+    // Auto-detect arch suffix from plugin metadata if not provided
+    let arch_suffix = arch_suffix.or_else(|| {
+        plugins.first().and_then(|p| {
+            triple_to_arch_suffix(&p.metadata.target_triple)
+        })
+    });
+
+    if arch_suffix.is_none() {
+        eprintln!("Warning: no --arch-suffix provided and could not auto-detect from plugin metadata.");
+        eprintln!("Tags will not include a platform suffix. Use --arch-suffix to specify one.");
+    }
+
     println!(
         "=== Publishing {} plugins to {} ===",
         plugins.len(),
@@ -934,7 +946,13 @@ fn triple_to_platform(triple: &str) -> Option<(String, String)> {
 }
 
 /// Map a target triple to the arch-suffix format used in tags (e.g., "linux-amd64").
-#[allow(dead_code)]
+/// Musl triples get a distinct suffix (e.g., "linux-musl-amd64").
 fn triple_to_arch_suffix(triple: &str) -> Option<String> {
-    triple_to_platform(triple).map(|(os, arch)| format!("{}-{}", os, arch))
+    triple_to_platform(triple).map(|(os, arch)| {
+        if triple.contains("musl") {
+            format!("{}-musl-{}", os, arch)
+        } else {
+            format!("{}-{}", os, arch)
+        }
+    })
 }

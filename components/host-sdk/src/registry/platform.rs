@@ -271,6 +271,10 @@ mod tests {
             target_triple_to_arch_suffix("x86_64-pc-windows-gnu"),
             Some("windows-amd64".to_string())
         );
+        assert_eq!(
+            target_triple_to_arch_suffix("x86_64-pc-windows-msvc"),
+            Some("windows-amd64".to_string())
+        );
         assert_eq!(target_triple_to_arch_suffix("unknown-triple"), None);
     }
 
