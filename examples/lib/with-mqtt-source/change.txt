@@ -1,0 +1,12 @@
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "reading1",
+    "labels": ["readings"],
+    "properties": {
+      "symbol": "AMZN",
+      "val": 4200000
+    }
+  }
+}

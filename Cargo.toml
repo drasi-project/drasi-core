@@ -44,6 +44,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/ris-live",
+  "components/sources/mqtt",
   "components/sources/mssql",
   "components/sources/dataverse",
   "components/sources/open511",
