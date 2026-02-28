@@ -23,7 +23,7 @@ use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::profiling::ProfilingMetadata;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 use std::collections::HashMap;
 
 pub use super::config::ProfilerReactionConfig;
@@ -483,9 +483,6 @@ impl Reaction for ProfilerReaction {
             )
             .await?;
 
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base
@@ -576,6 +573,10 @@ impl Reaction for ProfilerReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

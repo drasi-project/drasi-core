@@ -21,9 +21,9 @@
 
 use async_trait::async_trait;
 use drasi_lib::{
-    ComponentEvent, ComponentStatus, ComponentType, DrasiLib, LogLevel, Query, Reaction,
-    ReactionRuntimeContext, Source, SourceBase, SourceBaseParams, SourceRuntimeContext,
-    SourceSubscriptionSettings, SubscriptionResponse,
+    channels::QueryResult, ComponentEvent, ComponentStatus, ComponentType, DrasiLib, LogLevel,
+    Query, Reaction, ReactionRuntimeContext, Source, SourceBase, SourceBaseParams,
+    SourceRuntimeContext, SourceSubscriptionSettings, SubscriptionResponse,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -265,6 +265,10 @@ impl Reaction for TestReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

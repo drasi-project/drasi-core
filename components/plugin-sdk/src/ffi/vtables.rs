@@ -214,6 +214,11 @@ drasi_ffi_primitives::ffi_vtable! {
 
         // Initialization
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
+
+        // Host-managed query subscription forwarding
+        /// The host calls this to push a QueryResult into the reaction's priority queue.
+        /// The `result` pointer is a `*mut QueryResult` — ownership transfers to the callee.
+        fn enqueue_query_result_fn(state: *mut, result: *mut c_void) -> FfiResult,
     }
 }
 

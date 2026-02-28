@@ -1001,6 +1001,25 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         .expect("reaction initialize thread panicked");
     }
 
+    extern "C" fn enqueue_query_result_fn<T: Reaction + 'static>(
+        state: *mut c_void,
+        result: *mut c_void,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            let query_result =
+                unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
+            let handle = (w.runtime_handle)().handle().clone();
+            std::thread::spawn({
+                let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
+                move || handle.block_on(inner.inner.enqueue_query_result(query_result))
+            })
+            .join()
+            .expect("enqueue_query_result thread panicked");
+            FfiResult::ok()
+        })
+    }
+
     extern "C" fn drop_fn<T: Reaction + 'static>(state: *mut c_void) {
         unsafe { drop(Box::from_raw(state as *mut ReactionWrapper<T>)) };
     }
@@ -1034,6 +1053,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         status_fn: status_fn::<T>,
         deprovision_fn: deprovision_fn::<T>,
         initialize_fn: initialize_fn::<T>,
+        enqueue_query_result_fn: enqueue_query_result_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1255,6 +1275,28 @@ pub fn build_reaction_vtable_from_boxed(
         .expect("reaction initialize thread panicked");
     }
 
+    extern "C" fn enqueue_query_result_fn(
+        state: *mut c_void,
+        result: *mut c_void,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynReactionWrapper) };
+            let query_result =
+                unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
+            let handle = (w.runtime_handle)().handle().clone();
+            std::thread::spawn({
+                let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+                move || {
+                    let inner = unsafe { inner_ptr.as_ref() };
+                    handle.block_on(inner.inner.enqueue_query_result(query_result))
+                }
+            })
+            .join()
+            .expect("enqueue_query_result thread panicked");
+            FfiResult::ok()
+        })
+    }
+
     extern "C" fn drop_fn(state: *mut c_void) {
         unsafe { drop(Box::from_raw(state as *mut DynReactionWrapper)) };
     }
@@ -1288,6 +1330,7 @@ pub fn build_reaction_vtable_from_boxed(
         status_fn,
         deprovision_fn,
         initialize_fn,
+        enqueue_query_result_fn,
         drop_fn,
     }
 }
@@ -1861,8 +1904,6 @@ fn build_source_runtime_context(
     (ctx, status_rx)
 }
 
-/// Build a ReactionRuntimeContext from FFI runtime context.
-/// Note: query_provider is a stub since the host manages subscriptions for cdylib reactions.
 fn build_reaction_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
 ) -> (drasi_lib::ReactionRuntimeContext, ComponentEventReceiver) {
@@ -1885,26 +1926,11 @@ fn build_reaction_runtime_context(
         };
     let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
-    // Stub QueryProvider — the host manages query subscriptions for cdylib reactions
-    struct StubQueryProvider;
-    #[async_trait::async_trait]
-    impl drasi_lib::QueryProvider for StubQueryProvider {
-        async fn get_query_instance(
-            &self,
-            id: &str,
-        ) -> anyhow::Result<Arc<dyn drasi_lib::queries::Query>> {
-            anyhow::bail!(
-                "QueryProvider not available in dynamic plugin mode. Query '{id}' subscriptions are managed by the host."
-            )
-        }
-    }
-
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
         reaction_id: component_id,
         status_tx,
         state_store,
-        query_provider: Arc::new(StubQueryProvider),
         identity_provider,
     };
     (ctx, status_rx)

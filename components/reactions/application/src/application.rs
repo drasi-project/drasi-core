@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, RwLock};
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 use std::collections::HashMap;
 
 /// Handle for programmatic consumption of query results from an Application Reaction
@@ -534,9 +534,6 @@ impl Reaction for ApplicationReaction {
             )
             .await?;
 
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base
@@ -617,6 +614,10 @@ impl Reaction for ApplicationReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

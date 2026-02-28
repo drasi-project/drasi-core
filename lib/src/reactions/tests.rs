@@ -16,24 +16,12 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
-    use crate::queries::Query;
-    use crate::reactions::QueryProvider;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
-
-    // Mock QueryProvider for testing ReactionManager
-    struct MockQueryProvider;
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(&self, _id: &str) -> Result<Arc<dyn Query>> {
-            Err(anyhow::anyhow!("MockQueryProvider: query not found"))
-        }
-    }
 
     /// A simple test mock reaction for unit testing the ReactionManager.
     struct TestMockReaction {
@@ -152,6 +140,10 @@ mod manager_tests {
         async fn status(&self) -> ComponentStatus {
             self.status.read().await.clone()
         }
+
+        async fn enqueue_query_result(&self, _result: QueryResult) {
+            // No-op for test mock
+        }
     }
 
     /// Helper to create a TestMockReaction instance
@@ -176,10 +168,6 @@ mod manager_tests {
             event_tx.clone(),
             log_registry,
         ));
-        // Inject mock QueryProvider so add_reaction() can construct ReactionRuntimeContext
-        manager
-            .inject_query_provider(Arc::new(MockQueryProvider))
-            .await;
         (manager, event_rx, event_tx)
     }
 
@@ -656,6 +644,10 @@ mod manager_tests {
             self.deprovision_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
+        }
+
+        async fn enqueue_query_result(&self, _result: QueryResult) {
+            // No-op for test mock
         }
     }
 

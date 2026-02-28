@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
@@ -479,9 +479,6 @@ impl Reaction for AdaptiveHttpReaction {
             )
             .await?;
 
-        // Subscribe to queries
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Set status to Running
         self.base
@@ -565,5 +562,9 @@ impl Reaction for AdaptiveHttpReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }

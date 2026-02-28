@@ -41,7 +41,6 @@ use crate::channels::{
 };
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
-use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
@@ -110,8 +109,6 @@ pub struct ReactionBase {
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
     /// Channel for sending component status events (extracted from context for convenience)
     status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    /// Query provider for accessing queries (extracted from context)
-    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -140,10 +137,9 @@ impl ReactionBase {
             queries: params.queries,
             auto_start: params.auto_start,
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            context: Arc::new(RwLock::new(None)), // Set by initialize()
-            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
-            query_provider: Arc::new(RwLock::new(None)), // Extracted from context
-            state_store: Arc::new(RwLock::new(None)), // Extracted from context
+            context: Arc::new(RwLock::new(None)),
+            status_tx: Arc::new(RwLock::new(None)),
+            state_store: Arc::new(RwLock::new(None)),
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -160,14 +156,12 @@ impl ReactionBase {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_provider`: Access to query instances for subscription
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
         // Extract services for convenience
         *self.status_tx.write().await = Some(context.status_tx.clone());
-        *self.query_provider.write().await = Some(context.query_provider.clone());
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -241,7 +235,6 @@ impl ReactionBase {
             status: self.status.clone(),
             context: self.context.clone(),
             status_tx: self.status_tx.clone(),
-            query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
@@ -315,120 +308,12 @@ impl ReactionBase {
         self.send_component_event(status, message).await
     }
 
-    /// Subscribe to all configured queries and spawn forwarder tasks
+    /// Enqueue a query result for processing.
     ///
-    /// This method handles the common pattern of:
-    /// 1. Getting query instances via the injected QueryProvider
-    /// 2. Subscribing to each configured query
-    /// 3. Spawning forwarder tasks to enqueue results to priority queue
-    ///
-    /// # Prerequisites
-    /// * `inject_query_provider()` must have been called (done automatically by DrasiLib)
-    ///
-    /// # Returns
-    /// * `Ok(())` if all subscriptions succeeded
-    /// * `Err(...)` if QueryProvider not injected or any subscription failed
-    pub async fn subscribe_to_queries(&self) -> Result<()> {
-        // Get the injected query provider (clone the Arc to release the lock)
-        let query_provider = {
-            let qp_guard = self.query_provider.read().await;
-            qp_guard.as_ref().cloned().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "QueryProvider not injected - was reaction '{}' added to DrasiLib?",
-                    self.id
-                )
-            })?
-        };
-
-        // Subscribe to all configured queries and spawn forwarder tasks
-        for query_id in &self.queries {
-            // Get the query instance via QueryProvider
-            let query = query_provider.get_query_instance(query_id).await?;
-
-            // Subscribe to the query
-            let subscription_response = query
-                .subscribe(self.id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let mut receiver = subscription_response.receiver;
-
-            // Clone necessary data for the forwarder task
-            let priority_queue = self.priority_queue.clone();
-            let query_id_clone = query_id.clone();
-            let reaction_id = self.id.clone();
-
-            // Get instance_id from context for log routing isolation
-            let instance_id = self
-                .context()
-                .await
-                .map(|c| c.instance_id.clone())
-                .unwrap_or_default();
-
-            // Get query dispatch mode to determine enqueue strategy
-            let query_config = query.get_config();
-            let dispatch_mode = query_config
-                .dispatch_mode
-                .unwrap_or(crate::channels::DispatchMode::Channel);
-            let use_blocking_enqueue =
-                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
-
-            // Spawn forwarder task with tracing span for proper log routing
-            let span = tracing::info_span!(
-                "reaction_forwarder",
-                instance_id = %instance_id,
-                component_id = %reaction_id,
-                component_type = "reaction"
-            );
-            let forwarder_task = tokio::spawn(
-                async move {
-                    debug!(
-                        "[{reaction_id}] Started result forwarder for query '{query_id_clone}' (dispatch_mode: {dispatch_mode:?}, blocking_enqueue: {use_blocking_enqueue})"
-                    );
-
-                    loop {
-                        match receiver.recv().await {
-                            Ok(query_result) => {
-                                // Use appropriate enqueue method based on dispatch mode
-                                if use_blocking_enqueue {
-                                    // Channel mode: Use blocking enqueue to prevent message loss
-                                    // This creates backpressure when the priority queue is full
-                                    priority_queue.enqueue_wait(query_result).await;
-                                } else {
-                                    // Broadcast mode: Use non-blocking enqueue to prevent deadlock
-                                    // Messages may be dropped when priority queue is full
-                                    if !priority_queue.enqueue(query_result).await {
-                                        warn!(
-                                            "[{reaction_id}] Failed to enqueue result from query '{query_id_clone}' - priority queue at capacity (broadcast mode)"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Check if it's a lag error or closed channel
-                                let error_str = e.to_string();
-                                if error_str.contains("lagged") {
-                                    warn!(
-                                        "[{reaction_id}] Receiver lagged for query '{query_id_clone}': {error_str}"
-                                    );
-                                    continue;
-                                } else {
-                                    info!(
-                                        "[{reaction_id}] Receiver error for query '{query_id_clone}': {error_str}"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                .instrument(span),
-            );
-
-            // Store the forwarder task handle
-            self.subscription_tasks.write().await.push(forwarder_task);
-        }
-
-        Ok(())
+    /// The host calls this to forward query results to the reaction's priority queue.
+    /// Results are processed in timestamp order by the reaction's processing task.
+    pub async fn enqueue_query_result(&self, result: QueryResult) {
+        self.priority_queue.enqueue_wait(Arc::new(result)).await;
     }
 
     /// Perform common cleanup operations
@@ -542,20 +427,6 @@ mod tests {
     #[tokio::test]
     async fn test_status_transitions() {
         use crate::context::ReactionRuntimeContext;
-        use crate::queries::Query;
-
-        // Mock QueryProvider for testing
-        struct MockQueryProvider;
-
-        #[async_trait::async_trait]
-        impl crate::reactions::QueryProvider for MockQueryProvider {
-            async fn get_query_instance(
-                &self,
-                _id: &str,
-            ) -> anyhow::Result<std::sync::Arc<dyn Query>> {
-                Err(anyhow::anyhow!("MockQueryProvider: query not found"))
-            }
-        }
 
         let (status_tx, mut event_rx) = mpsc::channel(100);
         let params = ReactionBaseParams::new("test-reaction", vec![]);
@@ -568,7 +439,6 @@ mod tests {
             "test-reaction",
             status_tx,
             None,
-            std::sync::Arc::new(MockQueryProvider),
         );
         base.initialize(context).await;
 

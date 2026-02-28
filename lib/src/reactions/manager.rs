@@ -17,6 +17,7 @@ use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::channels::*;
 use crate::config::ReactionRuntime;
@@ -25,21 +26,24 @@ use crate::managers::{
     is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
     ComponentLogRegistry, Operation,
 };
-use crate::reactions::{QueryProvider, Reaction};
+use crate::queries::Query;
+use crate::reactions::Reaction;
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
     instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
     event_tx: ComponentEventSender,
-    /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
-    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
+    /// Query manager for subscribing reactions to query results
+    query_manager: Arc<RwLock<Option<Arc<crate::queries::QueryManager>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Event history for tracking component lifecycle events
     event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
+    /// Handles to subscription forwarder tasks per reaction
+    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
 }
 
 impl ReactionManager {
@@ -53,18 +57,19 @@ impl ReactionManager {
             instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            query_provider: Arc::new(RwLock::new(None)),
+            query_manager: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Inject the query provider (called after DrasiLib is fully constructed)
+    /// Inject the query manager (called after DrasiLib is fully constructed)
     ///
-    /// This allows reactions to look up queries when they start.
-    pub async fn inject_query_provider(&self, qp: Arc<dyn QueryProvider>) {
-        *self.query_provider.write().await = Some(qp);
+    /// This allows the ReactionManager to subscribe reactions to query results.
+    pub async fn inject_query_manager(&self, qm: Arc<crate::queries::QueryManager>) {
+        *self.query_manager.write().await = Some(qm);
     }
 
     /// Inject the state store provider (called after DrasiLib is fully constructed)
@@ -99,20 +104,12 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
-        // Query provider must be available for reactions
-        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "QueryProvider not injected - was ReactionManager initialized properly?"
-            )
-        })?;
-
         // Construct runtime context for this reaction
         let context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
-            query_provider,
         );
 
         // Initialize the reaction with its runtime context
@@ -151,6 +148,9 @@ impl ReactionManager {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
             reaction.start().await?;
+
+            // Subscribe to queries on behalf of the reaction and forward results
+            self.subscribe_reaction_to_queries(&id, reaction).await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
         }
@@ -167,6 +167,10 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Abort subscription forwarder tasks
+            self.abort_subscription_tasks(&id).await;
+
             reaction.stop().await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
@@ -227,6 +231,8 @@ impl ReactionManager {
             // If the reaction is running or starting, stop it first
             if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
                 info!("Stopping reaction '{id}' before deletion");
+                // Abort subscription forwarder tasks
+                self.abort_subscription_tasks(&id).await;
                 if let Err(e) = reaction.stop().await {
                     warn!("Failed to stop reaction '{id}' during deletion (may already be stopped): {e}");
                 }
@@ -256,6 +262,7 @@ impl ReactionManager {
 
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
+            self.abort_subscription_tasks(&id).await;
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
             // Clean up log registry for this reaction
@@ -321,6 +328,7 @@ impl ReactionManager {
             // If running or starting, stop first then validate
             if was_running {
                 info!("Stopping reaction '{id}' for reconfiguration");
+                self.abort_subscription_tasks(&id).await;
                 old_reaction.stop().await?;
 
                 // Poll for Stopped status with timeout
@@ -344,17 +352,11 @@ impl ReactionManager {
 
             // Initialize the new reaction with runtime context
             let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "QueryProvider not injected - was ReactionManager initialized properly?"
-                )
-            })?;
             let context = ReactionRuntimeContext::new(
                 &self.instance_id,
                 &id,
                 self.event_tx.clone(),
                 self.state_store.read().await.clone(),
-                query_provider,
             );
             new_reaction.initialize(context).await;
 
@@ -530,5 +532,114 @@ impl ReactionManager {
     /// Get a shared reference to the event history.
     pub fn event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
         Arc::clone(&self.event_history)
+    }
+
+    /// Subscribe a reaction to its configured queries and spawn forwarder tasks.
+    ///
+    /// This is called by the host after `reaction.start()` succeeds.
+    /// For each query the reaction is interested in, the manager:
+    /// 1. Gets the query instance from the QueryManager
+    /// 2. Subscribes to the query's result stream
+    /// 3. Spawns a forwarder task that calls `reaction.enqueue_query_result()`
+    async fn subscribe_reaction_to_queries(
+        &self,
+        reaction_id: &str,
+        reaction: Arc<dyn Reaction>,
+    ) -> Result<()> {
+        let query_ids = reaction.query_ids();
+        if query_ids.is_empty() {
+            return Ok(());
+        }
+
+        let query_manager = self.query_manager.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!("QueryManager not injected - was ReactionManager initialized properly?")
+        })?;
+
+        let instance_id = self.instance_id.clone();
+        let mut tasks = Vec::new();
+
+        for query_id in &query_ids {
+            let query = query_manager
+                .get_query_instance(query_id)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let subscription = query
+                .subscribe(reaction_id.to_string())
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let mut receiver = subscription.receiver;
+
+            let reaction = reaction.clone();
+            let query_id_clone = query_id.clone();
+            let reaction_id_owned = reaction_id.to_string();
+
+            let query_config = query.get_config();
+            let dispatch_mode = query_config
+                .dispatch_mode
+                .unwrap_or(crate::channels::DispatchMode::Channel);
+            let _use_blocking_enqueue =
+                matches!(dispatch_mode, crate::channels::DispatchMode::Channel);
+
+            let span = tracing::info_span!(
+                "reaction_forwarder",
+                instance_id = %instance_id,
+                component_id = %reaction_id_owned,
+                component_type = "reaction"
+            );
+
+            let forwarder_task = tokio::spawn(
+                async move {
+                    log::debug!(
+                        "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}'"
+                    );
+
+                    loop {
+                        match receiver.recv().await {
+                            Ok(query_result) => {
+                                // Unwrap Arc or clone if shared
+                                let result = Arc::try_unwrap(query_result)
+                                    .unwrap_or_else(|arc| (*arc).clone());
+                                reaction.enqueue_query_result(result).await;
+                            }
+                            Err(e) => {
+                                let error_str = e.to_string();
+                                if error_str.contains("lagged") {
+                                    log::warn!(
+                                        "[{reaction_id_owned}] Receiver lagged for query '{query_id_clone}': {error_str}"
+                                    );
+                                    continue;
+                                } else {
+                                    log::info!(
+                                        "[{reaction_id_owned}] Receiver closed for query '{query_id_clone}': {error_str}"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                .instrument(span),
+            );
+
+            tasks.push(forwarder_task);
+        }
+
+        // Store the forwarder task handles
+        self.subscription_tasks
+            .write()
+            .await
+            .insert(reaction_id.to_string(), tasks);
+
+        Ok(())
+    }
+
+    /// Abort all subscription forwarder tasks for a reaction.
+    async fn abort_subscription_tasks(&self, reaction_id: &str) {
+        if let Some(tasks) = self.subscription_tasks.write().await.remove(reaction_id) {
+            for task in tasks {
+                task.abort();
+            }
+        }
     }
 }

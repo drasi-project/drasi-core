@@ -29,7 +29,7 @@ use std::sync::Arc;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 use super::HttpReactionBuilder;
 
@@ -283,9 +283,6 @@ impl Reaction for HttpReaction {
             )
             .await?;
 
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base
@@ -510,5 +507,9 @@ impl Reaction for HttpReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }

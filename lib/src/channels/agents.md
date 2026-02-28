@@ -12,6 +12,7 @@ FFI-safe representations.
 |------|------|---------------|-------------|
 | `SourceEventWrapper` | `events.rs` | Opaque pointer (`Box<SourceEventWrapper>` → `*mut c_void`) | `FfiSourceEvent.opaque` |
 | `BootstrapEvent` | `events.rs` | Opaque pointer (`Box<BootstrapEvent>` → `*mut c_void`) | `FfiBootstrapEvent.opaque` |
+| `QueryResult` | `events.rs` | Opaque pointer (`Box<QueryResult>` → `*mut c_void`) | `ReactionVtable.enqueue_query_result_fn` arg |
 | `SubscriptionResponse` | `events.rs` | Converted field-by-field to `FfiSubscriptionResponse` | `FfiSubscriptionResponse` |
 | `ComponentStatus` | `events.rs` | Mapped to `FfiComponentStatus` enum | `FfiComponentStatus` |
 | `DispatchMode` | `dispatcher.rs` | Mapped to `FfiDispatchMode` enum | `FfiDispatchMode` |
@@ -28,6 +29,21 @@ However, you must still:
 
 2. If metadata fields are extracted (e.g., `source_id` from `SourceEventWrapper`), update
    the extraction in `components/plugin-sdk/src/ffi/vtable_gen.rs`.
+
+#### Adding/removing fields on `QueryResult`
+
+`QueryResult` crosses FFI as an opaque pointer via `ReactionVtable.enqueue_query_result_fn`.
+The host boxes the value (`Box::into_raw`) and the plugin takes ownership (`Box::from_raw`).
+
+1. Bump `FFI_SDK_VERSION` in `components/plugin-sdk/src/ffi/metadata.rs` — both sides
+   cast the same `*mut c_void` pointer.
+
+2. **Plugin side** — `components/plugin-sdk/src/ffi/vtable_gen.rs` — the
+   `enqueue_query_result_fn` function in both `build_reaction_vtable()` and
+   `build_reaction_vtable_from_boxed()` reconstructs the `QueryResult`.
+
+3. **Host side** — `components/host-sdk/src/proxies/reaction.rs` — `ReactionProxy`
+   boxes the `QueryResult` and passes the raw pointer.
 
 #### Adding variants to `ComponentStatus` or `DispatchMode`
 

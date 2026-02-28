@@ -22,9 +22,9 @@
 
 use async_trait::async_trait;
 use drasi_lib::{
-    ComponentEvent, ComponentStatus, DrasiLib, MemoryStateStoreProvider, Query, Reaction,
-    ReactionRuntimeContext, Source, SourceBase, SourceBaseParams, SourceRuntimeContext,
-    SourceSubscriptionSettings, StateStoreProvider, SubscriptionResponse,
+    channels::QueryResult, ComponentEvent, ComponentStatus, DrasiLib, MemoryStateStoreProvider,
+    Query, Reaction, ReactionRuntimeContext, Source, SourceBase, SourceBaseParams,
+    SourceRuntimeContext, SourceSubscriptionSettings, StateStoreProvider, SubscriptionResponse,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -327,6 +327,10 @@ impl Reaction for TestReaction {
         self.deprovision_called.store(true, Ordering::SeqCst);
         self.base.deprovision_common().await?;
         Ok(())
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

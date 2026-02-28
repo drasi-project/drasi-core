@@ -37,6 +37,11 @@ Several proxies reconstruct Rust types from opaque `*mut c_void` pointers:
 - `change_receiver.rs:92` — `Box::from_raw(opaque as *mut BootstrapEvent)`
 - `bootstrap_provider.rs:140` — `Box::from_raw(opaque as *mut BootstrapEvent)`
 
+`ReactionProxy` transfers ownership **to** the plugin via opaque pointers:
+
+- `reaction.rs` — `Box::into_raw(Box::new(query_result)) as *mut c_void` passed to
+  `enqueue_query_result_fn`. The plugin takes ownership via `Box::from_raw`.
+
 **Safety**: These casts are only valid if the plugin and host agree on the type's memory
 layout. This is enforced by SDK version validation in `loader.rs`.
 

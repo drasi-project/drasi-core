@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 use crate::config::{MySqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MySqlExecutor;
@@ -308,9 +308,6 @@ impl Reaction for MySqlStoredProcReaction {
         // Store executor for later use
         *self.executor.write().await = Some(executor.clone());
 
-        // Subscribe to all queries
-        self.base.subscribe_to_queries().await?;
-
         // Spawn processing task
         let task = self.spawn_processing_task(executor);
         *self.task_handle.lock().await = Some(task);
@@ -336,6 +333,10 @@ impl Reaction for MySqlStoredProcReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

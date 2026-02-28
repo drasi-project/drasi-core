@@ -233,11 +233,10 @@ fn test_mock_source_config_schema_is_valid_json() {
         serde_json::from_str(&schema_json).expect("Schema should be valid JSON");
     assert!(parsed.is_object(), "Schema should be a JSON object");
 
-    // The schema should contain the main config type
     let obj = parsed.as_object().unwrap();
     assert!(
-        obj.contains_key("MockSourceConfig"),
-        "Schema should contain MockSourceConfig, got keys: {:?}",
+        obj.contains_key("source.mock.MockSourceConfig"),
+        "Schema should contain source.mock.MockSourceConfig, got keys: {:?}",
         obj.keys().collect::<Vec<_>>()
     );
 }
@@ -267,8 +266,8 @@ fn test_log_reaction_config_schema_is_valid_json() {
 
     let obj = parsed.as_object().unwrap();
     assert!(
-        obj.contains_key("LogReactionConfig"),
-        "Schema should contain LogReactionConfig, got keys: {:?}",
+        obj.contains_key("reaction.log.LogReactionConfig"),
+        "Schema should contain reaction.log.LogReactionConfig, got keys: {:?}",
         obj.keys().collect::<Vec<_>>()
     );
 }
@@ -1612,4 +1611,184 @@ async fn test_source_with_identity_provider_injection() {
     // This should not crash — identity_provider is passed through FFI
     source.initialize(context).await;
     assert_eq!(source.id(), "ip-inject-test");
+}
+
+// ============================================================================
+// Reaction enqueue_query_result E2E Tests
+// ============================================================================
+
+/// Test that enqueue_query_result successfully pushes a QueryResult through FFI
+/// into the reaction's processing queue. This validates the full host-managed
+/// query subscription data flow for dynamic plugins.
+#[tokio::test]
+async fn test_reaction_enqueue_query_result() {
+    if !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIP: drasi-reaction-log not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-reaction-log");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let descriptor = &plugin.reaction_plugins[0];
+    let config = serde_json::json!({});
+    let query_ids = vec!["test-query".to_string()];
+
+    let reaction = descriptor
+        .create_reaction("enqueue-test", query_ids, &config, true)
+        .await
+        .expect("Should create log reaction instance");
+
+    // Initialize the reaction with a runtime context
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let context = drasi_lib::ReactionRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        reaction_id: "enqueue-test".to_string(),
+        status_tx,
+        state_store: None,
+        identity_provider: None,
+    };
+    reaction.initialize(context).await;
+
+    // Start the reaction
+    reaction.start().await.expect("Reaction should start");
+
+    // Build a QueryResult and enqueue it via the host-managed path
+    let query_result = drasi_lib::channels::QueryResult::new(
+        "test-query".to_string(),
+        chrono::Utc::now(),
+        vec![],
+        std::collections::HashMap::new(),
+    );
+
+    // This is the critical path: host calls enqueue_query_result on the reaction proxy,
+    // which transfers the QueryResult as an opaque pointer through FFI into the
+    // reaction's priority queue.
+    reaction.enqueue_query_result(query_result).await;
+
+    // If we get here without panic/crash, the opaque pointer transfer worked.
+    // Stop the reaction cleanly.
+    reaction.stop().await.expect("Reaction should stop");
+}
+
+/// Test that multiple QueryResults can be enqueued in sequence without issues.
+#[tokio::test]
+async fn test_reaction_enqueue_multiple_query_results() {
+    if !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIP: drasi-reaction-log not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-reaction-log");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let descriptor = &plugin.reaction_plugins[0];
+    let config = serde_json::json!({});
+    let query_ids = vec!["q1".to_string(), "q2".to_string()];
+
+    let reaction = descriptor
+        .create_reaction("multi-enqueue-test", query_ids, &config, true)
+        .await
+        .expect("Should create log reaction instance");
+
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let context = drasi_lib::ReactionRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        reaction_id: "multi-enqueue-test".to_string(),
+        status_tx,
+        state_store: None,
+        identity_provider: None,
+    };
+    reaction.initialize(context).await;
+    reaction.start().await.expect("Reaction should start");
+
+    // Enqueue results from different queries
+    for i in 0..5 {
+        let query_id = if i % 2 == 0 { "q1" } else { "q2" };
+        let result = drasi_lib::channels::QueryResult::new(
+            query_id.to_string(),
+            chrono::Utc::now(),
+            vec![],
+            std::collections::HashMap::new(),
+        );
+        reaction.enqueue_query_result(result).await;
+    }
+
+    reaction.stop().await.expect("Reaction should stop");
+}
+
+/// Test that enqueue_query_result works with a QueryResult containing actual data.
+#[tokio::test]
+async fn test_reaction_enqueue_query_result_with_data() {
+    if !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIP: drasi-reaction-log not built as cdylib");
+        return;
+    }
+    let path = require_plugin("drasi-reaction-log");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let descriptor = &plugin.reaction_plugins[0];
+    let config = serde_json::json!({});
+    let query_ids = vec!["data-query".to_string()];
+
+    let reaction = descriptor
+        .create_reaction("data-enqueue-test", query_ids, &config, true)
+        .await
+        .expect("Should create log reaction instance");
+
+    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let context = drasi_lib::ReactionRuntimeContext {
+        instance_id: "test-instance".to_string(),
+        reaction_id: "data-enqueue-test".to_string(),
+        status_tx,
+        state_store: None,
+        identity_provider: None,
+    };
+    reaction.initialize(context).await;
+    reaction.start().await.expect("Reaction should start");
+
+    // Build a QueryResult with actual result diffs and metadata
+    use drasi_lib::channels::ResultDiff;
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(
+        "source".to_string(),
+        serde_json::Value::String("test".to_string()),
+    );
+
+    let result_diff = ResultDiff::Add {
+        data: serde_json::json!({"id": 1, "name": "test-entity", "value": 42}),
+    };
+
+    let query_result = drasi_lib::channels::QueryResult {
+        query_id: "data-query".to_string(),
+        timestamp: chrono::Utc::now(),
+        results: vec![result_diff],
+        metadata,
+        profiling: None,
+    };
+
+    // Enqueue a result with actual data — validates that complex types
+    // cross the FFI boundary correctly as opaque pointers
+    reaction.enqueue_query_result(query_result).await;
+
+    reaction.stop().await.expect("Reaction should stop");
 }

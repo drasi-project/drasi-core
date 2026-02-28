@@ -163,6 +163,16 @@ impl Reaction for ReactionProxy {
         }
     }
 
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        // Transfer ownership via opaque pointer — no serialization
+        let boxed = Box::new(result);
+        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
+        let ffi_result = (self.vtable.enqueue_query_result_fn)(self.vtable.state, ptr);
+        if let Err(e) = unsafe { ffi_result.into_result() } {
+            log::error!("Failed to enqueue query result: {e}");
+        }
+    }
+
     async fn deprovision(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let deprovision_fn = self.vtable.deprovision_fn;

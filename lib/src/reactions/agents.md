@@ -19,6 +19,7 @@ through an `#[repr(C)]` vtable (`ReactionVtable`) across the FFI boundary.
 | `status()` | `status_fn` | Returns `FfiComponentStatus` |
 | `initialize()` | `initialize_fn` | Takes `*const FfiRuntimeContext` |
 | `deprovision()` | `deprovision_fn` | Returns `FfiResult` |
+| `enqueue_query_result()` | `enqueue_query_result_fn` | Takes `*mut c_void` (opaque `Box<QueryResult>`), returns `FfiResult`. Host transfers ownership. |
 
 ### What to update when changing the `Reaction` trait
 
@@ -35,6 +36,24 @@ If you add, remove, or change methods on the `Reaction` trait:
 
 4. **Version bump** — `components/plugin-sdk/src/ffi/metadata.rs` → `FFI_SDK_VERSION`
    - Adding a method to the vtable changes its layout → major version bump
+
+### Host-managed query subscriptions
+
+Reactions do **not** subscribe to queries themselves. The host (`ReactionManager`) manages
+query subscriptions and forwards `QueryResult` values into the reaction via
+`enqueue_query_result()`. This is true for both static and dynamic plugins.
+
+- `QueryResult` crosses FFI as an **opaque pointer** (`Box::into_raw` / `Box::from_raw`)
+- Ownership transfers from host to plugin — no serialization, no copying
+- The plugin-side vtable function (`enqueue_query_result_fn` in `vtable_gen.rs`) reconstructs
+  the `QueryResult` via `Box::from_raw` and calls `reaction.enqueue_query_result()`
+- The host-side proxy (`ReactionProxy` in `host-sdk/src/proxies/reaction.rs`) boxes the
+  `QueryResult` and passes the raw pointer
+
+If you change the `QueryResult` struct layout (in `lib/src/channels/events.rs`), you must
+bump `FFI_SDK_VERSION` since both sides cast the same `*mut c_void`.
+
+There is no `QueryProvider` trait — it was removed. Do not re-add it.
 
 ### What to update when changing `ReactionPluginDescriptor`
 

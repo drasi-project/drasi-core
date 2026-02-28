@@ -26,7 +26,7 @@ use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::OperationType;
-use drasi_lib::reactions::{QueryProvider, Reaction, ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::{Reaction, ReactionBase, ReactionBaseParams};
 
 use crate::config::{MsSqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MsSqlExecutor;
@@ -309,9 +309,6 @@ impl Reaction for MsSqlStoredProcReaction {
         // Store executor for later use
         *self.executor.write().await = Some(executor.clone());
 
-        // Subscribe to all queries
-        self.base.subscribe_to_queries().await?;
-
         // Spawn processing task
         let task = self.spawn_processing_task(executor);
         *self.task_handle.lock().await = Some(task);
@@ -343,6 +340,10 @@ impl Reaction for MsSqlStoredProcReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+        self.base.enqueue_query_result(result).await;
     }
 }
 

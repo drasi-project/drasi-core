@@ -20,7 +20,7 @@ FFI boundary through this directory. The general patterns are:
 | Domain type category | FFI pattern | Key file |
 |---------------------|-------------|----------|
 | Trait methods (Source, Reaction, BootstrapProvider) | Function pointer vtables | `vtables.rs`, `vtable_gen.rs` |
-| Opaque Rust types (SourceEventWrapper, BootstrapEvent) | `*mut c_void` in `#[repr(C)]` envelopes | `vtables.rs` (envelope defs), `vtable_gen.rs` (wrapping) |
+| Opaque Rust types (SourceEventWrapper, BootstrapEvent, QueryResult) | `*mut c_void` in `#[repr(C)]` envelopes or vtable args | `vtables.rs` (envelope defs), `vtable_gen.rs` (wrapping) |
 | Simple enums (ComponentStatus, DispatchMode) | Mirrored `#[repr(C)]` enums | `types.rs` |
 | Strings | `FfiStr` (borrowed) / `FfiOwnedStr` (owned) | `types.rs` |
 | Complex structs (SubscriptionSettings) | Deconstructed into `FfiStr` args or JSON | `vtable_gen.rs` |
