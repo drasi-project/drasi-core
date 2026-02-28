@@ -20,15 +20,33 @@ use async_trait::async_trait;
 
 use drasi_lib::channels::events::SourceEventWrapper;
 use drasi_lib::channels::ChangeReceiver;
-use drasi_plugin_sdk::ffi::FfiChangeReceiver;
+use drasi_plugin_sdk::ffi::{FfiChangeReceiver, FfiSourceEvent, SendMutPtr};
+
+/// Shared FFI state that ensures the plugin-side receiver is not freed
+/// while a `spawn_blocking` thread is still inside the FFI recv call.
+struct SharedFfiState {
+    recv_fn: extern "C" fn(*mut std::ffi::c_void) -> *mut FfiSourceEvent,
+    drop_fn: extern "C" fn(*mut std::ffi::c_void),
+    state: *mut std::ffi::c_void,
+}
+
+// Safety: The FFI function pointers and state are safe to call from any thread.
+unsafe impl Send for SharedFfiState {}
+unsafe impl Sync for SharedFfiState {}
+
+impl Drop for SharedFfiState {
+    fn drop(&mut self) {
+        (self.drop_fn)(self.state);
+    }
+}
 
 /// Wraps an `FfiChangeReceiver` into a `ChangeReceiver<SourceEventWrapper>`.
 ///
-/// The FFI receiver delivers `FfiSourceEvent` with opaque pointers to real
-/// `SourceEventWrapper` values. This proxy extracts the inner Rust type
-/// and returns it through the standard DrasiLib trait.
+/// Uses `spawn_blocking` for FFI recv calls because the plugin-side recv
+/// creates a nested tokio runtime, which corrupts the host runtime context
+/// and breaks `tokio::sync::Notify` wakers if run on a worker thread.
 pub struct ChangeReceiverProxy {
-    inner: FfiChangeReceiver,
+    shared: Arc<SharedFfiState>,
 }
 
 // Safety: FfiChangeReceiver is Send+Sync (vtable function pointers are safe to call from any thread)
@@ -37,31 +55,36 @@ unsafe impl Sync for ChangeReceiverProxy {}
 
 impl ChangeReceiverProxy {
     pub fn new(inner: FfiChangeReceiver) -> Self {
-        Self { inner }
+        Self {
+            shared: Arc::new(SharedFfiState {
+                recv_fn: inner.recv_fn,
+                drop_fn: inner.drop_fn,
+                state: inner.state,
+            }),
+        }
     }
 }
 
 #[async_trait]
 impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
     async fn recv(&mut self) -> anyhow::Result<Arc<SourceEventWrapper>> {
-        let ptr = (self.inner.recv_fn)(self.inner.state);
+        // Clone the Arc so the FFI state stays alive even if this proxy is dropped
+        // while the spawn_blocking thread is still blocked in the FFI recv call.
+        let shared = Arc::clone(&self.shared);
+        let result = tokio::task::spawn_blocking(move || {
+            let ptr = (shared.recv_fn)(shared.state);
+            SendMutPtr(ptr)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))?;
+        let ptr = result.0;
         if ptr.is_null() {
             return Err(anyhow::anyhow!("Channel closed"));
         }
         let ffi_event = unsafe { &*ptr };
-        // The opaque pointer holds a Box<SourceEventWrapper> created by the plugin SDK.
-        // We take ownership by reconstructing the Box, then wrap in Arc.
         let wrapper = unsafe { *Box::from_raw(ffi_event.opaque as *mut SourceEventWrapper) };
-        // Drop the FFI envelope (but NOT the opaque — we already took ownership)
-        // We need to free the FfiSourceEvent box itself without calling drop_fn on the opaque
         unsafe { drop(Box::from_raw(ptr)) };
         Ok(Arc::new(wrapper))
-    }
-}
-
-impl Drop for ChangeReceiverProxy {
-    fn drop(&mut self) {
-        (self.inner.drop_fn)(self.inner.state);
     }
 }
 

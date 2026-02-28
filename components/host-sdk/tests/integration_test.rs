@@ -1792,3 +1792,199 @@ async fn test_reaction_enqueue_query_result_with_data() {
 
     reaction.stop().await.expect("Reaction should stop");
 }
+
+// =============================================================================
+// Full end-to-end tests: cdylib source → query → cdylib reaction via DrasiLib
+// =============================================================================
+
+/// Full pipeline test: cdylib mock source → query → cdylib log reaction.
+///
+/// Replicates the user-facing flow:
+/// 1. Load cdylib plugins
+/// 2. Create source/reaction via plugin descriptors
+/// 3. Build DrasiLib with source, query, reaction
+/// 4. Start all components
+/// 5. Verify data flows from source through query to reaction
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_e2e_cdylib_source_query_reaction() {
+    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIPPING: cdylib plugins not found");
+        return;
+    }
+
+    let _ = log::set_max_level(log::LevelFilter::Debug);
+
+    // Load plugins
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let log_reaction_path = require_plugin("drasi-reaction-log");
+
+    let mock_plugin = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let log_plugin = load_plugin_from_path(
+        &log_reaction_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load log reaction plugin");
+
+    // Create source instance (mock source with 200ms interval)
+    let source_config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 200
+    });
+    let source = mock_plugin.source_plugins[0]
+        .create_source("test-source", &source_config, true)
+        .await
+        .expect("Should create mock source");
+
+    // Create reaction instance
+    let reaction_config = serde_json::json!({});
+    let reaction = log_plugin.reaction_plugins[0]
+        .create_reaction("test-reaction", vec!["e2e-query".to_string()], &reaction_config, true)
+        .await
+        .expect("Should create log reaction");
+
+    // Build DrasiLib with source, query, reaction
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id("e2e-test")
+        .with_source(source)
+        .with_query(
+            drasi_lib::Query::cypher("e2e-query")
+                .query("MATCH (n:Counter) RETURN n.value AS Value")
+                .from_source("test-source")
+                .build(),
+        )
+        .with_reaction(reaction)
+        .build()
+        .await
+        .expect("Should build DrasiLib");
+
+    // Start all components
+    core.start().await.expect("Should start DrasiLib");
+
+    // Wait for mock source to generate some events and for them to flow through
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Verify query is running
+    // Wait for mock source to generate some events and for them to flow through
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Check source status
+    let source_status = core.get_source_status("test-source").await
+        .expect("Should get source status");
+    println!("E2E test: Source status = {:?}", source_status);
+
+    // Verify query is running
+    let query_status = core.get_query_status("e2e-query").await
+        .expect("Should get query status");
+    println!("E2E test: Query status = {:?}", query_status);
+
+    // Check query results — if data flowed, there should be results
+    let results = core.get_query_results("e2e-query").await
+        .expect("Should get query results");
+
+    println!("E2E test: Query has {} results after 3s", results.len());
+
+    // If no results yet, wait more
+    if results.is_empty() {
+        println!("E2E test: No results after 3s, waiting 10 more seconds...");
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let results2 = core.get_query_results("e2e-query").await
+            .expect("Should get query results");
+        println!("E2E test: Query has {} results after 13s total", results2.len());
+
+        assert!(
+            !results2.is_empty(),
+            "Query should have results from mock source data flowing through"
+        );
+    }
+
+    // Stop everything
+    core.stop().await.expect("Should stop DrasiLib");
+}
+
+/// Minimal test: just source → subscriber, no query.
+/// Checks if a cdylib mock source actually dispatches events to a subscriber.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cdylib_source_dispatches_events() {
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIPPING: cdylib mock source plugin not found");
+        return;
+    }
+
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let source_config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 200
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("dispatch-test", &source_config, false)
+        .await
+        .expect("Should create mock source");
+
+    // Initialize with a minimal context
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "test-instance",
+        "dispatch-test",
+        event_tx,
+        None,
+    );
+    source.initialize(context).await;
+
+    // Start the source
+    source.start().await.expect("Should start source");
+    println!("Source started, status: {:?}", source.status().await);
+
+    // Subscribe
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "dispatch-test".to_string(),
+        enable_bootstrap: false,
+        query_id: "test-query".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+    };
+    let sub = source.subscribe(settings).await.expect("Should subscribe");
+    println!("Subscribed, got receiver");
+
+    let mut receiver = sub.receiver;
+
+    // Try to receive an event with a timeout
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        receiver.recv(),
+    ).await;
+
+    match result {
+        Ok(Ok(event)) => {
+            println!("Received event: source_id={}", event.source_id);
+            assert_eq!(event.source_id, "dispatch-test");
+        }
+        Ok(Err(e)) => {
+            panic!("Receiver returned error: {e}");
+        }
+        Err(_) => {
+            panic!("Timed out waiting for event - source not dispatching!");
+        }
+    }
+
+    source.stop().await.expect("Should stop");
+}
