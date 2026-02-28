@@ -28,6 +28,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/mqtt",
   "components/sources/mssql",
 
   # Reaction Plugins

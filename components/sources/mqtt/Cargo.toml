@@ -1,0 +1,27 @@
+[package]
+name = "drasi-source-mqtt"
+version = "0.1.7"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "MQTT source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "mqtt"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+anyhow = "1.0"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+rumqttc = "0.25.1"
+ordered-float = "3.0"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tracing = "0.1"
