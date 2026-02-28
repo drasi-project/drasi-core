@@ -346,12 +346,8 @@ mod tests {
     async fn test_reaction_runtime_context_without_state_store() {
         let (status_tx, _rx) = mpsc::channel(100);
 
-        let context = ReactionRuntimeContext::new(
-            "test-instance",
-            "test-reaction",
-            status_tx,
-            None,
-        );
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", status_tx, None);
 
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_none());
@@ -385,8 +381,7 @@ mod tests {
     #[test]
     fn test_reaction_runtime_context_debug() {
         let (status_tx, _rx) = mpsc::channel::<crate::channels::ComponentEvent>(100);
-        let context =
-            ReactionRuntimeContext::new("test-instance", "test", status_tx, None);
+        let context = ReactionRuntimeContext::new("test-instance", "test", status_tx, None);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));

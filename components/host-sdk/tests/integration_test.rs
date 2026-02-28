@@ -1808,7 +1808,9 @@ async fn test_reaction_enqueue_query_result_with_data() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_e2e_cdylib_source_query_reaction() {
     if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-sse") {
-        eprintln!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
+        eprintln!(
+            "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
+        );
         return;
     }
 
@@ -1917,10 +1919,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
         .get_query_results("e2e-query")
         .await
         .expect("Should get query results");
-    assert!(
-        !results.is_empty(),
-        "Query should have accumulated results"
-    );
+    assert!(!results.is_empty(), "Query should have accumulated results");
 
     core.stop().await.expect("Should stop DrasiLib");
 }
@@ -1941,7 +1940,9 @@ async fn test_e2e_cdylib_source_query_reaction() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_e2e_multi_source_query_reaction() {
     if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-sse") {
-        eprintln!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
+        eprintln!(
+            "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
+        );
         return;
     }
 
@@ -2126,15 +2127,27 @@ async fn test_e2e_multi_source_query_reaction() {
     }
 
     // ── Verify query state ──
-    let all_results = core.get_query_results("query-counters-all").await
+    let all_results = core
+        .get_query_results("query-counters-all")
+        .await
         .expect("Should get query-counters-all results");
-    let high_results = core.get_query_results("query-counters-high").await
+    let high_results = core
+        .get_query_results("query-counters-high")
+        .await
         .expect("Should get query-counters-high results");
-    let sensor_results = core.get_query_results("query-sensors").await
+    let sensor_results = core
+        .get_query_results("query-sensors")
+        .await
         .expect("Should get query-sensors results");
 
-    assert!(!all_results.is_empty(), "query-counters-all should have results");
-    assert!(!sensor_results.is_empty(), "query-sensors should have results");
+    assert!(
+        !all_results.is_empty(),
+        "query-counters-all should have results"
+    );
+    assert!(
+        !sensor_results.is_empty(),
+        "query-sensors should have results"
+    );
 
     println!(
         "Multi E2E: all={} events/{} results, high-a={} events, high-b={} events, high={} results, sensors={} events/{} results",
@@ -2148,7 +2161,11 @@ async fn test_e2e_multi_source_query_reaction() {
 
 /// Helper: connect to an SSE endpoint and collect up to `min_events` data events,
 /// returning early if the minimum is met or timing out after `timeout`.
-async fn collect_sse_events(url: &str, min_events: usize, timeout: std::time::Duration) -> Vec<String> {
+async fn collect_sse_events(
+    url: &str,
+    min_events: usize,
+    timeout: std::time::Duration,
+) -> Vec<String> {
     use tokio::io::AsyncBufReadExt;
 
     let mut collected = Vec::new();
@@ -2263,10 +2280,7 @@ async fn test_cdylib_source_dispatches_events() {
     let mut receiver = sub.receiver;
 
     // Try to receive an event with a timeout
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        receiver.recv(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv()).await;
 
     match result {
         Ok(Ok(event)) => {

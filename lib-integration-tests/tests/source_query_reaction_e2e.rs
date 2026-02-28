@@ -282,7 +282,13 @@ async fn test_source_to_query_to_reaction_data_flow() {
 
     wait_for_status(&drasi, "source", "test-source", ComponentStatus::Running).await;
     wait_for_status(&drasi, "query", "test-query", ComponentStatus::Running).await;
-    wait_for_status(&drasi, "reaction", "test-reaction", ComponentStatus::Running).await;
+    wait_for_status(
+        &drasi,
+        "reaction",
+        "test-reaction",
+        ComponentStatus::Running,
+    )
+    .await;
 
     // Inject a source event — insert a Sensor node
     let element = drasi_core::models::Element::Node {

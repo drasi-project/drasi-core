@@ -355,7 +355,6 @@ impl Reaction for LogReaction {
             )
             .await?;
 
-
         // Transition to Running
         self.base
             .set_status_with_event(

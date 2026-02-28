@@ -476,7 +476,6 @@ impl Reaction for AdaptiveGrpcReaction {
             )
             .await?;
 
-
         // Set status to Running
         self.base
             .set_status_with_event(

@@ -589,7 +589,9 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
                 }
             };
 
-            let stem = name.strip_suffix(".metadata.json").expect("filename must end with .metadata.json");
+            let stem = name
+                .strip_suffix(".metadata.json")
+                .expect("filename must end with .metadata.json");
             let ext = if metadata.target_triple.contains("windows") {
                 "dll"
             } else if metadata.target_triple.contains("apple")
@@ -925,7 +927,8 @@ async fn publish_directory_entry(
         None,
     );
 
-    let manifest = oci_client::manifest::OciImageManifest::build(std::slice::from_ref(&layer), &config, None);
+    let manifest =
+        oci_client::manifest::OciImageManifest::build(std::slice::from_ref(&layer), &config, None);
 
     let response = client
         .push(&reference, &[layer], config, auth, Some(manifest))

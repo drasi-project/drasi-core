@@ -1275,10 +1275,7 @@ pub fn build_reaction_vtable_from_boxed(
         .expect("reaction initialize thread panicked");
     }
 
-    extern "C" fn enqueue_query_result_fn(
-        state: *mut c_void,
-        result: *mut c_void,
-    ) -> FfiResult {
+    extern "C" fn enqueue_query_result_fn(state: *mut c_void, result: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynReactionWrapper) };
             let query_result =

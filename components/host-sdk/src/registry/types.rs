@@ -152,7 +152,9 @@ impl PluginReference {
         let (registry, repository) = if parts.len() == 2 && parts[0].contains('.') {
             // Full reference: ghcr.io/drasi-project/source/postgres
             // Registry is first segment with dot, repository is the rest
-            let first_slash = ref_without_tag.find('/').expect("registry reference must contain '/'");
+            let first_slash = ref_without_tag
+                .find('/')
+                .expect("registry reference must contain '/'");
             let registry = &ref_without_tag[..first_slash];
             let repository = &ref_without_tag[first_slash + 1..];
             (registry.to_string(), repository.to_string())

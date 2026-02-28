@@ -483,7 +483,6 @@ impl Reaction for ProfilerReaction {
             )
             .await?;
 
-
         // Transition to Running
         self.base
             .set_status_with_event(

@@ -23,6 +23,8 @@
 //! - Callback types for log/lifecycle event capture
 
 pub mod callbacks;
+#[cfg(feature = "fetcher")]
+pub mod fetcher;
 pub mod identity_bridge;
 pub mod loader;
 pub mod proxies;

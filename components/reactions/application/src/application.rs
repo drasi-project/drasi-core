@@ -534,7 +534,6 @@ impl Reaction for ApplicationReaction {
             )
             .await?;
 
-
         // Transition to Running
         self.base
             .set_status_with_event(

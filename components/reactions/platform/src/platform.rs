@@ -282,7 +282,6 @@ impl Reaction for PlatformReaction {
             log::warn!("Failed to emit Running control event: {e}");
         }
 
-
         // Transition to Running
         self.base
             .set_status_with_event(

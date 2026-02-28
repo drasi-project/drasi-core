@@ -434,12 +434,8 @@ mod tests {
         let base = ReactionBase::new(params);
 
         // Create context and initialize
-        let context = ReactionRuntimeContext::new(
-            "test-instance",
-            "test-reaction",
-            status_tx,
-            None,
-        );
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", status_tx, None);
         base.initialize(context).await;
 
         // Test status transition
