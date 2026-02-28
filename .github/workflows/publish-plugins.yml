@@ -147,9 +147,9 @@ jobs:
           REGISTRY="${{ inputs.registry }}"
           ORG="${REGISTRY#*/}"
           # Set plugin directory to public
-          echo "Setting ${ORG}/.drasi-plugin-directory to public..."
+          echo "Setting ${ORG}/drasi-plugin-directory to public..."
           gh api --method PATCH \
-            "/orgs/${ORG}/packages/container/.drasi-plugin-directory" \
+            "/orgs/${ORG}/packages/container/drasi-plugin-directory" \
             -f visibility=public \
             2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
           # Set each plugin package to public

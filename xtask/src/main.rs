@@ -755,7 +755,7 @@ fn publish_plugins(args: &[String]) {
             for (ptype, kind) in &dir_entries {
                 let dir_tag = format!("{}.{}", ptype, kind);
                 let dir_ref = format!(
-                    "{}/.drasi-plugin-directory:{}",
+                    "{}/drasi-plugin-directory:{}",
                     registry, dir_tag
                 );
                 match publish_directory_entry(&client, &auth, &dir_ref).await {
@@ -872,7 +872,7 @@ async fn publish_single_plugin(
 }
 
 /// Publish a zero-byte directory entry to the plugin directory package.
-/// Each entry is a tag like "source.postgres" on the .drasi-plugin-directory package.
+/// Each entry is a tag like "source.postgres" on the drasi-plugin-directory package.
 async fn publish_directory_entry(
     client: &oci_client::Client,
     auth: &oci_client::secrets::RegistryAuth,

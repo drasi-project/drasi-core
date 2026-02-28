@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 /// Well-known package name used as a plugin directory index.
 /// Each tag in this package represents a registered plugin (e.g., "source.postgres").
-const PLUGIN_DIRECTORY_PACKAGE: &str = ".drasi-plugin-directory";
+const PLUGIN_DIRECTORY_PACKAGE: &str = "drasi-plugin-directory";
 
 /// OCI registry client for interacting with plugin artifact registries.
 pub struct OciRegistryClient {
@@ -212,7 +212,7 @@ impl OciRegistryClient {
 
     /// Search for plugins matching a query.
     ///
-    /// Discovers available plugins by scanning the `.drasi-plugin-directory` package
+    /// Discovers available plugins by scanning the `drasi-plugin-directory` package
     /// in the registry. Each tag in that package represents a plugin (e.g., "source.postgres").
     ///
     /// - If query contains `/` (e.g., "source/postgres"), searches for an exact match.
