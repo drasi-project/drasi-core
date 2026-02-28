@@ -1,0 +1,49 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5 AS toolchain
+
+FROM ubuntu:20.04
+
+# Remove symlink that conflicts with COPY from toolchain
+RUN rm -rf /usr/local/man
+
+# Copy musl cross-toolchain (includes qemu) and runner script from the cross image
+COPY --from=toolchain /usr/local/ /usr/local/
+COPY --from=toolchain /qemu-runner /qemu-runner
+
+# Install build dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc libc6-dev \
+    perl make autoconf automake libtool \
+    protobuf-compiler libprotobuf-dev \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libjq from source for aarch64-musl (with bundled oniguruma)
+ENV JQ_VERSION=1.7.1
+RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
+    && cd jq-${JQ_VERSION} \
+    && autoreconf -fi \
+    && CC=aarch64-linux-musl-gcc CFLAGS="-fPIC" ./configure --host=aarch64-linux-musl --disable-shared --enable-static --with-oniguruma=builtin --prefix=/usr/local/musl-jq \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf jq-${JQ_VERSION}
+
+ENV JQ_LIB_DIR=/usr/local/musl-jq/lib
+ENV ONIG_LIB_DIR=/usr/local/musl-jq/lib
+ENV JQ_INCLUDE_DIR=/usr/local/musl-jq/include
+ENV CFLAGS_aarch64_unknown_linux_musl="-I/usr/local/musl-jq/include"
+ENV LIBJQ_STATIC=1
+ENV LIBONIG_STATIC=1
+
+# Create a linker wrapper that appends necessary libraries at the end
+RUN printf '#!/bin/sh\nexec aarch64-linux-musl-gcc "$@" -Wl,--no-as-needed -lpthread -ldl -lm -lc\n' \
+    > /usr/local/bin/musl-gcc-wrapper \
+    && chmod +x /usr/local/bin/musl-gcc-wrapper
+
+# Set cargo environment for cross-compilation
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc-wrapper
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="/qemu-runner aarch64"
+ENV CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+ENV CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
+ENV AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
+ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="--sysroot=/usr/local/aarch64-linux-musl -I/usr/local/lib/gcc/aarch64-linux-musl/9.2.0/include"

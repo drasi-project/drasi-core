@@ -298,17 +298,39 @@ fn build_plugins(args: &[String]) {
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
 
+    // Determine whether to use `cross` instead of `cargo`
+    let use_cross = if let Some(ref t) = target {
+        let host = host_target_triple();
+        if t != &host {
+            // Check if `cross` is available
+            Command::new("cross")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let build_tool = if use_cross { "cross" } else { "cargo" };
+
     println!(
-        "=== Building {} cdylib plugins ({}{}, {} parallel jobs) ===",
+        "=== Building {} cdylib plugins ({}{}, {}, {} parallel jobs) ===",
         result.plugins.len(),
         mode,
         target.as_ref().map(|t| format!(", {t}")).unwrap_or_default(),
+        build_tool,
         jobs
     );
 
     let failed = Arc::new(AtomicBool::new(false));
     let target_dir = Arc::new(target_dir);
     let target = Arc::new(target);
+    let build_tool = Arc::new(build_tool.to_string());
     let plugins: Vec<_> = result
         .plugins
         .iter()
@@ -328,11 +350,12 @@ fn build_plugins(args: &[String]) {
                 let failed = Arc::clone(&failed);
                 let target_dir = Arc::clone(&target_dir);
                 let target = Arc::clone(&target);
+                let build_tool = Arc::clone(&build_tool);
 
                 thread::spawn(move || {
                     println!("  Building {}...", name);
 
-                    let mut cmd = Command::new("cargo");
+                    let mut cmd = Command::new(build_tool.as_str());
                     cmd.args([
                         "build",
                         "--lib",
@@ -352,7 +375,7 @@ fn build_plugins(args: &[String]) {
                         cmd.arg("--release");
                     }
 
-                    let status = cmd.status().expect("failed to run cargo build");
+                    let status = cmd.status().expect("failed to run build command");
                     if !status.success() {
                         eprintln!("Failed to build {}", name);
                         failed.store(true, Ordering::Relaxed);

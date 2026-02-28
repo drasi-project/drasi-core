@@ -1,0 +1,33 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5
+
+# Install build dependencies for vendored OpenSSL, protobuf, and jq
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl make autoconf automake libtool \
+    protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libjq from source for musl (with bundled oniguruma)
+ENV JQ_VERSION=1.7.1
+RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
+    && cd jq-${JQ_VERSION} \
+    && autoreconf -fi \
+    && CC=x86_64-linux-musl-gcc CFLAGS="-fPIC" ./configure --host=x86_64-linux-musl --disable-shared --enable-static --with-oniguruma=builtin --prefix=/usr/local/musl-jq \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf jq-${JQ_VERSION}
+
+ENV JQ_LIB_DIR=/usr/local/musl-jq/lib
+ENV ONIG_LIB_DIR=/usr/local/musl-jq/lib
+ENV JQ_INCLUDE_DIR=/usr/local/musl-jq/include
+ENV CFLAGS_x86_64_unknown_linux_musl="-I/usr/local/musl-jq/include"
+ENV LIBJQ_STATIC=1
+ENV LIBONIG_STATIC=1
+
+# Create a linker wrapper that appends necessary libraries at the end
+# to resolve symbol ordering issues with musl cross-compilation
+RUN printf '#!/bin/sh\nexec x86_64-linux-musl-gcc "$@" -Wl,--no-as-needed -lpthread -ldl -lm -lc\n' \
+    > /usr/local/bin/musl-gcc-wrapper \
+    && chmod +x /usr/local/bin/musl-gcc-wrapper
+
+# Override the linker to use our wrapper
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc-wrapper
