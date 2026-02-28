@@ -298,11 +298,13 @@ fn build_plugins(args: &[String]) {
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
 
-    // Determine whether to use `cross` instead of `cargo`
+    // Determine whether to use `cross` instead of `cargo`.
+    // `cross` only works reliably on Linux hosts (it uses Docker with Linux containers).
+    // On macOS/Windows hosts, use `cargo` — macOS cross-arch builds work via `rustup target add`.
     let use_cross = if let Some(ref t) = target {
         let host = host_target_triple();
-        if t != &host {
-            // Check if `cross` is available
+        if t != &host && host.contains("linux") {
+            // Only use cross on Linux hosts, and only if cross is installed
             Command::new("cross")
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
