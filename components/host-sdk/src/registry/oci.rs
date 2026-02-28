@@ -24,6 +24,10 @@ use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
 
+/// Well-known package name used as a plugin directory index.
+/// Each tag in this package represents a registered plugin (e.g., "source.postgres").
+const PLUGIN_DIRECTORY_PACKAGE: &str = ".drasi-plugin-directory";
+
 /// OCI registry client for interacting with plugin artifact registries.
 pub struct OciRegistryClient {
     client: oci_client::Client,
@@ -206,32 +210,64 @@ impl OciRegistryClient {
         Ok(parsed.to_oci_reference())
     }
 
-    /// Search for plugins matching a name across all type prefixes.
+    /// Search for plugins matching a query.
     ///
-    /// If the reference already contains a type prefix (e.g., "source/postgres"),
-    /// only that exact package is searched. If it's a bare name (e.g., "postgres"),
-    /// all type prefixes are tried: source/, reaction/, bootstrap/.
+    /// Discovers available plugins by scanning the `.drasi-plugin-directory` package
+    /// in the registry. Each tag in that package represents a plugin (e.g., "source.postgres").
     ///
-    /// Tags are grouped by version, with platform suffixes stripped and listed separately.
-    pub async fn search_plugins(&self, reference: &str) -> Result<Vec<PluginSearchResult>> {
+    /// - If query contains `/` (e.g., "source/postgres"), searches for an exact match.
+    /// - If query is a bare name (e.g., "postgres"), matches any plugin whose kind contains it.
+    /// - If query is `*` or empty, lists all plugins.
+    ///
+    /// For each matched plugin, fetches available versions and groups by platform suffix.
+    pub async fn search_plugins(&self, query: &str) -> Result<Vec<PluginSearchResult>> {
         use crate::registry::platform::strip_arch_suffix;
 
-        let has_type_prefix = reference.contains('/') 
-            && !reference.contains('.');  // not a full registry URL
+        let dir_ref = format!(
+            "{}/{}",
+            self.config.default_registry, PLUGIN_DIRECTORY_PACKAGE
+        );
 
-        let candidates: Vec<String> = if has_type_prefix {
-            vec![reference.to_string()]
-        } else {
-            vec![
-                format!("source/{}", reference),
-                format!("reaction/{}", reference),
-                format!("bootstrap/{}", reference),
-            ]
-        };
+        // List all directory entries
+        let dir_oci_ref: Reference = dir_ref
+            .parse()
+            .context("invalid directory reference")?;
+        let dir_response = self
+            .client
+            .list_tags(&dir_oci_ref, &self.auth(), None, None)
+            .await
+            .context(
+                "failed to list plugin directory — directory package may not exist yet",
+            )?;
 
+        // Parse directory tags into (type, kind) pairs
+        // Tags are formatted as "type.kind" (e.g., "source.postgres", "reaction.storedproc-mssql")
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        for tag in &dir_response.tags {
+            if let Some((ptype, kind)) = tag.split_once('.') {
+                let plugin_ref = format!("{}/{}", ptype, kind);
+
+                let matches = if query.is_empty() || query == "*" {
+                    true
+                } else if query.contains('/') {
+                    // Exact type/kind match
+                    plugin_ref == query
+                } else {
+                    // Bare name — match if kind contains the query
+                    kind.contains(query)
+                };
+
+                if matches {
+                    candidates.push((ptype.to_string(), kind.to_string()));
+                }
+            }
+        }
+
+        // For each matched plugin, fetch versions
         let mut results = Vec::new();
-        for candidate in &candidates {
-            match self.list_tags(candidate).await {
+        for (ptype, kind) in &candidates {
+            let plugin_ref = format!("{}/{}", ptype, kind);
+            match self.list_tags(&plugin_ref).await {
                 Ok(tags) => {
                     // Group tags by version, collecting platform suffixes
                     let mut version_map: std::collections::BTreeMap<String, Vec<String>> =
@@ -251,13 +287,13 @@ impl OciRegistryClient {
                         .collect();
 
                     results.push(PluginSearchResult {
-                        reference: candidate.clone(),
-                        full_reference: self.expand_reference(candidate).unwrap_or_default(),
+                        reference: plugin_ref.clone(),
+                        full_reference: self.expand_reference(&plugin_ref).unwrap_or_default(),
                         versions,
                     });
                 }
                 Err(_) => {
-                    // Package doesn't exist or not accessible — skip
+                    // Plugin exists in directory but package not accessible — skip
                 }
             }
         }

@@ -741,6 +741,30 @@ fn publish_plugins(args: &[String]) {
             "\n=== Published: {} succeeded, {} failed ===",
             success_count, fail_count
         );
+
+        // Update plugin directory with entries for each successfully published plugin
+        if success_count > 0 {
+            println!("\n=== Updating plugin directory ===");
+            let mut dir_entries: Vec<(String, String)> = plugins
+                .iter()
+                .map(|p| (p.metadata.plugin_type.clone(), p.metadata.kind.clone()))
+                .collect();
+            dir_entries.sort();
+            dir_entries.dedup();
+
+            for (ptype, kind) in &dir_entries {
+                let dir_tag = format!("{}.{}", ptype, kind);
+                let dir_ref = format!(
+                    "{}/.drasi-plugin-directory:{}",
+                    registry, dir_tag
+                );
+                match publish_directory_entry(&client, &auth, &dir_ref).await {
+                    Ok(_) => println!("  ✓ directory entry: {}", dir_tag),
+                    Err(e) => eprintln!("  ✗ directory entry: {} — {}", dir_tag, e),
+                }
+            }
+        }
+
         if fail_count > 0 {
             std::process::exit(1);
         }
@@ -843,6 +867,40 @@ async fn publish_single_plugin(
         plugin.metadata.name,
         binary_size as f64 / 1_048_576.0
     );
+
+    Ok(response.manifest_url)
+}
+
+/// Publish a zero-byte directory entry to the plugin directory package.
+/// Each entry is a tag like "source.postgres" on the .drasi-plugin-directory package.
+async fn publish_directory_entry(
+    client: &oci_client::Client,
+    auth: &oci_client::secrets::RegistryAuth,
+    reference_str: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use oci_client::client::{Config, ImageLayer};
+
+    let reference: oci_client::Reference = reference_str.parse()?;
+
+    // Single empty layer
+    let layer = ImageLayer::new(
+        bytes::Bytes::from_static(b""),
+        "application/vnd.drasi.plugin.directory.v1".to_string(),
+        None,
+    );
+
+    let config = Config::new(
+        bytes::Bytes::from(b"{}".to_vec()),
+        "application/vnd.oci.image.config.v1+json".to_string(),
+        None,
+    );
+
+    let manifest =
+        oci_client::manifest::OciImageManifest::build(&[layer.clone()], &config, None);
+
+    let response = client
+        .push(&reference, &[layer], config, auth, Some(manifest))
+        .await?;
 
     Ok(response.manifest_url)
 }

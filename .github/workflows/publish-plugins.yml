@@ -41,6 +41,14 @@ jobs:
             os: ubuntu-latest-8-cores
             arch_suffix: linux-arm64
             cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest-8-cores
+            arch_suffix: linux-musl-amd64
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest-8-cores
+            arch_suffix: linux-musl-arm64
+            cross: true
           - target: x86_64-pc-windows-gnu
             os: ubuntu-latest-8-cores
             arch_suffix: windows-amd64
@@ -138,6 +146,13 @@ jobs:
         run: |
           REGISTRY="${{ inputs.registry }}"
           ORG="${REGISTRY#*/}"
+          # Set plugin directory to public
+          echo "Setting ${ORG}/.drasi-plugin-directory to public..."
+          gh api --method PATCH \
+            "/orgs/${ORG}/packages/container/.drasi-plugin-directory" \
+            -f visibility=public \
+            2>/dev/null || echo "  (skipped — may already be public or insufficient permissions)"
+          # Set each plugin package to public
           PLUGINS=$(cargo run -p xtask -- list-plugins 2>/dev/null | grep '^\s' | awk '{print $1}')
           for PLUGIN in $PLUGINS; do
             ENCODED=$(echo "$PLUGIN" | sed 's|/|%2F|g')

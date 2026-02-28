@@ -113,11 +113,16 @@ pub fn oci_platform_to_target_triple(platform: &OciPlatform) -> Option<String> {
 ///
 /// For example:
 /// - `x86_64-unknown-linux-gnu` → `linux-amd64`
+/// - `x86_64-unknown-linux-musl` → `linux-musl-amd64`
 /// - `aarch64-apple-darwin` → `darwin-arm64`
 /// - `x86_64-pc-windows-gnu` → `windows-amd64`
 pub fn target_triple_to_arch_suffix(triple: &str) -> Option<String> {
     let platform = target_triple_to_oci_platform(triple)?;
-    Some(format!("{}-{}", platform.os, platform.architecture))
+    if triple.contains("musl") {
+        Some(format!("{}-musl-{}", platform.os, platform.architecture))
+    } else {
+        Some(format!("{}-{}", platform.os, platform.architecture))
+    }
 }
 
 /// Strip a known `{os}-{arch}` suffix from a tag and return `(version, suffix)`.
@@ -125,8 +130,10 @@ pub fn target_triple_to_arch_suffix(triple: &str) -> Option<String> {
 /// For example, `"0.1.8-linux-amd64"` → `Some(("0.1.8", "linux-amd64"))`.
 /// Returns `None` if the tag doesn't end with a recognized platform suffix.
 pub fn strip_arch_suffix(tag: &str) -> Option<(&str, &str)> {
-    // Known OS names that can appear in suffixes
+    // Known suffixes — longer ones first to avoid partial matches
     const KNOWN_SUFFIXES: &[&str] = &[
+        "linux-musl-amd64",
+        "linux-musl-arm64",
         "linux-amd64",
         "linux-arm64",
         "linux-arm",
@@ -249,6 +256,14 @@ mod tests {
             Some("linux-amd64".to_string())
         );
         assert_eq!(
+            target_triple_to_arch_suffix("x86_64-unknown-linux-musl"),
+            Some("linux-musl-amd64".to_string())
+        );
+        assert_eq!(
+            target_triple_to_arch_suffix("aarch64-unknown-linux-musl"),
+            Some("linux-musl-arm64".to_string())
+        );
+        assert_eq!(
             target_triple_to_arch_suffix("aarch64-apple-darwin"),
             Some("darwin-arm64".to_string())
         );
@@ -264,6 +279,14 @@ mod tests {
         assert_eq!(
             strip_arch_suffix("0.1.8-linux-amd64"),
             Some(("0.1.8", "linux-amd64"))
+        );
+        assert_eq!(
+            strip_arch_suffix("0.1.8-linux-musl-amd64"),
+            Some(("0.1.8", "linux-musl-amd64"))
+        );
+        assert_eq!(
+            strip_arch_suffix("0.1.8-dev.1-linux-musl-arm64"),
+            Some(("0.1.8-dev.1", "linux-musl-arm64"))
         );
         assert_eq!(
             strip_arch_suffix("0.1.8-dev.1-darwin-arm64"),

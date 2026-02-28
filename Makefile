@@ -85,6 +85,8 @@ publish-plugins-release:
 # All architectures to build and publish
 PUBLISH_TARGETS ?= x86_64-unknown-linux-gnu:linux-amd64 \
                    aarch64-unknown-linux-gnu:linux-arm64 \
+                   x86_64-unknown-linux-musl:linux-musl-amd64 \
+                   aarch64-unknown-linux-musl:linux-musl-arm64 \
                    x86_64-pc-windows-gnu:windows-amd64 \
                    x86_64-apple-darwin:darwin-amd64 \
                    aarch64-apple-darwin:darwin-arm64
