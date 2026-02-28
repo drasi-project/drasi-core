@@ -410,26 +410,31 @@ impl ReactionManager {
     ///
     /// Only reactions with `auto_start() == true` will be started.
     pub async fn start_all(&self) -> Result<()> {
-        let reactions: Vec<Arc<dyn Reaction>> = {
+        let reaction_ids: Vec<String> = {
             let reactions = self.reactions.read().await;
-            reactions.values().cloned().collect()
+            reactions.keys().cloned().collect()
         };
 
         let mut failed_reactions = Vec::new();
 
-        for reaction in reactions {
-            // Only start reactions with auto_start enabled
-            if !reaction.auto_start() {
-                info!("Skipping reaction '{}' (auto_start=false)", reaction.id());
-                continue;
-            }
+        for reaction_id in reaction_ids {
+            // Check auto_start
+            let reaction = {
+                let reactions = self.reactions.read().await;
+                reactions.get(&reaction_id).cloned()
+            };
 
-            let reaction_id = reaction.id().to_string();
-            info!("Starting reaction: {reaction_id}");
-            if let Err(e) = reaction.start().await {
-                error!("Failed to start reaction {reaction_id}: {e}");
-                failed_reactions.push((reaction_id, e.to_string()));
-                // Continue starting other reactions instead of returning early
+            if let Some(reaction) = reaction {
+                if !reaction.auto_start() {
+                    info!("Skipping reaction '{}' (auto_start=false)", reaction_id);
+                    continue;
+                }
+
+                info!("Starting reaction: {reaction_id}");
+                if let Err(e) = self.start_reaction(reaction_id.clone()).await {
+                    error!("Failed to start reaction {reaction_id}: {e}");
+                    failed_reactions.push((reaction_id, e.to_string()));
+                }
             }
         }
 
