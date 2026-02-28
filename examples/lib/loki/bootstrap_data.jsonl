@@ -1,0 +1,7 @@
+{"kind":"Header","start_time":"2026-02-20T00:00:00+00:00","description":"Initial sensor readings for Loki example"}
+{"kind":"Node","id":"sensor_1","labels":["SensorReading"],"properties":{"sensor_id":"sensor_1","temperature":35.0,"humidity":60.0}}
+{"kind":"Node","id":"sensor_2","labels":["SensorReading"],"properties":{"sensor_id":"sensor_2","temperature":22.0,"humidity":45.0}}
+{"kind":"Node","id":"sensor_3","labels":["SensorReading"],"properties":{"sensor_id":"sensor_3","temperature":42.0,"humidity":70.0}}
+{"kind":"Node","id":"sensor_4","labels":["SensorReading"],"properties":{"sensor_id":"sensor_4","temperature":28.0,"humidity":50.0}}
+{"kind":"Node","id":"sensor_5","labels":["SensorReading"],"properties":{"sensor_id":"sensor_5","temperature":38.0,"humidity":65.0}}
+{"kind":"Finish","description":"Bootstrap complete"}
