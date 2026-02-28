@@ -1814,7 +1814,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
         return;
     }
 
-    let _ = log::set_max_level(log::LevelFilter::Debug);
+    log::set_max_level(log::LevelFilter::Debug);
 
     // Load plugins
     let mock_source_path = require_plugin("drasi-source-mock");
@@ -1946,7 +1946,7 @@ async fn test_e2e_multi_source_query_reaction() {
         return;
     }
 
-    let _ = log::set_max_level(log::LevelFilter::Debug);
+    log::set_max_level(log::LevelFilter::Debug);
 
     // Load plugins
     let mock_source_path = require_plugin("drasi-source-mock");
@@ -2193,9 +2193,8 @@ async fn collect_sse_events(
     // SSE protocol: lines starting with "data:" contain event payloads.
     let stream = response.bytes_stream();
     use futures_util::StreamExt;
-    let reader = tokio_util::io::StreamReader::new(
-        stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
-    );
+    let reader =
+        tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(std::io::Error::other)));
     let mut lines = tokio::io::BufReader::new(reader).lines();
 
     loop {

@@ -239,10 +239,7 @@ async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: 
     .await;
 
     if result.is_err() {
-        panic!(
-            "Timed out waiting for {} '{}' to reach {:?}",
-            component, id, expected
-        );
+        panic!("Timed out waiting for {component} '{id}' to reach {expected:?}");
     }
 }
 
@@ -334,7 +331,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
                 "Result should contain variable 's' from RETURN clause"
             );
         }
-        other => panic!("Expected Add result diff, got: {:?}", other),
+        other => panic!("Expected Add result diff, got: {other:?}"),
     }
 
     drasi.stop().await.unwrap();

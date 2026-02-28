@@ -426,7 +426,7 @@ impl ReactionManager {
 
             if let Some(reaction) = reaction {
                 if !reaction.auto_start() {
-                    info!("Skipping reaction '{}' (auto_start=false)", reaction_id);
+                    info!("Skipping reaction '{reaction_id}' (auto_start=false)");
                     continue;
                 }
 

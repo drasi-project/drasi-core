@@ -926,8 +926,7 @@ impl Query for DrasiQuery {
                     let status_check = status.read().await.clone();
                     if !matches!(status_check, ComponentStatus::Running) {
                         info!(
-                            "Query '{query_id}' status changed to non-running ({:?}), exiting processing loop",
-                            status_check
+                            "Query '{query_id}' status changed to non-running ({status_check:?}), exiting processing loop"
                         );
                         break;
                     }

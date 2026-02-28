@@ -139,7 +139,7 @@ pub async fn fetch_from_http(url: &str, dest_dir: &Path) -> Result<FetchedPlugin
     let parsed = url::Url::parse(url).context("Invalid HTTP URL")?;
     let filename = parsed
         .path_segments()
-        .and_then(|s| s.last())
+        .and_then(|mut s| s.next_back())
         .filter(|s| !s.is_empty())
         .context("Cannot determine filename from URL")?
         .to_string();
