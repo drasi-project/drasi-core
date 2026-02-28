@@ -1807,8 +1807,8 @@ async fn test_reaction_enqueue_query_result_with_data() {
 /// 5. Verify data flows from source through query to reaction
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_e2e_cdylib_source_query_reaction() {
-    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-log") {
-        eprintln!("SKIPPING: cdylib plugins not found");
+    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-sse") {
+        eprintln!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
         return;
     }
 
@@ -1816,7 +1816,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
 
     // Load plugins
     let mock_source_path = require_plugin("drasi-source-mock");
-    let log_reaction_path = require_plugin("drasi-reaction-log");
+    let sse_reaction_path = require_plugin("drasi-reaction-sse");
 
     let mock_plugin = load_plugin_from_path(
         &mock_source_path,
@@ -1827,16 +1827,16 @@ async fn test_e2e_cdylib_source_query_reaction() {
     )
     .expect("Should load mock source plugin");
 
-    let log_plugin = load_plugin_from_path(
-        &log_reaction_path,
+    let sse_plugin = load_plugin_from_path(
+        &sse_reaction_path,
         std::ptr::null_mut(),
         callbacks::default_log_callback_fn(),
         std::ptr::null_mut(),
         callbacks::default_lifecycle_callback_fn(),
     )
-    .expect("Should load log reaction plugin");
+    .expect("Should load SSE reaction plugin");
 
-    // Create source instance (mock source with 200ms interval)
+    // Create source instance (mock source with 200ms interval, counter mode)
     let source_config = serde_json::json!({
         "dataType": { "type": "counter" },
         "intervalMs": 200
@@ -1846,12 +1846,22 @@ async fn test_e2e_cdylib_source_query_reaction() {
         .await
         .expect("Should create mock source");
 
-    // Create reaction instance
-    let reaction_config = serde_json::json!({});
-    let reaction = log_plugin.reaction_plugins[0]
-        .create_reaction("test-reaction", vec!["e2e-query".to_string()], &reaction_config, true)
+    // Create SSE reaction on a random high port to avoid conflicts
+    let sse_port = 19100u16;
+    let reaction_config = serde_json::json!({
+        "host": "127.0.0.1",
+        "port": sse_port,
+        "sse_path": "/events"
+    });
+    let reaction = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "sse-reaction",
+            vec!["e2e-query".to_string()],
+            &reaction_config,
+            true,
+        )
         .await
-        .expect("Should create log reaction");
+        .expect("Should create SSE reaction");
 
     // Build DrasiLib with source, query, reaction
     let core = drasi_lib::DrasiLib::builder()
@@ -1871,45 +1881,330 @@ async fn test_e2e_cdylib_source_query_reaction() {
     // Start all components
     core.start().await.expect("Should start DrasiLib");
 
-    // Wait for mock source to generate some events and for them to flow through
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Give the SSE server a moment to bind
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Verify query is running
-    // Wait for mock source to generate some events and for them to flow through
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Connect SSE client and collect events
+    let sse_url = format!("http://127.0.0.1:{}/events", sse_port);
+    let collected = collect_sse_events(&sse_url, 5, std::time::Duration::from_secs(10)).await;
 
-    // Check source status
-    let source_status = core.get_source_status("test-source").await
-        .expect("Should get source status");
-    println!("E2E test: Source status = {:?}", source_status);
+    assert!(
+        !collected.is_empty(),
+        "SSE reaction should have sent events; received 0 from {sse_url}"
+    );
 
-    // Verify query is running
-    let query_status = core.get_query_status("e2e-query").await
-        .expect("Should get query status");
-    println!("E2E test: Query status = {:?}", query_status);
-
-    // Check query results — if data flowed, there should be results
-    let results = core.get_query_results("e2e-query").await
-        .expect("Should get query results");
-
-    println!("E2E test: Query has {} results after 3s", results.len());
-
-    // If no results yet, wait more
-    if results.is_empty() {
-        println!("E2E test: No results after 3s, waiting 10 more seconds...");
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        let results2 = core.get_query_results("e2e-query").await
-            .expect("Should get query results");
-        println!("E2E test: Query has {} results after 13s total", results2.len());
-
+    // Verify the events contain query results with the expected shape
+    for event_str in &collected {
+        let event: serde_json::Value =
+            serde_json::from_str(event_str).expect("SSE event should be valid JSON");
+        assert_eq!(
+            event["queryId"].as_str(),
+            Some("e2e-query"),
+            "Event should reference the correct query"
+        );
         assert!(
-            !results2.is_empty(),
-            "Query should have results from mock source data flowing through"
+            event["results"].is_array(),
+            "Event should contain a results array"
         );
     }
+    println!(
+        "E2E SSE test: received {} events from SSE stream",
+        collected.len()
+    );
 
-    // Stop everything
+    // Also verify query state has accumulated results
+    let results = core
+        .get_query_results("e2e-query")
+        .await
+        .expect("Should get query results");
+    assert!(
+        !results.is_empty(),
+        "Query should have accumulated results"
+    );
+
     core.stop().await.expect("Should stop DrasiLib");
+}
+
+/// E2E test exercising fan-out patterns: multiple queries from one source
+/// and multiple reactions subscribed to one query.
+///
+/// Topology:
+///   counter-source ──┬─→ query-counters-all  ──→  sse-all       (port 19201)
+///                    └─→ query-counters-high ──┬→  sse-high-a   (port 19202)
+///                                              └→  sse-high-b   (port 19203)
+///   sensor-source  ───→  query-sensors       ──→   sse-sensors  (port 19204)
+///
+/// Verifies:
+///   - One source feeding two queries (fan-out from source)
+///   - Two reactions subscribed to the same query (fan-out from query)
+///   - Independent source/query/reaction pipeline alongside
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_e2e_multi_source_query_reaction() {
+    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-sse") {
+        eprintln!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
+        return;
+    }
+
+    let _ = log::set_max_level(log::LevelFilter::Debug);
+
+    // Load plugins
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let sse_reaction_path = require_plugin("drasi-reaction-sse");
+
+    let mock_plugin = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let sse_plugin = load_plugin_from_path(
+        &sse_reaction_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load SSE reaction plugin");
+
+    // ── Sources ──
+
+    let counter_source = mock_plugin.source_plugins[0]
+        .create_source(
+            "counter-source",
+            &serde_json::json!({
+                "dataType": { "type": "counter" },
+                "intervalMs": 200
+            }),
+            true,
+        )
+        .await
+        .expect("Should create counter source");
+
+    let sensor_source = mock_plugin.source_plugins[0]
+        .create_source(
+            "sensor-source",
+            &serde_json::json!({
+                "dataType": { "type": "sensorReading", "sensorCount": 3 },
+                "intervalMs": 300
+            }),
+            true,
+        )
+        .await
+        .expect("Should create sensor source");
+
+    // ── Reactions ──
+
+    // Reaction for query-counters-all
+    let sse_all = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "sse-all",
+            vec!["query-counters-all".to_string()],
+            &serde_json::json!({ "host": "127.0.0.1", "port": 19201u16, "sse_path": "/events" }),
+            true,
+        )
+        .await
+        .expect("Should create sse-all reaction");
+
+    // Two reactions both subscribed to query-counters-high
+    let sse_high_a = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "sse-high-a",
+            vec!["query-counters-high".to_string()],
+            &serde_json::json!({ "host": "127.0.0.1", "port": 19202u16, "sse_path": "/events" }),
+            true,
+        )
+        .await
+        .expect("Should create sse-high-a reaction");
+
+    let sse_high_b = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "sse-high-b",
+            vec!["query-counters-high".to_string()],
+            &serde_json::json!({ "host": "127.0.0.1", "port": 19203u16, "sse_path": "/events" }),
+            true,
+        )
+        .await
+        .expect("Should create sse-high-b reaction");
+
+    // Reaction for query-sensors
+    let sse_sensors = sse_plugin.reaction_plugins[0]
+        .create_reaction(
+            "sse-sensors",
+            vec!["query-sensors".to_string()],
+            &serde_json::json!({ "host": "127.0.0.1", "port": 19204u16, "sse_path": "/events" }),
+            true,
+        )
+        .await
+        .expect("Should create sse-sensors reaction");
+
+    // ── Build DrasiLib ──
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id("multi-e2e-test")
+        .with_source(counter_source)
+        .with_source(sensor_source)
+        // Two queries from counter-source
+        .with_query(
+            drasi_lib::Query::cypher("query-counters-all")
+                .query("MATCH (n:Counter) RETURN n.value AS Value")
+                .from_source("counter-source")
+                .build(),
+        )
+        .with_query(
+            drasi_lib::Query::cypher("query-counters-high")
+                .query("MATCH (n:Counter) WHERE n.value > 3 RETURN n.value AS Value")
+                .from_source("counter-source")
+                .build(),
+        )
+        // One query from sensor-source
+        .with_query(
+            drasi_lib::Query::cypher("query-sensors")
+                .query("MATCH (s:SensorReading) RETURN s.sensor_id AS SensorId, s.temperature AS Temperature")
+                .from_source("sensor-source")
+                .build(),
+        )
+        .with_reaction(sse_all)
+        .with_reaction(sse_high_a)
+        .with_reaction(sse_high_b)
+        .with_reaction(sse_sensors)
+        .build()
+        .await
+        .expect("Should build DrasiLib");
+
+    core.start().await.expect("Should start DrasiLib");
+
+    // Give SSE servers time to bind
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let timeout = std::time::Duration::from_secs(10);
+
+    // Collect SSE events from all four streams in parallel
+    let (all_events, high_a_events, high_b_events, sensor_events) = tokio::join!(
+        collect_sse_events("http://127.0.0.1:19201/events", 3, timeout),
+        collect_sse_events("http://127.0.0.1:19202/events", 3, timeout),
+        collect_sse_events("http://127.0.0.1:19203/events", 3, timeout),
+        collect_sse_events("http://127.0.0.1:19204/events", 3, timeout),
+    );
+
+    // ── Assert: query-counters-all reaction ──
+    assert!(
+        !all_events.is_empty(),
+        "sse-all should receive events from query-counters-all"
+    );
+    for ev in &all_events {
+        let v: serde_json::Value = serde_json::from_str(ev).unwrap();
+        assert_eq!(v["queryId"].as_str(), Some("query-counters-all"));
+        assert!(v["results"].is_array());
+    }
+
+    // ── Assert: both reactions on query-counters-high receive events ──
+    assert!(
+        !high_a_events.is_empty(),
+        "sse-high-a should receive events from query-counters-high"
+    );
+    assert!(
+        !high_b_events.is_empty(),
+        "sse-high-b should receive events from query-counters-high"
+    );
+    for ev in high_a_events.iter().chain(high_b_events.iter()) {
+        let v: serde_json::Value = serde_json::from_str(ev).unwrap();
+        assert_eq!(v["queryId"].as_str(), Some("query-counters-high"));
+        assert!(v["results"].is_array());
+    }
+
+    // ── Assert: sensor pipeline ──
+    assert!(
+        !sensor_events.is_empty(),
+        "sse-sensors should receive events from query-sensors"
+    );
+    for ev in &sensor_events {
+        let v: serde_json::Value = serde_json::from_str(ev).unwrap();
+        assert_eq!(v["queryId"].as_str(), Some("query-sensors"));
+        assert!(v["results"].is_array());
+    }
+
+    // ── Verify query state ──
+    let all_results = core.get_query_results("query-counters-all").await
+        .expect("Should get query-counters-all results");
+    let high_results = core.get_query_results("query-counters-high").await
+        .expect("Should get query-counters-high results");
+    let sensor_results = core.get_query_results("query-sensors").await
+        .expect("Should get query-sensors results");
+
+    assert!(!all_results.is_empty(), "query-counters-all should have results");
+    assert!(!sensor_results.is_empty(), "query-sensors should have results");
+
+    println!(
+        "Multi E2E: all={} events/{} results, high-a={} events, high-b={} events, high={} results, sensors={} events/{} results",
+        all_events.len(), all_results.len(),
+        high_a_events.len(), high_b_events.len(), high_results.len(),
+        sensor_events.len(), sensor_results.len(),
+    );
+
+    core.stop().await.expect("Should stop DrasiLib");
+}
+
+/// Helper: connect to an SSE endpoint and collect up to `min_events` data events,
+/// returning early if the minimum is met or timing out after `timeout`.
+async fn collect_sse_events(url: &str, min_events: usize, timeout: std::time::Duration) -> Vec<String> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut collected = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    // Retry connecting in case the SSE server isn't ready yet
+    let response = loop {
+        match reqwest::get(url).await {
+            Ok(resp) if resp.status().is_success() => break resp,
+            Ok(resp) => {
+                eprintln!("SSE connect to {url} got status {}", resp.status());
+            }
+            Err(e) => {
+                eprintln!("SSE connect to {url} failed: {e}");
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            eprintln!("SSE connect to {url} timed out");
+            return collected;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+
+    // Read the SSE stream line by line.
+    // SSE protocol: lines starting with "data:" contain event payloads.
+    let stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    let reader = tokio_util::io::StreamReader::new(
+        stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+    );
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    loop {
+        let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
+        match line_result {
+            Ok(Ok(Some(line))) => {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if !data.is_empty() {
+                        collected.push(data.to_string());
+                        if collected.len() >= min_events {
+                            return collected;
+                        }
+                    }
+                }
+            }
+            Ok(Ok(None)) => break, // stream ended
+            Ok(Err(e)) => {
+                eprintln!("SSE read error: {e}");
+                break;
+            }
+            Err(_) => break, // timeout
+        }
+    }
+
+    collected
 }
 
 /// Minimal test: just source → subscriber, no query.
