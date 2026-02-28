@@ -88,6 +88,20 @@ fn host_target_triple() -> String {
     panic!("could not determine host target triple from rustc -vV");
 }
 
+/// Extract the OS portion from a target triple (e.g., "linux", "darwin", "windows").
+fn extract_os(triple: &str) -> &str {
+    let parts: Vec<&str> = triple.split('-').collect();
+    // Triples: arch-vendor-os or arch-vendor-os-env
+    // e.g., x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-pc-windows-gnu
+    for part in &parts {
+        match *part {
+            "linux" | "darwin" | "windows" => return part,
+            _ => {}
+        }
+    }
+    "unknown"
+}
+
 fn discover_dynamic_plugins() -> DiscoveryResult {
     let output = Command::new("cargo")
         .args(["metadata", "--format-version", "1"])
@@ -153,7 +167,6 @@ fn main() {
         Some("build-plugins") => build_plugins(&args[2..]),
         Some("list-plugins") => list_plugins(),
         Some("publish-plugins") => publish_plugins(&args[2..]),
-        Some("merge-manifests") => merge_manifests(&args[2..]),
         _ => {
             eprintln!("Usage: cargo xtask <command>");
             eprintln!();
@@ -161,7 +174,6 @@ fn main() {
             eprintln!("  build-plugins [OPTIONS]    Build all dynamic plugins as cdylib shared libraries");
             eprintln!("  list-plugins               List all discovered dynamic plugin crates");
             eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
-            eprintln!("  merge-manifests [OPTIONS]   Create multi-arch manifest index from per-arch tags");
             eprintln!();
             eprintln!("build-plugins options:");
             eprintln!("  --release             Build in release mode");
@@ -177,12 +189,6 @@ fn main() {
             eprintln!("  --pre-release <LABEL> Append pre-release label (e.g., dev.1 → 0.1.8-dev.1)");
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
             eprintln!("  --dry-run             Show what would be published without pushing");
-            eprintln!();
-            eprintln!("merge-manifests options:");
-            eprintln!("  --registry <URL>      OCI registry (default: ghcr.io/drasi-project)");
-            eprintln!("  --pre-release <LABEL> Pre-release label (must match what was used in publish)");
-            eprintln!("  --arch <SUFFIX>       Architecture tag suffixes to merge (repeatable, e.g., --arch linux-amd64 --arch linux-arm64)");
-            eprintln!("  --dry-run             Show what would be merged without pushing");
             std::process::exit(1);
         }
     }
@@ -297,6 +303,25 @@ fn build_plugins(args: &[String]) {
     let plugins_dir = build_dir.join("plugins");
 
     let target_triple = target.clone().unwrap_or_else(host_target_triple);
+
+    // Check if the target is buildable on this host
+    if let Some(ref t) = target {
+        let host = host_target_triple();
+        let host_os = extract_os(&host);
+        let target_os = extract_os(t);
+
+        if host_os != target_os {
+            // Cross-OS compilation requires `cross` + Docker, only works on Linux hosts
+            if !host.contains("linux") {
+                eprintln!(
+                    "Cannot build {} on {} — cross-OS compilation requires a Linux host with `cross` + Docker.",
+                    t, host
+                );
+                eprintln!("Skipping this target.");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Determine whether to use `cross` instead of `cargo`.
     // `cross` only works reliably on Linux hosts (it uses Docker with Linux containers).
@@ -854,207 +879,4 @@ fn triple_to_platform(triple: &str) -> Option<(String, String)> {
 #[allow(dead_code)]
 fn triple_to_arch_suffix(triple: &str) -> Option<String> {
     triple_to_platform(triple).map(|(os, arch)| format!("{}-{}", os, arch))
-}
-
-// ---------- Merge Manifests ----------
-
-/// Collect all `--arch` flag values from args (repeatable flag).
-fn parse_arch_values(args: &[String]) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--arch" {
-            if let Some(v) = args.get(i + 1) {
-                result.push(v.clone());
-                i += 2;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    result
-}
-
-fn merge_manifests(args: &[String]) {
-    let registry = parse_flag_value(args, "--registry")
-        .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
-    let pre_release = parse_flag_value(args, "--pre-release");
-    let arch_suffixes = parse_arch_values(args);
-    let dry_run = args.iter().any(|a| a == "--dry-run");
-
-    if arch_suffixes.is_empty() {
-        eprintln!("Error: at least one --arch suffix is required");
-        eprintln!("Example: --arch linux-amd64 --arch linux-arm64 --arch darwin-arm64");
-        std::process::exit(1);
-    }
-
-    // Discover plugins to know which repositories and versions to merge
-    let result = discover_dynamic_plugins();
-    if result.plugins.is_empty() {
-        eprintln!("No dynamic plugins found in workspace.");
-        std::process::exit(1);
-    }
-
-    println!(
-        "=== Merging manifest indexes for {} plugins across {} architectures ===",
-        result.plugins.len(),
-        arch_suffixes.len()
-    );
-    println!(
-        "  Architectures: {}",
-        arch_suffixes.join(", ")
-    );
-    if let Some(ref label) = pre_release {
-        println!("  Pre-release label: {}", label);
-    }
-
-    // Build the list of (type, kind, version) for all plugins
-    let plugin_repos: Vec<(String, String, String)> = result
-        .plugins
-        .iter()
-        .map(|p| {
-            let version = make_tag(&p.package.version, None, pre_release.as_deref(), None);
-            (p.plugin_type.clone(), p.kind.clone(), version)
-        })
-        .collect();
-
-    if dry_run {
-        for (ptype, kind, version) in &plugin_repos {
-            println!("  {}/{}/{}:{}", registry, ptype, kind, version);
-            for suffix in &arch_suffixes {
-                println!("    ← {}/{}/{}:{}-{}", registry, ptype, kind, version, suffix);
-            }
-        }
-        println!("\n=== Dry run — no manifests pushed ===");
-        return;
-    }
-
-    let username = std::env::var("OCI_REGISTRY_USERNAME").unwrap_or_default();
-    let password = std::env::var("OCI_REGISTRY_PASSWORD")
-        .or_else(|_| std::env::var("GHCR_TOKEN"))
-        .unwrap_or_default();
-
-    if password.is_empty() {
-        eprintln!(
-            "Error: OCI_REGISTRY_PASSWORD or GHCR_TOKEN env var required for authentication"
-        );
-        std::process::exit(1);
-    }
-
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-
-    rt.block_on(async {
-        let client_config = oci_client::client::ClientConfig {
-            protocol: oci_client::client::ClientProtocol::Https,
-            ..Default::default()
-        };
-        let client = oci_client::Client::new(client_config);
-
-        let auth = if username.is_empty() {
-            oci_client::secrets::RegistryAuth::Basic(String::new(), password.clone())
-        } else {
-            oci_client::secrets::RegistryAuth::Basic(username.clone(), password.clone())
-        };
-
-        let mut success_count = 0;
-        let mut fail_count = 0;
-
-        for (ptype, kind, version) in &plugin_repos {
-            let index_ref_str = format!("{}/{}/{}:{}", registry, ptype, kind, version);
-
-            match merge_single_plugin(&client, &auth, &registry, ptype, kind, version, &arch_suffixes)
-                .await
-            {
-                Ok(digest) => {
-                    println!("  ✓ {} → {}", index_ref_str, digest);
-                    success_count += 1;
-                }
-                Err(e) => {
-                    eprintln!("  ✗ {} — {}", index_ref_str, e);
-                    fail_count += 1;
-                }
-            }
-        }
-
-        println!(
-            "\n=== Merge complete: {} succeeded, {} failed ===",
-            success_count, fail_count
-        );
-        if fail_count > 0 {
-            std::process::exit(1);
-        }
-    });
-}
-
-async fn merge_single_plugin(
-    client: &oci_client::Client,
-    auth: &oci_client::secrets::RegistryAuth,
-    registry: &str,
-    plugin_type: &str,
-    kind: &str,
-    tag: &str,
-    arch_suffixes: &[String],
-) -> Result<String, Box<dyn std::error::Error>> {
-    use oci_client::manifest::{ImageIndexEntry, OciImageIndex, Platform};
-
-    let mut entries = Vec::new();
-
-    for suffix in arch_suffixes {
-        let arch_tag = format!("{}-{}", tag, suffix);
-        let arch_ref_str = format!("{}/{}/{}:{}", registry, plugin_type, kind, arch_tag);
-        let arch_ref: oci_client::Reference = arch_ref_str.parse()?;
-
-        // Authenticate and fetch the manifest for this arch-specific tag
-        client
-            .auth(&arch_ref, auth, oci_client::RegistryOperation::Pull)
-            .await?;
-
-        let (manifest, digest) = client.pull_manifest(&arch_ref, auth).await?;
-
-        let manifest_json = serde_json::to_vec(&manifest)?;
-        let size = manifest_json.len() as i64;
-
-        // Parse os/arch from suffix (e.g., "linux-amd64" → os=linux, arch=amd64)
-        let (os_str, arch_str) = suffix.split_once('-').ok_or_else(|| {
-            format!("Invalid arch suffix '{}': expected format 'os-arch'", suffix)
-        })?;
-
-        entries.push(ImageIndexEntry {
-            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
-            digest,
-            size,
-            platform: Some(Platform {
-                architecture: arch_str.into(),
-                os: os_str.into(),
-                os_version: None,
-                os_features: None,
-                variant: None,
-                features: None,
-            }),
-            annotations: None,
-        });
-
-        println!(
-            "    Found {}/{} ({}/{}) — {} bytes",
-            plugin_type, kind, os_str, arch_str, size
-        );
-    }
-
-    // Build and push the manifest index
-    let index = OciImageIndex {
-        schema_version: 2,
-        media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
-        manifests: entries,
-        artifact_type: None,
-        annotations: None,
-    };
-
-    let index_ref_str = format!("{}/{}/{}:{}", registry, plugin_type, kind, tag);
-    let index_ref: oci_client::Reference = index_ref_str.parse()?;
-
-    let result = client
-        .push_manifest_list(&index_ref, auth, index)
-        .await?;
-
-    Ok(result)
 }

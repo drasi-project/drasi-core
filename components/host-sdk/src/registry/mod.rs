@@ -25,7 +25,7 @@ pub mod platform;
 pub mod resolver;
 pub mod types;
 
-pub use oci::{OciRegistryClient, PluginSearchResult};
-pub use platform::{oci_platform_to_target_triple, target_triple_to_oci_platform, OciPlatform};
+pub use oci::{OciRegistryClient, PluginSearchResult, PluginVersionInfo};
+pub use platform::{oci_platform_to_target_triple, target_triple_to_oci_platform, target_triple_to_arch_suffix, strip_arch_suffix, OciPlatform};
 pub use resolver::PluginResolver;
 pub use types::{HostVersionInfo, PluginMetadataJson, RegistryAuth, RegistryConfig, ResolvedPlugin};

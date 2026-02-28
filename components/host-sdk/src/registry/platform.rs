@@ -109,6 +109,49 @@ pub fn oci_platform_to_target_triple(platform: &OciPlatform) -> Option<String> {
     Some(triple.to_string())
 }
 
+/// Convert a Rust target triple to the `{os}-{arch}` suffix used in OCI tags.
+///
+/// For example:
+/// - `x86_64-unknown-linux-gnu` → `linux-amd64`
+/// - `aarch64-apple-darwin` → `darwin-arm64`
+/// - `x86_64-pc-windows-gnu` → `windows-amd64`
+pub fn target_triple_to_arch_suffix(triple: &str) -> Option<String> {
+    let platform = target_triple_to_oci_platform(triple)?;
+    Some(format!("{}-{}", platform.os, platform.architecture))
+}
+
+/// Strip a known `{os}-{arch}` suffix from a tag and return `(version, suffix)`.
+///
+/// For example, `"0.1.8-linux-amd64"` → `Some(("0.1.8", "linux-amd64"))`.
+/// Returns `None` if the tag doesn't end with a recognized platform suffix.
+pub fn strip_arch_suffix(tag: &str) -> Option<(&str, &str)> {
+    // Known OS names that can appear in suffixes
+    const KNOWN_SUFFIXES: &[&str] = &[
+        "linux-amd64",
+        "linux-arm64",
+        "linux-arm",
+        "linux-386",
+        "linux-riscv64",
+        "linux-s390x",
+        "linux-ppc64le",
+        "windows-amd64",
+        "windows-arm64",
+        "darwin-amd64",
+        "darwin-arm64",
+        "freebsd-amd64",
+    ];
+
+    for suffix in KNOWN_SUFFIXES {
+        if let Some(version) = tag.strip_suffix(suffix) {
+            if let Some(version) = version.strip_suffix('-') {
+                return Some((version, suffix));
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +240,40 @@ mod tests {
                 platform
             );
         }
+    }
+
+    #[test]
+    fn test_target_triple_to_arch_suffix() {
+        assert_eq!(
+            target_triple_to_arch_suffix("x86_64-unknown-linux-gnu"),
+            Some("linux-amd64".to_string())
+        );
+        assert_eq!(
+            target_triple_to_arch_suffix("aarch64-apple-darwin"),
+            Some("darwin-arm64".to_string())
+        );
+        assert_eq!(
+            target_triple_to_arch_suffix("x86_64-pc-windows-gnu"),
+            Some("windows-amd64".to_string())
+        );
+        assert_eq!(target_triple_to_arch_suffix("unknown-triple"), None);
+    }
+
+    #[test]
+    fn test_strip_arch_suffix() {
+        assert_eq!(
+            strip_arch_suffix("0.1.8-linux-amd64"),
+            Some(("0.1.8", "linux-amd64"))
+        );
+        assert_eq!(
+            strip_arch_suffix("0.1.8-dev.1-darwin-arm64"),
+            Some(("0.1.8-dev.1", "darwin-arm64"))
+        );
+        assert_eq!(
+            strip_arch_suffix("0.1.8-rc.1-windows-amd64"),
+            Some(("0.1.8-rc.1", "windows-amd64"))
+        );
+        assert_eq!(strip_arch_suffix("0.1.8"), None);
+        assert_eq!(strip_arch_suffix("latest"), None);
     }
 }

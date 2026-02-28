@@ -89,11 +89,13 @@ PUBLISH_TARGETS ?= x86_64-unknown-linux-gnu:linux-amd64 \
                    x86_64-apple-darwin:darwin-amd64 \
                    aarch64-apple-darwin:darwin-arm64
 
-# Build, publish all architectures, then merge manifests
+# Build and publish all architectures
 # Usage: make publish-all [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg]
 # Skips targets that fail to build (e.g., macOS targets on Linux)
+# Each architecture is published with its own tag suffix (e.g., 0.1.8-linux-amd64)
+# The client auto-appends the correct suffix when installing.
 publish-all:
-	@SUCCEEDED=""; \
+	@SUCCEEDED=0; FAILED=0; \
 	for entry in $(PUBLISH_TARGETS); do \
 		TARGET=$$(echo $$entry | cut -d: -f1); \
 		SUFFIX=$$(echo $$entry | cut -d: -f2); \
@@ -104,22 +106,15 @@ publish-all:
 		     $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) \
 		     $(if $(REGISTRY),--registry $(REGISTRY),) \
 		     --arch-suffix $$SUFFIX; then \
-			SUCCEEDED="$$SUCCEEDED --arch $$SUFFIX"; \
+			SUCCEEDED=$$((SUCCEEDED + 1)); \
 		else \
 			echo "  ⚠ Skipping $$TARGET (build or publish failed)"; \
+			FAILED=$$((FAILED + 1)); \
 		fi; \
 	done; \
-	if [ -n "$$SUCCEEDED" ]; then \
-		echo ""; \
-		echo "=== Merging manifest indexes ==="; \
-		cargo run -p xtask -- merge-manifests \
-		  $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) \
-		  $(if $(REGISTRY),--registry $(REGISTRY),) \
-		  $$SUCCEEDED; \
-	else \
-		echo "No architectures succeeded — skipping merge."; \
-		exit 1; \
-	fi
+	echo ""; \
+	echo "=== Publish complete: $$SUCCEEDED succeeded, $$FAILED failed ==="; \
+	if [ $$SUCCEEDED -eq 0 ]; then exit 1; fi
 
 # Dry run of publish-all (builds but doesn't push)
 publish-all-dry-run:
@@ -134,20 +129,4 @@ publish-all-dry-run:
 		  $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) \
 		  $(if $(REGISTRY),--registry $(REGISTRY),) \
 		  --arch-suffix $$SUFFIX --dry-run || true; \
-	done; \
-	echo ""; \
-	echo "=== [DRY RUN] Merge plan ==="; \
-	cargo run -p xtask -- merge-manifests --dry-run \
-	  $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) \
-	  $(if $(REGISTRY),--registry $(REGISTRY),) \
-	  $(foreach arch,$(MERGE_ARCHS),--arch $(arch))
-
-# Create multi-arch manifest index from per-arch tags
-# Usage: make merge-manifests [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/drasi-project]
-# Default architectures: linux-amd64, linux-arm64, windows-amd64, darwin-amd64, darwin-arm64
-MERGE_ARCHS ?= linux-amd64 linux-arm64 windows-amd64 darwin-amd64 darwin-arm64
-merge-manifests:
-	cargo run -p xtask -- merge-manifests $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(foreach arch,$(MERGE_ARCHS),--arch $(arch))
-
-merge-manifests-dry-run:
-	cargo run -p xtask -- merge-manifests --dry-run $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(foreach arch,$(MERGE_ARCHS),--arch $(arch))
+	done

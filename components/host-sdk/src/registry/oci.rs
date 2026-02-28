@@ -211,7 +211,11 @@ impl OciRegistryClient {
     /// If the reference already contains a type prefix (e.g., "source/postgres"),
     /// only that exact package is searched. If it's a bare name (e.g., "postgres"),
     /// all type prefixes are tried: source/, reaction/, bootstrap/.
+    ///
+    /// Tags are grouped by version, with platform suffixes stripped and listed separately.
     pub async fn search_plugins(&self, reference: &str) -> Result<Vec<PluginSearchResult>> {
+        use crate::registry::platform::strip_arch_suffix;
+
         let has_type_prefix = reference.contains('/') 
             && !reference.contains('.');  // not a full registry URL
 
@@ -229,10 +233,27 @@ impl OciRegistryClient {
         for candidate in &candidates {
             match self.list_tags(candidate).await {
                 Ok(tags) => {
+                    // Group tags by version, collecting platform suffixes
+                    let mut version_map: std::collections::BTreeMap<String, Vec<String>> =
+                        std::collections::BTreeMap::new();
+                    for tag in &tags {
+                        if let Some((version, suffix)) = strip_arch_suffix(tag) {
+                            version_map
+                                .entry(version.to_string())
+                                .or_default()
+                                .push(suffix.to_string());
+                        }
+                    }
+
+                    let versions: Vec<PluginVersionInfo> = version_map
+                        .into_iter()
+                        .map(|(version, platforms)| PluginVersionInfo { version, platforms })
+                        .collect();
+
                     results.push(PluginSearchResult {
                         reference: candidate.clone(),
                         full_reference: self.expand_reference(candidate).unwrap_or_default(),
-                        tags,
+                        versions,
                     });
                 }
                 Err(_) => {
@@ -252,6 +273,15 @@ pub struct PluginSearchResult {
     pub reference: String,
     /// Full OCI reference (e.g., "ghcr.io/drasi-project/source/postgres").
     pub full_reference: String,
-    /// Available tags.
-    pub tags: Vec<String>,
+    /// Available versions with their platform suffixes.
+    pub versions: Vec<PluginVersionInfo>,
+}
+
+/// A single version of a plugin with its available platforms.
+#[derive(Debug, Clone)]
+pub struct PluginVersionInfo {
+    /// Version string (e.g., "0.1.8").
+    pub version: String,
+    /// Available platform suffixes (e.g., ["linux-amd64", "darwin-arm64"]).
+    pub platforms: Vec<String>,
 }

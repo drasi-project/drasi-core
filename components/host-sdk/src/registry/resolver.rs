@@ -15,7 +15,7 @@
 //! Version resolver for finding compatible plugin versions from an OCI registry.
 
 use crate::registry::oci::OciRegistryClient;
-use crate::registry::platform::target_triple_to_oci_platform;
+use crate::registry::platform::{target_triple_to_oci_platform, target_triple_to_arch_suffix, strip_arch_suffix};
 use crate::registry::types::{
     HostVersionInfo, PluginReference, ResolvedPlugin, annotations,
 };
@@ -52,15 +52,18 @@ impl<'a> PluginResolver<'a> {
         }
     }
 
-    /// Resolve an exact version tag — validate compatibility.
+    /// Resolve an exact version tag — append platform suffix and validate compatibility.
     async fn resolve_exact(
         &self,
         parsed: &PluginReference,
         tag: &str,
     ) -> Result<ResolvedPlugin> {
-        let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, tag);
+        let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
+            .context("unsupported platform — cannot determine architecture suffix")?;
+        let platform_tag = format!("{}-{}", tag, arch_suffix);
+        let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, platform_tag);
 
-        debug!("Resolving exact version: {}", full_ref);
+        debug!("Resolving exact version: {} (platform tag: {})", tag, platform_tag);
 
         // Fetch annotations for compatibility check
         let annotations = self
@@ -117,6 +120,9 @@ impl<'a> PluginResolver<'a> {
 
         info!("Resolving latest compatible version for {}...", base_ref);
 
+        let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
+            .context("unsupported platform — cannot determine architecture suffix")?;
+
         // List all tags
         let ref_for_tags = parsed.to_oci_reference();
         let tags = self
@@ -129,16 +135,19 @@ impl<'a> PluginResolver<'a> {
             bail!("no tags found for {}", base_ref);
         }
 
-        // Filter and sort semver tags (newest first), skipping pre-release versions
+        // Filter to tags matching our platform suffix, then strip the suffix for semver parsing
+        let expected_suffix = format!("-{}", arch_suffix);
         let mut semver_tags: Vec<(Version, String)> = tags
             .into_iter()
             .filter_map(|tag| {
-                Version::parse(&tag).ok().and_then(|v| {
-                    // Skip pre-release versions (e.g., 0.1.8-dev.1) during auto-resolution
+                // Only consider tags ending with our platform suffix
+                let version_str = tag.strip_suffix(&expected_suffix)?;
+                Version::parse(version_str).ok().and_then(|v| {
+                    // Skip pre-release versions during auto-resolution
                     if v.pre.is_empty() {
-                        Some((v, tag))
+                        Some((v, version_str.to_string()))
                     } else {
-                        debug!("  Skipping pre-release tag: {}", tag);
+                        debug!("  Skipping pre-release tag: {}", version_str);
                         None
                     }
                 })
@@ -149,24 +158,27 @@ impl<'a> PluginResolver<'a> {
 
         if semver_tags.is_empty() {
             bail!(
-                "no semver-formatted tags found for {}; available tags are not version numbers",
-                base_ref
+                "no compatible tags found for {} on platform {}",
+                base_ref,
+                arch_suffix
             );
         }
 
         debug!(
-            "Found {} semver tags, checking compatibility (newest first)...",
-            semver_tags.len()
+            "Found {} semver tags for {}, checking compatibility (newest first)...",
+            semver_tags.len(),
+            arch_suffix
         );
 
-        // Check each tag for compatibility
-        for (_version, tag) in &semver_tags {
-            let full_ref = format!("{}:{}", base_ref, tag);
+        // Check each tag for compatibility (re-append suffix for the actual OCI reference)
+        for (_version, version_str) in &semver_tags {
+            let platform_tag = format!("{}-{}", version_str, arch_suffix);
+            let full_ref = format!("{}:{}", base_ref, platform_tag);
 
             match self.client.fetch_manifest_annotations(&full_ref).await {
                 Ok(ann) => {
                     if self.is_compatible(&ann) {
-                        info!("Found compatible version: {} ({})", tag, full_ref);
+                        info!("Found compatible version: {} ({})", version_str, full_ref);
 
                         let digest = self
                             .client
@@ -181,7 +193,7 @@ impl<'a> PluginResolver<'a> {
                                 "{}/{}@{}",
                                 parsed.registry, parsed.repository, digest
                             ),
-                            version: tag.clone(),
+                            version: version_str.clone(),
                             sdk_version: ann
                                 .get(annotations::SDK_VERSION)
                                 .cloned()
@@ -205,7 +217,7 @@ impl<'a> PluginResolver<'a> {
                     } else {
                         debug!(
                             "  {} — incompatible (sdk: {}, core: {}, lib: {})",
-                            tag,
+                            version_str,
                             ann.get(annotations::SDK_VERSION).unwrap_or(&"?".to_string()),
                             ann.get(annotations::CORE_VERSION).unwrap_or(&"?".to_string()),
                             ann.get(annotations::LIB_VERSION).unwrap_or(&"?".to_string()),
@@ -219,8 +231,9 @@ impl<'a> PluginResolver<'a> {
         }
 
         bail!(
-            "no compatible version found for {}\n  Host versions: SDK {}, core {}, lib {}\n  Checked {} versions (newest first), none matched major.minor",
+            "no compatible version found for {} on platform {}\n  Host versions: SDK {}, core {}, lib {}\n  Checked {} versions (newest first), none matched major.minor",
             base_ref,
+            arch_suffix,
             self.host_info.sdk_version,
             self.host_info.core_version,
             self.host_info.lib_version,
