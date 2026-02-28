@@ -171,7 +171,9 @@ fn main() {
             eprintln!("Usage: cargo xtask <command>");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  build-plugins [OPTIONS]    Build all dynamic plugins as cdylib shared libraries");
+            eprintln!(
+                "  build-plugins [OPTIONS]    Build all dynamic plugins as cdylib shared libraries"
+            );
             eprintln!("  list-plugins               List all discovered dynamic plugin crates");
             eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
             eprintln!();
@@ -182,11 +184,15 @@ fn main() {
             eprintln!();
             eprintln!("publish-plugins options:");
             eprintln!("  --registry <URL>      OCI registry (default: ghcr.io/drasi-project)");
-            eprintln!("  --plugins-dir <DIR>   Directory with built plugins (default: auto-detect)");
+            eprintln!(
+                "  --plugins-dir <DIR>   Directory with built plugins (default: auto-detect)"
+            );
             eprintln!("  --release             Look in release build directory");
             eprintln!("  --target <TRIPLE>     Target triple for cross-compiled plugins");
             eprintln!("  --tag <TAG>           Override version tag for all plugins");
-            eprintln!("  --pre-release <LABEL> Append pre-release label (e.g., dev.1 → 0.1.8-dev.1)");
+            eprintln!(
+                "  --pre-release <LABEL> Append pre-release label (e.g., dev.1 → 0.1.8-dev.1)"
+            );
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
             eprintln!("  --dry-run             Show what would be published without pushing");
             std::process::exit(1);
@@ -349,7 +355,10 @@ fn build_plugins(args: &[String]) {
         "=== Building {} cdylib plugins ({}{}, {}, {} parallel jobs) ===",
         result.plugins.len(),
         mode,
-        target.as_ref().map(|t| format!(", {t}")).unwrap_or_default(),
+        target
+            .as_ref()
+            .map(|t| format!(", {t}"))
+            .unwrap_or_default(),
         build_tool,
         jobs
     );
@@ -612,8 +621,8 @@ fn discover_publishable_plugins(plugins_dir: &Path) -> Vec<PublishablePlugin> {
 }
 
 fn publish_plugins(args: &[String]) {
-    let registry = parse_flag_value(args, "--registry")
-        .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
+    let registry =
+        parse_flag_value(args, "--registry").unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
     let tag_override = parse_flag_value(args, "--tag");
     let pre_release = parse_flag_value(args, "--pre-release");
     let arch_suffix = parse_flag_value(args, "--arch-suffix");
@@ -655,13 +664,15 @@ fn publish_plugins(args: &[String]) {
 
     // Auto-detect arch suffix from plugin metadata if not provided
     let arch_suffix = arch_suffix.or_else(|| {
-        plugins.first().and_then(|p| {
-            triple_to_arch_suffix(&p.metadata.target_triple)
-        })
+        plugins
+            .first()
+            .and_then(|p| triple_to_arch_suffix(&p.metadata.target_triple))
     });
 
     if arch_suffix.is_none() {
-        eprintln!("Warning: no --arch-suffix provided and could not auto-detect from plugin metadata.");
+        eprintln!(
+            "Warning: no --arch-suffix provided and could not auto-detect from plugin metadata."
+        );
         eprintln!("Tags will not include a platform suffix. Use --arch-suffix to specify one.");
     }
 
@@ -675,7 +686,12 @@ fn publish_plugins(args: &[String]) {
     }
 
     for p in &plugins {
-        let tag = make_tag(&p.metadata.version, tag_override.as_deref(), pre_release.as_deref(), arch_suffix.as_deref());
+        let tag = make_tag(
+            &p.metadata.version,
+            tag_override.as_deref(),
+            pre_release.as_deref(),
+            arch_suffix.as_deref(),
+        );
         let reference = format!(
             "{}/{}/{}:{}",
             registry, p.metadata.plugin_type, p.metadata.kind, tag
@@ -701,9 +717,7 @@ fn publish_plugins(args: &[String]) {
         .unwrap_or_default();
 
     if password.is_empty() {
-        eprintln!(
-            "Error: OCI_REGISTRY_PASSWORD or GHCR_TOKEN env var required for authentication"
-        );
+        eprintln!("Error: OCI_REGISTRY_PASSWORD or GHCR_TOKEN env var required for authentication");
         std::process::exit(1);
     }
 
@@ -766,10 +780,7 @@ fn publish_plugins(args: &[String]) {
 
             for (ptype, kind) in &dir_entries {
                 let dir_tag = format!("{}.{}", ptype, kind);
-                let dir_ref = format!(
-                    "{}/drasi-plugin-directory:{}",
-                    registry, dir_tag
-                );
+                let dir_ref = format!("{}/drasi-plugin-directory:{}", registry, dir_tag);
                 match publish_directory_entry(&client, &auth, &dir_ref).await {
                     Ok(_) => println!("  ✓ directory entry: {}", dir_tag),
                     Err(e) => eprintln!("  ✗ directory entry: {} — {}", dir_tag, e),
@@ -784,7 +795,12 @@ fn publish_plugins(args: &[String]) {
 }
 
 /// Build the OCI tag from the plugin version, optional override, pre-release label, and arch suffix.
-fn make_tag(version: &str, tag_override: Option<&str>, pre_release: Option<&str>, arch_suffix: Option<&str>) -> String {
+fn make_tag(
+    version: &str,
+    tag_override: Option<&str>,
+    pre_release: Option<&str>,
+    arch_suffix: Option<&str>,
+) -> String {
     let base = if let Some(tag) = tag_override {
         tag.to_string()
     } else if let Some(label) = pre_release {
@@ -907,8 +923,7 @@ async fn publish_directory_entry(
         None,
     );
 
-    let manifest =
-        oci_client::manifest::OciImageManifest::build(&[layer.clone()], &config, None);
+    let manifest = oci_client::manifest::OciImageManifest::build(&[layer.clone()], &config, None);
 
     let response = client
         .push(&reference, &[layer], config, auth, Some(manifest))

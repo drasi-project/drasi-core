@@ -216,9 +216,11 @@ mod tests {
 
     #[test]
     fn test_parse_full_reference() {
-        let p =
-            PluginReference::parse("ghcr.io/drasi-project/source/postgres:0.1.8", "ghcr.io/drasi-project")
-                .unwrap();
+        let p = PluginReference::parse(
+            "ghcr.io/drasi-project/source/postgres:0.1.8",
+            "ghcr.io/drasi-project",
+        )
+        .unwrap();
         assert_eq!(p.registry, "ghcr.io");
         assert_eq!(p.repository, "drasi-project/source/postgres");
         assert_eq!(p.tag, Some("0.1.8".to_string()));
@@ -255,12 +257,18 @@ mod tests {
     #[test]
     fn test_to_oci_reference() {
         let p = PluginReference::parse("source/postgres:0.1.8", "ghcr.io/drasi-project").unwrap();
-        assert_eq!(p.to_oci_reference(), "ghcr.io/drasi-project/source/postgres:0.1.8");
+        assert_eq!(
+            p.to_oci_reference(),
+            "ghcr.io/drasi-project/source/postgres:0.1.8"
+        );
     }
 
     #[test]
     fn test_to_oci_reference_no_tag() {
         let p = PluginReference::parse("source/postgres", "ghcr.io/drasi-project").unwrap();
-        assert_eq!(p.to_oci_reference(), "ghcr.io/drasi-project/source/postgres");
+        assert_eq!(
+            p.to_oci_reference(),
+            "ghcr.io/drasi-project/source/postgres"
+        );
     }
 }

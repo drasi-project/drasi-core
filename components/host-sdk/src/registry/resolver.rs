@@ -15,11 +15,11 @@
 //! Version resolver for finding compatible plugin versions from an OCI registry.
 
 use crate::registry::oci::OciRegistryClient;
-use crate::registry::platform::{target_triple_to_oci_platform, target_triple_to_arch_suffix, strip_arch_suffix};
-use crate::registry::types::{
-    HostVersionInfo, PluginReference, ResolvedPlugin, annotations,
+use crate::registry::platform::{
+    strip_arch_suffix, target_triple_to_arch_suffix, target_triple_to_oci_platform,
 };
-use anyhow::{Context, Result, bail};
+use crate::registry::types::{annotations, HostVersionInfo, PluginReference, ResolvedPlugin};
+use anyhow::{bail, Context, Result};
 use log::{debug, info, warn};
 use semver::Version;
 
@@ -39,11 +39,7 @@ impl<'a> PluginResolver<'a> {
     ///
     /// - If a tag is specified, validates compatibility and returns it.
     /// - If no tag, finds the latest version compatible with the host's SDK/core/lib versions.
-    pub async fn resolve(
-        &self,
-        reference: &str,
-        default_registry: &str,
-    ) -> Result<ResolvedPlugin> {
+    pub async fn resolve(&self, reference: &str, default_registry: &str) -> Result<ResolvedPlugin> {
         let parsed = PluginReference::parse(reference, default_registry)?;
 
         match &parsed.tag {
@@ -53,17 +49,16 @@ impl<'a> PluginResolver<'a> {
     }
 
     /// Resolve an exact version tag — append platform suffix and validate compatibility.
-    async fn resolve_exact(
-        &self,
-        parsed: &PluginReference,
-        tag: &str,
-    ) -> Result<ResolvedPlugin> {
+    async fn resolve_exact(&self, parsed: &PluginReference, tag: &str) -> Result<ResolvedPlugin> {
         let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
             .context("unsupported platform — cannot determine architecture suffix")?;
         let platform_tag = format!("{}-{}", tag, arch_suffix);
         let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, platform_tag);
 
-        debug!("Resolving exact version: {} (platform tag: {})", tag, platform_tag);
+        debug!(
+            "Resolving exact version: {} (platform tag: {})",
+            tag, platform_tag
+        );
 
         // Fetch annotations for compatibility check
         let annotations = self
@@ -86,10 +81,7 @@ impl<'a> PluginResolver<'a> {
         let filename = self.derive_filename(&annotations);
 
         Ok(ResolvedPlugin {
-            reference: format!(
-                "{}/{}@{}",
-                parsed.registry, parsed.repository, digest
-            ),
+            reference: format!("{}/{}@{}", parsed.registry, parsed.repository, digest),
             version: tag.to_string(),
             sdk_version: annotations
                 .get(annotations::SDK_VERSION)
@@ -112,10 +104,7 @@ impl<'a> PluginResolver<'a> {
     }
 
     /// Resolve the latest compatible version by listing tags and checking each.
-    async fn resolve_latest_compatible(
-        &self,
-        parsed: &PluginReference,
-    ) -> Result<ResolvedPlugin> {
+    async fn resolve_latest_compatible(&self, parsed: &PluginReference) -> Result<ResolvedPlugin> {
         let base_ref = format!("{}/{}", parsed.registry, parsed.repository);
 
         info!("Resolving latest compatible version for {}...", base_ref);
@@ -206,11 +195,9 @@ impl<'a> PluginResolver<'a> {
                                 .get(annotations::LIB_VERSION)
                                 .cloned()
                                 .unwrap_or_default(),
-                            platform: target_triple_to_oci_platform(
-                                &self.host_info.target_triple,
-                            )
-                            .map(|p| p.to_string())
-                            .unwrap_or_default(),
+                            platform: target_triple_to_oci_platform(&self.host_info.target_triple)
+                                .map(|p| p.to_string())
+                                .unwrap_or_default(),
                             digest,
                             filename,
                         });
@@ -218,9 +205,12 @@ impl<'a> PluginResolver<'a> {
                         debug!(
                             "  {} — incompatible (sdk: {}, core: {}, lib: {})",
                             version_str,
-                            ann.get(annotations::SDK_VERSION).unwrap_or(&"?".to_string()),
-                            ann.get(annotations::CORE_VERSION).unwrap_or(&"?".to_string()),
-                            ann.get(annotations::LIB_VERSION).unwrap_or(&"?".to_string()),
+                            ann.get(annotations::SDK_VERSION)
+                                .unwrap_or(&"?".to_string()),
+                            ann.get(annotations::CORE_VERSION)
+                                .unwrap_or(&"?".to_string()),
+                            ann.get(annotations::LIB_VERSION)
+                                .unwrap_or(&"?".to_string()),
                         );
                     }
                 }
@@ -242,10 +232,7 @@ impl<'a> PluginResolver<'a> {
     }
 
     /// Check if a plugin's annotations indicate compatibility with the host.
-    fn is_compatible(
-        &self,
-        ann: &std::collections::BTreeMap<String, String>,
-    ) -> bool {
+    fn is_compatible(&self, ann: &std::collections::BTreeMap<String, String>) -> bool {
         let checks = [
             (annotations::SDK_VERSION, &self.host_info.sdk_version),
             (annotations::CORE_VERSION, &self.host_info.core_version),
@@ -277,7 +264,11 @@ impl<'a> PluginResolver<'a> {
     ) -> Result<()> {
         let checks = [
             ("SDK", annotations::SDK_VERSION, &self.host_info.sdk_version),
-            ("core", annotations::CORE_VERSION, &self.host_info.core_version),
+            (
+                "core",
+                annotations::CORE_VERSION,
+                &self.host_info.core_version,
+            ),
             ("lib", annotations::LIB_VERSION, &self.host_info.lib_version),
         ];
 
@@ -292,10 +283,7 @@ impl<'a> PluginResolver<'a> {
                     ));
                 }
             } else {
-                mismatches.push(format!(
-                    "  {} version: missing annotation ({})",
-                    name, key
-                ));
+                mismatches.push(format!("  {} version: missing annotation ({})", name, key));
             }
         }
 
@@ -311,10 +299,7 @@ impl<'a> PluginResolver<'a> {
     }
 
     /// Derive the expected binary filename from annotations.
-    fn derive_filename(
-        &self,
-        ann: &std::collections::BTreeMap<String, String>,
-    ) -> String {
+    fn derive_filename(&self, ann: &std::collections::BTreeMap<String, String>) -> String {
         let kind = ann
             .get(annotations::PLUGIN_KIND)
             .cloned()

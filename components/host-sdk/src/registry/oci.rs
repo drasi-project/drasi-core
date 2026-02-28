@@ -15,10 +15,9 @@
 //! OCI registry client for pulling and inspecting plugin artifacts.
 
 use crate::registry::types::{
-    PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
-    media_types,
+    media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use log::info;
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
@@ -60,7 +59,9 @@ impl OciRegistryClient {
     /// List available tags for a plugin reference.
     pub async fn list_tags(&self, reference: &str) -> Result<Vec<String>> {
         let parsed = PluginReference::parse(reference, &self.config.default_registry)?;
-        let oci_ref: Reference = parsed.to_oci_reference().parse()
+        let oci_ref: Reference = parsed
+            .to_oci_reference()
+            .parse()
             .context("invalid OCI reference")?;
 
         let response = self
@@ -77,8 +78,7 @@ impl OciRegistryClient {
         &self,
         reference: &str,
     ) -> Result<std::collections::BTreeMap<String, String>> {
-        let oci_ref: Reference = reference.parse()
-            .context("invalid OCI reference")?;
+        let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
         let (manifest, _digest) = self
             .client
@@ -98,8 +98,7 @@ impl OciRegistryClient {
 
     /// Fetch the plugin metadata JSON from the metadata layer.
     pub async fn fetch_metadata(&self, reference: &str) -> Result<PluginMetadataJson> {
-        let oci_ref: Reference = reference.parse()
-            .context("invalid OCI reference")?;
+        let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
         let image_data = self
             .client
@@ -136,8 +135,7 @@ impl OciRegistryClient {
         dest_dir: &Path,
         filename: &str,
     ) -> Result<PathBuf> {
-        let oci_ref: Reference = reference.parse()
-            .context("invalid OCI reference")?;
+        let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
         info!("Downloading plugin from {}...", reference);
 
@@ -192,8 +190,7 @@ impl OciRegistryClient {
 
     /// Get the manifest digest for a reference.
     pub async fn get_digest(&self, reference: &str) -> Result<String> {
-        let oci_ref: Reference = reference.parse()
-            .context("invalid OCI reference")?;
+        let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
         let (_manifest, digest) = self
             .client
@@ -229,16 +226,12 @@ impl OciRegistryClient {
         );
 
         // List all directory entries
-        let dir_oci_ref: Reference = dir_ref
-            .parse()
-            .context("invalid directory reference")?;
+        let dir_oci_ref: Reference = dir_ref.parse().context("invalid directory reference")?;
         let dir_response = self
             .client
             .list_tags(&dir_oci_ref, &self.auth(), None, None)
             .await
-            .context(
-                "failed to list plugin directory — directory package may not exist yet",
-            )?;
+            .context("failed to list plugin directory — directory package may not exist yet")?;
 
         // Parse directory tags into (type, kind) pairs
         // Tags are formatted as "type.kind" (e.g., "source.postgres", "reaction.storedproc-mssql")
