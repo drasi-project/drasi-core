@@ -330,64 +330,97 @@ fn build_plugins(args: &[String]) {
     let failed = Arc::new(AtomicBool::new(false));
     let target_dir = Arc::new(target_dir);
     let target = Arc::new(target);
-    let build_tool = Arc::new(build_tool.to_string());
+    let build_tool_str = build_tool.to_string();
     let plugins: Vec<_> = result
         .plugins
         .iter()
         .map(|p| (p.package.name.clone(), p.package.manifest_path.clone()))
         .collect();
 
-    for chunk in plugins.chunks(jobs) {
-        if failed.load(Ordering::Relaxed) {
-            break;
+    if use_cross {
+        // cross must run from workspace root using -p, and sequentially
+        // (each invocation starts a Docker container)
+        for (name, _manifest) in &plugins {
+            if failed.load(Ordering::Relaxed) {
+                break;
+            }
+            println!("  Building {}...", name);
+
+            let feature_flag = format!("{}/dynamic-plugin", name);
+            let mut cmd = Command::new(&build_tool_str);
+            cmd.args(["build", "--lib", "-p", name, "--features", &feature_flag]);
+
+            if let Some(t) = target.as_ref() {
+                cmd.args(["--target", t]);
+            }
+            if release {
+                cmd.arg("--release");
+            }
+
+            let status = cmd.status().expect("failed to run cross build");
+            if !status.success() {
+                eprintln!("Failed to build {}", name);
+                failed.store(true, Ordering::Relaxed);
+            } else {
+                println!("  Built {}", name);
+            }
         }
+    } else {
+        // cargo: parallel builds with --manifest-path
+        let build_tool = Arc::new(build_tool_str);
 
-        let handles: Vec<_> = chunk
-            .iter()
-            .map(|(name, manifest)| {
-                let name = name.clone();
-                let manifest = manifest.clone();
-                let failed = Arc::clone(&failed);
-                let target_dir = Arc::clone(&target_dir);
-                let target = Arc::clone(&target);
-                let build_tool = Arc::clone(&build_tool);
+        for chunk in plugins.chunks(jobs) {
+            if failed.load(Ordering::Relaxed) {
+                break;
+            }
 
-                thread::spawn(move || {
-                    println!("  Building {}...", name);
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|(name, manifest)| {
+                    let name = name.clone();
+                    let manifest = manifest.clone();
+                    let failed = Arc::clone(&failed);
+                    let target_dir = Arc::clone(&target_dir);
+                    let target = Arc::clone(&target);
+                    let build_tool = Arc::clone(&build_tool);
 
-                    let mut cmd = Command::new(build_tool.as_str());
-                    cmd.args([
-                        "build",
-                        "--lib",
-                        "--manifest-path",
-                        manifest.to_str().expect("invalid manifest path"),
-                        "--target-dir",
-                        target_dir.to_str().expect("invalid target dir"),
-                        "--features",
-                        "dynamic-plugin",
-                    ]);
+                    thread::spawn(move || {
+                        println!("  Building {}...", name);
 
-                    if let Some(t) = target.as_ref() {
-                        cmd.args(["--target", t]);
-                    }
+                        let mut cmd = Command::new(build_tool.as_str());
+                        cmd.args([
+                            "build",
+                            "--lib",
+                            "--manifest-path",
+                            manifest.to_str().expect("invalid manifest path"),
+                            "--target-dir",
+                            target_dir.to_str().expect("invalid target dir"),
+                            "--features",
+                            "dynamic-plugin",
+                        ]);
 
-                    if release {
-                        cmd.arg("--release");
-                    }
+                        if let Some(t) = target.as_ref() {
+                            cmd.args(["--target", t]);
+                        }
 
-                    let status = cmd.status().expect("failed to run build command");
-                    if !status.success() {
-                        eprintln!("Failed to build {}", name);
-                        failed.store(true, Ordering::Relaxed);
-                    } else {
-                        println!("  Built {}", name);
-                    }
+                        if release {
+                            cmd.arg("--release");
+                        }
+
+                        let status = cmd.status().expect("failed to run build command");
+                        if !status.success() {
+                            eprintln!("Failed to build {}", name);
+                            failed.store(true, Ordering::Relaxed);
+                        } else {
+                            println!("  Built {}", name);
+                        }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for h in handles {
-            h.join().expect("build thread panicked");
+            for h in handles {
+                h.join().expect("build thread panicked");
+            }
         }
     }
 
