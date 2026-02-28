@@ -882,9 +882,9 @@ async fn publish_directory_entry(
 
     let reference: oci_client::Reference = reference_str.parse()?;
 
-    // Single empty layer
+    // Minimal non-empty layer (GHCR rejects zero-length blobs)
     let layer = ImageLayer::new(
-        bytes::Bytes::from_static(b""),
+        bytes::Bytes::from_static(b"{}"),
         "application/vnd.drasi.plugin.directory.v1".to_string(),
         None,
     );

@@ -146,61 +146,114 @@ Result: [Removing {
 
 More examples can be found under the [examples](examples) folder.
 
-## Building Dynamic Plugins
+## Dynamic Plugins
 
-Drasi Core includes an `xtask` build tool for building and publishing dynamic plugins (shared libraries loaded at runtime by [Drasi Server](https://github.com/drasi-project/drasi-server)).
+Drasi Core includes an `xtask` build tool for building, listing, and publishing dynamic plugins — shared libraries (`.so`/`.dylib`/`.dll`) loaded at runtime by [Drasi Server](https://github.com/drasi-project/drasi-server).
+
+### What Makes a Crate a Plugin?
+
+A crate is automatically discovered as a dynamic plugin if it meets **both** criteria:
+
+1. **Has the `dynamic-plugin` feature** defined in its `Cargo.toml`
+2. **Follows the naming convention** `drasi-{type}-{kind}`, where `{type}` is one of `source`, `reaction`, or `bootstrap`
+
+For example, `drasi-source-postgres`, `drasi-reaction-log`, `drasi-bootstrap-mssql`.
 
 ### Prerequisites
 
 - Rust toolchain (see `rust-toolchain.toml`)
 - System dependencies: `jq`, `libjq-dev`, `protobuf-compiler` (Linux) or `jq`, `protobuf` (macOS)
+- For cross-compilation: [`cross`](https://github.com/cross-rs/cross) (Linux host with Docker)
 
-### Build Commands
+### xtask Commands
+
+#### `list-plugins` — Discover and list all dynamic plugins
+
+Scans the workspace for crates matching the plugin criteria and prints each plugin's type, kind, version, and manifest path. Also shows the workspace SDK, Core, and Lib versions.
 
 ```bash
-# List all discovered plugin crates
+cargo run -p xtask -- list-plugins
+# or
 make list-plugins
+```
 
+#### `build-plugins` — Build plugin shared libraries
+
+Builds all discovered plugin crates as `cdylib` shared libraries. Each plugin binary is placed under `target/<profile>/plugins/` (or `target/<triple>/<profile>/plugins/` for cross-builds), along with a `metadata.json` sidecar file containing plugin metadata.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--release` | Build in release mode (default: debug) |
+| `--jobs N` / `-j N` | Number of parallel build jobs |
+| `--target TRIPLE` | Cross-compile for a target triple (e.g. `aarch64-unknown-linux-gnu`) |
+
+**Examples:**
+
+```bash
 # Build all plugins (debug)
 make build-plugins
 
 # Build all plugins (release)
 make build-plugins-release
 
-# Build for a specific target (cross-compilation)
+# Cross-compile for ARM Linux
 cargo run -p xtask -- build-plugins --release --target aarch64-unknown-linux-gnu
 ```
 
-Built plugins are placed under `target/<profile>/` (or `target/<triple>/<profile>/` for cross-builds).
+**Cross-compilation behavior:**
+- On Linux hosts, uses `cross` (Docker-based) for Linux and Windows targets.
+- On macOS hosts, uses `cargo` directly. Only macOS targets are supported; Linux/Windows targets will exit with a clear error message.
+- Cross-arch builds on the same OS (e.g. macOS x86 → macOS ARM) use `cargo` with `--target`.
 
-### Running Host-SDK Integration Tests
+**Generated metadata (`metadata.json`):**
 
-```bash
-# Build test plugins and run integration tests
-make test-host-sdk
+A JSON file is written alongside each plugin binary with the following fields:
+
+```json
+{
+  "name": "drasi-source-postgres",
+  "kind": "postgres",
+  "type": "source",
+  "version": "0.1.8",
+  "sdk_version": "0.1.0",
+  "core_version": "0.1.0",
+  "lib_version": "0.1.0",
+  "target_triple": "x86_64-unknown-linux-gnu",
+  "description": "...",
+  "license": "Apache-2.0"
+}
 ```
 
-## Publishing Plugins to an OCI Registry
+#### `publish-plugins` — Publish plugins as OCI artifacts
 
-Plugins are published as OCI artifacts to a container registry (default: `ghcr.io/drasi-project`). Each architecture is published with a per-arch tag suffix, and a final merge step creates a multi-arch manifest index.
+Publishes built plugins to an OCI container registry. Each plugin is pushed as an OCI artifact with two layers:
 
-### Authentication
+| Layer | Media Type |
+|-------|-----------|
+| Plugin binary (`.so`/`.dylib`/`.dll`) | `application/vnd.drasi.plugin.v1+binary` |
+| Metadata JSON | `application/vnd.drasi.plugin.v1+metadata` |
 
-Set the following environment variables:
+After publishing all plugins, the command also updates the **plugin directory** — a special OCI package (`drasi-plugin-directory`) where each tag represents a known plugin (e.g. `source.postgres`, `reaction.storedproc-mssql`). This enables plugin discovery without knowing plugin names in advance.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--registry <URL>` | OCI registry (default: `ghcr.io/drasi-project`) |
+| `--plugins-dir <DIR>` | Override the plugins directory |
+| `--release` | Look in the release build directory |
+| `--target <TRIPLE>` | Specify target triple for locating cross-compiled plugins |
+| `--tag <TAG>` | Override the version tag for all plugins |
+| `--pre-release <LABEL>` | Append a pre-release label (e.g. `dev.1`) |
+| `--arch-suffix <SUFFIX>` | Append an architecture suffix to the tag (e.g. `linux-amd64`) |
+| `--dry-run` | Show what would be published without pushing |
+
+**Examples:**
 
 ```bash
-export OCI_REGISTRY_USERNAME=<your-github-username>
-export OCI_REGISTRY_PASSWORD=<your-pat-with-write-packages-scope>
-```
-
-The PAT needs the `write:packages` scope, and your GitHub account needs write access to the target org's packages.
-
-### Publish Workflow
-
-**1. Build and publish per-architecture:**
-
-```bash
-# Dry run (no push)
+# Dry run
 make publish-plugins-dry-run ARCH_SUFFIX=linux-amd64
 
 # Publish release build for a single architecture
@@ -213,35 +266,92 @@ make publish-plugins-release ARCH_SUFFIX=linux-amd64 PRE_RELEASE=dev.1
 make publish-plugins-release ARCH_SUFFIX=linux-amd64 REGISTRY=ghcr.io/my-org
 ```
 
-**2. Merge per-arch tags into a multi-arch manifest index:**
+### Authentication
 
-After publishing all architectures, create the manifest index:
+Set the following environment variables:
 
 ```bash
-# Merge all default architectures (linux-amd64, linux-arm64, windows-amd64, darwin-amd64, darwin-arm64)
-make merge-manifests
-
-# Merge with pre-release label
-make merge-manifests PRE_RELEASE=dev.1
-
-# Dry run
-make merge-manifests-dry-run
-
-# Merge specific architectures only
-make merge-manifests MERGE_ARCHS="linux-amd64 linux-arm64"
+export OCI_REGISTRY_USERNAME=<your-github-username>
+export OCI_REGISTRY_PASSWORD=<your-pat-with-write-packages-scope>
 ```
 
-### Per-Architecture Tag Format
+The PAT needs the `write:packages` scope, and your GitHub account needs write access to the target org's packages.
 
-Each plugin is tagged with its own version from `Cargo.toml`:
+### Tag Format
 
-- Per-arch: `ghcr.io/drasi-project/source/postgres:0.1.8-linux-amd64`
-- Merged: `ghcr.io/drasi-project/source/postgres:0.1.8`
-- Pre-release: `ghcr.io/drasi-project/source/postgres:0.1.8-dev.1`
+Plugins use **platform-suffixed tags** — the architecture is always appended as a tag suffix. There is no multi-arch manifest index; clients auto-append the correct suffix when pulling.
+
+| Format | Example |
+|--------|---------|
+| Release | `ghcr.io/drasi-project/source/postgres:0.1.8-linux-amd64` |
+| Pre-release | `ghcr.io/drasi-project/source/postgres:0.1.8-dev.1-linux-amd64` |
+| Musl | `ghcr.io/drasi-project/source/postgres:0.1.8-linux-musl-amd64` |
+
+Supported architecture suffixes:
+
+| Suffix | Target Triple |
+|--------|--------------|
+| `linux-amd64` | `x86_64-unknown-linux-gnu` |
+| `linux-arm64` | `aarch64-unknown-linux-gnu` |
+| `linux-musl-amd64` | `x86_64-unknown-linux-musl` |
+| `linux-musl-arm64` | `aarch64-unknown-linux-musl` |
+| `windows-amd64` | `x86_64-pc-windows-gnu` |
+| `darwin-amd64` | `x86_64-apple-darwin` |
+| `darwin-arm64` | `aarch64-apple-darwin` |
+
+### Plugin Directory
+
+A special OCI package called `drasi-plugin-directory` is maintained in the registry. Each tag represents a known plugin using `{type}.{kind}` format (e.g. `source.postgres`, `reaction.storedproc-mssql`). The `.` separator is used because plugin types never contain dots, avoiding ambiguity with dashes in plugin kind names.
+
+This enables the `plugin search` command in Drasi Server to discover available plugins by listing directory tags, then fetching version information from each matching plugin package.
+
+### Publishing All Architectures
+
+The `publish-all` target builds and publishes plugins for all 7 supported architectures in sequence:
+
+```bash
+# Publish all architectures
+make publish-all
+
+# Dry run
+make publish-all-dry-run
+
+# With pre-release label
+make publish-all PRE_RELEASE=dev.1
+```
 
 ### CI Workflow
 
-The `.github/workflows/publish-plugins.yml` workflow automates the full publish pipeline across 5 architectures (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`) with a final manifest merge step. Trigger it via `workflow_dispatch` in the GitHub Actions UI.
+The `.github/workflows/publish-plugins.yml` workflow automates publishing across all 7 architectures. It uses a build matrix:
+
+- Linux targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) build on `ubuntu-latest` via `cross`
+- macOS targets (`x86_64-apple-darwin`, `aarch64-apple-darwin`) build on `macos-latest` via `cargo`
+- Windows target (`x86_64-pc-windows-gnu`) builds on `ubuntu-latest` via `cross`
+
+After all builds succeed, a visibility step sets all packages (including `drasi-plugin-directory`) to public on GHCR. Trigger the workflow via `workflow_dispatch` in the GitHub Actions UI.
+
+### Makefile Reference
+
+| Target | Description |
+|--------|-------------|
+| `make list-plugins` | List all discovered plugin crates |
+| `make build-plugins` | Build all plugins (debug) |
+| `make build-plugins-release` | Build all plugins (release) |
+| `make test-host-sdk` | Build test plugins and run host-sdk integration tests |
+| `make publish-plugins` | Publish plugins (debug build) |
+| `make publish-plugins-release` | Publish plugins (release build) |
+| `make publish-plugins-dry-run` | Preview what would be published |
+| `make publish-all` | Build and publish for all 7 architectures |
+| `make publish-all-dry-run` | Dry run of `publish-all` |
+
+All publish targets accept optional variables: `REGISTRY`, `PRE_RELEASE`, `ARCH_SUFFIX`.
+
+### Running Host-SDK Integration Tests
+
+```bash
+# Build test plugins and run integration tests
+make test-host-sdk
+```
 
 ## Storage implementations
 
