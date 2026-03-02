@@ -636,7 +636,9 @@ impl PlatformSource {
             }
         }
 
-        unreachable!()
+        Err(anyhow::anyhow!(
+            "Failed to connect to Redis after {max_retries} attempts"
+        ))
     }
 
     /// Create or recreate consumer group based on configuration
