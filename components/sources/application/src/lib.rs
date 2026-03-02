@@ -151,7 +151,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
+use drasi_lib::channels::{ComponentStatus, ComponentType, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;

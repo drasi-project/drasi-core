@@ -541,7 +541,7 @@ mod runtime_tests {
 
     #[test]
     fn test_runtime_config_from_drasi_lib_config() {
-        let mut config = DrasiLibConfig {
+        let config = DrasiLibConfig {
             id: "test-server".to_string(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,

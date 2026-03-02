@@ -4,15 +4,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
