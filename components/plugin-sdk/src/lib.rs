@@ -244,9 +244,76 @@ pub use tokio as __tokio;
 ///     bootstrap_descriptors = [PostgresBootstrapDescriptor],
 /// );
 /// ```
+///
+/// An optional `worker_threads` parameter sets the default number of tokio
+/// worker threads for the plugin's runtime (default: 2). This can be
+/// overridden at deploy time via the `DRASI_PLUGIN_WORKERS` environment
+/// variable.
+///
+/// ```rust,ignore
+/// drasi_plugin_sdk::export_plugin!(
+///     plugin_id = "postgres",
+///     // ...
+///     bootstrap_descriptors = [PostgresBootstrapDescriptor],
+///     worker_threads = 4,
+/// );
+/// ```
 #[macro_export]
 macro_rules! export_plugin {
     // ── Declarative form: descriptors listed inline ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        worker_threads = $workers:expr $(,)?
+    ) => {
+        fn __auto_create_plugin_vtables() -> (
+            Vec<$crate::ffi::SourcePluginVtable>,
+            Vec<$crate::ffi::ReactionPluginVtable>,
+            Vec<$crate::ffi::BootstrapPluginVtable>,
+        ) {
+            let source_descs = vec![
+                $( $crate::ffi::build_source_plugin_vtable(
+                    $source_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            let reaction_descs = vec![
+                $( $crate::ffi::build_reaction_plugin_vtable(
+                    $reaction_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            let bootstrap_descs = vec![
+                $( $crate::ffi::build_bootstrap_plugin_vtable(
+                    $bootstrap_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            (source_descs, reaction_descs, bootstrap_descs)
+        }
+
+        $crate::export_plugin!(
+            @internal
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            init_fn = __auto_create_plugin_vtables,
+            default_workers = $workers,
+        );
+    };
+    // ── Declarative form: descriptors listed inline (default worker threads) ──
     (
         plugin_id = $plugin_id:expr,
         core_version = $core_ver:expr,
@@ -295,6 +362,7 @@ macro_rules! export_plugin {
             lib_version = $lib_ver,
             plugin_version = $plugin_ver,
             init_fn = __auto_create_plugin_vtables,
+            default_workers = 2usize,
         );
     };
 
@@ -305,15 +373,30 @@ macro_rules! export_plugin {
         core_version = $core_ver:expr,
         lib_version = $lib_ver:expr,
         plugin_version = $plugin_ver:expr,
-        init_fn = $init_fn:ident $(,)?
+        init_fn = $init_fn:ident,
+        default_workers = $default_workers:expr $(,)?
     ) => {
         // ── Tokio runtime (accessible to plugin code) ──
         pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
             use ::std::sync::OnceLock;
             static RT: OnceLock<$crate::__tokio::runtime::Runtime> = OnceLock::new();
             RT.get_or_init(|| {
+                let default_threads: usize = $default_workers;
+                let kind_var = format!(
+                    "DRASI_PLUGIN_WORKERS_{}",
+                    $plugin_id.to_uppercase().replace('-', "_")
+                );
+                let threads = ::std::env::var(&kind_var)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .or_else(|| {
+                        ::std::env::var("DRASI_PLUGIN_WORKERS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                    })
+                    .unwrap_or(default_threads);
                 $crate::__tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
+                    .worker_threads(threads)
                     .enable_all()
                     .thread_name(concat!($plugin_id, "-worker"))
                     .build()
@@ -334,13 +417,12 @@ macro_rules! export_plugin {
                 >,
             > = unsafe { Box::from_raw(future_ptr as *mut _) };
             let handle = __plugin_runtime().handle().clone();
-            let result = ::std::thread::spawn(move || {
-                let raw = handle.block_on(*boxed);
-                __SendPtr(raw)
-            })
-            .join()
-            .expect("Plugin executor thread panicked");
-            result.0
+            let (tx, rx) = ::std::sync::mpsc::sync_channel::<__SendPtr>(0);
+            handle.spawn(async move {
+                let raw = (*boxed).await;
+                let _ = tx.send(__SendPtr(raw));
+            });
+            rx.recv().expect("Plugin executor task dropped").0
         }
 
         /// Run an async future on the plugin runtime, blocking until complete.

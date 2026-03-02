@@ -18,13 +18,14 @@
 //! trait implementations into FFI-safe vtables. Each `extern "C"` function pointer
 //! handles:
 //! - `catch_unwind` for panic safety at the FFI boundary
-//! - Async→sync bridging via `std::thread::spawn` + `block_on`
+//! - Async→sync bridging via `handle.spawn` + channel wait
 //! - Lifecycle event emission
 //! - Error → `FfiResult` conversion
 
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
@@ -59,6 +60,28 @@ const _: () = assert!(
     std::mem::size_of::<*mut ()>() == std::mem::size_of::<super::callbacks::LogCallbackFn>(),
     "LogCallbackFn size must match pointer size"
 );
+
+/// Dispatch an async future to the plugin's tokio runtime and block until completion.
+///
+/// The vtable functions are `extern "C"` (synchronous) but are called from the
+/// host's async context. We cannot call `plugin_handle.block_on()` directly
+/// because tokio detects the nested runtime and panics. Instead we spawn a
+/// green thread on the plugin runtime and wait for the result via a channel.
+///
+/// # Safety
+/// The future must not outlive any data it references. Since we block until
+/// completion, the future finishes before this function returns.
+fn dispatch_to_runtime<R: Send + 'static>(
+    handle: &tokio::runtime::Handle,
+    future: impl std::future::Future<Output = R> + Send + 'static,
+) -> R {
+    let (tx, rx) = mpsc::sync_channel::<R>(0);
+    handle.spawn(async move {
+        let result = future.await;
+        let _ = tx.send(result);
+    });
+    rx.recv().expect("plugin runtime task dropped unexpectedly")
+}
 
 /// Helper to extract ElementMetadata from a SourceChange.
 fn source_change_metadata(change: &SourceChange) -> Option<&ElementMetadata> {
@@ -122,19 +145,18 @@ pub fn current_instance_log_ctx() -> Option<InstanceLogContext> {
     INSTANCE_LOG_CTX.with(|ctx| ctx.borrow().clone())
 }
 
-/// Set the TLS log context and run a closure.
-fn with_instance_log_ctx<F, R>(ctx: Option<InstanceLogContext>, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
+/// Set the TLS log context (for use in async blocks dispatched to the plugin runtime).
+fn set_instance_log_ctx(ctx: Option<InstanceLogContext>) {
     INSTANCE_LOG_CTX.with(|tls| {
         *tls.borrow_mut() = ctx;
     });
-    let result = f();
+}
+
+/// Clear the TLS log context.
+fn clear_instance_log_ctx() {
     INSTANCE_LOG_CTX.with(|tls| {
         *tls.borrow_mut() = None;
     });
-    result
 }
 
 // ============================================================================
@@ -245,12 +267,14 @@ pub fn build_source_vtable<T: Source + 'static>(
             emit_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_instance_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-            })
-            .join()
-            .expect("source start thread panicked");
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.start().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_lifecycle_for(w, FfiLifecycleEventType::Started, "");
@@ -271,12 +295,14 @@ pub fn build_source_vtable<T: Source + 'static>(
             emit_lifecycle_for(w, FfiLifecycleEventType::Stopping, "");
             let log_ctx = build_instance_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-            })
-            .join()
-            .expect("source stop thread panicked");
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.stop().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_lifecycle_for(w, FfiLifecycleEventType::Stopped, "");
@@ -294,12 +320,11 @@ pub fn build_source_vtable<T: Source + 'static>(
     extern "C" fn status_fn<T: Source + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let handle = (w.runtime_handle)().handle().clone();
-        let status = std::thread::spawn({
-            let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-            move || handle.block_on(inner.inner.status())
-        })
-        .join()
-        .expect("source status thread panicked");
+        let ptr = SendPtr(state as *const SourceWrapper<T>);
+        let status = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.status().await
+        });
         component_status_to_ffi(status)
     }
 
@@ -307,12 +332,11 @@ pub fn build_source_vtable<T: Source + 'static>(
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const SourceWrapper<T>) };
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-                move || handle.block_on(inner.inner.deprovision())
-            })
-            .join()
-            .expect("source deprovision thread panicked");
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.deprovision().await
+            });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -346,12 +370,11 @@ pub fn build_source_vtable<T: Source + 'static>(
         };
 
         let handle = (w.runtime_handle)().handle().clone();
-        let result = std::thread::spawn({
-            let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-            move || handle.block_on(inner.inner.subscribe(settings))
-        })
-        .join()
-        .expect("source subscribe thread panicked");
+        let ptr = SendPtr(state as *const SourceWrapper<T>);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.subscribe(settings).await
+        });
 
         match result {
             Ok(sub) => wrap_subscription_response(sub, w.vtable_executor),
@@ -396,12 +419,11 @@ pub fn build_source_vtable<T: Source + 'static>(
             *guard = Some(status_rx);
         }
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-            move || handle.block_on(inner.inner.initialize(runtime_ctx))
-        })
-        .join()
-        .expect("source initialize thread panicked");
+        let ptr = SendPtr(state as *const SourceWrapper<T>);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.initialize(runtime_ctx).await
+        });
     }
 
     extern "C" fn set_bootstrap_provider_fn<T: Source + 'static>(
@@ -417,12 +439,11 @@ pub fn build_source_vtable<T: Source + 'static>(
         });
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner = unsafe { &*(state as *const SourceWrapper<T>) };
-            move || handle.block_on(inner.inner.set_bootstrap_provider(proxy))
-        })
-        .join()
-        .expect("set_bootstrap_provider thread panicked");
+        let ptr = SendPtr(state as *const SourceWrapper<T>);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.set_bootstrap_provider(proxy).await
+        });
     }
 
     extern "C" fn drop_fn<T: Source + 'static>(state: *mut c_void) {
@@ -562,15 +583,14 @@ pub fn build_source_vtable_from_boxed(
             emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_source_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-                }
-            })
-            .join()
-            .expect("source start thread panicked");
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { inner_ptr.as_ref() };
+                let r = inner.inner.start().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Started, "");
@@ -591,15 +611,14 @@ pub fn build_source_vtable_from_boxed(
             emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Stopping, "");
             let log_ctx = build_dyn_source_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-                }
-            })
-            .join()
-            .expect("source stop thread panicked");
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { inner_ptr.as_ref() };
+                let r = inner.inner.stop().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_dyn_source_lifecycle(w, FfiLifecycleEventType::Stopped, "");
@@ -617,15 +636,11 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let handle = (w.runtime_handle)().handle().clone();
-        let status = std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.status())
-            }
-        })
-        .join()
-        .expect("source status thread panicked");
+        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+        let status = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.status().await
+        });
         component_status_to_ffi(status)
     }
 
@@ -633,15 +648,11 @@ pub fn build_source_vtable_from_boxed(
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynSourceWrapper) };
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    handle.block_on(inner.inner.deprovision())
-                }
-            })
-            .join()
-            .expect("source deprovision thread panicked");
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.deprovision().await
+            });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -675,15 +686,11 @@ pub fn build_source_vtable_from_boxed(
         };
 
         let handle = (w.runtime_handle)().handle().clone();
-        let result = std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.subscribe(settings))
-            }
-        })
-        .join()
-        .expect("source subscribe thread panicked");
+        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.subscribe(settings).await
+        });
 
         match result {
             Ok(sub) => {
@@ -724,15 +731,11 @@ pub fn build_source_vtable_from_boxed(
             *guard = Some(status_rx);
         }
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.initialize(runtime_ctx))
-            }
-        })
-        .join()
-        .expect("source initialize thread panicked");
+        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.initialize(runtime_ctx).await
+        });
     }
 
     extern "C" fn set_bootstrap_provider_fn(
@@ -748,15 +751,11 @@ pub fn build_source_vtable_from_boxed(
         });
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.set_bootstrap_provider(proxy))
-            }
-        })
-        .join()
-        .expect("set_bootstrap_provider thread panicked");
+        let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.set_bootstrap_provider(proxy).await
+        });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
@@ -898,12 +897,14 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-            })
-            .join()
-            .expect("reaction start thread panicked");
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.start().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Started, "");
@@ -924,12 +925,14 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Stopping, "");
             let log_ctx = build_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-            })
-            .join()
-            .expect("reaction stop thread panicked");
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.stop().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_reaction_lifecycle_for(w, FfiLifecycleEventType::Stopped, "");
@@ -947,12 +950,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     extern "C" fn status_fn<T: Reaction + 'static>(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         let handle = (w.runtime_handle)().handle().clone();
-        let status = std::thread::spawn({
-            let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-            move || handle.block_on(inner.inner.status())
-        })
-        .join()
-        .expect("reaction status thread panicked");
+        let ptr = SendPtr(state as *const ReactionWrapper<T>);
+        let status = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.status().await
+        });
         component_status_to_ffi(status)
     }
 
@@ -960,12 +962,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const ReactionWrapper<T>) };
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || handle.block_on(inner.inner.deprovision())
-            })
-            .join()
-            .expect("reaction deprovision thread panicked");
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.deprovision().await
+            });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1004,12 +1005,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             *guard = Some(status_rx);
         }
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-            move || handle.block_on(inner.inner.initialize(runtime_ctx))
-        })
-        .join()
-        .expect("reaction initialize thread panicked");
+        let ptr = SendPtr(state as *const ReactionWrapper<T>);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.initialize(runtime_ctx).await
+        });
     }
 
     extern "C" fn enqueue_query_result_fn<T: Reaction + 'static>(
@@ -1021,12 +1021,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             let query_result =
                 unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
             let handle = (w.runtime_handle)().handle().clone();
-            let res = std::thread::spawn({
-                let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
-                move || handle.block_on(inner.inner.enqueue_query_result(query_result))
-            })
-            .join()
-            .expect("enqueue_query_result thread panicked");
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let res = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.enqueue_query_result(query_result).await
+            });
             match res {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1164,15 +1163,14 @@ pub fn build_reaction_vtable_from_boxed(
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.start()))
-                }
-            })
-            .join()
-            .expect("reaction start thread panicked");
+            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { inner_ptr.as_ref() };
+                let r = inner.inner.start().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Started, "");
@@ -1193,15 +1191,14 @@ pub fn build_reaction_vtable_from_boxed(
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Stopping, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    with_instance_log_ctx(log_ctx, || handle.block_on(inner.inner.stop()))
-                }
-            })
-            .join()
-            .expect("reaction stop thread panicked");
+            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { inner_ptr.as_ref() };
+                let r = inner.inner.stop().await;
+                clear_instance_log_ctx();
+                r
+            });
             match result {
                 Ok(()) => {
                     emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Stopped, "");
@@ -1219,15 +1216,11 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
         let w = unsafe { &*(state as *const DynReactionWrapper) };
         let handle = (w.runtime_handle)().handle().clone();
-        let status = std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.status())
-            }
-        })
-        .join()
-        .expect("reaction status thread panicked");
+        let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+        let status = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.status().await
+        });
         component_status_to_ffi(status)
     }
 
@@ -1235,15 +1228,11 @@ pub fn build_reaction_vtable_from_boxed(
         catch_panic_ffi(|| {
             let w = unsafe { &*(state as *const DynReactionWrapper) };
             let handle = (w.runtime_handle)().handle().clone();
-            let result = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    handle.block_on(inner.inner.deprovision())
-                }
-            })
-            .join()
-            .expect("reaction deprovision thread panicked");
+            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let result = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.deprovision().await
+            });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1278,15 +1267,11 @@ pub fn build_reaction_vtable_from_boxed(
             *guard = Some(status_rx);
         }
         let handle = (w.runtime_handle)().handle().clone();
-        std::thread::spawn({
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-            move || {
-                let inner = unsafe { inner_ptr.as_ref() };
-                handle.block_on(inner.inner.initialize(runtime_ctx))
-            }
-        })
-        .join()
-        .expect("reaction initialize thread panicked");
+        let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+        dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { inner_ptr.as_ref() };
+            inner.inner.initialize(runtime_ctx).await
+        });
     }
 
     extern "C" fn enqueue_query_result_fn(state: *mut c_void, result: *mut c_void) -> FfiResult {
@@ -1295,15 +1280,11 @@ pub fn build_reaction_vtable_from_boxed(
             let query_result =
                 unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
             let handle = (w.runtime_handle)().handle().clone();
-            let res = std::thread::spawn({
-                let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-                move || {
-                    let inner = unsafe { inner_ptr.as_ref() };
-                    handle.block_on(inner.inner.enqueue_query_result(query_result))
-                }
-            })
-            .join()
-            .expect("enqueue_query_result thread panicked");
+            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let res = dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.enqueue_query_result(query_result).await
+            });
             match res {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1554,19 +1535,12 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         };
 
         let handle = (w.runtime_handle)().handle().clone();
-        let result = std::thread::spawn({
-            let inner = unsafe { &*(state as *const SourcePluginWrapper<T>) };
-            let id_owned = id_str.clone();
-            move || {
-                handle.block_on(
-                    inner
-                        .inner
-                        .create_source(&id_owned, &config_value, auto_start),
-                )
-            }
-        })
-        .join()
-        .expect("create_source thread panicked");
+        let ptr = SendPtr(state as *const SourcePluginWrapper<T>);
+        let id_owned = id_str.clone();
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_source(&id_owned, &config_value, auto_start).await
+        });
 
         match result {
             Ok(source) => {
@@ -1691,20 +1665,12 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         };
 
         let handle = (w.runtime_handle)().handle().clone();
-        let result = std::thread::spawn({
-            let inner = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
-            let id_owned = id_str.clone();
-            move || {
-                handle.block_on(inner.inner.create_reaction(
-                    &id_owned,
-                    query_ids,
-                    &config_value,
-                    auto_start,
-                ))
-            }
-        })
-        .join()
-        .expect("create_reaction thread panicked");
+        let ptr = SendPtr(state as *const ReactionPluginWrapper<T>);
+        let id_owned = id_str.clone();
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_reaction(&id_owned, query_ids, &config_value, auto_start).await
+        });
 
         match result {
             Ok(reaction) => {
@@ -1827,18 +1793,11 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         };
 
         let handle = (w.runtime_handle)().handle().clone();
-        let result = std::thread::spawn({
-            let inner = unsafe { &*(state as *const BootstrapPluginWrapper<T>) };
-            move || {
-                handle.block_on(
-                    inner
-                        .inner
-                        .create_bootstrap_provider(&config_value, &source_config_value),
-                )
-            }
-        })
-        .join()
-        .expect("create_bootstrap_provider thread panicked");
+        let ptr = SendPtr(state as *const BootstrapPluginWrapper<T>);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_bootstrap_provider(&config_value, &source_config_value).await
+        });
 
         match result {
             Ok(provider) => {
