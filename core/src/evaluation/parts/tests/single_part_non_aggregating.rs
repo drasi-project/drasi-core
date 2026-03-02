@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::process_solution;
+use super::{process_solution, IGNORED_ROW_SIGNATURE};
 
 use crate::{
     evaluation::{
@@ -50,13 +50,15 @@ async fn add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
     assert_eq!(
         result.await,
         vec![QueryPartEvaluationContext::Adding {
-            after: variablemap!["a" => node1.clone()]
+            after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -96,6 +98,7 @@ async fn update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -106,6 +109,7 @@ async fn update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -113,7 +117,8 @@ async fn update_solution() {
         result.await,
         vec![QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
-            after: variablemap!["a" => node2.clone()]
+            after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -123,6 +128,7 @@ async fn update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node2.clone()],
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -130,6 +136,7 @@ async fn update_solution() {
         result.await,
         vec![QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -157,6 +164,7 @@ async fn remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -166,13 +174,15 @@ async fn remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
     assert_eq!(
         result.await,
         vec![QueryPartEvaluationContext::Removing {
-            before: variablemap!["a" => node1.clone()]
+            before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }

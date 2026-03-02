@@ -51,11 +51,12 @@ pub struct RocksDbElementIndex {
 }
 
 pub struct Context {
-    db: OptimisticTransactionDB,
+    db: Arc<OptimisticTransactionDB>,
     join_spec_by_label: RwLock<JoinSpecByLabel>,
     options: RocksIndexOptions,
 }
 
+#[derive(Clone, Copy)]
 pub struct RocksIndexOptions {
     pub archive_enabled: bool,
     pub direct_io: bool,
@@ -69,49 +70,18 @@ const PARTIAL_CF: &str = "partial";
 const ELEMENT_BLOCK_CACHE_SIZE: u64 = 32;
 
 impl RocksDbElementIndex {
-    pub fn new(query_id: &str, path: &str, options: RocksIndexOptions) -> Result<Self, IndexError> {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        opts.set_db_write_buffer_size(64 * 1024 * 1024);
-        opts.set_use_direct_reads(options.direct_io);
-        opts.set_use_direct_io_for_flush_and_compaction(options.direct_io);
-
-        let path = std::path::PathBuf::from(path)
-            .join(query_id)
-            .join("elements");
-        let path = match path.to_str() {
-            Some(path) => path,
-            None => return Err(IndexError::NotSupported),
-        };
-
-        let mut column_families = vec![
-            rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options()),
-            rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options()),
-            rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options()),
-            rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options()),
-            rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options()),
-        ];
-
-        if options.archive_enabled {
-            column_families.push(rocksdb::ColumnFamilyDescriptor::new(
-                archive_index::ARCHIVE_CF,
-                archive_index::get_archive_cf_options(),
-            ));
-        }
-
-        let db = match OptimisticTransactionDB::open_cf_descriptors(&opts, path, column_families) {
-            Ok(db) => db,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        Ok(RocksDbElementIndex {
+    /// Create a new RocksDbElementIndex from a shared database handle.
+    ///
+    /// The database must already have the required column families created.
+    /// Use `open_unified_db()` to open a database with all required CFs.
+    pub fn new(db: Arc<OptimisticTransactionDB>, options: RocksIndexOptions) -> Self {
+        RocksDbElementIndex {
             context: Arc::new(Context {
                 db,
                 join_spec_by_label: RwLock::new(HashMap::new()),
                 options,
             }),
-        })
+        }
     }
 }
 
@@ -388,22 +358,44 @@ impl ElementIndex for RocksDbElementIndex {
     }
 }
 
-fn get_partial_cf_options() -> Options {
+pub(crate) fn get_partial_cf_options() -> Options {
     let mut partial_opts = Options::default();
     partial_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     partial_opts
 }
 
-fn get_inout_index_cf_options() -> Options {
+pub(crate) fn get_inout_index_cf_options() -> Options {
     let mut inout_bound_opts = Options::default();
     inout_bound_opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(18));
     inout_bound_opts
 }
 
-fn get_elements_cf_options() -> Options {
+pub(crate) fn get_elements_cf_options() -> Options {
     let mut elements_opts = Options::default();
     elements_opts.optimize_for_point_lookup(ELEMENT_BLOCK_CACHE_SIZE);
     elements_opts
+}
+
+/// Collect all column family descriptors needed by the element index.
+pub(crate) fn element_cf_descriptors(
+    options: &RocksIndexOptions,
+) -> Vec<rocksdb::ColumnFamilyDescriptor> {
+    let mut cfs = vec![
+        rocksdb::ColumnFamilyDescriptor::new(ELEMENTS_CF, get_elements_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(SLOT_CF, get_elements_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(INBOUND_CF, get_inout_index_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(OUTBOUND_CF, get_inout_index_cf_options()),
+        rocksdb::ColumnFamilyDescriptor::new(PARTIAL_CF, get_partial_cf_options()),
+    ];
+
+    if options.archive_enabled {
+        cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+            archive_index::ARCHIVE_CF,
+            archive_index::get_archive_cf_options(),
+        ));
+    }
+
+    cfs
 }
 
 fn get_element_internal(

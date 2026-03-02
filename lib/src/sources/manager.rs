@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -264,20 +264,23 @@ impl SourceManager {
         if let Some(source) = source {
             let status = source.status().await;
 
-            // If the source is running, stop it first
-            if matches!(status, ComponentStatus::Running) {
+            // If the source is running or starting, stop it first
+            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
                 info!("Stopping source '{id}' before deletion");
-                source.stop().await?;
+                if let Err(e) = source.stop().await {
+                    warn!("Failed to stop source '{id}' during deletion (may already be stopped): {e}");
+                }
 
                 // Wait a bit to ensure the source has fully stopped
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                // Verify it's stopped
+                // Verify it's stopped - accept Stopped or Error
                 let new_status = source.status().await;
-                if !matches!(new_status, ComponentStatus::Stopped) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to stop source '{id}' before deletion"
-                    ));
+                if !matches!(
+                    new_status,
+                    ComponentStatus::Stopped | ComponentStatus::Error
+                ) {
+                    warn!("Source '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
                 }
             } else {
                 // Still validate the operation for non-running states
