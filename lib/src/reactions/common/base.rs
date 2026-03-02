@@ -312,8 +312,9 @@ impl ReactionBase {
     ///
     /// The host calls this to forward query results to the reaction's priority queue.
     /// Results are processed in timestamp order by the reaction's processing task.
-    pub async fn enqueue_query_result(&self, result: QueryResult) {
+    pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
         self.priority_queue.enqueue_wait(Arc::new(result)).await;
+        Ok(())
     }
 
     /// Perform common cleanup operations

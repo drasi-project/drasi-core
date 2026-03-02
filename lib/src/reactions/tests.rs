@@ -141,8 +141,8 @@ mod manager_tests {
             self.status.read().await.clone()
         }
 
-        async fn enqueue_query_result(&self, _result: QueryResult) {
-            // No-op for test mock
+        async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -646,8 +646,8 @@ mod manager_tests {
             Ok(())
         }
 
-        async fn enqueue_query_result(&self, _result: QueryResult) {
-            // No-op for test mock
+        async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+            Ok(())
         }
     }
 

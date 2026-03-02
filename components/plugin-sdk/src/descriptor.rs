@@ -76,6 +76,16 @@
 //! boundary. Both plugin and server **must** be compiled with the same Rust toolchain
 //! and the same `drasi-plugin-sdk` version for this to work correctly.
 //!
+//! # Schema Naming Convention
+//!
+//! Schema names follow the pattern `{component_type}.{kind}.{TypeName}` to avoid
+//! collisions when multiple plugins are loaded into the same OpenAPI spec.
+//!
+//! Examples:
+//! - `source.postgres.PostgresSourceConfig`
+//! - `reaction.http.HttpReactionConfig`
+//! - `bootstrap.mssql.MssqlBootstrapConfig`
+//!
 //! # Complete Example
 //!
 //! ```rust,ignore

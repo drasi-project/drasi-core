@@ -152,18 +152,21 @@ impl PluginRegistration {
     }
 
     /// Register a source plugin descriptor.
+    #[must_use]
     pub fn with_source(mut self, descriptor: Box<dyn SourcePluginDescriptor>) -> Self {
         self.sources.push(descriptor);
         self
     }
 
     /// Register a reaction plugin descriptor.
+    #[must_use]
     pub fn with_reaction(mut self, descriptor: Box<dyn ReactionPluginDescriptor>) -> Self {
         self.reactions.push(descriptor);
         self
     }
 
     /// Register a bootstrap plugin descriptor.
+    #[must_use]
     pub fn with_bootstrapper(mut self, descriptor: Box<dyn BootstrapPluginDescriptor>) -> Self {
         self.bootstrappers.push(descriptor);
         self

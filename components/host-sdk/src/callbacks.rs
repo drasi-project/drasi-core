@@ -19,7 +19,7 @@
 //! and lifecycle events into the DrasiLib systems that the REST API reads from.
 
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use drasi_lib::channels::events::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
@@ -31,6 +31,24 @@ use drasi_plugin_sdk::ffi::{
 };
 use tokio::sync::RwLock;
 
+/// Spawn an async future on the host tokio runtime and block until it completes.
+///
+/// Callbacks are `extern "C"` functions invoked from within a plugin's own tokio
+/// runtime (inside `block_on`), so we cannot call `block_on` again on the same
+/// thread. Instead we spawn a green thread on the host runtime and wait for
+/// completion via an `mpsc::sync_channel`.
+fn run_on_host_runtime<F>(handle: &tokio::runtime::Handle, f: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+    handle.spawn(async move {
+        f.await;
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv();
+}
+
 /// Host-side callback context that routes plugin logs and events into DrasiLib.
 ///
 /// One context is created per DrasiLib instance. The host passes a raw pointer
@@ -38,6 +56,8 @@ use tokio::sync::RwLock;
 pub struct CallbackContext {
     /// The DrasiLib instance ID that owns the plugins using this context.
     pub instance_id: String,
+    /// Handle to the host tokio runtime for dispatching async callback work.
+    pub runtime_handle: tokio::runtime::Handle,
     /// The global log registry (shared across all DrasiLib instances).
     pub log_registry: Arc<ComponentLogRegistry>,
     /// The event history for the owning DrasiLib instance's sources.
@@ -75,6 +95,8 @@ impl CallbackContext {
 pub struct InstanceCallbackContext {
     /// The DrasiLib instance ID.
     pub instance_id: String,
+    /// Handle to the host tokio runtime for dispatching async callback work.
+    pub runtime_handle: tokio::runtime::Handle,
     /// The global log registry.
     pub log_registry: Arc<ComponentLogRegistry>,
     /// Channel for lifecycle events (same one the SourceManager monitors).
@@ -217,14 +239,10 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             ComponentType::Source, // TODO: parse from entry if available
         );
         let registry = context.log_registry.clone();
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for log callback");
-            rt.block_on(registry.log(log_message));
-        })
-        .join();
+        let handle = context.runtime_handle.clone();
+        run_on_host_runtime(&handle, async move {
+            registry.log(log_message).await;
+        });
     }
 }
 
@@ -276,16 +294,9 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
             _ => context.source_event_history.clone(),
         };
 
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for lifecycle callback");
-            rt.block_on(async {
-                event_history.write().await.record_event(component_event);
-            });
-        })
-        .join();
+        run_on_host_runtime(&context.runtime_handle, async move {
+            event_history.write().await.record_event(component_event);
+        });
     }
 }
 
@@ -365,14 +376,10 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             ComponentType::Source,
         );
         let registry = context.log_registry.clone();
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for instance log callback");
-            rt.block_on(registry.log(log_message));
-        })
-        .join();
+        let handle = context.runtime_handle.clone();
+        run_on_host_runtime(&handle, async move {
+            registry.log(log_message).await;
+        });
     }
 }
 
@@ -422,18 +429,12 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         };
 
         let tx = context.event_tx.clone();
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for instance lifecycle callback");
-            rt.block_on(async {
-                if let Err(e) = tx.send(component_event).await {
-                    log::error!("Failed to send lifecycle event: {e}");
-                }
-            });
-        })
-        .join();
+        let handle = context.runtime_handle.clone();
+        run_on_host_runtime(&handle, async move {
+            if let Err(e) = tx.send(component_event).await {
+                log::error!("Failed to send lifecycle event: {e}");
+            }
+        });
     }
 }
 

@@ -100,6 +100,7 @@ impl Reaction for ReactionProxy {
         // Create per-instance callback context for this reaction
         let per_instance_ctx = Arc::new(crate::callbacks::InstanceCallbackContext {
             instance_id: instance_id_str.clone(),
+            runtime_handle: tokio::runtime::Handle::current(),
             log_registry: drasi_lib::managers::get_or_init_global_registry(),
             event_tx: context.status_tx.clone(),
         });
@@ -163,14 +164,12 @@ impl Reaction for ReactionProxy {
         }
     }
 
-    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> anyhow::Result<()> {
         // Transfer ownership via opaque pointer — no serialization
         let boxed = Box::new(result);
         let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
         let ffi_result = (self.vtable.enqueue_query_result_fn)(self.vtable.state, ptr);
-        if let Err(e) = unsafe { ffi_result.into_result() } {
-            log::error!("Failed to enqueue query result: {e}");
-        }
+        unsafe { ffi_result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {

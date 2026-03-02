@@ -128,6 +128,7 @@ use drasi_host_sdk::CallbackContext;
 
 let ctx = Arc::new(CallbackContext {
     instance_id: "my-instance".to_string(),
+    runtime_handle: tokio::runtime::Handle::current(),
     log_registry: log_registry.clone(),
     source_event_history: source_events.clone(),
     reaction_event_history: reaction_events.clone(),

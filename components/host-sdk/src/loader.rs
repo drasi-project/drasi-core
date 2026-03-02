@@ -188,51 +188,63 @@ pub fn load_plugin_from_path(
     (registration.set_lifecycle_callback)(lifecycle_ctx, lifecycle_callback);
 
     // Step 4: Extract factory vtables into proxies
-    let mut source_plugins = Vec::new();
-    let mut reaction_plugins = Vec::new();
-    let mut bootstrap_plugins = Vec::new();
-
-    if !registration.source_plugins.is_null() && registration.source_plugin_count > 0 {
-        let vtables = unsafe {
+    // Take ownership of ALL arrays upfront before processing, so if any
+    // proxy construction panics, remaining arrays are still dropped correctly.
+    let source_vtables = if !registration.source_plugins.is_null() && registration.source_plugin_count > 0 {
+        Some(unsafe {
             Vec::from_raw_parts(
                 registration.source_plugins,
                 registration.source_plugin_count,
                 registration.source_plugin_count,
             )
-        };
-        for v in vtables {
-            source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
-        }
-    }
+        })
+    } else {
+        None
+    };
 
-    if !registration.reaction_plugins.is_null() && registration.reaction_plugin_count > 0 {
-        let vtables = unsafe {
+    let reaction_vtables = if !registration.reaction_plugins.is_null() && registration.reaction_plugin_count > 0 {
+        Some(unsafe {
             Vec::from_raw_parts(
                 registration.reaction_plugins,
                 registration.reaction_plugin_count,
                 registration.reaction_plugin_count,
             )
-        };
-        for v in vtables {
-            reaction_plugins.push(ReactionPluginProxy::new(v, lib.clone()));
-        }
-    }
+        })
+    } else {
+        None
+    };
 
-    if !registration.bootstrap_plugins.is_null() && registration.bootstrap_plugin_count > 0 {
-        let vtables = unsafe {
+    let bootstrap_vtables = if !registration.bootstrap_plugins.is_null() && registration.bootstrap_plugin_count > 0 {
+        Some(unsafe {
             Vec::from_raw_parts(
                 registration.bootstrap_plugins,
                 registration.bootstrap_plugin_count,
                 registration.bootstrap_plugin_count,
             )
-        };
-        for v in vtables {
-            bootstrap_plugins.push(BootstrapPluginProxy::new(v, lib.clone()));
-        }
+        })
+    } else {
+        None
+    };
+
+    // Now safe to forget the registration — we own all arrays
+    std::mem::forget(registration);
+
+    // Process vtables into proxies
+    let mut source_plugins = Vec::new();
+    let mut reaction_plugins = Vec::new();
+    let mut bootstrap_plugins = Vec::new();
+
+    for v in source_vtables.into_iter().flatten() {
+        source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
     }
 
-    // Prevent the registration from being double-freed (we already took ownership of vtable arrays)
-    std::mem::forget(registration);
+    for v in reaction_vtables.into_iter().flatten() {
+        reaction_plugins.push(ReactionPluginProxy::new(v, lib.clone()));
+    }
+
+    for v in bootstrap_vtables.into_iter().flatten() {
+        bootstrap_plugins.push(BootstrapPluginProxy::new(v, lib.clone()));
+    }
 
     Ok(LoadedPlugin {
         source_plugins,

@@ -39,6 +39,12 @@ use super::callbacks::{FfiLogEntry, FfiLogLevel, LogCallbackFn};
 use super::types::FfiStr;
 use super::vtable_gen::{current_instance_log_ctx, InstanceLogContext};
 
+// Compile-time assertion that transmuting raw pointers to LogCallbackFn is safe.
+const _: () = assert!(
+    std::mem::size_of::<*mut ()>() == std::mem::size_of::<LogCallbackFn>(),
+    "LogCallbackFn size must match pointer size"
+);
+
 /// A tracing Layer that forwards events through FFI log callbacks.
 ///
 /// It extracts `instance_id`, `component_id`, and `component_type` from the

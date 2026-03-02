@@ -49,6 +49,17 @@ use crate::descriptor::{
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
 
+// Compile-time assertions that transmute between raw pointers and callback
+// function pointers is safe (same size and alignment).
+const _: () = assert!(
+    std::mem::size_of::<*mut ()>() == std::mem::size_of::<super::callbacks::LifecycleCallbackFn>(),
+    "LifecycleCallbackFn size must match pointer size"
+);
+const _: () = assert!(
+    std::mem::size_of::<*mut ()>() == std::mem::size_of::<super::callbacks::LogCallbackFn>(),
+    "LogCallbackFn size must match pointer size"
+);
+
 /// Helper to extract ElementMetadata from a SourceChange.
 fn source_change_metadata(change: &SourceChange) -> Option<&ElementMetadata> {
     match change {
@@ -1010,13 +1021,16 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             let query_result =
                 unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
             let handle = (w.runtime_handle)().handle().clone();
-            std::thread::spawn({
+            let res = std::thread::spawn({
                 let inner = unsafe { &*(state as *const ReactionWrapper<T>) };
                 move || handle.block_on(inner.inner.enqueue_query_result(query_result))
             })
             .join()
             .expect("enqueue_query_result thread panicked");
-            FfiResult::ok()
+            match res {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
         })
     }
 
@@ -1281,7 +1295,7 @@ pub fn build_reaction_vtable_from_boxed(
             let query_result =
                 unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
             let handle = (w.runtime_handle)().handle().clone();
-            std::thread::spawn({
+            let res = std::thread::spawn({
                 let inner_ptr = SendPtr(state as *const DynReactionWrapper);
                 move || {
                     let inner = unsafe { inner_ptr.as_ref() };
@@ -1290,7 +1304,10 @@ pub fn build_reaction_vtable_from_boxed(
             })
             .join()
             .expect("enqueue_query_result thread panicked");
-            FfiResult::ok()
+            match res {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
         })
     }
 

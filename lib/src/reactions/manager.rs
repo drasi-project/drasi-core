@@ -546,6 +546,12 @@ impl ReactionManager {
     /// 1. Gets the query instance from the QueryManager
     /// 2. Subscribes to the query's result stream
     /// 3. Spawns a forwarder task that calls `reaction.enqueue_query_result()`
+    ///
+    /// # Locking invariant
+    ///
+    /// The `query_manager` RwLock is held only long enough to clone the inner
+    /// `Arc<QueryManager>`. All subsequent calls (`get_query_instance`, `subscribe`)
+    /// operate on the cloned Arc, so no locks are held while calling into external code.
     async fn subscribe_reaction_to_queries(
         &self,
         reaction_id: &str,
@@ -556,6 +562,7 @@ impl ReactionManager {
             return Ok(());
         }
 
+        // Clone the Arc and release the RwLock guard immediately.
         let query_manager = self.query_manager.read().await.clone().ok_or_else(|| {
             anyhow::anyhow!("QueryManager not injected - was ReactionManager initialized properly?")
         })?;
@@ -605,7 +612,11 @@ impl ReactionManager {
                                 // Unwrap Arc or clone if shared
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
-                                reaction.enqueue_query_result(result).await;
+                                if let Err(e) = reaction.enqueue_query_result(result).await {
+                                    log::error!(
+                                        "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 let error_str = e.to_string();

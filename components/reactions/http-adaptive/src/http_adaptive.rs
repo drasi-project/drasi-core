@@ -563,7 +563,7 @@ impl Reaction for AdaptiveHttpReaction {
         self.base.get_status().await
     }
 
-    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) {
-        self.base.enqueue_query_result(result).await;
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }

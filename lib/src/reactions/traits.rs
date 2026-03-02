@@ -174,7 +174,10 @@ pub trait Reaction: Send + Sync {
     /// The host calls this to forward query results to the reaction.
     /// The default implementation pushes to the reaction's priority queue
     /// via `ReactionBase`.
-    async fn enqueue_query_result(&self, result: QueryResult);
+    ///
+    /// Returns `Ok(())` on success, or `Err` if the queue is closed or the
+    /// reaction has stopped accepting results.
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()>;
 
     /// Permanently clean up internal state when the reaction is being removed.
     ///
@@ -232,7 +235,7 @@ impl Reaction for Box<dyn Reaction + 'static> {
         (**self).status().await
     }
 
-    async fn enqueue_query_result(&self, result: QueryResult) {
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
         (**self).enqueue_query_result(result).await
     }
 

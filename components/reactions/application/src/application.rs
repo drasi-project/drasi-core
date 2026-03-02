@@ -615,8 +615,8 @@ impl Reaction for ApplicationReaction {
         self.base.get_status().await
     }
 
-    async fn enqueue_query_result(&self, result: QueryResult) {
-        self.base.enqueue_query_result(result).await;
+    async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }
 
