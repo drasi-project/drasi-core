@@ -38,7 +38,7 @@ drasi-core.workspace = true
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.29.1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.29.1", features = ["rt", "sync", "time", "macros"] }
 
 # Dependencies used by specific middleware
 jsonpath-rust = "0.5.0"  # Used by map/unwind
