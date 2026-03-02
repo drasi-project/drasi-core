@@ -31,7 +31,7 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
 use rocksdb::{OptimisticTransactionDB, Options};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -169,6 +169,7 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             archive_index: element_index,
             result_index,
             future_queue,
+            session_control: Arc::new(NoOpSessionControl),
         })
     }
 
