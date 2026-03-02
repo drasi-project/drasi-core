@@ -347,6 +347,8 @@ pub enum ResultDiff {
     Aggregation {
         before: Option<serde_json::Value>,
         after: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grouping_keys: Option<Vec<String>>,
     },
     #[serde(rename = "noop")]
     Noop,
