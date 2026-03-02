@@ -28,6 +28,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -163,11 +164,15 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 60;
     }
@@ -194,11 +199,15 @@ pub async fn logical_conditions(config: &(impl QueryTestConfig + Send)) {
         println!("Node Result - Update sensor value ({timestamp}): {result:?}");
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "freezerId" => VariableValue::from(json!("equip_01"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "freezerId" => VariableValue::from(json!("equip_01"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         timestamp += 60;
     }

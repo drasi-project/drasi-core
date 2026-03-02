@@ -230,7 +230,7 @@ pub fn insert_archive(
     }
 }
 
-pub fn get_archive_cf_options() -> Options {
+pub(crate) fn get_archive_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
     opts

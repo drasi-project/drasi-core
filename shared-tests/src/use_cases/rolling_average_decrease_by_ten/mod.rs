@@ -28,6 +28,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::IGNORED_ROW_SIGNATURE;
 use crate::QueryTestConfig;
 
 mod data;
@@ -157,16 +158,14 @@ pub async fn rolling_average_decrease_by_ten(config: &(impl QueryTestConfig + Se
             .unwrap();
         // println!("Node Result - Update sensor value in loop ({}): {:?}", timestamp, node_result);
         assert_eq!(node_result.len(), 1);
-        assert_eq!(
-            node_result[0],
-            QueryPartEvaluationContext::Adding {
-                after: variablemap! (
-                    "currentAverageTemp" => VariableValue::from(json!(37.857142857142854)),
-                    "freezerId" => VariableValue::from(json!("equip_01")),
-                    "previousAverageTemp" => VariableValue::from(json!(42.5))
-                )
-            }
-        );
+        assert!(node_result[0].data_eq(&QueryPartEvaluationContext::Adding {
+            after: variablemap! (
+                "currentAverageTemp" => VariableValue::from(json!(37.857142857142854)),
+                "freezerId" => VariableValue::from(json!("equip_01")),
+                "previousAverageTemp" => VariableValue::from(json!(42.5))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }));
     }
 
     //Adding a new temperature that causes the average to go up

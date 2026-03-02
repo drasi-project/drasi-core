@@ -24,16 +24,14 @@
 //! use drasi_lib::DrasiLib;
 //! use std::sync::Arc;
 //!
-//! let provider = GarnetIndexProvider::new("redis://localhost:6379", None);
+//! let provider = GarnetIndexProvider::new("redis://localhost:6379", None, true);
 //! let drasi = DrasiLib::builder()
 //!     .with_index_provider(Arc::new(provider))
 //!     .build()?;
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{
-    ElementArchiveIndex, ElementIndex, FutureQueue, IndexBackendPlugin, IndexError, ResultIndex,
-};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
 use std::sync::Arc;
 
 use crate::element_index::GarnetElementIndex;
@@ -43,20 +41,23 @@ use crate::result_index::GarnetResultIndex;
 /// Garnet/Redis index backend provider.
 ///
 /// This provider creates Redis/Garnet-backed indexes for distributed storage.
-/// Data survives restarts and can be shared across multiple instances.
+/// All indexes for a query share a single `MultiplexedConnection`, reducing
+/// connection overhead.
 ///
 /// # Configuration
 ///
 /// - `connection_string`: Redis connection URL (e.g., "redis://localhost:6379")
 /// - `cache_size`: Optional local cache size for improved read performance
+/// - `enable_archive`: Enable archive index for `past()` function support
 ///
 /// # Key Structure
 ///
-/// The provider uses the following Redis key patterns:
+/// The provider uses Redis hash tags `{query_id}` so all keys for a query
+/// hash to the same Redis Cluster slot:
 /// ```text
-/// ei:{query_id}:{source_id}:{element_id}  - Element data
-/// ari:{query_id}:{set_id}                 - Accumulator/result data
-/// fqi:{query_id}                          - Future queue
+/// ei:{my-query}:source1:elem1   - Element data
+/// ari:{my-query}:42             - Accumulator/result data
+/// fqi:{my-query}                - Future queue
 /// ```
 ///
 /// # Caching
@@ -67,6 +68,7 @@ use crate::result_index::GarnetResultIndex;
 pub struct GarnetIndexProvider {
     connection_string: String,
     cache_size: Option<usize>,
+    enable_archive: bool,
 }
 
 impl GarnetIndexProvider {
@@ -76,20 +78,26 @@ impl GarnetIndexProvider {
     ///
     /// * `connection_string` - Redis connection URL (e.g., "redis://localhost:6379")
     /// * `cache_size` - Optional local cache size for improved read performance
+    /// * `enable_archive` - Enable archive index for point-in-time queries
     ///
     /// # Example
     ///
     /// ```ignore
     /// // Without caching
-    /// let provider = GarnetIndexProvider::new("redis://localhost:6379", None);
+    /// let provider = GarnetIndexProvider::new("redis://localhost:6379", None, true);
     ///
     /// // With caching (1000 element cache)
-    /// let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1000));
+    /// let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1000), false);
     /// ```
-    pub fn new(connection_string: impl Into<String>, cache_size: Option<usize>) -> Self {
+    pub fn new(
+        connection_string: impl Into<String>,
+        cache_size: Option<usize>,
+        enable_archive: bool,
+    ) -> Self {
         Self {
             connection_string: connection_string.into(),
             cache_size,
+            enable_archive,
         }
     }
 
@@ -102,89 +110,38 @@ impl GarnetIndexProvider {
     pub fn cache_size(&self) -> Option<usize> {
         self.cache_size
     }
+
+    /// Check if archive is enabled.
+    pub fn is_archive_enabled(&self) -> bool {
+        self.enable_archive
+    }
 }
 
 #[async_trait]
 impl IndexBackendPlugin for GarnetIndexProvider {
-    async fn create_element_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementIndex>, IndexError> {
-        let index = GarnetElementIndex::connect(query_id, &self.connection_string)
+    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
+        let client = redis::Client::open(self.connection_string.as_str())
+            .map_err(IndexError::connection_failed)?;
+        let connection = client
+            .get_multiplexed_async_connection()
             .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet element index for query '{}' at '{}': {}",
-                    query_id,
-                    self.connection_string,
-                    e
-                );
-                e
-            })?;
+            .map_err(IndexError::connection_failed)?;
 
-        // Note: Caching is handled at the factory level in lib, not here
-        // This allows the factory to wrap with CachedElementIndex if cache_size is set
-        Ok(Arc::new(index))
-    }
+        let element_index = Arc::new(GarnetElementIndex::new(
+            query_id,
+            connection.clone(),
+            self.enable_archive,
+        ));
+        let result_index = Arc::new(GarnetResultIndex::new(query_id, connection.clone()));
+        let future_queue = Arc::new(GarnetFutureQueue::new(query_id, connection));
 
-    async fn create_archive_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ElementArchiveIndex>, IndexError> {
-        // Garnet shares the element index and archive index
-        // Archive functionality is managed within GarnetElementIndex
-        let index = GarnetElementIndex::connect(query_id, &self.connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet archive index for query '{}' at '{}': {}",
-                    query_id,
-                    self.connection_string,
-                    e
-                );
-                e
-            })?;
-
-        Ok(Arc::new(index))
-    }
-
-    async fn create_result_index(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn ResultIndex>, IndexError> {
-        let index = GarnetResultIndex::connect(query_id, &self.connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet result index for query '{}' at '{}': {}",
-                    query_id,
-                    self.connection_string,
-                    e
-                );
-                e
-            })?;
-
-        // Note: Caching is handled at the factory level if cache_size is set
-        Ok(Arc::new(index))
-    }
-
-    async fn create_future_queue(
-        &self,
-        query_id: &str,
-    ) -> Result<Arc<dyn FutureQueue>, IndexError> {
-        let queue = GarnetFutureQueue::connect(query_id, &self.connection_string)
-            .await
-            .map_err(|e| {
-                log::error!(
-                    "Failed to connect to Redis/Garnet future queue for query '{}' at '{}': {}",
-                    query_id,
-                    self.connection_string,
-                    e
-                );
-                e
-            })?;
-
-        Ok(Arc::new(queue))
+        Ok(IndexSet {
+            element_index: element_index.clone(),
+            archive_index: element_index,
+            result_index,
+            future_queue,
+            session_control: Arc::new(NoOpSessionControl),
+        })
     }
 
     fn is_volatile(&self) -> bool {
@@ -198,47 +155,49 @@ mod tests {
 
     #[test]
     fn test_garnet_index_provider_new() {
-        let provider = GarnetIndexProvider::new("redis://localhost:6379", None); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", None, false); // DevSkim: ignore DS162092
         assert_eq!(provider.connection_string(), "redis://localhost:6379"); // DevSkim: ignore DS162092
         assert!(provider.cache_size().is_none());
+        assert!(!provider.is_archive_enabled());
     }
 
     #[test]
     fn test_garnet_index_provider_new_with_cache() {
-        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1000)); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1000), true); // DevSkim: ignore DS162092
         assert_eq!(provider.connection_string(), "redis://localhost:6379"); // DevSkim: ignore DS162092
         assert_eq!(provider.cache_size(), Some(1000));
+        assert!(provider.is_archive_enabled());
     }
 
     #[test]
     fn test_garnet_index_provider_connection_string_from_string() {
-        let provider = GarnetIndexProvider::new(String::from("redis://myhost:1234"), None); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new(String::from("redis://myhost:1234"), None, false); // DevSkim: ignore DS162092
         assert_eq!(provider.connection_string(), "redis://myhost:1234"); // DevSkim: ignore DS162092
     }
 
     #[test]
     fn test_garnet_index_provider_is_volatile() {
-        let provider = GarnetIndexProvider::new("redis://localhost:6379", None); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", None, false); // DevSkim: ignore DS162092
         assert!(!provider.is_volatile());
     }
 
     #[test]
     fn test_garnet_index_provider_large_cache_size() {
-        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1_000_000)); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(1_000_000), false); // DevSkim: ignore DS162092
         assert_eq!(provider.cache_size(), Some(1_000_000));
     }
 
     #[test]
     fn test_garnet_index_provider_zero_cache_size() {
         // Zero cache size should be valid (effectively no caching)
-        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(0)); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("redis://localhost:6379", Some(0), false); // DevSkim: ignore DS162092
         assert_eq!(provider.cache_size(), Some(0));
     }
 
     #[test]
     fn test_garnet_index_provider_connection_string_with_auth() {
         // Test connection string with authentication
-        let provider = GarnetIndexProvider::new("redis://:password@localhost:6379/0", None); // DevSkim: ignore DS137138 DS162092
+        let provider = GarnetIndexProvider::new("redis://:password@localhost:6379/0", None, false); // DevSkim: ignore DS137138 DS162092
         assert_eq!(
             provider.connection_string(),
             "redis://:password@localhost:6379/0" // DevSkim: ignore DS137138 DS162092
@@ -248,7 +207,7 @@ mod tests {
     #[test]
     fn test_garnet_index_provider_connection_string_with_tls() {
         // Test connection string with TLS
-        let provider = GarnetIndexProvider::new("rediss://localhost:6379", None); // DevSkim: ignore DS162092
+        let provider = GarnetIndexProvider::new("rediss://localhost:6379", None, false); // DevSkim: ignore DS162092
         assert_eq!(provider.connection_string(), "rediss://localhost:6379"); // DevSkim: ignore DS162092
     }
 }

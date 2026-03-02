@@ -14,9 +14,11 @@
 
 //! Configuration for the PostgreSQL Stored Procedure reaction.
 
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::common::{self, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Re-export common template types for public API
 pub use common::{QueryConfig, TemplateSpec};
@@ -77,7 +79,7 @@ pub use common::{QueryConfig, TemplateSpec};
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PostgresStoredProcReactionConfig {
     /// Database hostname or IP address
     #[serde(default = "default_hostname")]
@@ -87,10 +89,16 @@ pub struct PostgresStoredProcReactionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 
-    /// Database user
+    /// Identity provider for authentication (takes precedence over user/password)
+    #[serde(skip)]
+    pub identity_provider: Option<Box<dyn IdentityProvider>>,
+
+    /// Database user (deprecated: use identity_provider instead)
+    #[serde(default)]
     pub user: String,
 
-    /// Database password
+    /// Database password (deprecated: use identity_provider instead)
+    #[serde(default)]
     pub password: String,
 
     /// Database name
@@ -117,11 +125,31 @@ pub struct PostgresStoredProcReactionConfig {
     pub retry_attempts: u32,
 }
 
+// Manual Debug implementation to avoid issues with trait objects
+impl std::fmt::Debug for PostgresStoredProcReactionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgresStoredProcReactionConfig")
+            .field("hostname", &self.hostname)
+            .field("port", &self.port)
+            .field("identity_provider", &self.identity_provider.is_some())
+            .field("user", &self.user)
+            .field("password", &"***")
+            .field("database", &self.database)
+            .field("ssl", &self.ssl)
+            .field("routes", &self.routes)
+            .field("default_template", &self.default_template)
+            .field("command_timeout_ms", &self.command_timeout_ms)
+            .field("retry_attempts", &self.retry_attempts)
+            .finish()
+    }
+}
+
 impl Default for PostgresStoredProcReactionConfig {
     fn default() -> Self {
         Self {
             hostname: default_hostname(),
             port: None,
+            identity_provider: None,
             user: String::new(),
             password: String::new(),
             database: String::new(),
@@ -183,9 +211,11 @@ impl PostgresStoredProcReactionConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.user.is_empty() {
-            anyhow::bail!("Database user is required");
+        // Check authentication configuration
+        if self.identity_provider.is_none() && self.user.is_empty() {
+            anyhow::bail!("Either identity_provider or user/password must be provided");
         }
+
         if self.database.is_empty() {
             anyhow::bail!("Database name is required");
         }
