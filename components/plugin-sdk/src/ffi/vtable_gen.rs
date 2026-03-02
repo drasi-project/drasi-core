@@ -24,8 +24,8 @@
 
 use std::collections::HashSet;
 use std::ffi::c_void;
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
@@ -1539,7 +1539,10 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         let id_owned = id_str.clone();
         let result = dispatch_to_runtime(&handle, async move {
             let inner = unsafe { ptr.as_ref() };
-            inner.inner.create_source(&id_owned, &config_value, auto_start).await
+            inner
+                .inner
+                .create_source(&id_owned, &config_value, auto_start)
+                .await
         });
 
         match result {
@@ -1669,7 +1672,10 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         let id_owned = id_str.clone();
         let result = dispatch_to_runtime(&handle, async move {
             let inner = unsafe { ptr.as_ref() };
-            inner.inner.create_reaction(&id_owned, query_ids, &config_value, auto_start).await
+            inner
+                .inner
+                .create_reaction(&id_owned, query_ids, &config_value, auto_start)
+                .await
         });
 
         match result {
@@ -1796,7 +1802,10 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         let ptr = SendPtr(state as *const BootstrapPluginWrapper<T>);
         let result = dispatch_to_runtime(&handle, async move {
             let inner = unsafe { ptr.as_ref() };
-            inner.inner.create_bootstrap_provider(&config_value, &source_config_value).await
+            inner
+                .inner
+                .create_bootstrap_provider(&config_value, &source_config_value)
+                .await
         });
 
         match result {

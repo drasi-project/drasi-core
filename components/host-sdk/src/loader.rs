@@ -190,41 +190,44 @@ pub fn load_plugin_from_path(
     // Step 4: Extract factory vtables into proxies
     // Take ownership of ALL arrays upfront before processing, so if any
     // proxy construction panics, remaining arrays are still dropped correctly.
-    let source_vtables = if !registration.source_plugins.is_null() && registration.source_plugin_count > 0 {
-        Some(unsafe {
-            Vec::from_raw_parts(
-                registration.source_plugins,
-                registration.source_plugin_count,
-                registration.source_plugin_count,
-            )
-        })
-    } else {
-        None
-    };
+    let source_vtables =
+        if !registration.source_plugins.is_null() && registration.source_plugin_count > 0 {
+            Some(unsafe {
+                Vec::from_raw_parts(
+                    registration.source_plugins,
+                    registration.source_plugin_count,
+                    registration.source_plugin_count,
+                )
+            })
+        } else {
+            None
+        };
 
-    let reaction_vtables = if !registration.reaction_plugins.is_null() && registration.reaction_plugin_count > 0 {
-        Some(unsafe {
-            Vec::from_raw_parts(
-                registration.reaction_plugins,
-                registration.reaction_plugin_count,
-                registration.reaction_plugin_count,
-            )
-        })
-    } else {
-        None
-    };
+    let reaction_vtables =
+        if !registration.reaction_plugins.is_null() && registration.reaction_plugin_count > 0 {
+            Some(unsafe {
+                Vec::from_raw_parts(
+                    registration.reaction_plugins,
+                    registration.reaction_plugin_count,
+                    registration.reaction_plugin_count,
+                )
+            })
+        } else {
+            None
+        };
 
-    let bootstrap_vtables = if !registration.bootstrap_plugins.is_null() && registration.bootstrap_plugin_count > 0 {
-        Some(unsafe {
-            Vec::from_raw_parts(
-                registration.bootstrap_plugins,
-                registration.bootstrap_plugin_count,
-                registration.bootstrap_plugin_count,
-            )
-        })
-    } else {
-        None
-    };
+    let bootstrap_vtables =
+        if !registration.bootstrap_plugins.is_null() && registration.bootstrap_plugin_count > 0 {
+            Some(unsafe {
+                Vec::from_raw_parts(
+                    registration.bootstrap_plugins,
+                    registration.bootstrap_plugin_count,
+                    registration.bootstrap_plugin_count,
+                )
+            })
+        } else {
+            None
+        };
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);

@@ -164,7 +164,10 @@ impl Reaction for ReactionProxy {
         }
     }
 
-    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> anyhow::Result<()> {
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
         // Transfer ownership via opaque pointer — no serialization
         let boxed = Box::new(result);
         let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
