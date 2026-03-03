@@ -142,11 +142,11 @@ drasi_plugin_sdk::export_plugin!(
 
 ### Static Linking
 
-Compile the plugin crate directly into the server binary. Call your `register()` function at server startup and pass the descriptors to the plugin registry. This is the simplest approach — no shared library boundary, no ABI concerns.
+Bundle your descriptors directly into a Rust binary using `PluginRegistration`. This is only applicable when using `drasi-lib` programmatically (embedded/library use) — no shared library boundary, no ABI concerns. The standalone `drasi-server` always uses dynamic loading.
 
 ### Dynamic Loading
 
-Build the plugin as a `cdylib` shared library that the server discovers and loads at runtime. This allows deploying new plugins without recompiling the server.
+Build the plugin as a `cdylib` shared library that the server discovers and loads at runtime. This is the standard deployment model for the standalone server — dynamic loading is always enabled with no feature flags required on the server side.
 
 #### Step 1: Configure crate type
 
@@ -187,12 +187,14 @@ Each descriptor is wrapped in an FFI vtable (`SourcePluginVtable`, `ReactionPlug
 #### Step 3: Build and deploy
 
 ```bash
-# Build with dynamic plugin feature enabled
-cargo build --release --features dynamic-plugin
+# Build the plugin as a cdylib shared library
+cargo build --release
 
-# Copy the shared library to the server's binary directory
-cp target/release/libdrasi_source_my_plugin.so /path/to/server/
+# Copy the shared library to the server's plugin directory
+cp target/release/libdrasi_source_my_plugin.so /path/to/server/plugins/
 ```
+
+> **Note:** Individual plugin crates may define a `dynamic-plugin` feature to gate `export_plugin!` macro invocation — check the plugin's `Cargo.toml`.
 
 #### Compatibility requirements
 
@@ -224,7 +226,25 @@ Dynamic plugins communicate with the host through `#[repr(C)]` vtable structs (s
 | `ffi::state_store_proxy` | Plugin-side proxy that implements `StateStoreProvider` over an FFI vtable |
 | `ffi::bootstrap_proxy` | Plugin-side proxy that implements `BootstrapProvider` over an FFI vtable |
 
-Each plugin gets its own tokio runtime (created by the `export_plugin!` macro). Async operations are dispatched via the `AsyncExecutorFn` callback, which ensures futures run on the plugin's runtime rather than the host's.
+Each plugin gets its own tokio runtime (created by the `export_plugin!` macro). Synchronous vtable calls (e.g., `start`, `stop`) use `dispatch_to_runtime` with a `std::sync::mpsc::sync_channel(0)` rendezvous to bridge into the plugin's async runtime. However, the primary data paths use a **push-based** model that avoids per-event `dispatch_to_runtime` overhead.
+
+### Push-Based Data Delivery
+
+All high-throughput data paths use a push model where a forwarder task is spawned on one side and events are pushed via a callback into a channel on the other side:
+
+- **Source change events**: The host calls `start_push_fn` with a callback. The plugin spawns a forwarder task on its runtime that reads from the underlying change channel and invokes the callback for each event. This avoids per-event `dispatch_to_runtime` overhead (~0.3µs vs ~5-20µs for rendezvous dispatch).
+- **Bootstrap events**: Same push pattern — the plugin spawns a forwarder that pushes bootstrap events (a finite stream) into a host-side channel via a callback.
+- **Reaction query results**: Reversed direction — `start_result_push_fn` lets the host push query results into a channel. The plugin's forwarder drains them via a blocking callback (`spawn_blocking` + `std::sync::mpsc::Receiver::recv`).
+
+Typical FFI overhead through the full push pipeline is ~1-2µs per change event.
+
+### Cross-cdylib Channel Safety
+
+All channels that cross the cdylib boundary use `std::sync::mpsc` (not `tokio::sync::mpsc`). Each cdylib has its own statically-linked copy of tokio with incompatible internal state, so `tokio::sync` channels cannot be shared across the boundary. Host-side proxies bridge from `std::sync::mpsc` into tokio channels using forwarding tasks or `tokio::sync::Notify` for async wakeup.
+
+### Fire-and-Forget Host Callbacks
+
+Host callbacks for logging and lifecycle events use fire-and-forget `tokio::spawn` on the host runtime (via `run_on_host_runtime`) rather than blocking rendezvous. This avoids deadlocks when the host runtime is single-threaded (e.g., in test environments). The plugin invokes the `extern "C"` callback synchronously, but the host side immediately spawns an async task and returns.
 
 ## Configuration Values
 
