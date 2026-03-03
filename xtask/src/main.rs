@@ -834,6 +834,7 @@ fn make_tag(
 /// Warns on failure but does not abort the publish batch.
 fn cosign_sign(reference: &str) {
     print!("  🔏 signing {}...", reference);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut cmd = Command::new("cosign");
     cmd.arg("sign").arg("--yes").arg(reference);
@@ -853,7 +854,9 @@ fn cosign_sign(reference: &str) {
             }
         }
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::PermissionDenied
+            {
                 eprintln!(" ✗ cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)");
             } else {
                 eprintln!(" ✗ failed to run cosign: {}", e);

@@ -72,7 +72,7 @@ impl OciRegistryClient {
     }
 
     /// Get the OCI auth credentials.
-    fn auth(&self) -> oci_client::secrets::RegistryAuth {
+    pub fn auth(&self) -> oci_client::secrets::RegistryAuth {
         match &self.config.auth {
             RegistryAuth::Anonymous => oci_client::secrets::RegistryAuth::Anonymous,
             RegistryAuth::Basic { username, password } => {
@@ -169,9 +169,7 @@ impl OciRegistryClient {
             self.verifier
                 .verify_plugin(reference, &self.auth())
                 .await
-                .with_context(|| {
-                    format!("cosign signature verification failed for {reference}")
-                })?
+                .with_context(|| format!("cosign signature verification failed for {reference}"))?
         } else {
             None
         };

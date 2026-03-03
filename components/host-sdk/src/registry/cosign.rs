@@ -141,11 +141,7 @@ impl CosignVerifier {
 
         // Fetch trusted signature layers
         let signature_layers = cosign_client
-            .trusted_signature_layers(
-                &convert_auth(auth),
-                &source_digest,
-                &cosign_image,
-            )
+            .trusted_signature_layers(&convert_auth(auth), &source_digest, &cosign_image)
             .await
             .context("failed to fetch signature layers")?;
 
@@ -196,9 +192,7 @@ fn check_layer_against_identities(
         sigstore::cosign::signature_layers::CertificateSubject::Uri(uri) => uri.as_str(),
     };
 
-    debug!(
-        "Checking signature layer: issuer={issuer_str}, subject={subject_str}"
-    );
+    debug!("Checking signature layer: issuer={issuer_str}, subject={subject_str}");
 
     for identity in identities {
         if identity.issuer == issuer_str && glob_match(&identity.subject_pattern, subject_str) {
@@ -284,9 +278,15 @@ mod tests {
 
     #[test]
     fn test_glob_match_wildcard_suffix() {
-        assert!(glob_match("https://github.com/drasi-project/*", "https://github.com/drasi-project/anything"));
+        assert!(glob_match(
+            "https://github.com/drasi-project/*",
+            "https://github.com/drasi-project/anything"
+        ));
         assert!(glob_match("https://github.com/drasi-project/*", "https://github.com/drasi-project/source/postgres/.github/workflows/release.yml@refs/heads/main"));
-        assert!(!glob_match("https://github.com/drasi-project/*", "https://github.com/other-org/something"));
+        assert!(!glob_match(
+            "https://github.com/drasi-project/*",
+            "https://github.com/other-org/something"
+        ));
     }
 
     #[test]
@@ -305,7 +305,10 @@ mod tests {
     fn test_default_trusted_identities() {
         let defaults = default_trusted_identities();
         assert_eq!(defaults.len(), 1);
-        assert_eq!(defaults[0].issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            defaults[0].issuer,
+            "https://token.actions.githubusercontent.com"
+        );
         assert!(defaults[0].subject_pattern.contains("drasi-project"));
     }
 
@@ -323,12 +326,10 @@ mod tests {
     fn test_verification_config_effective_identities_uses_custom() {
         let config = VerificationConfig {
             enabled: true,
-            trusted_identities: vec![
-                TrustedIdentity {
-                    issuer: "https://custom-issuer.example.com".to_string(),
-                    subject_pattern: "https://github.com/my-org/*".to_string(),
-                },
-            ],
+            trusted_identities: vec![TrustedIdentity {
+                issuer: "https://custom-issuer.example.com".to_string(),
+                subject_pattern: "https://github.com/my-org/*".to_string(),
+            }],
         };
         let effective = config.effective_identities();
         assert_eq!(effective.len(), 1);
