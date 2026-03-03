@@ -100,24 +100,24 @@ async fn main() {
 
         // Open shared RocksDB if either index type needs it (avoids LOCK conflict
         // from opening the same unified DB path twice)
-        let (rocks_db, rocks_session_state) =
-            if test_run_config.element_index_type == IndexType::RocksDB
-                || test_run_config.result_index_type == IndexType::RocksDB
-            {
-                let options = RocksIndexOptions {
-                    archive_enabled: false,
-                    direct_io: false,
-                };
-                let path = match env::var("ROCKS_PATH") {
-                    Ok(p) => p,
-                    Err(_) => "test-data".to_string(),
-                };
-                let db = open_unified_db(&path, &query_id, &options).unwrap();
-                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
-                (Some(db), Some(session_state))
-            } else {
-                (None, None)
+        let (rocks_db, rocks_session_state) = if test_run_config.element_index_type
+            == IndexType::RocksDB
+            || test_run_config.result_index_type == IndexType::RocksDB
+        {
+            let options = RocksIndexOptions {
+                archive_enabled: false,
+                direct_io: false,
             };
+            let path = match env::var("ROCKS_PATH") {
+                Ok(p) => p,
+                Err(_) => "test-data".to_string(),
+            };
+            let db = open_unified_db(&path, &query_id, &options).unwrap();
+            let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+            (Some(db), Some(session_state))
+        } else {
+            (None, None)
+        };
 
         // Configure the correct element index
         builder = match test_run_config.element_index_type {
@@ -164,8 +164,8 @@ async fn main() {
         // Wire up session control for RocksDB so that process_source_change
         // can begin/commit transactions around index operations.
         if let Some(session_state) = rocks_session_state {
-            builder = builder
-                .with_session_control(Arc::new(RocksDbSessionControl::new(session_state)));
+            builder =
+                builder.with_session_control(Arc::new(RocksDbSessionControl::new(session_state)));
         }
 
         let cq = builder.build().await;
