@@ -50,21 +50,12 @@ fn default_trusted_identities() -> Vec<TrustedIdentity> {
 }
 
 /// Configuration for cosign verification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VerificationConfig {
     /// Whether verification is enabled.
     pub enabled: bool,
     /// Trusted identities. If empty when enabled, uses the default drasi-project identity.
     pub trusted_identities: Vec<TrustedIdentity>,
-}
-
-impl Default for VerificationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            trusted_identities: Vec::new(),
-        }
-    }
 }
 
 impl VerificationConfig {
