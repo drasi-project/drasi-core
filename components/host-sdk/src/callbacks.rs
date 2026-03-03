@@ -213,15 +213,16 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
         message
     );
 
-    // Always capture for diagnostics
-    captured_logs()
-        .lock()
-        .expect("captured_logs lock poisoned")
-        .push(CapturedLog {
+    // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C"
+    // if the Mutex was poisoned by a prior test/thread panic — a panic here would
+    // be a non-unwinding abort since this is an extern "C" function)
+    if let Ok(mut logs) = captured_logs().lock() {
+        logs.push(CapturedLog {
             level,
             plugin_id: plugin_id.clone(),
             message: message.clone(),
         });
+    }
 
     // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
     if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
@@ -255,15 +256,14 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
 
     log::debug!("Lifecycle: {component_id} ({component_type_str}) {event_type:?} {message}");
 
-    // Always capture for diagnostics
-    captured_lifecycles()
-        .lock()
-        .expect("captured_lifecycles lock poisoned")
-        .push(CapturedLifecycle {
+    // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+    if let Ok(mut events) = captured_lifecycles().lock() {
+        events.push(CapturedLifecycle {
             component_id: component_id.clone(),
             event_type,
             message: message.clone(),
         });
+    }
 
     // Route into DrasiLib's ComponentEventHistory if context is available
     if !ctx.is_null() {
@@ -338,15 +338,14 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
         message
     );
 
-    // Capture for diagnostics
-    captured_logs()
-        .lock()
-        .expect("captured_logs lock poisoned")
-        .push(CapturedLog {
+    // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+    if let Ok(mut logs) = captured_logs().lock() {
+        logs.push(CapturedLog {
             level,
             plugin_id: plugin_id.clone(),
             message: message.clone(),
         });
+    }
 
     // Route into ComponentLogRegistry
     if !ctx.is_null() {
@@ -395,15 +394,14 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         "Lifecycle [instance]: {component_id} ({component_type_str}) {event_type:?} {message}"
     );
 
-    // Capture for diagnostics
-    captured_lifecycles()
-        .lock()
-        .expect("captured_lifecycles lock poisoned")
-        .push(CapturedLifecycle {
+    // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+    if let Ok(mut events) = captured_lifecycles().lock() {
+        events.push(CapturedLifecycle {
             component_id: component_id.clone(),
             event_type,
             message: message.clone(),
         });
+    }
 
     // Send through the event channel (same path as static sources)
     if !ctx.is_null() {
