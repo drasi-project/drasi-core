@@ -205,7 +205,18 @@ impl ContinuousQuery {
                     .get_element(element.get_reference())
                     .await?
                 {
+                    let incoming_timestamp = element.get_effective_from();
                     let prev_timestamp = prev_version.get_effective_from();
+                    if incoming_timestamp < prev_timestamp {
+                        tracing::warn!(
+                            element_ref = %element.get_reference(),
+                            incoming_timestamp,
+                            current_timestamp = prev_timestamp,
+                            "Rejecting stale source update"
+                        );
+                        return Ok(result);
+                    }
+
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                     let affinity_slots = self
@@ -242,7 +253,18 @@ impl ContinuousQuery {
             }
             SourceChange::Delete { metadata } => {
                 if let Some(element) = self.element_index.get_element(&metadata.reference).await? {
+                    let incoming_timestamp = metadata.effective_from;
                     let prev_timestamp = element.get_effective_from();
+                    if incoming_timestamp < prev_timestamp {
+                        tracing::warn!(
+                            element_ref = %metadata.reference,
+                            incoming_timestamp,
+                            current_timestamp = prev_timestamp,
+                            "Rejecting stale source delete"
+                        );
+                        return Ok(result);
+                    }
+
                     let before_clock =
                         Arc::new(InstantQueryClock::new(prev_timestamp, clock.get_realtime()));
                     let affinity_slots = self

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod row_signature_tests;
+mod stale_source_update_tests;
 
 use std::sync::Arc;
 
