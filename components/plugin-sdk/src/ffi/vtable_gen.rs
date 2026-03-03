@@ -1040,9 +1040,8 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                 if result_ptr.is_null() {
                     break;
                 }
-                let query_result = unsafe {
-                    *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult)
-                };
+                let query_result =
+                    unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
                 let inner = unsafe { ptr.as_ref() };
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
                     log::error!("Failed to enqueue query result: {}", e);
@@ -1315,9 +1314,8 @@ pub fn build_reaction_vtable_from_boxed(
                 if result_ptr.is_null() {
                     break;
                 }
-                let query_result = unsafe {
-                    *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult)
-                };
+                let query_result =
+                    unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
                 let inner = unsafe { ptr.as_ref() };
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
                     log::error!("Failed to enqueue query result: {}", e);
@@ -2157,8 +2155,7 @@ fn wrap_subscription_response(
         }
 
         extern "C" fn bootstrap_drop(state: *mut c_void) {
-            let handle =
-                unsafe { Box::from_raw(state as *mut DrasiLibBootstrapReceiverHandle) };
+            let handle = unsafe { Box::from_raw(state as *mut DrasiLibBootstrapReceiverHandle) };
             handle.receiver.shutdown.notify_one();
             drop(handle);
         }

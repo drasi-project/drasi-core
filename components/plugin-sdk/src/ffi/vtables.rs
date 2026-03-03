@@ -64,7 +64,8 @@ pub struct FfiBootstrapEvent {
 /// Called by the plugin forwarder for each source event.
 /// `ctx` is the host-owned context pointer, `event` is the event to deliver.
 /// Returns `true` if the event was accepted, `false` to signal shutdown.
-pub type FfiChangePushCallbackFn = extern "C" fn(ctx: *mut c_void, event: *mut FfiSourceEvent) -> bool;
+pub type FfiChangePushCallbackFn =
+    extern "C" fn(ctx: *mut c_void, event: *mut FfiSourceEvent) -> bool;
 
 /// Change receiver — push-based model.
 ///

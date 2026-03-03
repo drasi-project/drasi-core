@@ -1811,7 +1811,9 @@ async fn test_e2e_cdylib_source_query_reaction() {
         eprintln!(
             "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
         );
-        panic!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
+        panic!(
+            "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
+        );
     }
 
     log::set_max_level(log::LevelFilter::Debug);
@@ -1943,7 +1945,9 @@ async fn test_e2e_multi_source_query_reaction() {
         eprintln!(
             "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
         );
-        panic!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
+        panic!(
+            "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
+        );
     }
 
     log::set_max_level(log::LevelFilter::Debug);

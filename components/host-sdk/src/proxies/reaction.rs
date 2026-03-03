@@ -38,7 +38,8 @@ pub struct ReactionProxy {
     cached_type_name: String,
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
     /// Channel for push-based result delivery. Created on start, closed on stop/drop.
-    result_tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
+    result_tx:
+        std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
     /// Keep the callback context alive for the lifetime of the forwarder.
     _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
 }
@@ -50,12 +51,12 @@ struct ResultPushContext {
 
 /// Callback invoked by the plugin's forwarder task to receive the next QueryResult.
 /// Blocks until a result is available. Returns null on channel close (shutdown).
-extern "C" fn result_push_callback(
-    ctx: *mut c_void,
-    _unused: *mut c_void,
-) -> *mut c_void {
+extern "C" fn result_push_callback(ctx: *mut c_void, _unused: *mut c_void) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
-    let guard = context.rx.lock().expect("result_push_callback lock poisoned");
+    let guard = context
+        .rx
+        .lock()
+        .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
         match rx.recv() {
             Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,

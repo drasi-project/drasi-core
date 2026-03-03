@@ -40,10 +40,7 @@ struct PushCallbackContext {
 
 /// The push callback invoked by the plugin forwarder for each event.
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
-extern "C" fn change_push_callback(
-    ctx: *mut std::ffi::c_void,
-    event: *mut FfiSourceEvent,
-) -> bool {
+extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
@@ -170,7 +167,9 @@ impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
 /// Context passed to the bootstrap push callback. Holds the std mpsc sender
 /// and a tokio Notify to wake the host receiver.
 struct BootstrapPushCallbackContext {
-    tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::events::BootstrapEvent>>>,
+    tx: std::sync::Mutex<
+        Option<std::sync::mpsc::SyncSender<drasi_lib::channels::events::BootstrapEvent>>,
+    >,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -183,7 +182,10 @@ extern "C" fn bootstrap_push_callback(
 
     if event.is_null() {
         // Stream exhausted — drop the sender to signal completion
-        let mut guard = context.tx.lock().expect("bootstrap push callback mutex poisoned");
+        let mut guard = context
+            .tx
+            .lock()
+            .expect("bootstrap push callback mutex poisoned");
         *guard = None;
         context.notify.notify_one();
         // Reclaim the leaked Arc reference
@@ -197,7 +199,10 @@ extern "C" fn bootstrap_push_callback(
     };
     unsafe { drop(Box::from_raw(event)) };
 
-    let guard = context.tx.lock().expect("bootstrap push callback mutex poisoned");
+    let guard = context
+        .tx
+        .lock()
+        .expect("bootstrap push callback mutex poisoned");
     if let Some(tx) = guard.as_ref() {
         let ok = tx.send(bootstrap_event).is_ok();
         drop(guard);
