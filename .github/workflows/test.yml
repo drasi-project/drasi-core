@@ -80,7 +80,7 @@ jobs:
         REDIS_URL: redis://localhost:6379
       run: |
         cargo install junitify
-        cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
+        cargo test --workspace --exclude drasi-host-sdk -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
 
     - name: Run host-sdk integration tests

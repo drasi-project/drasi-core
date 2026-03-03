@@ -91,11 +91,27 @@ pub struct FfiChangeReceiver {
 unsafe impl Send for FfiChangeReceiver {}
 unsafe impl Sync for FfiChangeReceiver {}
 
-/// Bootstrap receiver — finite stream of bootstrap events.
+/// Callback function type for push-based bootstrap delivery.
+/// Called by the plugin forwarder for each bootstrap event.
+/// `ctx` is the host-owned context pointer, `event` is the event to deliver (null signals end-of-stream).
+/// Returns `true` if the event was accepted, `false` to signal shutdown.
+pub type FfiBootstrapPushCallbackFn =
+    extern "C" fn(ctx: *mut c_void, event: *mut FfiBootstrapEvent) -> bool;
+
+/// Bootstrap receiver — push-based finite stream of bootstrap events.
+///
+/// Like `FfiChangeReceiver`, uses a push model: the host calls `start_push_fn`
+/// with a callback, and the plugin spawns a forwarder that pushes events via
+/// the callback until the stream is exhausted (sends null) or the callback
+/// returns `false`.
 #[repr(C)]
 pub struct FfiBootstrapReceiver {
     pub state: *mut c_void,
-    pub recv_fn: extern "C" fn(state: *mut c_void) -> *mut FfiBootstrapEvent,
+    pub start_push_fn: extern "C" fn(
+        state: *mut c_void,
+        callback: FfiBootstrapPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ),
     pub drop_fn: extern "C" fn(state: *mut c_void),
 }
 
@@ -116,29 +132,13 @@ pub struct FfiSubscriptionResponse {
 // Query result events — carries QueryResult across FFI to reactions
 // ============================================================================
 
-/// Represents a query result event delivered to reactions.
-/// The opaque pointer holds a concrete `QueryResult`.
-#[repr(C)]
-pub struct FfiQueryResultEvent {
-    pub opaque: *mut c_void,
-    pub query_id: FfiStr,
-    pub timestamp_us: i64,
-    pub sequence: u64,
-    pub result_count: usize,
-    pub drop_fn: extern "C" fn(*mut c_void),
-}
-
-/// Receiver for query result events (reaction-side).
-#[repr(C)]
-pub struct FfiQueryResultReceiver {
-    pub state: *mut c_void,
-    pub executor: AsyncExecutorFn,
-    pub recv_fn: extern "C" fn(state: *mut c_void) -> *mut FfiQueryResultEvent,
-    pub drop_fn: extern "C" fn(state: *mut c_void),
-}
-
-unsafe impl Send for FfiQueryResultReceiver {}
-unsafe impl Sync for FfiQueryResultReceiver {}
+/// Callback for push-based query result delivery to reactions.
+/// The plugin calls this to receive the next QueryResult from the host.
+/// Returns a `*mut QueryResult` (ownership transfers to the plugin),
+/// or null to signal end-of-stream / shutdown.
+/// The `result` parameter is unused (reserved).
+pub type FfiResultPushCallbackFn =
+    extern "C" fn(ctx: *mut c_void, result: *mut c_void) -> *mut c_void;
 
 // ============================================================================
 // Bootstrap sender — callback for sending bootstrap records from provider
@@ -234,10 +234,11 @@ drasi_ffi_primitives::ffi_vtable! {
         // Initialization
         fn initialize_fn(state: *mut, ctx: *const FfiRuntimeContext),
 
-        // Host-managed query subscription forwarding
-        /// The host calls this to push a QueryResult into the reaction's priority queue.
-        /// The `result` pointer is a `*mut QueryResult` — ownership transfers to the callee.
-        fn enqueue_query_result_fn(state: *mut, result: *mut c_void) -> FfiResult,
+        // Host-managed query subscription forwarding (push-based)
+        /// The host calls this once to start push-based delivery.
+        /// The plugin spawns a forwarder task that reads from an internal channel
+        /// and calls `reaction.enqueue_query_result()` for each item.
+        fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),
     }
 }
 

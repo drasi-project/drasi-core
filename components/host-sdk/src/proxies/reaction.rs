@@ -37,6 +37,33 @@ pub struct ReactionProxy {
     cached_id: String,
     cached_type_name: String,
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+    /// Channel for push-based result delivery. Created on start, closed on stop/drop.
+    result_tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
+    /// Keep the callback context alive for the lifetime of the forwarder.
+    _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
+}
+
+/// Context for the push-based result callback.
+struct ResultPushContext {
+    rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
+}
+
+/// Callback invoked by the plugin's forwarder task to receive the next QueryResult.
+/// Blocks until a result is available. Returns null on channel close (shutdown).
+extern "C" fn result_push_callback(
+    ctx: *mut c_void,
+    _unused: *mut c_void,
+) -> *mut c_void {
+    let context = unsafe { &*(ctx as *const ResultPushContext) };
+    let guard = context.rx.lock().expect("result_push_callback lock poisoned");
+    if let Some(ref rx) = *guard {
+        match rx.recv() {
+            Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
+            Err(_) => std::ptr::null_mut(),
+        }
+    } else {
+        std::ptr::null_mut()
+    }
 }
 
 unsafe impl Send for ReactionProxy {}
@@ -53,6 +80,8 @@ impl ReactionProxy {
             cached_id,
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
+            result_tx: std::sync::Mutex::new(None),
+            _push_ctx: std::sync::Mutex::new(None),
         }
     }
 }
@@ -135,6 +164,27 @@ impl Reaction for ReactionProxy {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
+        // Set up push-based result channel before starting the reaction
+        let (tx, rx) = std::sync::mpsc::sync_channel::<drasi_lib::channels::QueryResult>(256);
+        {
+            let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
+            *guard = Some(tx);
+        }
+
+        let push_ctx = Arc::new(ResultPushContext {
+            rx: std::sync::Mutex::new(Some(rx)),
+        });
+        // Use Arc::as_ptr — the Arc stays alive in _push_ctx for the lifetime of the proxy
+        let ctx_ptr = Arc::as_ptr(&push_ctx) as *mut c_void;
+        {
+            let mut guard = self._push_ctx.lock().expect("_push_ctx lock poisoned");
+            *guard = Some(push_ctx);
+        }
+
+        // Start the plugin's forwarder task
+        (self.vtable.start_result_push_fn)(self.vtable.state, result_push_callback, ctx_ptr);
+
+        // Start the reaction itself
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let start_fn = self.vtable.start_fn;
         let result = std::thread::spawn(move || (start_fn)(state.as_ptr()))
@@ -144,6 +194,20 @@ impl Reaction for ReactionProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
+        // Close the sender so the forwarder's callback returns null
+        {
+            let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
+            *guard = None;
+        }
+        // Also drop the receiver to unblock the callback if it's blocked in recv()
+        if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(ref ctx) = *guard {
+                if let Ok(mut rx_guard) = ctx.rx.lock() {
+                    *rx_guard = None;
+                }
+            }
+        }
+
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let stop_fn = self.vtable.stop_fn;
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
@@ -168,11 +232,16 @@ impl Reaction for ReactionProxy {
         &self,
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
-        // Transfer ownership via opaque pointer — no serialization
-        let boxed = Box::new(result);
-        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
-        let ffi_result = (self.vtable.enqueue_query_result_fn)(self.vtable.state, ptr);
-        unsafe { ffi_result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        let guard = self.result_tx.lock().expect("result_tx lock poisoned");
+        if let Some(ref tx) = *guard {
+            tx.send(result)
+                .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "Reaction not started — result channel not initialized"
+            ));
+        }
+        Ok(())
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {
@@ -187,6 +256,18 @@ impl Reaction for ReactionProxy {
 
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
+        // Close the result channel to unblock the forwarder
+        if let Ok(mut guard) = self.result_tx.lock() {
+            *guard = None;
+        }
+        // Also drop the receiver inside the push context to unblock the callback
+        if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(ref ctx) = *guard {
+                if let Ok(mut rx_guard) = ctx.rx.lock() {
+                    *rx_guard = None;
+                }
+            }
+        }
         (self.vtable.drop_fn)(self.vtable.state);
     }
 }

@@ -1012,25 +1012,43 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         });
     }
 
-    extern "C" fn enqueue_query_result_fn<T: Reaction + 'static>(
+    extern "C" fn start_result_push_fn<T: Reaction + 'static>(
         state: *mut c_void,
-        result: *mut c_void,
-    ) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
-            let query_result =
-                unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
-            let handle = (w.runtime_handle)().handle().clone();
-            let ptr = SendPtr(state as *const ReactionWrapper<T>);
-            let res = dispatch_to_runtime(&handle, async move {
+        callback: FfiResultPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        // Push-based result delivery. The host provides a blocking callback
+        // that returns the next QueryResult pointer (or null on shutdown).
+        // The plugin spawns a forwarder that calls the callback via
+        // spawn_blocking (to avoid starving async workers), then enqueues
+        // each result into the reaction's priority queue.
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        let handle = (w.runtime_handle)().handle().clone();
+        let ctx_raw = callback_ctx as usize;
+        let ptr = SendPtr(state as *const ReactionWrapper<T>);
+        handle.spawn(async move {
+            loop {
+                let ctx_val = ctx_raw;
+                let result_ptr = tokio::task::spawn_blocking(move || {
+                    SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                })
+                .await;
+                let result_ptr = match result_ptr {
+                    Ok(p) => p.as_ptr(),
+                    Err(_) => break,
+                };
+                if result_ptr.is_null() {
+                    break;
+                }
+                let query_result = unsafe {
+                    *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult)
+                };
                 let inner = unsafe { ptr.as_ref() };
-                inner.inner.enqueue_query_result(query_result).await
-            });
-            match res {
-                Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
+                if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
+                    log::error!("Failed to enqueue query result: {}", e);
+                }
             }
-        })
+        });
     }
 
     extern "C" fn drop_fn<T: Reaction + 'static>(state: *mut c_void) {
@@ -1066,7 +1084,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         status_fn: status_fn::<T>,
         deprovision_fn: deprovision_fn::<T>,
         initialize_fn: initialize_fn::<T>,
-        enqueue_query_result_fn: enqueue_query_result_fn::<T>,
+        start_result_push_fn: start_result_push_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1274,22 +1292,38 @@ pub fn build_reaction_vtable_from_boxed(
         });
     }
 
-    extern "C" fn enqueue_query_result_fn(state: *mut c_void, result: *mut c_void) -> FfiResult {
-        catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynReactionWrapper) };
-            let query_result =
-                unsafe { *Box::from_raw(result as *mut drasi_lib::channels::QueryResult) };
-            let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-            let res = dispatch_to_runtime(&handle, async move {
-                let inner = unsafe { inner_ptr.as_ref() };
-                inner.inner.enqueue_query_result(query_result).await
-            });
-            match res {
-                Ok(()) => FfiResult::ok(),
-                Err(e) => FfiResult::err(e.to_string()),
+    extern "C" fn start_result_push_fn(
+        state: *mut c_void,
+        callback: FfiResultPushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let handle = (w.runtime_handle)().handle().clone();
+        let ctx_raw = callback_ctx as usize;
+        let ptr = SendPtr(state as *const DynReactionWrapper);
+        handle.spawn(async move {
+            loop {
+                let ctx_val = ctx_raw;
+                let result_ptr = tokio::task::spawn_blocking(move || {
+                    SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                })
+                .await;
+                let result_ptr = match result_ptr {
+                    Ok(p) => p.as_ptr(),
+                    Err(_) => break,
+                };
+                if result_ptr.is_null() {
+                    break;
+                }
+                let query_result = unsafe {
+                    *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult)
+                };
+                let inner = unsafe { ptr.as_ref() };
+                if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
+                    log::error!("Failed to enqueue query result: {}", e);
+                }
             }
-        })
+        });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
@@ -1325,7 +1359,7 @@ pub fn build_reaction_vtable_from_boxed(
         status_fn,
         deprovision_fn,
         initialize_fn,
-        enqueue_query_result_fn,
+        start_result_push_fn,
         drop_fn,
     }
 }
@@ -2037,69 +2071,108 @@ fn wrap_subscription_response(
         drop_fn: change_receiver_drop,
     });
 
-    // Wrap bootstrap receiver if present
-    let bootstrap_receiver = if let Some(mut brx) = sub.bootstrap_receiver {
+    // Wrap bootstrap receiver if present (push-based, like the change receiver)
+    let bootstrap_receiver = if let Some(brx) = sub.bootstrap_receiver {
+        use super::vtables::FfiBootstrapPushCallbackFn;
+
         struct DrasiLibBootstrapReceiver {
             inner: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<BootstrapEvent>>,
             runtime_handle: tokio::runtime::Handle,
+            shutdown: Arc<tokio::sync::Notify>,
         }
 
-        extern "C" fn bootstrap_recv(state: *mut c_void) -> *mut FfiBootstrapEvent {
-            let r = unsafe { &*(state as *const DrasiLibBootstrapReceiver) };
-            let event = dispatch_to_runtime(&r.runtime_handle, {
-                let state_ptr = SendPtr(state as *const DrasiLibBootstrapReceiver);
-                async move {
-                    let inner = unsafe { state_ptr.as_ref() };
-                    let mut rx = inner.inner.lock().await;
-                    rx.recv().await
+        struct DrasiLibBootstrapReceiverHandle {
+            receiver: Arc<DrasiLibBootstrapReceiver>,
+        }
+
+        /// Convert a BootstrapEvent into a heap-allocated FfiBootstrapEvent.
+        fn wrap_bootstrap_event(record: BootstrapEvent) -> *mut FfiBootstrapEvent {
+            let source_id_owned = record.source_id.clone();
+            let timestamp_us = record
+                .timestamp
+                .timestamp_nanos_opt()
+                .map(|n| n / 1000)
+                .unwrap_or(0);
+            let sequence = record.sequence;
+            let entity_id_str = source_change_metadata(&record.change)
+                .map(|m| m.reference.element_id.to_string())
+                .unwrap_or_default();
+            let label_str = source_change_metadata(&record.change)
+                .and_then(|m| m.labels.first().map(|l| l.to_string()))
+                .unwrap_or_default();
+
+            let boxed = Box::new(record);
+            let opaque = Box::into_raw(boxed) as *mut c_void;
+            extern "C" fn drop_bootstrap(ptr: *mut c_void) {
+                unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
+            }
+            Box::into_raw(Box::new(FfiBootstrapEvent {
+                opaque,
+                source_id: FfiStr::from_str(&source_id_owned),
+                timestamp_us,
+                sequence,
+                label: FfiStr::from_str(&label_str),
+                entity_id: FfiStr::from_str(&entity_id_str),
+                drop_fn: drop_bootstrap,
+            }))
+        }
+
+        extern "C" fn bootstrap_start_push(
+            state: *mut c_void,
+            callback: FfiBootstrapPushCallbackFn,
+            callback_ctx: *mut c_void,
+        ) {
+            let handle = unsafe { &*(state as *const DrasiLibBootstrapReceiverHandle) };
+            let receiver = handle.receiver.clone();
+            let ctx = SendMutPtr(callback_ctx);
+            let shutdown = receiver.shutdown.clone();
+            let rt_handle = receiver.runtime_handle.clone();
+            rt_handle.spawn(async move {
+                let mut rx = receiver.inner.lock().await;
+                loop {
+                    tokio::select! {
+                        _ = shutdown.notified() => {
+                            callback(ctx.as_ptr(), std::ptr::null_mut());
+                            break;
+                        }
+                        result = rx.recv() => {
+                            match result {
+                                Some(record) => {
+                                    let ffi_event = wrap_bootstrap_event(record);
+                                    let accepted = callback(ctx.as_ptr(), ffi_event);
+                                    if !accepted {
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    // Stream exhausted
+                                    callback(ctx.as_ptr(), std::ptr::null_mut());
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             });
-            match event {
-                Some(record) => {
-                    let source_id_owned = record.source_id.clone();
-                    let timestamp_us = record
-                        .timestamp
-                        .timestamp_nanos_opt()
-                        .map(|n| n / 1000)
-                        .unwrap_or(0);
-                    let sequence = record.sequence;
-                    let entity_id_str = source_change_metadata(&record.change)
-                        .map(|m| m.reference.element_id.to_string())
-                        .unwrap_or_default();
-                    let label_str = source_change_metadata(&record.change)
-                        .and_then(|m| m.labels.first().map(|l| l.to_string()))
-                        .unwrap_or_default();
-
-                    let boxed = Box::new(record);
-                    let opaque = Box::into_raw(boxed) as *mut c_void;
-                    extern "C" fn drop_bootstrap(ptr: *mut c_void) {
-                        unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
-                    }
-                    Box::into_raw(Box::new(FfiBootstrapEvent {
-                        opaque,
-                        source_id: FfiStr::from_str(&source_id_owned),
-                        timestamp_us,
-                        sequence,
-                        label: FfiStr::from_str(&label_str),
-                        entity_id: FfiStr::from_str(&entity_id_str),
-                        drop_fn: drop_bootstrap,
-                    }))
-                }
-                None => std::ptr::null_mut(),
-            }
         }
 
         extern "C" fn bootstrap_drop(state: *mut c_void) {
-            unsafe { drop(Box::from_raw(state as *mut DrasiLibBootstrapReceiver)) };
+            let handle =
+                unsafe { Box::from_raw(state as *mut DrasiLibBootstrapReceiverHandle) };
+            handle.receiver.shutdown.notify_one();
+            drop(handle);
         }
 
-        let ffi_brx = Box::new(DrasiLibBootstrapReceiver {
-            inner: tokio::sync::Mutex::new(brx),
-            runtime_handle: runtime_handle.clone(),
+        let ffi_brx = Box::new(DrasiLibBootstrapReceiverHandle {
+            receiver: Arc::new(DrasiLibBootstrapReceiver {
+                inner: tokio::sync::Mutex::new(brx),
+                runtime_handle: runtime_handle.clone(),
+                shutdown: Arc::new(tokio::sync::Notify::new()),
+            }),
         });
         let ffi_brx_wrapper = Box::new(FfiBootstrapReceiver {
             state: Box::into_raw(ffi_brx) as *mut c_void,
-            recv_fn: bootstrap_recv,
+            start_push_fn: bootstrap_start_push,
             drop_fn: bootstrap_drop,
         });
         Box::into_raw(ffi_brx_wrapper)
