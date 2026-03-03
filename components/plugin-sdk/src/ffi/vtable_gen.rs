@@ -377,7 +377,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         });
 
         match result {
-            Ok(sub) => wrap_subscription_response(sub, w.vtable_executor),
+            Ok(sub) => wrap_subscription_response(sub, w.vtable_executor, handle),
             Err(e) => {
                 log::error!("Subscribe failed: {e}");
                 std::ptr::null_mut()
@@ -695,7 +695,7 @@ pub fn build_source_vtable_from_boxed(
         match result {
             Ok(sub) => {
                 let executor = unsafe { &*(state as *const DynSourceWrapper) }.vtable_executor;
-                wrap_subscription_response(sub, executor)
+                wrap_subscription_response(sub, executor, handle)
             }
             Err(e) => {
                 log::error!("Subscribe failed: {e}");
@@ -1922,24 +1922,26 @@ fn build_reaction_runtime_context(
 fn wrap_subscription_response(
     sub: drasi_lib::SubscriptionResponse,
     executor: AsyncExecutorFn,
+    runtime_handle: tokio::runtime::Handle,
 ) -> *mut FfiSubscriptionResponse {
     use drasi_lib::channels::events::SourceEventWrapper;
 
     // Wrap ChangeReceiver<SourceEventWrapper> → FfiChangeReceiver
     struct DrasiLibChangeReceiver {
-        inner: std::sync::Mutex<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
+        inner: tokio::sync::Mutex<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
+        runtime_handle: tokio::runtime::Handle,
     }
 
     extern "C" fn change_receiver_recv(state: *mut c_void) -> *mut FfiSourceEvent {
         let r = unsafe { &*(state as *const DrasiLibChangeReceiver) };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create tokio runtime for change_receiver_recv");
-        let event = {
-            let mut rx = r.inner.lock().expect("change receiver mutex poisoned");
-            rt.block_on(rx.recv())
-        };
+        let event = dispatch_to_runtime(&r.runtime_handle, {
+            let state_ptr = SendPtr(state as *const DrasiLibChangeReceiver);
+            async move {
+                let inner = unsafe { state_ptr.as_ref() };
+                let mut rx = inner.inner.lock().await;
+                rx.recv().await
+            }
+        });
         match event {
             Ok(wrapper) => {
                 let op = match &wrapper.event {
@@ -1982,7 +1984,8 @@ fn wrap_subscription_response(
     }
 
     let ffi_receiver = Box::new(DrasiLibChangeReceiver {
-        inner: std::sync::Mutex::new(sub.receiver),
+        inner: tokio::sync::Mutex::new(sub.receiver),
+        runtime_handle: runtime_handle.clone(),
     });
     let ffi_rx = Box::new(FfiChangeReceiver {
         state: Box::into_raw(ffi_receiver) as *mut c_void,
@@ -1994,19 +1997,20 @@ fn wrap_subscription_response(
     // Wrap bootstrap receiver if present
     let bootstrap_receiver = if let Some(mut brx) = sub.bootstrap_receiver {
         struct DrasiLibBootstrapReceiver {
-            inner: std::sync::Mutex<tokio::sync::mpsc::Receiver<BootstrapEvent>>,
+            inner: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<BootstrapEvent>>,
+            runtime_handle: tokio::runtime::Handle,
         }
 
         extern "C" fn bootstrap_recv(state: *mut c_void) -> *mut FfiBootstrapEvent {
             let r = unsafe { &*(state as *const DrasiLibBootstrapReceiver) };
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create tokio runtime for bootstrap_recv");
-            let event = {
-                let mut rx = r.inner.lock().expect("bootstrap receiver mutex poisoned");
-                rt.block_on(rx.recv())
-            };
+            let event = dispatch_to_runtime(&r.runtime_handle, {
+                let state_ptr = SendPtr(state as *const DrasiLibBootstrapReceiver);
+                async move {
+                    let inner = unsafe { state_ptr.as_ref() };
+                    let mut rx = inner.inner.lock().await;
+                    rx.recv().await
+                }
+            });
             match event {
                 Some(record) => {
                     let source_id_owned = record.source_id.clone();
@@ -2047,7 +2051,8 @@ fn wrap_subscription_response(
         }
 
         let ffi_brx = Box::new(DrasiLibBootstrapReceiver {
-            inner: std::sync::Mutex::new(brx),
+            inner: tokio::sync::Mutex::new(brx),
+            runtime_handle: runtime_handle.clone(),
         });
         let ffi_brx_wrapper = Box::new(FfiBootstrapReceiver {
             state: Box::into_raw(ffi_brx) as *mut c_void,
