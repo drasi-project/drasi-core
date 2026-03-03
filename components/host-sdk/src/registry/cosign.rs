@@ -213,15 +213,15 @@ async fn verify_cosign_signature(
         .parse()
         .context("failed to construct referrers reference")?;
 
-    if let Ok((manifest, _)) = client.pull_manifest(&referrers_ref, auth).await {
-        if let oci_client::manifest::OciManifest::ImageIndex(idx) = &manifest {
-            if !idx.manifests.is_empty() {
-                debug!("Found referrers index with {} entries", idx.manifests.len());
-                if let Some(result) =
-                    try_verify_bundle(&client, &repo, idx, auth, oci_reference).await?
-                {
-                    return Ok(Some(result));
-                }
+    if let Ok((oci_client::manifest::OciManifest::ImageIndex(idx), _)) =
+        client.pull_manifest(&referrers_ref, auth).await.as_ref()
+    {
+        if !idx.manifests.is_empty() {
+            debug!("Found referrers index with {} entries", idx.manifests.len());
+            if let Some(result) =
+                try_verify_bundle(&client, &repo, idx, auth, oci_reference).await?
+            {
+                return Ok(Some(result));
             }
         }
     }
