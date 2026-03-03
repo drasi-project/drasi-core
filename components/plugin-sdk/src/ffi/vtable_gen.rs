@@ -1044,7 +1044,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                     unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
                 let inner = unsafe { ptr.as_ref() };
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
-                    log::error!("Failed to enqueue query result: {}", e);
+                    log::error!("Failed to enqueue query result: {e}");
                 }
             }
         });
@@ -1318,7 +1318,7 @@ pub fn build_reaction_vtable_from_boxed(
                     unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
                 let inner = unsafe { ptr.as_ref() };
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
-                    log::error!("Failed to enqueue query result: {}", e);
+                    log::error!("Failed to enqueue query result: {e}");
                 }
             }
         });
