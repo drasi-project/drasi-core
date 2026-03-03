@@ -171,16 +171,16 @@ const OID_FULCIO_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
 
 /// Verify a cosign signature for an OCI reference.
 ///
-/// 1. Constructs the cosign signature tag (`sha256-DIGEST.sig`)
-/// 2. Pulls the signature layer from the registry
-/// 3. Parses the Fulcio certificate from the annotation
-/// 4. Verifies the ECDSA-P256 signature over the simplesigning payload
-/// 5. Extracts the OIDC issuer and subject from the certificate
+/// Supports two cosign signature storage formats:
+/// 1. **Simplesigning** (legacy): `sha256-DIGEST.sig` tag → image manifest with
+///    signature + certificate in layer annotations.
+/// 2. **Sigstore Bundle** (v0.3+): `sha256-DIGEST` referrers tag → image index →
+///    inner manifest with a `application/vnd.dev.sigstore.bundle.v0.3+json` layer
+///    containing a DSSE envelope + certificate.
 async fn verify_cosign_signature(
     oci_reference: &str,
     auth: &oci_client::secrets::RegistryAuth,
 ) -> Result<Option<VerificationResult>> {
-    // Parse the reference and extract the digest
     let parsed: oci_client::Reference = oci_reference.parse().context("invalid OCI reference")?;
 
     let client = oci_client::Client::new(oci_client::client::ClientConfig {
@@ -203,38 +203,176 @@ async fn verify_cosign_signature(
         .strip_prefix("sha256:")
         .context("expected sha256 digest")?;
 
-    // Build the cosign signature tag reference
     let repo = format!("{}/{}", parsed.registry(), parsed.repository());
+
+    // Try sigstore bundle format first (sha256-DIGEST referrers tag)
+    let referrers_tag = format!("{repo}:sha256-{digest_hex}");
+    debug!("Looking for sigstore bundle at: {referrers_tag}");
+
+    let referrers_ref: oci_client::Reference = referrers_tag
+        .parse()
+        .context("failed to construct referrers reference")?;
+
+    if let Ok((manifest, _)) = client.pull_manifest(&referrers_ref, auth).await {
+        if let oci_client::manifest::OciManifest::ImageIndex(idx) = &manifest {
+            if !idx.manifests.is_empty() {
+                debug!("Found referrers index with {} entries", idx.manifests.len());
+                if let Some(result) =
+                    try_verify_bundle(&client, &repo, idx, auth, oci_reference).await?
+                {
+                    return Ok(Some(result));
+                }
+            }
+        }
+    }
+
+    // Fall back to simplesigning format (sha256-DIGEST.sig tag)
     let sig_tag = format!("{repo}:sha256-{digest_hex}.sig");
-    debug!("Looking for cosign signature at: {sig_tag}");
+    debug!("Looking for simplesigning signature at: {sig_tag}");
 
     let sig_ref: oci_client::Reference = sig_tag
         .parse()
         .context("failed to construct signature reference")?;
 
-    // Pull the signature manifest — if it doesn't exist, the plugin is unsigned
     let sig_manifest = match client.pull_manifest(&sig_ref, auth).await {
         Ok((m, _)) => m,
         Err(_) => {
-            debug!("No cosign signature tag found for {oci_reference}");
+            debug!("No cosign signature found for {oci_reference}");
             return Ok(None);
         }
     };
 
-    // Verify we got an image manifest (not an index)
-    let layer_count = match &sig_manifest {
+    try_verify_simplesigning(&client, &sig_ref, &sig_manifest, auth, oci_reference).await
+}
+
+/// Verify a sigstore bundle (v0.3+) from a referrers image index.
+///
+/// The index contains inner manifests whose single layer is a JSON sigstore bundle
+/// with a DSSE envelope. The signature is ECDSA-P256 over the DSSE PAE encoding.
+async fn try_verify_bundle(
+    client: &oci_client::Client,
+    repo: &str,
+    idx: &oci_client::manifest::OciImageIndex,
+    auth: &oci_client::secrets::RegistryAuth,
+    oci_reference: &str,
+) -> Result<Option<VerificationResult>> {
+    for entry in &idx.manifests {
+        let inner_ref: oci_client::Reference = format!("{repo}@{}", entry.digest).parse()?;
+
+        let (inner_manifest, _) = client
+            .pull_manifest(&inner_ref, auth)
+            .await
+            .context("failed to pull inner signature manifest")?;
+
+        let img = match &inner_manifest {
+            oci_client::manifest::OciManifest::Image(img) => img,
+            _ => continue,
+        };
+
+        if img.layers.is_empty() {
+            continue;
+        }
+
+        let layer_desc = &img.layers[0];
+
+        // Only process sigstore bundle layers
+        if !layer_desc.media_type.contains("sigstore.bundle") {
+            continue;
+        }
+
+        let mut buf = Vec::new();
+        client
+            .pull_blob(&inner_ref, layer_desc, &mut buf)
+            .await
+            .context("failed to pull sigstore bundle blob")?;
+
+        let bundle: serde_json::Value =
+            serde_json::from_slice(&buf).context("failed to parse sigstore bundle JSON")?;
+
+        let envelope = bundle
+            .get("dsseEnvelope")
+            .context("no dsseEnvelope in bundle")?;
+
+        let payload_b64 = envelope
+            .get("payload")
+            .and_then(|v| v.as_str())
+            .context("no payload in DSSE envelope")?;
+        let payload_bytes = base64_decode(payload_b64)?;
+
+        let sig_b64 = envelope
+            .get("signatures")
+            .and_then(|s| s.as_array())
+            .and_then(|a| a.first())
+            .and_then(|s| s.get("sig"))
+            .and_then(|v| v.as_str())
+            .context("no signature in DSSE envelope")?;
+        let sig_bytes = base64_decode(sig_b64)?;
+
+        let cert_b64 = bundle
+            .get("verificationMaterial")
+            .and_then(|vm| vm.get("certificate"))
+            .and_then(|c| c.get("rawBytes"))
+            .and_then(|v| v.as_str())
+            .context("no certificate in verification material")?;
+        let cert_der = base64_decode(cert_b64)?;
+
+        let (_, cert) = x509_parser::parse_x509_certificate(&cert_der)
+            .map_err(|e| anyhow::anyhow!("failed to parse certificate: {e}"))?;
+
+        let pub_key = cert
+            .tbs_certificate
+            .subject_pki
+            .subject_public_key
+            .data
+            .to_vec();
+        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key)
+            .context("failed to parse ECDSA-P256 public key")?;
+
+        // DSSE PAE: "DSSEv1 <len(type)> <type> <len(payload)> <payload>"
+        let payload_type = envelope
+            .get("payloadType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/vnd.in-toto+json");
+        let pae = dsse_pae(payload_type, &payload_bytes);
+
+        let signature = DerSignature::from_bytes(&sig_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse DER signature: {e}"))?;
+
+        verifying_key
+            .verify(&pae, &signature)
+            .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
+
+        debug!("ECDSA-P256 signature verified (sigstore bundle)");
+        let result = extract_identity(&cert, oci_reference)?;
+        return Ok(Some(result));
+    }
+
+    Ok(None)
+}
+
+/// Verify a simplesigning-format cosign signature.
+///
+/// The signature manifest is an image with layers containing the simplesigning
+/// JSON payload, with certificate and signature in layer annotations.
+async fn try_verify_simplesigning(
+    client: &oci_client::Client,
+    sig_ref: &oci_client::Reference,
+    sig_manifest: &oci_client::manifest::OciManifest,
+    auth: &oci_client::secrets::RegistryAuth,
+    oci_reference: &str,
+) -> Result<Option<VerificationResult>> {
+    let layer_count = match sig_manifest {
         oci_client::manifest::OciManifest::Image(img) => img.layers.len(),
-        _ => bail!("expected image manifest for cosign signature, got image index"),
+        _ => bail!("expected image manifest for cosign signature"),
     };
 
     if layer_count == 0 {
         bail!("cosign signature manifest has no layers");
     }
 
-    // Pull the signature layers
     let image_data = client
         .pull(
-            &sig_ref,
+            sig_ref,
             auth,
             vec![
                 "application/vnd.dev.cosign.simplesigning.v1+json",
@@ -244,43 +382,35 @@ async fn verify_cosign_signature(
         .await
         .context("failed to pull cosign signature layers")?;
 
-    // Process the first signature layer
     for layer in &image_data.layers {
         let anns = match &layer.annotations {
             Some(a) => a,
             None => continue,
         };
 
-        // Get the certificate (try both annotation key variants)
         let cert_pem_str = anns
             .get("dev.sigstore.cosign/certificate")
             .or_else(|| anns.get("dev.cosignproject.cosign/certificate"))
-            .context("no certificate annotation in signature layer")?;
+            .context("no certificate annotation")?;
 
-        // Get the signature
         let sig_b64 = anns
             .get("dev.cosignproject.cosign/signature")
-            .context("no signature annotation in signature layer")?;
+            .context("no signature annotation")?;
 
-        // Parse the Fulcio certificate
         let cert_pem = pem::parse(cert_pem_str).context("failed to parse certificate PEM")?;
-
         let (_, cert) = x509_parser::parse_x509_certificate(cert_pem.contents())
-            .map_err(|e| anyhow::anyhow!("failed to parse X.509 certificate: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to parse certificate: {e}"))?;
 
-        // Verify the ECDSA-P256 signature over the simplesigning payload
-        let pub_key_bytes = cert
+        let pub_key = cert
             .tbs_certificate
             .subject_pki
             .subject_public_key
             .data
             .to_vec();
+        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key)
+            .context("failed to parse ECDSA-P256 public key")?;
 
-        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key_bytes)
-            .context("failed to parse ECDSA-P256 public key from certificate")?;
-
-        let sig_bytes = base64_decode(sig_b64).context("failed to decode signature base64")?;
-
+        let sig_bytes = base64_decode(sig_b64)?;
         let signature = DerSignature::from_bytes(&sig_bytes)
             .map_err(|e| anyhow::anyhow!("failed to parse DER signature: {e}"))?;
 
@@ -288,58 +418,76 @@ async fn verify_cosign_signature(
             .verify(&layer.data, &signature)
             .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
 
-        debug!("ECDSA-P256 signature verified successfully");
+        debug!("ECDSA-P256 signature verified (simplesigning)");
+        let result = extract_identity(&cert, oci_reference)?;
+        return Ok(Some(result));
+    }
 
-        // Extract the OIDC identity from certificate extensions
-        let mut issuer = String::new();
-        let mut subject = String::new();
+    bail!("no processable signature layers found")
+}
 
-        for ext in cert.extensions() {
-            let oid = ext.oid.to_string();
+/// Build the DSSE Pre-Authentication Encoding (PAE).
+fn dsse_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+    let mut pae = Vec::new();
+    pae.extend_from_slice(b"DSSEv1 ");
+    pae.extend_from_slice(payload_type.len().to_string().as_bytes());
+    pae.push(b' ');
+    pae.extend_from_slice(payload_type.as_bytes());
+    pae.push(b' ');
+    pae.extend_from_slice(payload.len().to_string().as_bytes());
+    pae.push(b' ');
+    pae.extend_from_slice(payload);
+    pae
+}
 
-            // OIDC Issuer (prefer v2, fall back to v1)
-            if oid == OID_FULCIO_ISSUER_V2 {
-                issuer = decode_der_utf8string(ext.value)
-                    .or_else(|| std::str::from_utf8(ext.value).ok().map(String::from))
-                    .unwrap_or_default();
-            } else if oid == OID_FULCIO_ISSUER_V1 && issuer.is_empty() {
-                issuer = std::str::from_utf8(ext.value).unwrap_or("").to_string();
-            }
+/// Extract OIDC issuer and subject from a Fulcio certificate.
+fn extract_identity(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    oci_reference: &str,
+) -> Result<VerificationResult> {
+    let mut issuer = String::new();
+    let mut subject = String::new();
 
-            // Subject from SAN
-            if ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME {
-                if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
-                    ext.parsed_extension()
-                {
-                    for name in &san.general_names {
-                        match name {
-                            x509_parser::extensions::GeneralName::RFC822Name(email) => {
-                                subject = email.to_string();
-                            }
-                            x509_parser::extensions::GeneralName::URI(uri) => {
-                                subject = uri.to_string();
-                            }
-                            _ => {}
+    for ext in cert.extensions() {
+        let oid = ext.oid.to_string();
+
+        if oid == OID_FULCIO_ISSUER_V2 {
+            issuer = decode_der_utf8string(ext.value)
+                .or_else(|| std::str::from_utf8(ext.value).ok().map(String::from))
+                .unwrap_or_default();
+        } else if oid == OID_FULCIO_ISSUER_V1 && issuer.is_empty() {
+            issuer = std::str::from_utf8(ext.value).unwrap_or("").to_string();
+        }
+
+        if ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME {
+            if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
+                ext.parsed_extension()
+            {
+                for name in &san.general_names {
+                    match name {
+                        x509_parser::extensions::GeneralName::RFC822Name(email) => {
+                            subject = email.to_string();
                         }
+                        x509_parser::extensions::GeneralName::URI(uri) => {
+                            subject = uri.to_string();
+                        }
+                        _ => {}
                     }
                 }
             }
         }
-
-        if issuer.is_empty() {
-            bail!("no OIDC issuer found in Fulcio certificate extensions");
-        }
-
-        if subject.is_empty() {
-            bail!("no subject found in certificate SAN");
-        }
-
-        info!("✓ {oci_reference} — signed by (issuer={issuer}, subject={subject})");
-
-        return Ok(Some(VerificationResult { issuer, subject }));
     }
 
-    bail!("no processable signature layers found")
+    if issuer.is_empty() {
+        bail!("no OIDC issuer found in Fulcio certificate extensions");
+    }
+
+    if subject.is_empty() {
+        bail!("no subject found in certificate SAN");
+    }
+
+    info!("✓ {oci_reference} — signed by (issuer={issuer}, subject={subject})");
+    Ok(VerificationResult { issuer, subject })
 }
 
 /// Decode a DER-encoded UTF8String (tag 0x0c).
