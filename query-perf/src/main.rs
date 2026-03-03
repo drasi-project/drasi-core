@@ -28,6 +28,7 @@ use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     open_unified_db,
     result_index::RocksDbResultIndex,
+    RocksDbSessionState,
 };
 use drasi_query_cypher::CypherParser;
 
@@ -131,7 +132,8 @@ async fn main() {
                 };
 
                 let db = rocks_db.clone().unwrap();
-                let element_index = RocksDbElementIndex::new(db, options);
+                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let element_index = RocksDbElementIndex::new(db, options, session_state);
                 element_index.clear().await.unwrap();
 
                 builder.with_element_index(Arc::new(element_index))
@@ -148,7 +150,8 @@ async fn main() {
             }
             IndexType::RocksDB => {
                 let db = rocks_db.unwrap();
-                let ari = RocksDbResultIndex::new(db);
+                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let ari = RocksDbResultIndex::new(db, session_state);
                 ari.clear().await.unwrap();
 
                 builder.with_result_index(Arc::new(ari))
