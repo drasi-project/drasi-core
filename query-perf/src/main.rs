@@ -28,7 +28,7 @@ use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     open_unified_db,
     result_index::RocksDbResultIndex,
-    RocksDbSessionState,
+    RocksDbSessionControl, RocksDbSessionState,
 };
 use drasi_query_cypher::CypherParser;
 
@@ -100,21 +100,24 @@ async fn main() {
 
         // Open shared RocksDB if either index type needs it (avoids LOCK conflict
         // from opening the same unified DB path twice)
-        let rocks_db = if test_run_config.element_index_type == IndexType::RocksDB
-            || test_run_config.result_index_type == IndexType::RocksDB
-        {
-            let options = RocksIndexOptions {
-                archive_enabled: false,
-                direct_io: false,
+        let (rocks_db, rocks_session_state) =
+            if test_run_config.element_index_type == IndexType::RocksDB
+                || test_run_config.result_index_type == IndexType::RocksDB
+            {
+                let options = RocksIndexOptions {
+                    archive_enabled: false,
+                    direct_io: false,
+                };
+                let path = match env::var("ROCKS_PATH") {
+                    Ok(p) => p,
+                    Err(_) => "test-data".to_string(),
+                };
+                let db = open_unified_db(&path, &query_id, &options).unwrap();
+                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                (Some(db), Some(session_state))
+            } else {
+                (None, None)
             };
-            let path = match env::var("ROCKS_PATH") {
-                Ok(p) => p,
-                Err(_) => "test-data".to_string(),
-            };
-            Some(open_unified_db(&path, &query_id, &options).unwrap())
-        } else {
-            None
-        };
 
         // Configure the correct element index
         builder = match test_run_config.element_index_type {
@@ -132,7 +135,7 @@ async fn main() {
                 };
 
                 let db = rocks_db.clone().unwrap();
-                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let session_state = rocks_session_state.clone().unwrap();
                 let element_index = RocksDbElementIndex::new(db, options, session_state);
                 element_index.clear().await.unwrap();
 
@@ -150,13 +153,20 @@ async fn main() {
             }
             IndexType::RocksDB => {
                 let db = rocks_db.unwrap();
-                let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+                let session_state = rocks_session_state.clone().unwrap();
                 let ari = RocksDbResultIndex::new(db, session_state);
                 ari.clear().await.unwrap();
 
                 builder.with_result_index(Arc::new(ari))
             }
         };
+
+        // Wire up session control for RocksDB so that process_source_change
+        // can begin/commit transactions around index operations.
+        if let Some(session_state) = rocks_session_state {
+            builder = builder
+                .with_session_control(Arc::new(RocksDbSessionControl::new(session_state)));
+        }
 
         let cq = builder.build().await;
 
