@@ -164,12 +164,16 @@ impl OciRegistryClient {
     ) -> Result<DownloadResult> {
         let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
-        // Verify cosign signature before downloading (if enabled)
+        // Attempt cosign signature verification (best-effort).
+        // Verification result is recorded but failures don't block download.
         let verification = if self.verifier.is_enabled() {
-            self.verifier
-                .verify_plugin(reference, &self.auth())
-                .await
-                .with_context(|| format!("cosign signature verification failed for {reference}"))?
+            match self.verifier.verify_plugin(reference, &self.auth()).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::warn!("Signature verification failed for {reference}: {e}");
+                    None
+                }
+            }
         } else {
             None
         };

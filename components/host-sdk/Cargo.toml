@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
-registry = ["oci-client", "semver", "tokio/fs", "sigstore"]
+registry = ["oci-client", "semver", "tokio/fs", "x509-parser", "p256", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
 
 [dependencies]
@@ -27,7 +27,10 @@ chrono = "0.4"
 # Optional: OCI registry support
 oci-client = { version = "0.16", optional = true }
 semver = { version = "1.0", optional = true }
-sigstore = { version = "0.13", default-features = false, features = ["cosign", "cached-client", "native-tls", "sigstore-trust-root", "rekor", "fulcio", "registry"], optional = true }
+x509-parser = { version = "0.16", optional = true }
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+pem = { version = "3", optional = true }
+base64 = { version = "0.22", optional = true }
 
 # Optional: HTTP fetching support
 reqwest = { version = "0.12", optional = true }

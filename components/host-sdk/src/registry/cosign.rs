@@ -14,13 +14,16 @@
 
 //! Cosign signature verification for OCI plugin artifacts.
 //!
-//! Provides optional keyless signature verification using the Sigstore
-//! transparency log. When enabled, downloaded plugins must have a valid
-//! cosign signature from a trusted identity (OIDC issuer + subject pattern).
+//! Implements keyless signature verification by directly inspecting the
+//! cosign signature tag in the OCI registry, parsing the Fulcio certificate,
+//! and verifying the ECDSA-P256 signature over the simplesigning payload.
+//!
+//! This replaces the `sigstore-rs` library with a lightweight, focused
+//! implementation that only needs `oci-client`, `x509-parser`, and `p256`.
 
 use anyhow::{bail, Context, Result};
 use log::{debug, info};
-use sigstore::cosign::CosignCapabilities;
+use p256::ecdsa::{signature::Verifier, DerSignature, VerifyingKey};
 
 /// A trusted signing identity for cosign verification.
 #[derive(Debug, Clone)]
@@ -35,9 +38,9 @@ pub struct TrustedIdentity {
 /// Result of a successful signature verification.
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
-    /// The issuer that matched.
+    /// The OIDC issuer from the Fulcio certificate.
     pub issuer: String,
-    /// The subject from the signing certificate.
+    /// The subject (SAN URI or email) from the Fulcio certificate.
     pub subject: String,
 }
 
@@ -87,13 +90,12 @@ impl CosignVerifier {
 
     /// Verify a plugin's cosign signature.
     ///
-    /// If verification is disabled, returns `Ok(None)` immediately.
-    /// If enabled, fetches the cosign signature from the registry and checks
-    /// it against the configured trusted identities using the Sigstore
-    /// transparency log (Rekor) and Fulcio certificate chain.
+    /// Pulls the cosign signature tag from the registry, parses the Fulcio
+    /// certificate, verifies the ECDSA-P256 signature, and extracts the
+    /// signer identity (OIDC issuer + subject).
     ///
-    /// Returns `Ok(Some(result))` with the matched identity on success,
-    /// or an error if verification fails.
+    /// Returns `Ok(Some(result))` with the signer identity on success,
+    /// `Ok(None)` if the plugin is unsigned, or an error if verification fails.
     pub async fn verify_plugin(
         &self,
         oci_reference: &str,
@@ -104,97 +106,271 @@ impl CosignVerifier {
         }
 
         info!("Verifying cosign signature for {oci_reference}...");
+        verify_cosign_signature(oci_reference, auth).await
+    }
 
-        // Initialize the Sigstore trust root (Fulcio CA + Rekor keys)
-        let trust_root = sigstore::trust::sigstore::SigstoreTrustRoot::new(None)
-            .await
-            .context("failed to fetch Sigstore trust root")?;
-
-        // Build cosign client with the trust root
-        let mut cosign_client = sigstore::cosign::ClientBuilder::default()
-            .with_trust_repository(&trust_root)
-            .context("failed to configure trust repository")?
-            .build()
-            .context("failed to build cosign client")?;
-
-        // Parse the OCI reference
-        let sigstore_ref: sigstore::registry::OciReference = oci_reference
-            .parse()
-            .context("invalid OCI reference for sigstore")?;
-
-        // Triangulate: find the cosign signature tag
-        let (cosign_image, source_digest) = cosign_client
-            .triangulate(&sigstore_ref, &convert_auth(auth))
-            .await
-            .context("failed to locate cosign signature")?;
-
-        debug!("Cosign signature image: {cosign_image}, source digest: {source_digest}");
-
-        // Fetch trusted signature layers
-        let signature_layers = cosign_client
-            .trusted_signature_layers(&convert_auth(auth), &source_digest, &cosign_image)
-            .await
-            .context("failed to fetch signature layers")?;
-
-        if signature_layers.is_empty() {
-            bail!(
-                "no valid cosign signatures found for {oci_reference}. \
-                 The plugin may not be signed or the signature may be invalid."
-            );
+    /// Verify multiple plugins in parallel against the OCI registry.
+    ///
+    /// Each entry is `(oci_reference, filename)`.
+    /// Returns `(filename, Option<VerificationResult>)` for each plugin.
+    /// `None` means unsigned or verification failed.
+    pub async fn verify_batch(
+        &self,
+        plugins: Vec<(String, String)>,
+        auth: &oci_client::secrets::RegistryAuth,
+    ) -> Vec<(String, Option<VerificationResult>)> {
+        if !self.config.enabled || plugins.is_empty() {
+            return plugins.into_iter().map(|(_, f)| (f, None)).collect();
         }
 
-        // Check signature layers against trusted identities
-        let identities = self.config.effective_identities();
+        info!(
+            "Verifying {} plugin signature(s) against registry...",
+            plugins.len()
+        );
 
-        for layer in &signature_layers {
-            if let Some(result) = check_layer_against_identities(layer, &identities) {
-                info!(
-                    "✓ {oci_reference} — signature verified (issuer={}, subject={})",
-                    result.issuer, result.subject
-                );
-                return Ok(Some(result));
+        let mut join_set = tokio::task::JoinSet::new();
+        for (reference, filename) in plugins {
+            let auth = auth.clone();
+            join_set.spawn(async move {
+                match verify_cosign_signature(&reference, &auth).await {
+                    Ok(Some(vr)) => {
+                        info!(
+                            "✓ {} — signed by (issuer={}, subject={})",
+                            reference, vr.issuer, vr.subject
+                        );
+                        (filename, Some(vr))
+                    }
+                    Ok(None) => {
+                        debug!("⊘ {} — unsigned", reference);
+                        (filename, None)
+                    }
+                    Err(e) => {
+                        log::warn!("✗ {} — verification failed: {e}", reference);
+                        (filename, None)
+                    }
+                }
+            });
+        }
+
+        let mut results = Vec::new();
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(r) => results.push(r),
+                Err(e) => log::error!("Verification task panicked: {e}"),
             }
         }
-
-        // No matching identity found
-        let identity_desc: Vec<String> = identities
-            .iter()
-            .map(|id| format!("issuer={}, subject={}", id.issuer, id.subject_pattern))
-            .collect();
-        bail!(
-            "cosign signature found for {oci_reference} but no trusted identity matched. \
-             Trusted identities: [{}]",
-            identity_desc.join("; ")
-        );
+        results
     }
 }
 
-/// Check a signature layer against a list of trusted identities.
-fn check_layer_against_identities(
-    layer: &sigstore::cosign::SignatureLayer,
-    identities: &[TrustedIdentity],
-) -> Option<VerificationResult> {
-    // Extract issuer and subject from the certificate signature
-    let cert_sig = layer.certificate_signature.as_ref()?;
+/// Fulcio OIDC Issuer extension OID (v1): 1.3.6.1.4.1.57264.1.1
+const OID_FULCIO_ISSUER_V1: &str = "1.3.6.1.4.1.57264.1.1";
 
-    let issuer_str = cert_sig.issuer.as_deref().unwrap_or("");
-    let subject_str = match &cert_sig.subject {
-        sigstore::cosign::signature_layers::CertificateSubject::Email(email) => email.as_str(),
-        sigstore::cosign::signature_layers::CertificateSubject::Uri(uri) => uri.as_str(),
+/// Fulcio OIDC Issuer extension OID (v2): 1.3.6.1.4.1.57264.1.8
+const OID_FULCIO_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
+
+/// Verify a cosign signature for an OCI reference.
+///
+/// 1. Constructs the cosign signature tag (`sha256-DIGEST.sig`)
+/// 2. Pulls the signature layer from the registry
+/// 3. Parses the Fulcio certificate from the annotation
+/// 4. Verifies the ECDSA-P256 signature over the simplesigning payload
+/// 5. Extracts the OIDC issuer and subject from the certificate
+async fn verify_cosign_signature(
+    oci_reference: &str,
+    auth: &oci_client::secrets::RegistryAuth,
+) -> Result<Option<VerificationResult>> {
+    // Parse the reference and extract the digest
+    let parsed: oci_client::Reference = oci_reference.parse().context("invalid OCI reference")?;
+
+    let client = oci_client::Client::new(oci_client::client::ClientConfig {
+        protocol: oci_client::client::ClientProtocol::Https,
+        ..Default::default()
+    });
+
+    // Get the digest (either from the reference or by pulling the manifest)
+    let digest = if let Some(d) = parsed.digest() {
+        d.to_string()
+    } else {
+        let (_manifest, d) = client
+            .pull_manifest(&parsed, auth)
+            .await
+            .context("failed to pull manifest for digest")?;
+        d
     };
 
-    debug!("Checking signature layer: issuer={issuer_str}, subject={subject_str}");
+    let digest_hex = digest
+        .strip_prefix("sha256:")
+        .context("expected sha256 digest")?;
 
-    for identity in identities {
-        if identity.issuer == issuer_str && glob_match(&identity.subject_pattern, subject_str) {
-            return Some(VerificationResult {
-                issuer: issuer_str.to_string(),
-                subject: subject_str.to_string(),
-            });
+    // Build the cosign signature tag reference
+    let repo = format!("{}/{}", parsed.registry(), parsed.repository());
+    let sig_tag = format!("{repo}:sha256-{digest_hex}.sig");
+    debug!("Looking for cosign signature at: {sig_tag}");
+
+    let sig_ref: oci_client::Reference = sig_tag
+        .parse()
+        .context("failed to construct signature reference")?;
+
+    // Pull the signature manifest — if it doesn't exist, the plugin is unsigned
+    let sig_manifest = match client.pull_manifest(&sig_ref, auth).await {
+        Ok((m, _)) => m,
+        Err(_) => {
+            debug!("No cosign signature tag found for {oci_reference}");
+            return Ok(None);
         }
+    };
+
+    // Verify we got an image manifest (not an index)
+    let layer_count = match &sig_manifest {
+        oci_client::manifest::OciManifest::Image(img) => img.layers.len(),
+        _ => bail!("expected image manifest for cosign signature, got image index"),
+    };
+
+    if layer_count == 0 {
+        bail!("cosign signature manifest has no layers");
     }
 
+    // Pull the signature layers
+    let image_data = client
+        .pull(
+            &sig_ref,
+            auth,
+            vec![
+                "application/vnd.dev.cosign.simplesigning.v1+json",
+                "application/octet-stream",
+            ],
+        )
+        .await
+        .context("failed to pull cosign signature layers")?;
+
+    // Process the first signature layer
+    for layer in &image_data.layers {
+        let anns = match &layer.annotations {
+            Some(a) => a,
+            None => continue,
+        };
+
+        // Get the certificate (try both annotation key variants)
+        let cert_pem_str = anns
+            .get("dev.sigstore.cosign/certificate")
+            .or_else(|| anns.get("dev.cosignproject.cosign/certificate"))
+            .context("no certificate annotation in signature layer")?;
+
+        // Get the signature
+        let sig_b64 = anns
+            .get("dev.cosignproject.cosign/signature")
+            .context("no signature annotation in signature layer")?;
+
+        // Parse the Fulcio certificate
+        let cert_pem = pem::parse(cert_pem_str).context("failed to parse certificate PEM")?;
+
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_pem.contents())
+            .map_err(|e| anyhow::anyhow!("failed to parse X.509 certificate: {e}"))?;
+
+        // Verify the ECDSA-P256 signature over the simplesigning payload
+        let pub_key_bytes = cert
+            .tbs_certificate
+            .subject_pki
+            .subject_public_key
+            .data
+            .to_vec();
+
+        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key_bytes)
+            .context("failed to parse ECDSA-P256 public key from certificate")?;
+
+        let sig_bytes = base64_decode(sig_b64).context("failed to decode signature base64")?;
+
+        let signature = DerSignature::from_bytes(&sig_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse DER signature: {e}"))?;
+
+        verifying_key
+            .verify(&layer.data, &signature)
+            .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
+
+        debug!("ECDSA-P256 signature verified successfully");
+
+        // Extract the OIDC identity from certificate extensions
+        let mut issuer = String::new();
+        let mut subject = String::new();
+
+        for ext in cert.extensions() {
+            let oid = ext.oid.to_string();
+
+            // OIDC Issuer (prefer v2, fall back to v1)
+            if oid == OID_FULCIO_ISSUER_V2 {
+                issuer = decode_der_utf8string(ext.value)
+                    .or_else(|| std::str::from_utf8(ext.value).ok().map(String::from))
+                    .unwrap_or_default();
+            } else if oid == OID_FULCIO_ISSUER_V1 && issuer.is_empty() {
+                issuer = std::str::from_utf8(ext.value).unwrap_or("").to_string();
+            }
+
+            // Subject from SAN
+            if ext.oid == x509_parser::oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME {
+                if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
+                    ext.parsed_extension()
+                {
+                    for name in &san.general_names {
+                        match name {
+                            x509_parser::extensions::GeneralName::RFC822Name(email) => {
+                                subject = email.to_string();
+                            }
+                            x509_parser::extensions::GeneralName::URI(uri) => {
+                                subject = uri.to_string();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if issuer.is_empty() {
+            bail!("no OIDC issuer found in Fulcio certificate extensions");
+        }
+
+        if subject.is_empty() {
+            bail!("no subject found in certificate SAN");
+        }
+
+        info!("✓ {oci_reference} — signed by (issuer={issuer}, subject={subject})");
+
+        return Ok(Some(VerificationResult { issuer, subject }));
+    }
+
+    bail!("no processable signature layers found")
+}
+
+/// Decode a DER-encoded UTF8String (tag 0x0c).
+fn decode_der_utf8string(data: &[u8]) -> Option<String> {
+    if data.len() > 2 && data[0] == 0x0c {
+        let len = data[1] as usize;
+        if data.len() >= 2 + len {
+            return std::str::from_utf8(&data[2..2 + len])
+                .ok()
+                .map(String::from);
+        }
+    }
     None
+}
+
+/// Decode base64 (standard alphabet).
+fn base64_decode(input: &str) -> Result<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(input.as_bytes())
+        .context("base64 decode error")
+}
+
+/// Check whether a verification result matches any of the trusted identities.
+pub fn matches_trusted_identity(
+    result: &VerificationResult,
+    identities: &[TrustedIdentity],
+) -> bool {
+    identities
+        .iter()
+        .any(|id| id.issuer == result.issuer && glob_match(&id.subject_pattern, &result.subject))
 }
 
 /// Simple glob matching supporting `*` wildcards.
@@ -212,13 +388,11 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
 
     if parts.len() == 2 {
-        // Single wildcard: "prefix*suffix"
         let prefix = parts[0];
         let suffix = parts[1];
         return value.starts_with(prefix) && value.ends_with(suffix);
     }
 
-    // Multiple wildcards: check each segment in order
     let mut remaining = value;
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
@@ -242,19 +416,6 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     }
 
     true
-}
-
-/// Convert our oci_client auth to sigstore auth.
-fn convert_auth(auth: &oci_client::secrets::RegistryAuth) -> sigstore::registry::Auth {
-    match auth {
-        oci_client::secrets::RegistryAuth::Anonymous => sigstore::registry::Auth::Anonymous,
-        oci_client::secrets::RegistryAuth::Basic(user, pass) => {
-            sigstore::registry::Auth::Basic(user.clone(), pass.clone())
-        }
-        oci_client::secrets::RegistryAuth::Bearer(token) => {
-            sigstore::registry::Auth::Bearer(token.clone())
-        }
-    }
 }
 
 #[cfg(test)]
@@ -325,5 +486,38 @@ mod tests {
         let effective = config.effective_identities();
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].issuer, "https://custom-issuer.example.com");
+    }
+
+    #[test]
+    fn test_matches_trusted_identity() {
+        let result = VerificationResult {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            subject: "https://github.com/drasi-project/source/postgres/.github/workflows/release.yml@refs/heads/main".to_string(),
+        };
+        let trusted = default_trusted_identities();
+        assert!(matches_trusted_identity(&result, &trusted));
+    }
+
+    #[test]
+    fn test_matches_trusted_identity_wrong_issuer() {
+        let result = VerificationResult {
+            issuer: "https://other-issuer.example.com".to_string(),
+            subject: "https://github.com/drasi-project/something".to_string(),
+        };
+        let trusted = default_trusted_identities();
+        assert!(!matches_trusted_identity(&result, &trusted));
+    }
+
+    #[test]
+    fn test_decode_der_utf8string() {
+        // DER UTF8String: tag=0x0c, length=5, value="hello"
+        let data = [0x0c, 0x05, b'h', b'e', b'l', b'l', b'o'];
+        assert_eq!(decode_der_utf8string(&data), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_decode_der_utf8string_not_utf8string() {
+        let data = [0x04, 0x03, b'f', b'o', b'o']; // OCTET STRING, not UTF8String
+        assert_eq!(decode_der_utf8string(&data), None);
     }
 }

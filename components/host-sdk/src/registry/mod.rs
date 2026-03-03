@@ -26,7 +26,10 @@ pub mod platform;
 pub mod resolver;
 pub mod types;
 
-pub use cosign::{CosignVerifier, TrustedIdentity, VerificationConfig, VerificationResult};
+pub use cosign::{
+    matches_trusted_identity, CosignVerifier, TrustedIdentity, VerificationConfig,
+    VerificationResult,
+};
 pub use oci::{DownloadResult, OciRegistryClient, PluginSearchResult, PluginVersionInfo};
 pub use platform::{
     oci_platform_to_target_triple, strip_arch_suffix, target_triple_to_arch_suffix,
