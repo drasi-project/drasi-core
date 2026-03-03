@@ -140,6 +140,15 @@ let raw_ctx = CallbackContext::into_raw(ctx);
 
 Plugins route all `log` and `tracing` events through the FFI log callback. The `CallbackContext` dispatches these into the correct DrasiLib `ComponentLogRegistry` keyed by instance and component ID.
 
+## OCI Registry and Signature Verification
+
+The `OciRegistryClient` supports downloading plugins from OCI registries and optional cosign signature verification via `CosignVerifier`:
+
+- Use `OciRegistryClient::with_verifier(config, verifier)` to enable signature verification on download
+- `VerificationConfig` allows configuring trusted identities (issuer + subject pattern)
+- `download_plugin()` returns `DownloadResult` containing the plugin path and an optional `VerificationResult`
+- `PluginMetadata` now includes `git_commit` and `build_timestamp` fields for build provenance
+
 ## Plugin Load Sequence
 
 1. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`

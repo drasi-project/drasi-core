@@ -196,6 +196,14 @@ cp target/release/libdrasi_source_my_plugin.so /path/to/server/plugins/
 
 > **Note:** Individual plugin crates may define a `dynamic-plugin` feature to gate `export_plugin!` macro invocation — check the plugin's `Cargo.toml`.
 
+#### Plugin metadata provenance
+
+`PluginMetadata` includes `git_commit` (from `GIT_COMMIT` env or `git rev-parse HEAD`) and `build_timestamp` (from `BUILD_TIMESTAMP` env or compile time) for build provenance tracking.
+
+#### Plugin signing
+
+When publishing plugins with `cargo xtask publish-plugins --sign`, each plugin is signed using cosign keyless signing (Sigstore). Third-party plugin authors can sign their plugins using `cosign sign --yes <oci-reference>` after publishing.
+
 #### Compatibility requirements
 
 Both the plugin and the server **must** be compiled with:

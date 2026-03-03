@@ -207,6 +207,10 @@ pub struct PluginBinaryMetadata {
     pub lib_version: String,
     /// Rust target triple.
     pub target_triple: String,
+    /// Git commit SHA the plugin was built from.
+    pub git_commit: String,
+    /// Build timestamp in RFC 3339 format.
+    pub build_timestamp: String,
 }
 
 /// Load a plugin binary just enough to read its metadata, then unload it.
@@ -246,6 +250,8 @@ pub fn read_plugin_metadata(path: &Path) -> Option<PluginBinaryMetadata> {
         core_version: unsafe { meta.core_version.to_string() },
         lib_version: unsafe { meta.lib_version.to_string() },
         target_triple: unsafe { meta.target_triple.to_string() },
+        git_commit: unsafe { meta.git_commit.to_string() },
+        build_timestamp: unsafe { meta.build_timestamp.to_string() },
     })
 }
 

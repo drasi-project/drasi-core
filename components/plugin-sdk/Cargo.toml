@@ -26,5 +26,8 @@ tracing-log = "0.2"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
+[build-dependencies]
+chrono = "0.4"
+
 [lints]
 workspace = true

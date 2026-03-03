@@ -271,8 +271,10 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
                 let core_ver = meta.core_version.to_string();
                 let plugin_ver = meta.plugin_version.to_string();
                 let target = meta.target_triple.to_string();
+                let commit = meta.git_commit.to_string();
+                let built = meta.build_timestamp.to_string();
                 Some(format!(
-                    "sdk={sdk_ver} core={core_ver} plugin={plugin_ver} target={target}"
+                    "sdk={sdk_ver} core={core_ver} plugin={plugin_ver} target={target} commit={commit} built={built}"
                 ))
             } else {
                 None

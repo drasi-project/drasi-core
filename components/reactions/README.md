@@ -1199,6 +1199,8 @@ cargo build          # target/debug/libmy_reaction.so   (Linux)
 
 Copy the resulting library into the Drasi server's `plugins/` directory. The server discovers and loads it automatically on startup.
 
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
+
 ## Additional Resources
 
 - See individual plugin directories for implementation examples

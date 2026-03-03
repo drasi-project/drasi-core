@@ -525,6 +525,14 @@ macro_rules! export_plugin {
                 ptr: $crate::ffi::TARGET_TRIPLE.as_ptr() as *const ::std::os::raw::c_char,
                 len: $crate::ffi::TARGET_TRIPLE.len(),
             },
+            git_commit: $crate::ffi::FfiStr {
+                ptr: $crate::ffi::GIT_COMMIT_SHA.as_ptr() as *const ::std::os::raw::c_char,
+                len: $crate::ffi::GIT_COMMIT_SHA.len(),
+            },
+            build_timestamp: $crate::ffi::FfiStr {
+                ptr: $crate::ffi::BUILD_TIMESTAMP.as_ptr() as *const ::std::os::raw::c_char,
+                len: $crate::ffi::BUILD_TIMESTAMP.len(),
+            },
         };
 
         /// Returns plugin metadata for version validation. Called BEFORE init.

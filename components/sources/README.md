@@ -1441,6 +1441,8 @@ drasi_plugin_sdk::export_plugin!(
 
 This keeps the source and its bootstrap provider together in a single shared library.
 
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
+
 ## Additional Resources
 
 - See individual plugin directories for implementation examples

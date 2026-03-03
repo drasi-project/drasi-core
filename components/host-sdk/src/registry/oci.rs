@@ -14,6 +14,7 @@
 
 //! OCI registry client for pulling and inspecting plugin artifacts.
 
+use crate::registry::cosign::{CosignVerifier, VerificationResult};
 use crate::registry::types::{
     media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
@@ -23,6 +24,15 @@ use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
 
+/// Result of downloading a plugin, including the binary path and optional verification info.
+#[derive(Debug)]
+pub struct DownloadResult {
+    /// Path to the downloaded binary file.
+    pub path: PathBuf,
+    /// Cosign verification result, if verification was enabled and succeeded.
+    pub verification: Option<VerificationResult>,
+}
+
 /// Well-known package name used as a plugin directory index.
 /// Each tag in this package represents a registered plugin (e.g., "source.postgres").
 const PLUGIN_DIRECTORY_PACKAGE: &str = "drasi-plugin-directory";
@@ -31,6 +41,7 @@ const PLUGIN_DIRECTORY_PACKAGE: &str = "drasi-plugin-directory";
 pub struct OciRegistryClient {
     client: oci_client::Client,
     config: RegistryConfig,
+    verifier: CosignVerifier,
 }
 
 impl OciRegistryClient {
@@ -43,6 +54,20 @@ impl OciRegistryClient {
         Self {
             client: oci_client::Client::new(client_config),
             config,
+            verifier: CosignVerifier::new(Default::default()),
+        }
+    }
+
+    /// Create a new OCI registry client with cosign verification.
+    pub fn with_verifier(config: RegistryConfig, verifier: CosignVerifier) -> Self {
+        let client_config = ClientConfig {
+            protocol: ClientProtocol::Https,
+            ..Default::default()
+        };
+        Self {
+            client: oci_client::Client::new(client_config),
+            config,
+            verifier,
         }
     }
 
@@ -128,16 +153,30 @@ impl OciRegistryClient {
 
     /// Download a plugin binary to a destination directory.
     ///
-    /// Returns the path to the downloaded binary file.
+    /// If cosign verification is enabled, the signature is verified BEFORE
+    /// writing the binary to disk. Returns the path to the downloaded binary
+    /// and the verification result (if verification was enabled and succeeded).
     pub async fn download_plugin(
         &self,
         reference: &str,
         dest_dir: &Path,
         filename: &str,
-    ) -> Result<PathBuf> {
+    ) -> Result<DownloadResult> {
         let oci_ref: Reference = reference.parse().context("invalid OCI reference")?;
 
-        info!("Downloading plugin from {}...", reference);
+        // Verify cosign signature before downloading (if enabled)
+        let verification = if self.verifier.is_enabled() {
+            self.verifier
+                .verify_plugin(reference, &self.auth())
+                .await
+                .with_context(|| {
+                    format!("cosign signature verification failed for {reference}")
+                })?
+        } else {
+            None
+        };
+
+        info!("Downloading plugin from {reference}...");
 
         let image_data = self
             .client
@@ -181,7 +220,10 @@ impl OciRegistryClient {
                     dest_path.display()
                 );
 
-                return Ok(dest_path);
+                return Ok(DownloadResult {
+                    path: dest_path,
+                    verification,
+                });
             }
         }
 
@@ -199,6 +241,11 @@ impl OciRegistryClient {
             .context("failed to pull manifest")?;
 
         Ok(digest)
+    }
+
+    /// Get a reference to the cosign verifier.
+    pub fn verifier(&self) -> &CosignVerifier {
+        &self.verifier
     }
 
     /// Expand a short plugin reference to a full OCI reference.

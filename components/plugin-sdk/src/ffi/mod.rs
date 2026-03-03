@@ -44,7 +44,9 @@ pub use callbacks::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, LifecycleCallbackFn,
     LogCallbackFn,
 };
-pub use metadata::{PluginMetadata, FFI_SDK_VERSION, TARGET_TRIPLE};
+pub use metadata::{
+    PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,
+};
 pub use types::{
     catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiDispatchMode,
     FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,

@@ -22,6 +22,7 @@ on:
 permissions:
   packages: write
   contents: read
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -95,6 +96,9 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Build plugins
         run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
 
@@ -103,7 +107,7 @@ jobs:
         env:
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }}"
+          ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --sign"
           if [ -n "${{ inputs.pre_release }}" ]; then
             ARGS="$ARGS --pre-release ${{ inputs.pre_release }}"
           fi

@@ -18,6 +18,20 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET_TRIPLE={target}");
 
+    // Capture the git commit SHA (short hash) for plugin provenance
+    let git_commit = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=GIT_COMMIT_SHA={git_commit}");
+
+    // Capture the build timestamp in RFC 3339 UTC format
+    let build_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    println!("cargo:rustc-env=BUILD_TIMESTAMP={build_timestamp}");
+
     // Compute build compatibility hash from rustc version, crate version,
     // target triple, and build profile. Used to reject plugins built with
     // a different toolchain or configuration.
@@ -33,8 +47,9 @@ fn main() {
 
     println!("cargo:rustc-env=DRASI_BUILD_HASH={hash}");
 
-    // Rerun if the compiler or profile changes
+    // Rerun if the compiler, profile, or git HEAD changes
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-changed=.git/HEAD");
 }

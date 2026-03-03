@@ -1063,6 +1063,8 @@ drasi_plugin_sdk::export_plugin!(
 
 This keeps related components in a single shared library, simplifying deployment.
 
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
+
 ## Additional Resources
 
 - See individual plugin directories for implementation examples

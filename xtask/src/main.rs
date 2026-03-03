@@ -197,6 +197,7 @@ fn main() {
             );
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
             eprintln!("  --dry-run             Show what would be published without pushing");
+            eprintln!("  --sign                Sign each published artifact with cosign (requires cosign in PATH)");
             std::process::exit(1);
         }
     }
@@ -631,6 +632,7 @@ fn publish_plugins(args: &[String]) {
     let pre_release = parse_flag_value(args, "--pre-release");
     let arch_suffix = parse_flag_value(args, "--arch-suffix");
     let dry_run = args.iter().any(|a| a == "--dry-run");
+    let sign = args.iter().any(|a| a == "--sign");
 
     if tag_override.is_some() && pre_release.is_some() {
         eprintln!("Error: --tag and --pre-release are mutually exclusive");
@@ -759,6 +761,11 @@ fn publish_plugins(args: &[String]) {
                 Ok(url) => {
                     println!("  ✓ {} → {}", reference_str, url);
                     success_count += 1;
+
+                    // Sign the published artifact with cosign if --sign is enabled
+                    if sign {
+                        cosign_sign(&reference_str);
+                    }
                 }
                 Err(e) => {
                     eprintln!("  ✗ {} — {}", reference_str, e);
@@ -815,6 +822,43 @@ fn make_tag(
     match arch_suffix {
         Some(suffix) => format!("{}-{}", base, suffix),
         None => base,
+    }
+}
+
+/// Sign an OCI artifact with cosign after publishing.
+///
+/// Shells out to the `cosign` CLI. Supports:
+/// - Keyless mode (default): uses ambient OIDC credentials (GitHub Actions, etc.)
+/// - Key-based mode: set `COSIGN_KEY` env var to a private key path
+///
+/// Warns on failure but does not abort the publish batch.
+fn cosign_sign(reference: &str) {
+    print!("  🔏 signing {}...", reference);
+
+    let mut cmd = Command::new("cosign");
+    cmd.arg("sign").arg("--yes").arg(reference);
+
+    // If COSIGN_KEY is set, use key-based signing
+    if let Ok(key) = std::env::var("COSIGN_KEY") {
+        cmd.arg("--key").arg(&key);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                println!(" ✓ signed");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!(" ✗ signing failed: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                eprintln!(" ✗ cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)");
+            } else {
+                eprintln!(" ✗ failed to run cosign: {}", e);
+            }
+        }
     }
 }
 

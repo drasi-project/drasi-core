@@ -22,6 +22,12 @@ pub const FFI_SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The target triple this crate was compiled for.
 pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
 
+/// Git commit SHA the plugin was built from (short hash, e.g. "a1b2c3d").
+pub const GIT_COMMIT_SHA: &str = env!("GIT_COMMIT_SHA");
+
+/// Build timestamp in RFC 3339 format (e.g. "2026-03-03T17:00:00Z").
+pub const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
+
 /// Metadata returned by `drasi_plugin_metadata()` for version validation.
 /// The host checks these fields before calling `drasi_plugin_init()`.
 #[repr(C)]
@@ -36,4 +42,8 @@ pub struct PluginMetadata {
     pub plugin_version: FfiStr,
     /// Target triple (e.g., "x86_64-unknown-linux-gnu").
     pub target_triple: FfiStr,
+    /// Git commit SHA the plugin was built from (short hash).
+    pub git_commit: FfiStr,
+    /// Build timestamp in RFC 3339 format.
+    pub build_timestamp: FfiStr,
 }
