@@ -24,9 +24,8 @@ use reqwest::{
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;

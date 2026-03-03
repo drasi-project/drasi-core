@@ -22,7 +22,7 @@ use std::sync::Arc;
 // RecvError no longer needed with trait-based receivers
 use tokio::sync::{mpsc, RwLock};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, QueryResult};
+use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;

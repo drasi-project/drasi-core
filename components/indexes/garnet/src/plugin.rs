@@ -31,7 +31,7 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet, NoOpSessionControl};
 use std::sync::Arc;
 
 use crate::element_index::GarnetElementIndex;
@@ -140,6 +140,7 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             archive_index: element_index,
             result_index,
             future_queue,
+            session_control: Arc::new(NoOpSessionControl),
         })
     }
 
