@@ -764,7 +764,15 @@ fn publish_plugins(args: &[String]) {
 
                     // Sign the published artifact with cosign if --sign is enabled
                     if sign {
-                        cosign_sign(&reference_str);
+                        // Extract digest from manifest URL and sign by digest
+                        let digest_ref = if let Some(digest) = url.rsplit("/manifests/").next() {
+                            // Build registry/repo@sha256:... reference
+                            let repo = reference_str.split(':').next().unwrap_or(&reference_str);
+                            format!("{}@{}", repo, digest)
+                        } else {
+                            reference_str.clone()
+                        };
+                        cosign_sign(&digest_ref);
                     }
                 }
                 Err(e) => {
@@ -851,6 +859,9 @@ fn cosign_sign(reference: &str) {
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!(" ✗ signing failed: {}", stderr.trim());
+                if stderr.contains("expired_token") || stderr.contains("retrieving ID token") {
+                    eprintln!("    hint: keyless signing requires GitHub Actions OIDC or `cosign login`. For local signing, set COSIGN_KEY=path/to/key.pem");
+                }
             }
         }
         Err(e) => {
