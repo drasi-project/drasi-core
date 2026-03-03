@@ -33,9 +33,9 @@ If a trait method is added/changed in `drasi-lib`, you need to update **both sid
 
 Several proxies reconstruct Rust types from opaque `*mut c_void` pointers:
 
-- `change_receiver.rs:54` — `Box::from_raw(opaque as *mut SourceEventWrapper)`
-- `change_receiver.rs:92` — `Box::from_raw(opaque as *mut BootstrapEvent)`
-- `bootstrap_provider.rs:140` — `Box::from_raw(opaque as *mut BootstrapEvent)`
+- `change_receiver.rs:57` — `Box::from_raw(opaque as *mut SourceEventWrapper)`
+- `change_receiver.rs:198` — `Box::from_raw(opaque as *mut BootstrapEvent)`
+- `bootstrap_provider.rs:142` — `Box::from_raw(opaque as *mut BootstrapEvent)`
 
 `ReactionProxy` transfers ownership **to** the plugin via opaque pointers:
 
