@@ -15,9 +15,7 @@
 //! Version resolver for finding compatible plugin versions from an OCI registry.
 
 use crate::registry::oci::OciRegistryClient;
-use crate::registry::platform::{
-    target_triple_to_arch_suffix, target_triple_to_oci_platform,
-};
+use crate::registry::platform::{target_triple_to_arch_suffix, target_triple_to_oci_platform};
 use crate::registry::types::{annotations, HostVersionInfo, PluginReference, ResolvedPlugin};
 use anyhow::{bail, Context, Result};
 use log::{debug, info, warn};
