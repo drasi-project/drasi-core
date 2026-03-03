@@ -559,20 +559,24 @@ impl Source for DataverseSource {
             .await?;
 
         // Create token manager and client
-        let token_url = format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-            self.config.tenant_id
-        );
-
         let base_url = self.config.environment_url.clone();
 
-        let token_manager = TokenManager::with_token_url(
-            &self.config.tenant_id,
-            &self.config.client_id,
-            &self.config.client_secret,
-            &base_url,
-            &token_url,
-        );
+        let token_manager = if self.config.use_azure_cli {
+            log::info!("[{}] Using Azure CLI authentication", self.base.id);
+            TokenManager::azure_cli(&base_url)
+        } else {
+            let token_url = format!(
+                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+                self.config.tenant_id
+            );
+            TokenManager::with_token_url(
+                &self.config.tenant_id,
+                &self.config.client_id,
+                &self.config.client_secret,
+                &base_url,
+                &token_url,
+            )
+        };
 
         let client = Arc::new(DataverseClient::new(
             &base_url,
@@ -773,6 +777,7 @@ pub struct DataverseSourceBuilder {
     tenant_id: String,
     client_id: String,
     client_secret: String,
+    use_azure_cli: bool,
     entities: Vec<String>,
     entity_set_overrides: HashMap<String, String>,
     entity_columns: HashMap<String, Vec<String>>,
@@ -795,6 +800,7 @@ impl DataverseSourceBuilder {
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
+            use_azure_cli: false,
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -830,6 +836,19 @@ impl DataverseSourceBuilder {
     /// Set the Azure AD client secret.
     pub fn with_client_secret(mut self, client_secret: impl Into<String>) -> Self {
         self.client_secret = client_secret.into();
+        self
+    }
+
+    /// Use Azure CLI for authentication instead of client credentials.
+    ///
+    /// When enabled, the source acquires tokens by running
+    /// `az account get-access-token --resource <environment_url>`.
+    /// Requires `az login` to have been run beforehand.
+    ///
+    /// This is the simplest auth option for local development and testing.
+    /// When using Azure CLI auth, `tenant_id`, `client_id`, and `client_secret` are not required.
+    pub fn with_azure_cli_auth(mut self) -> Self {
+        self.use_azure_cli = true;
         self
     }
 
@@ -920,6 +939,7 @@ impl DataverseSourceBuilder {
             tenant_id: self.tenant_id,
             client_id: self.client_id,
             client_secret: self.client_secret,
+            use_azure_cli: self.use_azure_cli,
             entities: self.entities,
             entity_set_overrides: self.entity_set_overrides,
             entity_columns: self.entity_columns,
@@ -997,6 +1017,7 @@ mod tests {
                 tenant_id: "t".to_string(),
                 client_id: "c".to_string(),
                 client_secret: "s".to_string(),
+                use_azure_cli: false,
                 entities: vec!["account".to_string()],
                 entity_set_overrides: HashMap::new(),
                 entity_columns: HashMap::new(),

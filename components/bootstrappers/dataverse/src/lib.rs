@@ -89,8 +89,57 @@ impl DataverseBootstrapProvider {
         DataverseBootstrapProviderBuilder::new()
     }
 
-    /// Fetch an OAuth2 token using client credentials.
+    /// Fetch an authentication token.
+    ///
+    /// When `use_azure_cli` is enabled, obtains a token via
+    /// `az account get-access-token`. Otherwise falls back to the OAuth2
+    /// client credentials flow.
     async fn get_token(&self, http_client: &reqwest::Client) -> Result<String> {
+        if self.config.use_azure_cli {
+            self.get_token_azure_cli().await
+        } else {
+            self.get_token_client_credentials(http_client).await
+        }
+    }
+
+    /// Obtain a token via Azure CLI.
+    async fn get_token_azure_cli(&self) -> Result<String> {
+        let output = tokio::process::Command::new("az")
+            .args([
+                "account",
+                "get-access-token",
+                "--resource",
+                &self.config.environment_url,
+                "--output",
+                "json",
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to run 'az account get-access-token'. Is Azure CLI installed and are you logged in? Error: {e}"
+                )
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Azure CLI token request failed: {stderr}"
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Azure CLI token response: {e}"))?;
+
+        json.get("accessToken")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("No accessToken in Azure CLI response"))
+    }
+
+    /// Fetch an OAuth2 token using client credentials.
+    async fn get_token_client_credentials(&self, http_client: &reqwest::Client) -> Result<String> {
         let token_url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
             self.config.tenant_id
@@ -386,6 +435,7 @@ pub struct DataverseBootstrapProviderBuilder {
     tenant_id: String,
     client_id: String,
     client_secret: String,
+    use_azure_cli: bool,
     entities: Vec<String>,
     entity_set_overrides: HashMap<String, String>,
     entity_columns: HashMap<String, Vec<String>>,
@@ -401,6 +451,7 @@ impl DataverseBootstrapProviderBuilder {
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
+            use_azure_cli: false,
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -430,6 +481,12 @@ impl DataverseBootstrapProviderBuilder {
     /// Set the Azure AD client secret.
     pub fn with_client_secret(mut self, client_secret: impl Into<String>) -> Self {
         self.client_secret = client_secret.into();
+        self
+    }
+
+    /// Use Azure CLI authentication instead of client credentials.
+    pub fn with_azure_cli_auth(mut self) -> Self {
+        self.use_azure_cli = true;
         self
     }
 
@@ -481,6 +538,7 @@ impl DataverseBootstrapProviderBuilder {
             tenant_id: self.tenant_id,
             client_id: self.client_id,
             client_secret: self.client_secret,
+            use_azure_cli: self.use_azure_cli,
             entities: self.entities,
             entity_set_overrides: self.entity_set_overrides,
             entity_columns: self.entity_columns,
