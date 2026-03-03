@@ -25,9 +25,9 @@ help:
 	@echo "  build-plugins-release     - Build all dynamic plugins (release)"
 	@echo "  list-plugins              - List all discovered dynamic plugin crates"
 	@echo "  publish-plugins-dry-run   - Show what would be published (no push)"
-	@echo "  publish-plugins           - Publish plugins to OCI registry (per-arch tags)"
-	@echo "  publish-plugins-release   - Publish release plugins (per-arch tags)"
-	@echo "  publish-all               - Build, publish all architectures, and merge manifests"
+	@echo "  publish-plugins           - Publish plugins to OCI registry (per-arch tags, SIGN=1 to cosign)"
+	@echo "  publish-plugins-release   - Publish release plugins (per-arch tags, SIGN=1 to cosign)"
+	@echo "  publish-all               - Build, publish all architectures, and merge manifests (SIGN=1 to cosign)"
 	@echo "  publish-all-dry-run       - Dry run of publish-all"
 	@echo "  merge-manifests           - Create multi-arch manifest index from per-arch tags"
 	@echo "  merge-manifests-dry-run   - Show what would be merged (no push)"
@@ -74,14 +74,14 @@ publish-plugins-dry-run:
 	cargo run -p xtask -- publish-plugins --dry-run $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(ARCH_SUFFIX),--arch-suffix $(ARCH_SUFFIX),)
 
 # Publish built plugins to OCI registry (requires OCI_REGISTRY_PASSWORD or GHCR_TOKEN)
-# Usage: make publish-plugins [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg] [ARCH_SUFFIX=linux-amd64]
+# Usage: make publish-plugins [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg] [ARCH_SUFFIX=linux-amd64] [SIGN=1]
 publish-plugins:
-	cargo run -p xtask -- publish-plugins $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(if $(ARCH_SUFFIX),--arch-suffix $(ARCH_SUFFIX),)
+	cargo run -p xtask -- publish-plugins $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(if $(ARCH_SUFFIX),--arch-suffix $(ARCH_SUFFIX),) $(if $(SIGN),--sign,)
 
 # Publish release-built plugins
-# Usage: make publish-plugins-release [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg] [ARCH_SUFFIX=linux-amd64]
+# Usage: make publish-plugins-release [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg] [ARCH_SUFFIX=linux-amd64] [SIGN=1]
 publish-plugins-release:
-	cargo run -p xtask -- publish-plugins --release $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(if $(ARCH_SUFFIX),--arch-suffix $(ARCH_SUFFIX),)
+	cargo run -p xtask -- publish-plugins --release $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) $(if $(REGISTRY),--registry $(REGISTRY),) $(if $(ARCH_SUFFIX),--arch-suffix $(ARCH_SUFFIX),) $(if $(SIGN),--sign,)
 
 # All architectures to build and publish
 PUBLISH_TARGETS ?= x86_64-unknown-linux-gnu:linux-amd64 \
@@ -93,7 +93,7 @@ PUBLISH_TARGETS ?= x86_64-unknown-linux-gnu:linux-amd64 \
                    aarch64-apple-darwin:darwin-arm64
 
 # Build and publish all architectures
-# Usage: make publish-all [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg]
+# Usage: make publish-all [PRE_RELEASE=dev.1] [REGISTRY=ghcr.io/myorg] [SIGN=1]
 # Skips targets that fail to build (e.g., macOS targets on Linux)
 # Each architecture is published with its own tag suffix (e.g., 0.1.8-linux-amd64)
 # The client auto-appends the correct suffix when installing.
@@ -108,6 +108,7 @@ publish-all:
 		   cargo run -p xtask -- publish-plugins --release --target $$TARGET \
 		     $(if $(PRE_RELEASE),--pre-release $(PRE_RELEASE),) \
 		     $(if $(REGISTRY),--registry $(REGISTRY),) \
+		     $(if $(SIGN),--sign,) \
 		     --arch-suffix $$SUFFIX; then \
 			SUCCEEDED=$$((SUCCEEDED + 1)); \
 		else \
