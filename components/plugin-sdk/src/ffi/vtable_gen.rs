@@ -1924,73 +1924,116 @@ fn wrap_subscription_response(
     executor: AsyncExecutorFn,
     runtime_handle: tokio::runtime::Handle,
 ) -> *mut FfiSubscriptionResponse {
+    use super::vtables::FfiChangePushCallbackFn;
     use drasi_lib::channels::events::SourceEventWrapper;
 
-    // Wrap ChangeReceiver<SourceEventWrapper> → FfiChangeReceiver
+    // Wrap ChangeReceiver<SourceEventWrapper> → FfiChangeReceiver (push-based)
+    //
+    // The DrasiLibChangeReceiver is wrapped in Arc so that both the FFI state
+    // (owned by the host) and the forwarder task (running on the plugin runtime)
+    // can safely reference it. The forwarder clones the Arc, so the inner data
+    // survives until both the FFI drop and the forwarder task complete.
     struct DrasiLibChangeReceiver {
         inner: tokio::sync::Mutex<Box<dyn ChangeReceiver<SourceEventWrapper>>>,
         runtime_handle: tokio::runtime::Handle,
+        shutdown: Arc<tokio::sync::Notify>,
     }
 
-    extern "C" fn change_receiver_recv(state: *mut c_void) -> *mut FfiSourceEvent {
-        let r = unsafe { &*(state as *const DrasiLibChangeReceiver) };
-        let event = dispatch_to_runtime(&r.runtime_handle, {
-            let state_ptr = SendPtr(state as *const DrasiLibChangeReceiver);
-            async move {
-                let inner = unsafe { state_ptr.as_ref() };
-                let mut rx = inner.inner.lock().await;
-                rx.recv().await
+    struct DrasiLibChangeReceiverHandle {
+        receiver: Arc<DrasiLibChangeReceiver>,
+    }
+
+    /// Convert a SourceEventWrapper into a heap-allocated FfiSourceEvent.
+    fn wrap_source_event(wrapper: Arc<SourceEventWrapper>) -> *mut FfiSourceEvent {
+        let op = match &wrapper.event {
+            drasi_lib::channels::events::SourceEvent::Change(change) => match change {
+                SourceChange::Insert { .. } => FfiChangeOp::Insert,
+                SourceChange::Update { .. } => FfiChangeOp::Update,
+                SourceChange::Delete { .. } => FfiChangeOp::Delete,
+                SourceChange::Future { .. } => FfiChangeOp::Update,
+            },
+            _ => FfiChangeOp::Update,
+        };
+        let timestamp_us = wrapper
+            .timestamp
+            .timestamp_nanos_opt()
+            .map(|n| n / 1000)
+            .unwrap_or(0);
+        let boxed = Box::new(Arc::try_unwrap(wrapper).unwrap_or_else(|arc| (*arc).clone()));
+        let source_id = FfiStr::from_str(&boxed.source_id);
+        let opaque = Box::into_raw(boxed) as *mut c_void;
+        extern "C" fn drop_wrapper(ptr: *mut c_void) {
+            unsafe { drop(Box::from_raw(ptr as *mut SourceEventWrapper)) };
+        }
+        Box::into_raw(Box::new(FfiSourceEvent {
+            opaque,
+            source_id,
+            timestamp_us,
+            op,
+            label: FfiStr::from_str(""),
+            entity_id: FfiStr::from_str(""),
+            drop_fn: drop_wrapper,
+        }))
+    }
+
+    extern "C" fn start_push_fn(
+        state: *mut c_void,
+        callback: FfiChangePushCallbackFn,
+        callback_ctx: *mut c_void,
+    ) {
+        let handle = unsafe { &*(state as *const DrasiLibChangeReceiverHandle) };
+        let receiver = handle.receiver.clone();
+        let ctx = SendMutPtr(callback_ctx);
+        let shutdown = receiver.shutdown.clone();
+        let rt_handle = receiver.runtime_handle.clone();
+        rt_handle.spawn(async move {
+            let mut rx = receiver.inner.lock().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.notified() => {
+                        callback(ctx.as_ptr(), std::ptr::null_mut());
+                        break;
+                    }
+                    result = rx.recv() => {
+                        match result {
+                            Ok(wrapper) => {
+                                let ffi_event = wrap_source_event(wrapper);
+                                let accepted = callback(ctx.as_ptr(), ffi_event);
+                                if !accepted {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                callback(ctx.as_ptr(), std::ptr::null_mut());
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         });
-        match event {
-            Ok(wrapper) => {
-                let op = match &wrapper.event {
-                    drasi_lib::channels::events::SourceEvent::Change(change) => match change {
-                        SourceChange::Insert { .. } => FfiChangeOp::Insert,
-                        SourceChange::Update { .. } => FfiChangeOp::Update,
-                        SourceChange::Delete { .. } => FfiChangeOp::Delete,
-                        SourceChange::Future { .. } => FfiChangeOp::Update,
-                    },
-                    _ => FfiChangeOp::Update,
-                };
-                let source_id_str = wrapper.source_id.clone();
-                let timestamp_us = wrapper
-                    .timestamp
-                    .timestamp_nanos_opt()
-                    .map(|n| n / 1000)
-                    .unwrap_or(0);
-                let boxed = Box::new(Arc::try_unwrap(wrapper).unwrap_or_else(|arc| (*arc).clone()));
-                let source_id = FfiStr::from_str(&boxed.source_id);
-                let opaque = Box::into_raw(boxed) as *mut c_void;
-                extern "C" fn drop_wrapper(ptr: *mut c_void) {
-                    unsafe { drop(Box::from_raw(ptr as *mut SourceEventWrapper)) };
-                }
-                Box::into_raw(Box::new(FfiSourceEvent {
-                    opaque,
-                    source_id,
-                    timestamp_us,
-                    op,
-                    label: FfiStr::from_str(""), // extracted by host if needed
-                    entity_id: FfiStr::from_str(""),
-                    drop_fn: drop_wrapper,
-                }))
-            }
-            Err(_) => std::ptr::null_mut(),
-        }
     }
 
     extern "C" fn change_receiver_drop(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut DrasiLibChangeReceiver)) };
+        let handle = unsafe { Box::from_raw(state as *mut DrasiLibChangeReceiverHandle) };
+        // Signal the forwarder to stop, then drop our Arc reference.
+        // The forwarder holds its own Arc clone, so the inner data stays
+        // alive until the forwarder task completes.
+        handle.receiver.shutdown.notify_one();
+        drop(handle);
     }
 
-    let ffi_receiver = Box::new(DrasiLibChangeReceiver {
-        inner: tokio::sync::Mutex::new(sub.receiver),
-        runtime_handle: runtime_handle.clone(),
+    let ffi_receiver = Box::new(DrasiLibChangeReceiverHandle {
+        receiver: Arc::new(DrasiLibChangeReceiver {
+            inner: tokio::sync::Mutex::new(sub.receiver),
+            runtime_handle: runtime_handle.clone(),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+        }),
     });
     let ffi_rx = Box::new(FfiChangeReceiver {
         state: Box::into_raw(ffi_receiver) as *mut c_void,
         executor,
-        recv_fn: change_receiver_recv,
+        start_push_fn,
         drop_fn: change_receiver_drop,
     });
 

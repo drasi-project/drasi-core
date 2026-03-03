@@ -60,12 +60,31 @@ pub struct FfiBootstrapEvent {
 // Receivers — streaming events from plugin to host
 // ============================================================================
 
-/// Change receiver — wraps a `Box<dyn ChangeReceiver<SourceEventWrapper>>`.
+/// Callback function type for push-based change delivery.
+/// Called by the plugin forwarder for each source event.
+/// `ctx` is the host-owned context pointer, `event` is the event to deliver.
+/// Returns `true` if the event was accepted, `false` to signal shutdown.
+pub type FfiChangePushCallbackFn = extern "C" fn(ctx: *mut c_void, event: *mut FfiSourceEvent) -> bool;
+
+/// Change receiver — push-based model.
+///
+/// Instead of the host polling via `recv_fn`, the host calls `start_push_fn`
+/// with a callback. The plugin spawns a forwarder task that reads from the
+/// underlying channel and invokes the callback for each event. This avoids
+/// the `spawn_blocking` + `dispatch_to_runtime` round-trip per event.
 #[repr(C)]
 pub struct FfiChangeReceiver {
     pub state: *mut c_void,
     pub executor: AsyncExecutorFn,
-    pub recv_fn: extern "C" fn(state: *mut c_void) -> *mut FfiSourceEvent,
+    /// Start pushing events to the provided callback.
+    /// The plugin spawns a forwarder task on its runtime.
+    /// The callback is called once per event until the channel closes
+    /// or the callback returns `false`.
+    pub start_push_fn: extern "C" fn(
+        state: *mut c_void,
+        callback: FfiChangePushCallbackFn,
+        callback_ctx: *mut c_void,
+    ),
     pub drop_fn: extern "C" fn(state: *mut c_void),
 }
 

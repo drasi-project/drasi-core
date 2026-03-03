@@ -91,7 +91,7 @@ fn plugin_exists(crate_name: &str) -> bool {
 fn test_load_mock_source_plugin() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -129,7 +129,7 @@ fn test_load_mock_source_plugin() {
 fn test_load_log_reaction_plugin() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
 
@@ -160,7 +160,7 @@ fn test_load_log_reaction_plugin() {
 fn test_mock_source_descriptor_kind() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -185,7 +185,7 @@ fn test_mock_source_descriptor_kind() {
 fn test_log_reaction_descriptor_kind() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -214,7 +214,7 @@ fn test_log_reaction_descriptor_kind() {
 fn test_mock_source_config_schema_is_valid_json() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -245,7 +245,7 @@ fn test_mock_source_config_schema_is_valid_json() {
 fn test_log_reaction_config_schema_is_valid_json() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -280,7 +280,7 @@ fn test_log_reaction_config_schema_is_valid_json() {
 async fn test_create_mock_source_instance() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -313,7 +313,7 @@ async fn test_create_mock_source_instance() {
 async fn test_create_log_reaction_instance() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -351,7 +351,7 @@ async fn test_create_log_reaction_instance() {
 async fn test_mock_source_start_stop_lifecycle() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -406,7 +406,7 @@ async fn test_mock_source_start_stop_lifecycle() {
 async fn test_create_multiple_source_instances() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -525,7 +525,7 @@ fn test_plugin_loader_skips_non_plugin_files() {
 fn test_plugin_loader_discovers_plugins_by_pattern() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let dir = plugin_dir();
 
@@ -561,7 +561,7 @@ fn test_plugin_loader_discovers_plugins_by_pattern() {
 fn test_plugin_loader_with_multiple_patterns() {
     if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: need both mock source and log reaction built as cdylib");
-        return;
+        panic!("SKIP: need both mock source and log reaction built as cdylib");
     }
     let dir = plugin_dir();
 
@@ -607,7 +607,7 @@ fn test_plugin_loader_with_multiple_patterns() {
 async fn test_log_callback_captures_plugin_logs() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -697,7 +697,7 @@ fn test_load_invalid_file_returns_error() {
 async fn test_create_source_with_invalid_config() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -739,7 +739,7 @@ async fn test_create_source_with_invalid_config() {
 async fn test_mock_source_dispatch_mode() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -781,7 +781,7 @@ async fn test_mock_source_dispatch_mode() {
 async fn test_drop_source_instance_does_not_crash() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
     let plugin = load_plugin_from_path(
@@ -814,7 +814,7 @@ async fn test_drop_source_instance_does_not_crash() {
 fn test_drop_loaded_plugin_does_not_crash() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -855,7 +855,7 @@ async fn test_plugin_logs_routed_to_log_registry() {
 
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -933,7 +933,7 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
 
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -1034,7 +1034,7 @@ async fn test_null_callback_context_does_not_crash() {
     //! go to the diagnostic store via global callbacks. No crash occurs.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -1075,7 +1075,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     //! start/stop, verifying the tracing-log bridge works for the log crate.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -1135,7 +1135,7 @@ async fn test_logs_without_initialize_reach_global_callback() {
     //! This verifies the tracing bridge's global fallback path.
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -1189,7 +1189,7 @@ async fn test_per_instance_logs_include_correct_component_id() {
 
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
-        return;
+        panic!("SKIP: drasi-source-mock not built as cdylib");
     }
     let path = require_plugin("drasi-source-mock");
 
@@ -1534,7 +1534,7 @@ async fn test_source_with_null_identity_provider() {
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
         eprintln!("Skipping test: mock source plugin not found at {mock_path:?}");
-        return;
+        panic!("Skipping test: mock source plugin not found at {mock_path:?}");
     }
 
     let plugin = load_plugin_from_path(
@@ -1574,7 +1574,7 @@ async fn test_source_with_identity_provider_injection() {
     let mock_path = dir.join(plugin_filename("drasi_source_mock"));
     if !mock_path.exists() {
         eprintln!("Skipping test: mock source plugin not found at {mock_path:?}");
-        return;
+        panic!("Skipping test: mock source plugin not found at {mock_path:?}");
     }
 
     let plugin = load_plugin_from_path(
@@ -1624,7 +1624,7 @@ async fn test_source_with_identity_provider_injection() {
 async fn test_reaction_enqueue_query_result() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -1682,7 +1682,7 @@ async fn test_reaction_enqueue_query_result() {
 async fn test_reaction_enqueue_multiple_query_results() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -1734,7 +1734,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
 async fn test_reaction_enqueue_query_result_with_data() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
-        return;
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
     }
     let path = require_plugin("drasi-reaction-log");
     let plugin = load_plugin_from_path(
@@ -1811,7 +1811,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
         eprintln!(
             "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
         );
-        return;
+        panic!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
     }
 
     log::set_max_level(log::LevelFilter::Debug);
@@ -1943,7 +1943,7 @@ async fn test_e2e_multi_source_query_reaction() {
         eprintln!(
             "SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)"
         );
-        return;
+        panic!("SKIPPING: cdylib plugins not found (need drasi-source-mock and drasi-reaction-sse)");
     }
 
     log::set_max_level(log::LevelFilter::Debug);
@@ -2229,7 +2229,7 @@ async fn collect_sse_events(
 async fn test_cdylib_source_dispatches_events() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIPPING: cdylib mock source plugin not found");
-        return;
+        panic!("SKIPPING: cdylib mock source plugin not found");
     }
 
     let mock_source_path = require_plugin("drasi-source-mock");

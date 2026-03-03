@@ -19,7 +19,7 @@
 //! and lifecycle events into the DrasiLib systems that the REST API reads from.
 
 use std::ffi::c_void;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use drasi_lib::channels::events::{
     ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
@@ -34,19 +34,14 @@ use tokio::sync::RwLock;
 /// Spawn an async future on the host tokio runtime and block until it completes.
 ///
 /// Callbacks are `extern "C"` functions invoked from within a plugin's own tokio
-/// runtime (inside `block_on`), so we cannot call `block_on` again on the same
-/// thread. Instead we spawn a green thread on the host runtime and wait for
-/// completion via an `mpsc::sync_channel`.
+/// runtime, so we cannot call `block_on` on the host runtime. Instead we
+/// fire-and-forget a task on the host runtime. This avoids deadlocks when the
+/// host runtime is single-threaded.
 fn run_on_host_runtime<F>(handle: &tokio::runtime::Handle, f: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
-    handle.spawn(async move {
-        f.await;
-        let _ = done_tx.send(());
-    });
-    let _ = done_rx.recv();
+    handle.spawn(f);
 }
 
 /// Host-side callback context that routes plugin logs and events into DrasiLib.

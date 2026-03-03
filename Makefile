@@ -45,6 +45,7 @@ build-test-plugins:
 	@echo "=== Building cdylib test plugins ==="
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
 	@echo "=== Test plugins built ==="
 
 # Build test plugins, then run host-sdk integration tests.

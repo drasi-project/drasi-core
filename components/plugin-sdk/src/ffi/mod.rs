@@ -57,9 +57,10 @@ pub use vtable_gen::{
 };
 pub use vtables::{
     BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapReceiver,
-    FfiBootstrapSender, FfiChangeReceiver, FfiPluginRegistration, FfiQueryResultEvent,
-    FfiQueryResultReceiver, FfiRuntimeContext, FfiSourceEvent, FfiSubscriptionResponse,
-    ReactionPluginVtable, ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    FfiBootstrapSender, FfiChangeReceiver, FfiChangePushCallbackFn, FfiPluginRegistration,
+    FfiQueryResultEvent, FfiQueryResultReceiver, FfiRuntimeContext, FfiSourceEvent,
+    FfiSubscriptionResponse, ReactionPluginVtable, ReactionVtable, SourcePluginVtable,
+    SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
