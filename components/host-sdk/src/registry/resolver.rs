@@ -16,7 +16,7 @@
 
 use crate::registry::oci::OciRegistryClient;
 use crate::registry::platform::{
-    strip_arch_suffix, target_triple_to_arch_suffix, target_triple_to_oci_platform,
+    target_triple_to_arch_suffix, target_triple_to_oci_platform,
 };
 use crate::registry::types::{annotations, HostVersionInfo, PluginReference, ResolvedPlugin};
 use anyhow::{bail, Context, Result};
