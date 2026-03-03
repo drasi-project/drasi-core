@@ -42,6 +42,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -85,13 +86,17 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::Null
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::Null
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 1
@@ -139,18 +144,22 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::Null
-            ),
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::from(json!(70.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::Null
+                ),
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::from(json!(70.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 2
@@ -198,18 +207,22 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::Null
-            ),
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::from(json!(10.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::Null
+                ),
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::from(json!(10.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update payment 2
@@ -233,18 +246,22 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-                "payment_amount" => VariableValue::from(json!(10.0))
-            ),
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::from(json!(15.0))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                    "payment_amount" => VariableValue::from(json!(10.0))
+                ),
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::from(json!(15.0))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //delete payment 2
@@ -262,18 +279,22 @@ pub async fn optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-                "payment_amount" => VariableValue::from(json!(15.0))
-            ),
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(100.0)),
-              "id" => VariableValue::from(json!("i1")),
-              "payment_amount" => VariableValue::Null
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                    "payment_amount" => VariableValue::from(json!(15.0))
+                ),
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(100.0)),
+                  "id" => VariableValue::from(json!("i1")),
+                  "payment_amount" => VariableValue::Null
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -308,24 +329,28 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec!["id".to_string(), "amount".to_string()],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(100.0)),
-                "payment_amount" => VariableValue::from(json!(0.0)),
-                "id" => VariableValue::from(json!("i1"))
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec!["id".to_string(), "amount".to_string()],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(100.0)),
+                    "payment_amount" => VariableValue::from(json!(0.0)),
+                    "id" => VariableValue::from(json!("i1"))
 
-            )),
-            after: variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(100.0)),
-                "payment_amount" => VariableValue::from(json!(0.0)),
-                "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+                )),
+                after: variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(100.0)),
+                    "payment_amount" => VariableValue::from(json!(0.0)),
+                    "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 1
@@ -373,24 +398,28 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec!["id".to_string(), "amount".to_string()],
-            default_before: false,
-            default_after: false,
-            before: Some(variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(100.0)),
-                "payment_amount" => VariableValue::from(json!(0.0)),
-                "id" => VariableValue::from(json!("i1"))
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec!["id".to_string(), "amount".to_string()],
+                default_before: false,
+                default_after: false,
+                before: Some(variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(100.0)),
+                    "payment_amount" => VariableValue::from(json!(0.0)),
+                    "id" => VariableValue::from(json!("i1"))
 
-            )),
-            after: variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(30.0)),
-                "payment_amount" => VariableValue::from(json!(70.0)),
-                "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+                )),
+                after: variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(30.0)),
+                    "payment_amount" => VariableValue::from(json!(70.0)),
+                    "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 2
@@ -438,24 +467,28 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec!["id".to_string(), "amount".to_string()],
-            default_before: false,
-            default_after: false,
-            before: Some(variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(30.0)),
-                "payment_amount" => VariableValue::from(json!(70.0)),
-                "id" => VariableValue::from(json!("i1"))
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec!["id".to_string(), "amount".to_string()],
+                default_before: false,
+                default_after: false,
+                before: Some(variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(30.0)),
+                    "payment_amount" => VariableValue::from(json!(70.0)),
+                    "id" => VariableValue::from(json!("i1"))
 
-            )),
-            after: variablemap!(
-                "amount" => VariableValue::from(json!(100.0)),
-                "balance" => VariableValue::from(json!(0.0)),
-                "payment_amount" => VariableValue::from(json!(100.0)),
-                "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+                )),
+                after: variablemap!(
+                    "amount" => VariableValue::from(json!(100.0)),
+                    "balance" => VariableValue::from(json!(0.0)),
+                    "payment_amount" => VariableValue::from(json!(100.0)),
+                    "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -489,13 +522,17 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "customer_id" => VariableValue::from(json!("c1")),
-                "invoice_id" => VariableValue::Null,
-                "payment_id" => VariableValue::Null
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "customer_id" => VariableValue::from(json!("c1")),
+                    "invoice_id" => VariableValue::Null,
+                    "payment_id" => VariableValue::Null
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add has 1
@@ -543,18 +580,22 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "customer_id" => VariableValue::from(json!("c1")),
-                "invoice_id" => VariableValue::Null,
-                "payment_id" => VariableValue::Null
-            ),
-            after: variablemap!(
-                "customer_id" => VariableValue::from(json!("c1")),
-                "invoice_id" => VariableValue::from(json!("i1")),
-                "payment_id" => VariableValue::Null
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "customer_id" => VariableValue::from(json!("c1")),
+                    "invoice_id" => VariableValue::Null,
+                    "payment_id" => VariableValue::Null
+                ),
+                after: variablemap!(
+                    "customer_id" => VariableValue::from(json!("c1")),
+                    "invoice_id" => VariableValue::from(json!("i1")),
+                    "payment_id" => VariableValue::Null
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 1
@@ -602,17 +643,21 @@ pub async fn multi_optional_match(config: &(impl QueryTestConfig + Send)) {
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "customer_id" => VariableValue::from(json!("c1")),
-                "invoice_id" => VariableValue::from(json!("i1")),
-                "payment_id" => VariableValue::Null
-            ),
-            after: variablemap!(
-                "customer_id" => VariableValue::from(json!("c1")),
-                "invoice_id" => VariableValue::from(json!("i1")),
-                "payment_id" => VariableValue::from(json!("p1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "customer_id" => VariableValue::from(json!("c1")),
+                    "invoice_id" => VariableValue::from(json!("i1")),
+                    "payment_id" => VariableValue::Null
+                ),
+                after: variablemap!(
+                    "customer_id" => VariableValue::from(json!("c1")),
+                    "invoice_id" => VariableValue::from(json!("i1")),
+                    "payment_id" => VariableValue::from(json!("p1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

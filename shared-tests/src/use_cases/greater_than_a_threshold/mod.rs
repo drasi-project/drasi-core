@@ -43,6 +43,7 @@ use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -148,13 +149,17 @@ pub async fn greater_than_a_threshold(config: &(impl QueryTestConfig + Send)) {
         // println!("Node Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "callYear" => VariableValue::from(json!(2023)),
-              "callDayOfYear" => VariableValue::from(json!(274)),
-              "callCount" => VariableValue::from(json!(11))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "callYear" => VariableValue::from(json!(2023)),
+                  "callDayOfYear" => VariableValue::from(json!(274)),
+                  "callCount" => VariableValue::from(json!(11))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -245,15 +250,19 @@ pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig
         // println!("Rel Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "customerId" => VariableValue::from(json!("customer_01")),
-              "customerName" => VariableValue::from(json!("Customer 01")),
-              "callYear" => VariableValue::from(json!(2023)),
-              "callDayOfYear" => VariableValue::from(json!(274)),
-              "callCount" => VariableValue::from(json!(6))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "customerId" => VariableValue::from(json!("customer_01")),
+                  "customerName" => VariableValue::from(json!("Customer 01")),
+                  "callYear" => VariableValue::from(json!(2023)),
+                  "callDayOfYear" => VariableValue::from(json!(274)),
+                  "callCount" => VariableValue::from(json!(6))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     // Add a 6th call by customer_02
@@ -279,14 +288,18 @@ pub async fn greater_than_a_threshold_by_customer(config: &(impl QueryTestConfig
         // println!("Rel Result - Add call 11: {:?}", result);
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "customerId" => VariableValue::from(json!("customer_02")),
-              "customerName" => VariableValue::from(json!("Customer 02")),
-              "callYear" => VariableValue::from(json!(2023)),
-              "callDayOfYear" => VariableValue::from(json!(274)),
-              "callCount" => VariableValue::from(json!(6))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "customerId" => VariableValue::from(json!("customer_02")),
+                  "customerName" => VariableValue::from(json!("Customer 02")),
+                  "callYear" => VariableValue::from(json!(2023)),
+                  "callDayOfYear" => VariableValue::from(json!(274)),
+                  "callCount" => VariableValue::from(json!(6))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

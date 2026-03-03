@@ -42,6 +42,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -87,14 +88,18 @@ pub async fn test_upsert_semantics(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1, "Should have exactly one result");
         assert!(
-            result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("entity1")),
-                    "name" => VariableValue::from(json!("Entity One")),
-                    "status" => VariableValue::from(json!("active")),
-                    "value" => VariableValue::from(json!(100))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("entity1")),
+                        "name" => VariableValue::from(json!("Entity One")),
+                        "status" => VariableValue::from(json!("active")),
+                        "value" => VariableValue::from(json!(100))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "First SourceUpdate should ADD the entity"
         );
         //println!("✓ First SourceUpdate created new entity");
@@ -126,20 +131,24 @@ pub async fn test_upsert_semantics(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1, "Should have exactly one result");
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("entity1")),
-                    "name" => VariableValue::from(json!("Entity One")),
-                    "status" => VariableValue::from(json!("active")),
-                    "value" => VariableValue::from(json!(100))
-                ),
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("entity1")),
-                    "name" => VariableValue::from(json!("Entity One Updated")),
-                    "status" => VariableValue::from(json!("inactive")),
-                    "value" => VariableValue::from(json!(200))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("entity1")),
+                        "name" => VariableValue::from(json!("Entity One")),
+                        "status" => VariableValue::from(json!("active")),
+                        "value" => VariableValue::from(json!(100))
+                    ),
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("entity1")),
+                        "name" => VariableValue::from(json!("Entity One Updated")),
+                        "status" => VariableValue::from(json!("inactive")),
+                        "value" => VariableValue::from(json!(200))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Second SourceUpdate should UPDATE the existing entity"
         );
         //println!("✓ Second SourceUpdate updated existing entity");
@@ -210,20 +219,24 @@ pub async fn test_partial_updates(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("entity2")),
-                    "name" => VariableValue::from(json!("Full Entity")),
-                    "status" => VariableValue::from(json!("online")),
-                    "value" => VariableValue::from(json!(42))
-                ),
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("entity2")),
-                    "name" => VariableValue::from(json!("Full Entity")),  // Preserved
-                    "status" => VariableValue::from(json!("online")),     // Preserved
-                    "value" => VariableValue::from(json!(84))              // Updated
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("entity2")),
+                        "name" => VariableValue::from(json!("Full Entity")),
+                        "status" => VariableValue::from(json!("online")),
+                        "value" => VariableValue::from(json!(42))
+                    ),
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("entity2")),
+                        "name" => VariableValue::from(json!("Full Entity")),  // Preserved
+                        "status" => VariableValue::from(json!("online")),     // Preserved
+                        "value" => VariableValue::from(json!(84))              // Updated
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Partial update should preserve unspecified properties"
         );
         //println!("✓ Partial update preserved unspecified properties");
@@ -263,14 +276,18 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("sensor1")),
-                    "temp" => VariableValue::from(json!(20)),
-                    "humidity" => VariableValue::from(json!(60)),
-                    "battery" => VariableValue::from(json!(100))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("sensor1")),
+                        "temp" => VariableValue::from(json!(20)),
+                        "humidity" => VariableValue::from(json!(60)),
+                        "battery" => VariableValue::from(json!(100))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "First event should create the sensor"
         );
         //println!("✓ Event 1: Created new sensor node");
@@ -299,20 +316,24 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("sensor1")),
-                    "temp" => VariableValue::from(json!(20)),
-                    "humidity" => VariableValue::from(json!(60)),
-                    "battery" => VariableValue::from(json!(100))
-                ),
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("sensor1")),
-                    "temp" => VariableValue::from(json!(21)),
-                    "humidity" => VariableValue::from(json!(61)),
-                    "battery" => VariableValue::from(json!(99))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("sensor1")),
+                        "temp" => VariableValue::from(json!(20)),
+                        "humidity" => VariableValue::from(json!(60)),
+                        "battery" => VariableValue::from(json!(100))
+                    ),
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("sensor1")),
+                        "temp" => VariableValue::from(json!(21)),
+                        "humidity" => VariableValue::from(json!(61)),
+                        "battery" => VariableValue::from(json!(99))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Second event should update existing sensor"
         );
         //println!("✓ Event 2: Updated existing sensor node");
@@ -341,20 +362,24 @@ pub async fn test_stateless_processing(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("sensor1")),
-                    "temp" => VariableValue::from(json!(21)),
-                    "humidity" => VariableValue::from(json!(61)),
-                    "battery" => VariableValue::from(json!(99))
-                ),
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("sensor1")),
-                    "temp" => VariableValue::from(json!(22)),
-                    "humidity" => VariableValue::from(json!(62)),
-                    "battery" => VariableValue::from(json!(98))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("sensor1")),
+                        "temp" => VariableValue::from(json!(21)),
+                        "humidity" => VariableValue::from(json!(61)),
+                        "battery" => VariableValue::from(json!(99))
+                    ),
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("sensor1")),
+                        "temp" => VariableValue::from(json!(22)),
+                        "humidity" => VariableValue::from(json!(62)),
+                        "battery" => VariableValue::from(json!(98))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Third event should update existing sensor"
         );
         //println!("✓ Event 3: Updated existing sensor node");
@@ -394,14 +419,18 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("device1")),
-                    "name" => VariableValue::from(json!("Test Device")),
-                    "temp" => VariableValue::from(json!(25)),
-                    "humidity" => VariableValue::from(json!(50))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("device1")),
+                        "name" => VariableValue::from(json!("Test Device")),
+                        "temp" => VariableValue::from(json!(25)),
+                        "humidity" => VariableValue::from(json!(50))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Device with status='online' should match query"
         );
         //println!("✓ Device created and matched query");
@@ -431,14 +460,18 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Removing {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("device1")),
-                    "name" => VariableValue::from(json!("Test Device")),
-                    "temp" => VariableValue::from(json!(25)),
-                    "humidity" => VariableValue::from(json!(50))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Removing {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("device1")),
+                        "name" => VariableValue::from(json!("Test Device")),
+                        "temp" => VariableValue::from(json!(25)),
+                        "humidity" => VariableValue::from(json!(50))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Device with status='offline' should be removed from results"
         );
         //println!("✓ Device updated and removed from query results");
@@ -468,14 +501,18 @@ pub async fn test_query_matching(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("device1")),
-                    "name" => VariableValue::from(json!("Test Device")),
-                    "temp" => VariableValue::from(json!(26)),
-                    "humidity" => VariableValue::from(json!(51))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("device1")),
+                        "name" => VariableValue::from(json!("Test Device")),
+                        "temp" => VariableValue::from(json!(26)),
+                        "humidity" => VariableValue::from(json!(51))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Device with status='online' should match query again"
         );
         //println!("✓ Device re-added to query results");
@@ -546,20 +583,24 @@ pub async fn test_multiple_entities(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1, "Should only affect entity2");
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "id" => VariableValue::from(json!("entity2")),
-                    "name" => VariableValue::from(json!("Entity 2")),
-                    "status" => VariableValue::from(json!("active")),
-                    "value" => VariableValue::from(json!(20))
-                ),
-                after: variablemap!(
-                    "id" => VariableValue::from(json!("entity2")),
-                    "name" => VariableValue::from(json!("Entity 2 Updated")),
-                    "status" => VariableValue::from(json!("inactive")),
-                    "value" => VariableValue::from(json!(99))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "id" => VariableValue::from(json!("entity2")),
+                        "name" => VariableValue::from(json!("Entity 2")),
+                        "status" => VariableValue::from(json!("active")),
+                        "value" => VariableValue::from(json!(20))
+                    ),
+                    after: variablemap!(
+                        "id" => VariableValue::from(json!("entity2")),
+                        "name" => VariableValue::from(json!("Entity 2 Updated")),
+                        "status" => VariableValue::from(json!("inactive")),
+                        "value" => VariableValue::from(json!(99))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Should update only entity2"
         );
         //println!("✓ Updated only entity2, others unaffected");
@@ -614,13 +655,17 @@ pub async fn test_relationship_upsert(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                    "from_id" => VariableValue::from(json!("device1")),
-                    "to_id" => VariableValue::from(json!("device2")),
-                    "strength" => VariableValue::from(json!(50))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                        "from_id" => VariableValue::from(json!("device1")),
+                        "to_id" => VariableValue::from(json!("device2")),
+                        "strength" => VariableValue::from(json!(50))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "First relationship SourceUpdate should create it"
         );
         //println!("✓ Relationship created");
@@ -648,18 +693,22 @@ pub async fn test_relationship_upsert(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         assert!(
-            result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                    "from_id" => VariableValue::from(json!("device1")),
-                    "to_id" => VariableValue::from(json!("device2")),
-                    "strength" => VariableValue::from(json!(50))
-                ),
-                after: variablemap!(
-                    "from_id" => VariableValue::from(json!("device1")),
-                    "to_id" => VariableValue::from(json!("device2")),
-                    "strength" => VariableValue::from(json!(75))
-                ),
-            }),
+            contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                        "from_id" => VariableValue::from(json!("device1")),
+                        "to_id" => VariableValue::from(json!("device2")),
+                        "strength" => VariableValue::from(json!(50))
+                    ),
+                    after: variablemap!(
+                        "from_id" => VariableValue::from(json!("device1")),
+                        "to_id" => VariableValue::from(json!("device2")),
+                        "strength" => VariableValue::from(json!(75))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ),
             "Second relationship SourceUpdate should update it"
         );
         //println!("✓ Relationship updated");
@@ -694,19 +743,23 @@ pub async fn test_aggregation_with_upserts(config: &(impl QueryTestConfig + Send
 
         let result = count_query.process_source_change(change).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            grouping_keys: vec!["status".to_string()],
-            default_before: true,
-            default_after: false,
-            before: Some(variablemap!(
-                "status" => VariableValue::from(json!("active")),
-                "count" => VariableValue::from(json!(0))
-            )),
-            after: variablemap!(
-                "status" => VariableValue::from(json!("active")),
-                "count" => VariableValue::from(json!(1))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                grouping_keys: vec!["status".to_string()],
+                default_before: true,
+                default_after: false,
+                before: Some(variablemap!(
+                    "status" => VariableValue::from(json!("active")),
+                    "count" => VariableValue::from(json!(0))
+                )),
+                after: variablemap!(
+                    "status" => VariableValue::from(json!("active")),
+                    "count" => VariableValue::from(json!(1))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
         //println!("✓ Count for 'active' = 1");
     }
 

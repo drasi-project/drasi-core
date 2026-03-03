@@ -42,6 +42,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -132,12 +133,16 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(105.0)),
-              "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(105.0)),
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update invoice 1 with increasing amount
@@ -162,16 +167,20 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(105.0)),
-              "id" => VariableValue::from(json!("i1"))
-            ),
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(110.0)),
-              "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(105.0)),
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(110.0)),
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update invoice 1 with decreasing amount
@@ -196,12 +205,16 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "amount" => VariableValue::from(json!(110.0)),
-              "id" => VariableValue::from(json!("i1"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "amount" => VariableValue::from(json!(110.0)),
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update invoice 1 with increasing amount
@@ -226,12 +239,16 @@ pub async fn before_value(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "amount" => VariableValue::from(json!(95.0)),
-              "id" => VariableValue::from(json!("i1"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "amount" => VariableValue::from(json!(95.0)),
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -314,11 +331,15 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add relation 2
@@ -367,10 +388,14 @@ pub async fn before_sum(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "id" => VariableValue::from(json!("i1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "id" => VariableValue::from(json!("i1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

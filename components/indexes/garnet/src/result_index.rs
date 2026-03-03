@@ -31,31 +31,22 @@ use redis::{aio::MultiplexedConnection, AsyncCommands};
 
 use crate::{storage_models::StoredValueAccumulator, ClearByPattern};
 
-/// Redis key structure:
-/// ari:{query_id}:{set_id} -> {value}
-/// ari:{query_id}:{set_id} -> [sorted value]
-/// ari:{query_id}:{set_id}:{value} -> count
+/// Redis key structure (hash-tagged for cluster compatibility):
+/// ari:{<query_id>}:{set_id} -> {value}
+/// ari:{<query_id>}:{set_id} -> [sorted value]
+/// ari:{<query_id>}:{set_id}:{value} -> count
 pub struct GarnetResultIndex {
     query_id: Arc<str>,
     connection: MultiplexedConnection,
 }
 
 impl GarnetResultIndex {
-    pub async fn connect(query_id: &str, url: &str) -> Result<Self, IndexError> {
-        let client = match redis::Client::open(url) {
-            Ok(client) => client,
-            Err(e) => return Err(IndexError::connection_failed(e)),
-        };
-
-        let connection = match client.get_multiplexed_async_connection().await {
-            Ok(con) => con,
-            Err(e) => return Err(IndexError::connection_failed(e)),
-        };
-
-        Ok(GarnetResultIndex {
+    /// Create a new GarnetResultIndex from a shared connection.
+    pub fn new(query_id: &str, connection: MultiplexedConnection) -> Self {
+        GarnetResultIndex {
             query_id: Arc::from(query_id),
             connection,
-        })
+        }
     }
 }
 
@@ -69,7 +60,7 @@ impl AccumulatorIndex for GarnetResultIndex {
     ) -> Result<Option<ValueAccumulator>, IndexError> {
         let mut con = self.connection.clone();
         let set_id = get_hash_key(owner, key);
-        let key = format!("ari:{}:{}", self.query_id, set_id);
+        let key = format!("ari:{{{}}}:{}", self.query_id, set_id);
         let result = match con.get::<String, Option<StoredValueAccumulator>>(key).await {
             Ok(v) => v,
             Err(e) => return Err(IndexError::other(e)),
@@ -90,7 +81,7 @@ impl AccumulatorIndex for GarnetResultIndex {
     ) -> Result<(), IndexError> {
         let mut con = self.connection.clone();
         let set_id = get_hash_key(&owner, &key);
-        let key = format!("ari:{}:{}", self.query_id, set_id);
+        let key = format!("ari:{{{}}}:{}", self.query_id, set_id);
 
         match value {
             None => match con.del::<String, isize>(key).await {
@@ -111,7 +102,7 @@ impl AccumulatorIndex for GarnetResultIndex {
 
     async fn clear(&self) -> Result<(), IndexError> {
         self.connection
-            .clear(format!("ari:{}:*", self.query_id))
+            .clear(format!("ari:{{{}}}:*", self.query_id))
             .await
     }
 }
@@ -125,7 +116,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         value: Option<OrderedFloat<f64>>,
     ) -> Result<Option<(OrderedFloat<f64>, isize)>, IndexError> {
         let mut con = self.connection.clone();
-        let set_key = format!("ari:{}:{}", self.query_id, set_id);
+        let set_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
 
         let next_value = match value {
             Some(value) => {
@@ -178,7 +169,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         value: OrderedFloat<f64>,
     ) -> Result<isize, IndexError> {
         let mut con = self.connection.clone();
-        let key = format!("ari:{}:{}:{}", self.query_id, set_id, value.0);
+        let key = format!("ari:{{{}}}:{}:{}", self.query_id, set_id, value.0);
 
         match con.get::<String, isize>(key).await {
             Ok(v) => Ok(v),
@@ -194,7 +185,7 @@ impl LazySortedSetStore for GarnetResultIndex {
         delta: isize,
     ) -> Result<(), IndexError> {
         let mut con = self.connection.clone();
-        let set_key = format!("ari:{}:{}", self.query_id, set_id);
+        let set_key = format!("ari:{{{}}}:{}", self.query_id, set_id);
         let val_key = format!("{}:{}", set_key, value.0);
 
         let current_count = match con.get::<&str, Option<isize>>(&val_key).await {
@@ -223,9 +214,9 @@ impl LazySortedSetStore for GarnetResultIndex {
     }
 }
 
-/// Redis key structure:
-/// metadata:{query_id}:sequence -> {value}
-/// metadata:{query_id}:source_change_id -> {value}
+/// Redis key structure (hash-tagged for cluster compatibility):
+/// metadata:{<query_id>}:sequence -> {value}
+/// metadata:{<query_id>}:source_change_id -> {value}
 #[async_trait]
 impl ResultSequenceCounter for GarnetResultIndex {
     async fn apply_sequence(
@@ -237,11 +228,11 @@ impl ResultSequenceCounter for GarnetResultIndex {
 
         let mut pipeline = redis::pipe();
         pipeline
-            .set::<String, u64>(format!("metadata:{}:sequence", self.query_id), sequence)
+            .set::<String, u64>(format!("metadata:{{{}}}:sequence", self.query_id), sequence)
             .ignore();
         pipeline
             .set::<String, String>(
-                format!("metadata:{}:source_change_id", self.query_id),
+                format!("metadata:{{{}}}:source_change_id", self.query_id),
                 source_change_id.to_string(),
             )
             .ignore();
@@ -257,7 +248,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let mut con = self.connection.clone();
 
         let sequence = match con
-            .get::<String, Option<u64>>(format!("metadata:{}:sequence", self.query_id))
+            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.query_id))
             .await
         {
             Ok(v) => v.unwrap_or(0),
@@ -265,7 +256,10 @@ impl ResultSequenceCounter for GarnetResultIndex {
         };
 
         let source_change_id = match con
-            .get::<String, Option<String>>(format!("metadata:{}:source_change_id", self.query_id))
+            .get::<String, Option<String>>(format!(
+                "metadata:{{{}}}:source_change_id",
+                self.query_id
+            ))
             .await
         {
             Ok(v) => match v {

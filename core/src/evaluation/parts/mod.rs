@@ -69,7 +69,7 @@ impl QueryPartEvaluator {
         );
 
         match context {
-            QueryPartEvaluationContext::Adding { after } => {
+            QueryPartEvaluationContext::Adding { after, .. } => {
                 let agg_snapshot = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
@@ -123,11 +123,15 @@ impl QueryPartEvaluator {
                         grouping_keys,
                         default_before: true,
                         default_after: false,
+                        row_signature: 0,
                     }]),
-                    _ => Ok(vec![QueryPartEvaluationContext::Adding { after: data }]),
+                    _ => Ok(vec![QueryPartEvaluationContext::Adding {
+                        after: data,
+                        row_signature: 0,
+                    }]),
                 }
             }
-            QueryPartEvaluationContext::Updating { before, after } => {
+            QueryPartEvaluationContext::Updating { before, after, .. } => {
                 if before == after && !change_context.is_future_reprocess {
                     return Ok(vec![QueryPartEvaluationContext::Noop]);
                 };
@@ -231,6 +235,7 @@ impl QueryPartEvaluator {
                             Some(before_out) => {
                                 return Ok(vec![QueryPartEvaluationContext::Removing {
                                     before: before_out,
+                                    row_signature: 0,
                                 }])
                             }
                             None => return Ok(vec![QueryPartEvaluationContext::Noop]),
@@ -263,14 +268,16 @@ impl QueryPartEvaluator {
                         Some(before_out) => Ok(vec![QueryPartEvaluationContext::Updating {
                             before: before_out,
                             after: after_out,
+                            row_signature: 0,
                         }]),
                         None => Ok(vec![QueryPartEvaluationContext::Adding {
                             after: after_out,
+                            row_signature: 0,
                         }]),
                     },
                 }
             }
-            QueryPartEvaluationContext::Removing { before } => {
+            QueryPartEvaluationContext::Removing { before, .. } => {
                 let agg_before = match &part.return_clause {
                     ProjectionClause::GroupBy {
                         grouping: _,
@@ -323,8 +330,12 @@ impl QueryPartEvaluator {
                         grouping_keys,
                         default_before: false,
                         default_after: true,
+                        row_signature: 0,
                     }]),
-                    _ => Ok(vec![QueryPartEvaluationContext::Removing { before: data }]),
+                    _ => Ok(vec![QueryPartEvaluationContext::Removing {
+                        before: data,
+                        row_signature: 0,
+                    }]),
                 }
             }
             QueryPartEvaluationContext::Aggregation {
@@ -333,6 +344,7 @@ impl QueryPartEvaluator {
                 grouping_keys,
                 default_before,
                 default_after,
+                ..
             } => {
                 if let Some(before) = &before {
                     if before == &after && !change_context.is_future_reprocess && !default_before {
@@ -531,6 +543,7 @@ impl QueryPartEvaluator {
                         if before.is_some() && !before_filtered {
                             return Ok(vec![QueryPartEvaluationContext::Removing {
                                 before: next_before.unwrap_or_default(),
+                                row_signature: 0,
                             }]);
                         } else {
                             return Ok(vec![QueryPartEvaluationContext::Noop]);
@@ -566,11 +579,13 @@ impl QueryPartEvaluator {
                         if before_filtered || !should_revert {
                             Ok(vec![QueryPartEvaluationContext::Adding {
                                 after: next_after,
+                                row_signature: 0,
                             }])
                         } else {
                             Ok(vec![QueryPartEvaluationContext::Updating {
                                 before: next_before.unwrap_or_default(),
                                 after: next_after,
+                                row_signature: 0,
                             }])
                         }
                     }
@@ -652,6 +667,7 @@ impl QueryPartEvaluator {
                 grouping_keys,
                 default_before: false,
                 default_after: false,
+                row_signature: 0,
             }]);
         }
         let before_in = before_in.unwrap();
@@ -672,6 +688,7 @@ impl QueryPartEvaluator {
                 grouping_keys,
                 default_before: false,
                 default_after: false,
+                row_signature: 0,
             }]);
         }
 
@@ -682,6 +699,7 @@ impl QueryPartEvaluator {
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
                 default_after: false,
+                row_signature: 0,
             },
             QueryPartEvaluationContext::Aggregation {
                 before: Some(before_out),
@@ -698,6 +716,7 @@ impl QueryPartEvaluator {
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
                 default_after: false,
+                row_signature: 0,
             },
         ])
     }
