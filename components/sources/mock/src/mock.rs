@@ -380,11 +380,11 @@ impl Source for MockSource {
                             let metadata = ElementMetadata {
                                 reference,
                                 labels: Arc::from(vec![Arc::from("Generic")]),
-                                effective_from: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .expect("System time is before UNIX epoch")
-                                    .as_nanos()
-                                    as u64,
+                                effective_from: crate::time::get_system_time_millis()
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to get timestamp for mock generic: {e}");
+                                        chrono::Utc::now().timestamp_millis() as u64
+                                    }),
                             };
 
                             let element = Element::Node {
