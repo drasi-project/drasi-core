@@ -144,8 +144,10 @@ pub struct DataverseSourceConfig {
     #[serde(default = "default_min_interval_ms", alias = "minIntervalMs")]
     pub min_interval_ms: u64,
 
-    /// Maximum adaptive polling interval in seconds (default: 30).
-    /// Matches the platform's `SingleEntityMaxIntervalMs / 1000`.
+    /// Maximum adaptive polling interval per entity in seconds (default: 30).
+    /// This is the single-entity base value, matching the platform's
+    /// `SingleEntityMaxIntervalMs / 1000`. At startup, the effective max is
+    /// scaled by `sqrt(entity_count)` (e.g., 1 entity → 30s, 5 → 67s, 10 → 95s).
     #[serde(default = "default_max_interval_seconds", alias = "maxIntervalSeconds")]
     pub max_interval_seconds: u64,
 

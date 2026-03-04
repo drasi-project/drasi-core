@@ -36,7 +36,7 @@
 //! | `SyncWorker` (per-entity)               | Per-entity `tokio::spawn` task            |
 //! | `{entity}-deltatoken` state key         | Same state key format                     |
 //! | `ServiceClient`                         | `reqwest` HTTP client                     |
-//! | Adaptive backoff (500ms → 30s)          | Same adaptive backoff pattern             |
+//! | Adaptive backoff (500ms → scaled max) | Same adaptive backoff pattern             |
 //!
 //! # Configuration
 //!
@@ -51,7 +51,7 @@
 //! | `entity_columns`       | HashMap\<String, Vec...\> | `{}`      | Per-entity column selection              |
 //! | `polling_interval_ms`  | u64                       | `5000`    | Base polling interval                    |
 //! | `min_interval_ms`      | u64                       | `500`     | Minimum adaptive interval                |
-//! | `max_interval_seconds` | u64                       | `30`      | Maximum adaptive interval                |
+//! | `max_interval_seconds` | u64                       | `30`      | Per-entity max interval (sqrt-scaled by entity count) |
 //! | `api_version`          | String                    | `"v9.2"`  | Web API version                          |
 //!
 //! # Usage
@@ -604,6 +604,21 @@ impl Source for DataverseSource {
         let state_store = self.base.state_store().await;
         let source_id = self.base.id.clone();
 
+        // Calculate effective max interval using square root scaling based on
+        // entity count, matching the platform's ChangeMonitor.cs:
+        //   calculatedMaxIntervalMs = SingleEntityMaxIntervalMs * sqrt(entityCount)
+        // Examples: 1 entity = 30s, 5 entities = ~67s, 10 entities = ~95s
+        let entity_count = self.config.entities.len() as f64;
+        let effective_max_interval_seconds =
+            (self.config.max_interval_seconds as f64 * entity_count.sqrt()).max(1.0) as u64;
+        log::info!(
+            "[{}] Effective max polling interval: {}s (base {}s * sqrt({} entities))",
+            self.base.id,
+            effective_max_interval_seconds,
+            self.config.max_interval_seconds,
+            self.config.entities.len()
+        );
+
         // Get instance_id from context for log routing
         let instance_id = self
             .base
@@ -624,7 +639,7 @@ impl Source for DataverseSource {
             let state_store = state_store.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             let min_interval_ms = self.config.min_interval_ms;
-            let max_interval_seconds = self.config.max_interval_seconds;
+            let max_interval_seconds = effective_max_interval_seconds;
             let instance_id = instance_id.clone();
 
             let span = tracing::info_span!(
