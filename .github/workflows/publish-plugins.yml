@@ -101,7 +101,7 @@ jobs:
 
       - name: Login to GHCR
         if: ${{ !inputs.dry_run }}
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build plugins
         run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
