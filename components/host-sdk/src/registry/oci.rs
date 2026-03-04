@@ -14,7 +14,7 @@
 
 //! OCI registry client for pulling and inspecting plugin artifacts.
 
-use crate::registry::cosign::{CosignVerifier, VerificationResult};
+use crate::registry::cosign::{CosignVerifier, SignatureStatus};
 use crate::registry::types::{
     media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 pub struct DownloadResult {
     /// Path to the downloaded binary file.
     pub path: PathBuf,
-    /// Cosign verification result, if verification was enabled and succeeded.
-    pub verification: Option<VerificationResult>,
+    /// Cosign signature verification status.
+    pub verification: SignatureStatus,
 }
 
 /// Well-known package name used as a plugin directory index.
@@ -166,17 +166,7 @@ impl OciRegistryClient {
 
         // Attempt cosign signature verification (best-effort).
         // Verification result is recorded but failures don't block download.
-        let verification = if self.verifier.is_enabled() {
-            match self.verifier.verify_plugin(reference, &self.auth()).await {
-                Ok(result) => result,
-                Err(e) => {
-                    log::warn!("Signature verification failed for {reference}: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let verification = self.verifier.verify_plugin(reference, &self.auth()).await;
 
         info!("Downloading plugin from {reference}...");
 

@@ -27,7 +27,7 @@ pub mod resolver;
 pub mod types;
 
 pub use cosign::{
-    matches_trusted_identity, CosignVerifier, TrustedIdentity, VerificationConfig,
+    matches_trusted_identity, CosignVerifier, SignatureStatus, TrustedIdentity, VerificationConfig,
     VerificationResult,
 };
 pub use oci::{DownloadResult, OciRegistryClient, PluginSearchResult, PluginVersionInfo};

@@ -16,14 +16,19 @@
 //!
 //! Implements keyless signature verification by directly inspecting the
 //! cosign signature tag in the OCI registry, parsing the Fulcio certificate,
-//! and verifying the ECDSA-P256 signature over the simplesigning payload.
+//! verifying the certificate chain back to the Sigstore root CA, and
+//! verifying the ECDSA-P256 signature over the payload.
+//!
+//! Supports two cosign storage formats:
+//! - **Simplesigning** (legacy): `sha256-DIGEST.sig` tag
+//! - **Sigstore Bundle** (v0.3+): `sha256-DIGEST` referrers tag
 //!
 //! This replaces the `sigstore-rs` library with a lightweight, focused
-//! implementation that only needs `oci-client`, `x509-parser`, and `p256`.
+//! implementation using `oci-client`, `x509-parser`, `p256`, and `p384`.
 
 use anyhow::{bail, Context, Result};
-use log::{debug, info};
-use p256::ecdsa::{signature::Verifier, DerSignature, VerifyingKey};
+use log::{debug, info, warn};
+use p256::ecdsa::{signature::Verifier as _, DerSignature, VerifyingKey};
 
 /// A trusted signing identity for cosign verification.
 #[derive(Debug, Clone)]
@@ -42,6 +47,17 @@ pub struct VerificationResult {
     pub issuer: String,
     /// The subject (SAN URI or email) from the Fulcio certificate.
     pub subject: String,
+}
+
+/// Status of a cosign signature check.
+#[derive(Debug, Clone)]
+pub enum SignatureStatus {
+    /// No signature found — the artifact is unsigned.
+    Unsigned,
+    /// Signature is cryptographically valid and the certificate chains to the Sigstore root CA.
+    Verified(VerificationResult),
+    /// A signature exists but verification failed — the artifact may have been tampered with.
+    Tampered(String),
 }
 
 /// Default trusted identity: drasi-project GitHub Actions.
@@ -90,19 +106,14 @@ impl CosignVerifier {
 
     /// Verify a plugin's cosign signature.
     ///
-    /// Pulls the cosign signature tag from the registry, parses the Fulcio
-    /// certificate, verifies the ECDSA-P256 signature, and extracts the
-    /// signer identity (OIDC issuer + subject).
-    ///
-    /// Returns `Ok(Some(result))` with the signer identity on success,
-    /// `Ok(None)` if the plugin is unsigned, or an error if verification fails.
+    /// Returns the full `SignatureStatus`: `Unsigned`, `Verified`, or `Tampered`.
     pub async fn verify_plugin(
         &self,
         oci_reference: &str,
         auth: &oci_client::secrets::RegistryAuth,
-    ) -> Result<Option<VerificationResult>> {
+    ) -> SignatureStatus {
         if !self.config.enabled {
-            return Ok(None);
+            return SignatureStatus::Unsigned;
         }
 
         info!("Verifying cosign signature for {oci_reference}...");
@@ -112,15 +123,17 @@ impl CosignVerifier {
     /// Verify multiple plugins in parallel against the OCI registry.
     ///
     /// Each entry is `(oci_reference, filename)`.
-    /// Returns `(filename, Option<VerificationResult>)` for each plugin.
-    /// `None` means unsigned or verification failed.
+    /// Returns `(filename, SignatureStatus)` for each plugin.
     pub async fn verify_batch(
         &self,
         plugins: Vec<(String, String)>,
         auth: &oci_client::secrets::RegistryAuth,
-    ) -> Vec<(String, Option<VerificationResult>)> {
+    ) -> Vec<(String, SignatureStatus)> {
         if !self.config.enabled || plugins.is_empty() {
-            return plugins.into_iter().map(|(_, f)| (f, None)).collect();
+            return plugins
+                .into_iter()
+                .map(|(_, f)| (f, SignatureStatus::Unsigned))
+                .collect();
         }
 
         info!(
@@ -132,23 +145,22 @@ impl CosignVerifier {
         for (reference, filename) in plugins {
             let auth = auth.clone();
             join_set.spawn(async move {
-                match verify_cosign_signature(&reference, &auth).await {
-                    Ok(Some(vr)) => {
+                let status = verify_cosign_signature(&reference, &auth).await;
+                match &status {
+                    SignatureStatus::Verified(vr) => {
                         info!(
-                            "✓ {} — signed by (issuer={}, subject={})",
-                            reference, vr.issuer, vr.subject
+                            "✓ {reference} — signed by (issuer={}, subject={})",
+                            vr.issuer, vr.subject
                         );
-                        (filename, Some(vr))
                     }
-                    Ok(None) => {
-                        debug!("⊘ {} — unsigned", reference);
-                        (filename, None)
+                    SignatureStatus::Unsigned => {
+                        debug!("⊘ {reference} — unsigned");
                     }
-                    Err(e) => {
-                        log::warn!("✗ {} — verification failed: {e}", reference);
-                        (filename, None)
+                    SignatureStatus::Tampered(reason) => {
+                        warn!("⚠ {reference} — TAMPERED: {reason}");
                     }
                 }
+                (filename, status)
             });
         }
 
@@ -169,18 +181,68 @@ const OID_FULCIO_ISSUER_V1: &str = "1.3.6.1.4.1.57264.1.1";
 /// Fulcio OIDC Issuer extension OID (v2): 1.3.6.1.4.1.57264.1.8
 const OID_FULCIO_ISSUER_V2: &str = "1.3.6.1.4.1.57264.1.8";
 
+// ── Embedded Sigstore CA certificates ──────────────────────────────────
+//
+// These are the public Sigstore trust-root certificates used by Fulcio.
+// They are long-lived and rarely rotate (root valid until 2031).
+// Source: https://fulcio.sigstore.dev/api/v2/trustBundle
+
+/// Sigstore root CA (`O=sigstore.dev, CN=sigstore`), P-384, self-signed.
+/// Retained for reference; only the intermediate is used for chain verification.
+#[allow(dead_code)]
+const SIGSTORE_ROOT_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMw
+KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
+MTEwMDcxMzU2NTlaFw0zMTEwMDUxMzU2NThaMCoxFTATBgNVBAoTDHNpZ3N0b3Jl
+LmRldjERMA8GA1UEAxMIc2lnc3RvcmUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAT7
+XeFT4rb3PQGwS4IajtLk3/OlnpgangaBclYpsYBr5i+4ynB07ceb3LP0OIOZdxex
+X69c5iVuyJRQ+Hz05yi+UF3uBWAlHpiS5sh0+H2GHE7SXrk1EC5m1Tr19L9gg92j
+YzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRY
+wB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQ
+KsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCM
+WP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9
+TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ
+-----END CERTIFICATE-----";
+
+/// Sigstore intermediate CA (`O=sigstore.dev, CN=sigstore-intermediate`), P-384.
+const SIGSTORE_INTERMEDIATE_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMw
+KjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0y
+MjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3Jl
+LmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0C
+AQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV7
+7LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS
+0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYB
+BQUHAwkwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjp
+KFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZI
+zj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJR
+nZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsP
+mygUY7Ii2zbdCdliiow=
+-----END CERTIFICATE-----";
+
 /// Verify a cosign signature for an OCI reference.
 ///
-/// Supports two cosign signature storage formats:
-/// 1. **Simplesigning** (legacy): `sha256-DIGEST.sig` tag → image manifest with
-///    signature + certificate in layer annotations.
-/// 2. **Sigstore Bundle** (v0.3+): `sha256-DIGEST` referrers tag → image index →
-///    inner manifest with a `application/vnd.dev.sigstore.bundle.v0.3+json` layer
-///    containing a DSSE envelope + certificate.
+/// Returns `SignatureStatus::Unsigned` if no signature tag is found,
+/// `SignatureStatus::Verified` if valid, or `SignatureStatus::Tampered` if
+/// a signature exists but ECDSA or certificate chain verification fails.
 async fn verify_cosign_signature(
     oci_reference: &str,
     auth: &oci_client::secrets::RegistryAuth,
-) -> Result<Option<VerificationResult>> {
+) -> SignatureStatus {
+    match verify_cosign_inner(oci_reference, auth).await {
+        Ok(status) => status,
+        Err(e) => {
+            warn!("Signature verification error for {oci_reference}: {e}");
+            SignatureStatus::Unsigned
+        }
+    }
+}
+
+/// Inner implementation that returns Result for ergonomic error handling.
+async fn verify_cosign_inner(
+    oci_reference: &str,
+    auth: &oci_client::secrets::RegistryAuth,
+) -> Result<SignatureStatus> {
     let parsed: oci_client::Reference = oci_reference.parse().context("invalid OCI reference")?;
 
     let client = oci_client::Client::new(oci_client::client::ClientConfig {
@@ -218,10 +280,9 @@ async fn verify_cosign_signature(
     {
         if !idx.manifests.is_empty() {
             debug!("Found referrers index with {} entries", idx.manifests.len());
-            if let Some(result) =
-                try_verify_bundle(&client, &repo, idx, auth, oci_reference).await?
-            {
-                return Ok(Some(result));
+            let status = try_verify_bundle(&client, &repo, idx, auth, oci_reference).await;
+            if !matches!(status, SignatureStatus::Unsigned) {
+                return Ok(status);
             }
         }
     }
@@ -238,31 +299,36 @@ async fn verify_cosign_signature(
         Ok((m, _)) => m,
         Err(_) => {
             debug!("No cosign signature found for {oci_reference}");
-            return Ok(None);
+            return Ok(SignatureStatus::Unsigned);
         }
     };
 
-    try_verify_simplesigning(&client, &sig_ref, &sig_manifest, auth, oci_reference).await
+    Ok(try_verify_simplesigning(&client, &sig_ref, &sig_manifest, auth, oci_reference).await)
 }
 
 /// Verify a sigstore bundle (v0.3+) from a referrers image index.
 ///
 /// The index contains inner manifests whose single layer is a JSON sigstore bundle
 /// with a DSSE envelope. The signature is ECDSA-P256 over the DSSE PAE encoding.
+/// After ECDSA verification, the Fulcio leaf certificate is validated against the
+/// embedded Sigstore intermediate CA.
 async fn try_verify_bundle(
     client: &oci_client::Client,
     repo: &str,
     idx: &oci_client::manifest::OciImageIndex,
     auth: &oci_client::secrets::RegistryAuth,
     oci_reference: &str,
-) -> Result<Option<VerificationResult>> {
+) -> SignatureStatus {
     for entry in &idx.manifests {
-        let inner_ref: oci_client::Reference = format!("{repo}@{}", entry.digest).parse()?;
+        let inner_ref: oci_client::Reference = match format!("{repo}@{}", entry.digest).parse() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
 
-        let (inner_manifest, _) = client
-            .pull_manifest(&inner_ref, auth)
-            .await
-            .context("failed to pull inner signature manifest")?;
+        let (inner_manifest, _) = match client.pull_manifest(&inner_ref, auth).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
 
         let img = match &inner_manifest {
             oci_client::manifest::OciManifest::Image(img) => img,
@@ -281,96 +347,159 @@ async fn try_verify_bundle(
         }
 
         let mut buf = Vec::new();
-        client
+        if client
             .pull_blob(&inner_ref, layer_desc, &mut buf)
             .await
-            .context("failed to pull sigstore bundle blob")?;
+            .is_err()
+        {
+            return SignatureStatus::Tampered("failed to pull sigstore bundle blob".into());
+        }
 
-        let bundle: serde_json::Value =
-            serde_json::from_slice(&buf).context("failed to parse sigstore bundle JSON")?;
+        let bundle: serde_json::Value = match serde_json::from_slice(&buf) {
+            Ok(v) => v,
+            Err(_) => {
+                return SignatureStatus::Tampered("invalid sigstore bundle JSON".into());
+            }
+        };
 
-        let envelope = bundle
-            .get("dsseEnvelope")
-            .context("no dsseEnvelope in bundle")?;
+        let envelope = match bundle.get("dsseEnvelope") {
+            Some(e) => e,
+            None => {
+                return SignatureStatus::Tampered("no dsseEnvelope in bundle".into());
+            }
+        };
 
-        let payload_b64 = envelope
-            .get("payload")
-            .and_then(|v| v.as_str())
-            .context("no payload in DSSE envelope")?;
-        let payload_bytes = base64_decode(payload_b64)?;
+        let payload_b64 = match envelope.get("payload").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => {
+                return SignatureStatus::Tampered("no payload in DSSE envelope".into());
+            }
+        };
+        let payload_bytes = match base64_decode(payload_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                return SignatureStatus::Tampered("invalid base64 payload".into());
+            }
+        };
 
-        let sig_b64 = envelope
+        let sig_b64 = match envelope
             .get("signatures")
             .and_then(|s| s.as_array())
             .and_then(|a| a.first())
             .and_then(|s| s.get("sig"))
             .and_then(|v| v.as_str())
-            .context("no signature in DSSE envelope")?;
-        let sig_bytes = base64_decode(sig_b64)?;
+        {
+            Some(s) => s,
+            None => {
+                return SignatureStatus::Tampered("no signature in DSSE envelope".into());
+            }
+        };
+        let sig_bytes = match base64_decode(sig_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                return SignatureStatus::Tampered("invalid base64 signature".into());
+            }
+        };
 
-        let cert_b64 = bundle
+        let cert_b64 = match bundle
             .get("verificationMaterial")
             .and_then(|vm| vm.get("certificate"))
             .and_then(|c| c.get("rawBytes"))
             .and_then(|v| v.as_str())
-            .context("no certificate in verification material")?;
-        let cert_der = base64_decode(cert_b64)?;
+        {
+            Some(c) => c,
+            None => {
+                return SignatureStatus::Tampered("no certificate in verification material".into());
+            }
+        };
+        let cert_der = match base64_decode(cert_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                return SignatureStatus::Tampered("invalid base64 certificate".into());
+            }
+        };
 
-        let (_, cert) = x509_parser::parse_x509_certificate(&cert_der)
-            .map_err(|e| anyhow::anyhow!("failed to parse certificate: {e}"))?;
+        let (_, cert) = match x509_parser::parse_x509_certificate(&cert_der) {
+            Ok(c) => c,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("failed to parse certificate: {e}"));
+            }
+        };
 
+        // Verify ECDSA-P256 signature over DSSE PAE
         let pub_key = cert
             .tbs_certificate
             .subject_pki
             .subject_public_key
             .data
             .to_vec();
-        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key)
-            .context("failed to parse ECDSA-P256 public key")?;
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&pub_key) {
+            Ok(k) => k,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("invalid ECDSA-P256 public key: {e}"));
+            }
+        };
 
-        // DSSE PAE: "DSSEv1 <len(type)> <type> <len(payload)> <payload>"
         let payload_type = envelope
             .get("payloadType")
             .and_then(|v| v.as_str())
             .unwrap_or("application/vnd.in-toto+json");
         let pae = dsse_pae(payload_type, &payload_bytes);
 
-        let signature = DerSignature::from_bytes(&sig_bytes)
-            .map_err(|e| anyhow::anyhow!("failed to parse DER signature: {e}"))?;
+        let signature = match DerSignature::from_bytes(&sig_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("invalid DER signature: {e}"));
+            }
+        };
 
-        verifying_key
-            .verify(&pae, &signature)
-            .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
+        if let Err(e) = verifying_key.verify(&pae, &signature) {
+            return SignatureStatus::Tampered(format!("ECDSA signature verification failed: {e}"));
+        }
 
         debug!("ECDSA-P256 signature verified (sigstore bundle)");
-        let result = extract_identity(&cert, oci_reference)?;
-        return Ok(Some(result));
+
+        // Verify certificate chain: leaf → Sigstore intermediate CA
+        if let Err(reason) = verify_fulcio_chain(&cert) {
+            return SignatureStatus::Tampered(reason);
+        }
+
+        match extract_identity(&cert, oci_reference) {
+            Ok(result) => return SignatureStatus::Verified(result),
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("failed to extract identity: {e}"));
+            }
+        }
     }
 
-    Ok(None)
+    SignatureStatus::Unsigned
 }
 
 /// Verify a simplesigning-format cosign signature.
 ///
 /// The signature manifest is an image with layers containing the simplesigning
 /// JSON payload, with certificate and signature in layer annotations.
+/// After ECDSA verification, the Fulcio leaf certificate is validated against the
+/// embedded Sigstore intermediate CA.
 async fn try_verify_simplesigning(
     client: &oci_client::Client,
     sig_ref: &oci_client::Reference,
     sig_manifest: &oci_client::manifest::OciManifest,
     auth: &oci_client::secrets::RegistryAuth,
     oci_reference: &str,
-) -> Result<Option<VerificationResult>> {
+) -> SignatureStatus {
     let layer_count = match sig_manifest {
         oci_client::manifest::OciManifest::Image(img) => img.layers.len(),
-        _ => bail!("expected image manifest for cosign signature"),
+        _ => {
+            return SignatureStatus::Tampered("expected image manifest for cosign signature".into())
+        }
     };
 
     if layer_count == 0 {
-        bail!("cosign signature manifest has no layers");
+        return SignatureStatus::Tampered("cosign signature manifest has no layers".into());
     }
 
-    let image_data = client
+    let image_data = match client
         .pull(
             sig_ref,
             auth,
@@ -380,7 +509,14 @@ async fn try_verify_simplesigning(
             ],
         )
         .await
-        .context("failed to pull cosign signature layers")?;
+    {
+        Ok(d) => d,
+        Err(e) => {
+            return SignatureStatus::Tampered(format!(
+                "failed to pull cosign signature layers: {e}"
+            ));
+        }
+    };
 
     for layer in &image_data.layers {
         let anns = match &layer.annotations {
@@ -388,18 +524,33 @@ async fn try_verify_simplesigning(
             None => continue,
         };
 
-        let cert_pem_str = anns
+        let cert_pem_str = match anns
             .get("dev.sigstore.cosign/certificate")
             .or_else(|| anns.get("dev.cosignproject.cosign/certificate"))
-            .context("no certificate annotation")?;
+        {
+            Some(c) => c,
+            None => continue,
+        };
 
-        let sig_b64 = anns
-            .get("dev.cosignproject.cosign/signature")
-            .context("no signature annotation")?;
+        let sig_b64 = match anns.get("dev.cosignproject.cosign/signature") {
+            Some(s) => s,
+            None => {
+                return SignatureStatus::Tampered("no signature annotation".into());
+            }
+        };
 
-        let cert_pem = pem::parse(cert_pem_str).context("failed to parse certificate PEM")?;
-        let (_, cert) = x509_parser::parse_x509_certificate(cert_pem.contents())
-            .map_err(|e| anyhow::anyhow!("failed to parse certificate: {e}"))?;
+        let cert_pem = match pem::parse(cert_pem_str) {
+            Ok(p) => p,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("failed to parse certificate PEM: {e}"));
+            }
+        };
+        let (_, cert) = match x509_parser::parse_x509_certificate(cert_pem.contents()) {
+            Ok(c) => c,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("failed to parse certificate: {e}"));
+            }
+        };
 
         let pub_key = cert
             .tbs_certificate
@@ -407,23 +558,86 @@ async fn try_verify_simplesigning(
             .subject_public_key
             .data
             .to_vec();
-        let verifying_key = VerifyingKey::from_sec1_bytes(&pub_key)
-            .context("failed to parse ECDSA-P256 public key")?;
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&pub_key) {
+            Ok(k) => k,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("invalid ECDSA-P256 public key: {e}"));
+            }
+        };
 
-        let sig_bytes = base64_decode(sig_b64)?;
-        let signature = DerSignature::from_bytes(&sig_bytes)
-            .map_err(|e| anyhow::anyhow!("failed to parse DER signature: {e}"))?;
+        let sig_bytes = match base64_decode(sig_b64) {
+            Ok(b) => b,
+            Err(_) => {
+                return SignatureStatus::Tampered("invalid base64 signature".into());
+            }
+        };
+        let signature = match DerSignature::from_bytes(&sig_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("invalid DER signature: {e}"));
+            }
+        };
 
-        verifying_key
-            .verify(&layer.data, &signature)
-            .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
+        if let Err(e) = verifying_key.verify(&layer.data, &signature) {
+            return SignatureStatus::Tampered(format!("ECDSA signature verification failed: {e}"));
+        }
 
         debug!("ECDSA-P256 signature verified (simplesigning)");
-        let result = extract_identity(&cert, oci_reference)?;
-        return Ok(Some(result));
+
+        // Verify certificate chain: leaf → Sigstore intermediate CA
+        if let Err(reason) = verify_fulcio_chain(&cert) {
+            return SignatureStatus::Tampered(reason);
+        }
+
+        match extract_identity(&cert, oci_reference) {
+            Ok(result) => return SignatureStatus::Verified(result),
+            Err(e) => {
+                return SignatureStatus::Tampered(format!("failed to extract identity: {e}"));
+            }
+        }
     }
 
-    bail!("no processable signature layers found")
+    SignatureStatus::Unsigned
+}
+
+/// Verify that a Fulcio leaf certificate was issued by the Sigstore intermediate CA.
+///
+/// The intermediate CA signs leaf certificates using ECDSA-SHA384 (P-384).
+/// We verify the leaf cert's `signature_value` over its `tbs_certificate` DER encoding
+/// using the intermediate CA's P-384 public key.
+fn verify_fulcio_chain(leaf: &x509_parser::certificate::X509Certificate<'_>) -> Result<(), String> {
+    // Parse the embedded intermediate CA certificate
+    let intermediate_pem = pem::parse(SIGSTORE_INTERMEDIATE_CA_PEM)
+        .map_err(|e| format!("failed to parse embedded intermediate CA PEM: {e}"))?;
+    let (_, intermediate) = x509_parser::parse_x509_certificate(intermediate_pem.contents())
+        .map_err(|e| format!("failed to parse embedded intermediate CA cert: {e}"))?;
+
+    // Extract the intermediate's P-384 public key
+    let intermediate_pub_key = intermediate
+        .tbs_certificate
+        .subject_pki
+        .subject_public_key
+        .data
+        .to_vec();
+    let p384_verifying_key = p384::ecdsa::VerifyingKey::from_sec1_bytes(&intermediate_pub_key)
+        .map_err(|e| format!("invalid intermediate CA P-384 public key: {e}"))?;
+
+    // The leaf's signature is over its TBS (To-Be-Signed) certificate DER encoding
+    let tbs_der = leaf.tbs_certificate.as_ref();
+    let leaf_signature = p384::ecdsa::DerSignature::from_bytes(&leaf.signature_value.data)
+        .map_err(|e| format!("invalid leaf certificate signature: {e}"))?;
+
+    use p384::ecdsa::signature::Verifier as _;
+    p384_verifying_key
+        .verify(tbs_der, &leaf_signature)
+        .map_err(|e| {
+            format!(
+                "certificate chain verification failed — leaf cert not issued by Sigstore CA: {e}"
+            )
+        })?;
+
+    debug!("Certificate chain verified: leaf → Sigstore intermediate CA");
+    Ok(())
 }
 
 /// Build the DSSE Pre-Authentication Encoding (PAE).
