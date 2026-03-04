@@ -10,14 +10,8 @@ members = [
   "middleware",
   "lib",
 
-  # Source Plugins
-  "components/sources/postgres",
-  "components/sources/http",
-  "components/sources/grpc",
-  "components/sources/platform",
-  "components/sources/application",
-  "components/sources/mock",
-  "components/sources/mssql",
+  # Shared component libraries
+  "components/mssql-common",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -26,6 +20,15 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+
+  # Source Plugins
+  "components/sources/postgres",
+  "components/sources/http",
+  "components/sources/grpc",
+  "components/sources/platform",
+  "components/sources/application",
+  "components/sources/mock",
+  "components/sources/mssql",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -47,9 +50,6 @@ members = [
 
   # State Store Plugins
   "components/state_stores/redb",
-
-  # Shared component libraries
-  "components/mssql-common",
 
   # FFI Primitives (shared FFI types and macros)
   "components/ffi-primitives",
