@@ -99,12 +99,17 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - name: Login to GHCR
+        if: ${{ !inputs.dry_run }}
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: Build plugins
         run: cargo run -p xtask -- build-plugins --release --target ${{ matrix.target }}
 
       - name: Publish plugins (per-architecture tag)
         if: ${{ !inputs.dry_run }}
         env:
+          OCI_REGISTRY_USERNAME: ${{ github.actor }}
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --sign"
