@@ -69,27 +69,37 @@ impl ElementArchiveIndex for GarnetElementIndex {
 
         let candidates = match deltas_result {
             Some(Some(deltas)) => {
-                let mut candidates: Vec<(Vec<u8>, f64)> = Vec::new();
-                for (member, score) in all_redis {
-                    if !deltas.removed.contains(&member) {
-                        if let Some(&new_score) = deltas.added.get(&member) {
-                            candidates.push((member, new_score));
-                        } else {
-                            candidates.push((member, score));
+                if deltas.full_replace {
+                    // Key was DEL'd then re-added — only use buffer additions
+                    deltas
+                        .added
+                        .into_iter()
+                        .filter(|(_, score)| *score <= time as f64)
+                        .collect()
+                } else {
+                    let mut candidates: Vec<(Vec<u8>, f64)> = Vec::new();
+                    for (member, score) in all_redis {
+                        if !deltas.removed.contains(&member) {
+                            if let Some(&new_score) = deltas.added.get(&member) {
+                                candidates.push((member, new_score));
+                            } else {
+                                candidates.push((member, score));
+                            }
                         }
                     }
-                }
 
-                // Collect seen members for O(1) dedup
-                let seen: HashSet<Vec<u8>> = candidates.iter().map(|(m, _)| m.clone()).collect();
+                    // Collect seen members for O(1) dedup
+                    let seen: HashSet<Vec<u8>> =
+                        candidates.iter().map(|(m, _)| m.clone()).collect();
 
-                // Add buffer additions with score <= time
-                for (member, score) in &deltas.added {
-                    if *score <= time as f64 && !seen.contains(member) {
-                        candidates.push((member.clone(), *score));
+                    // Add buffer additions with score <= time
+                    for (member, score) in &deltas.added {
+                        if *score <= time as f64 && !seen.contains(member) {
+                            candidates.push((member.clone(), *score));
+                        }
                     }
+                    candidates
                 }
-                candidates
             }
             Some(None) => return Ok(None), // key deleted
             None => {
@@ -170,28 +180,38 @@ impl ElementArchiveIndex for GarnetElementIndex {
 
             match buffer.zset_get_deltas(&key) {
                 BufferReadResult::Found(deltas) => {
-                    for (member, score) in redis_results {
-                        if !deltas.removed.contains(&member) {
-                            if let Some(&new_score) = deltas.added.get(&member) {
-                                if new_score >= from_timestamp as f64 && new_score <= to as f64 {
-                                    candidates.push((member, new_score));
-                                }
-                            } else {
-                                candidates.push((member, score));
+                    if deltas.full_replace {
+                        // Key was DEL'd then re-added — only use buffer additions
+                        for (member, score) in &deltas.added {
+                            if *score >= from_timestamp as f64 && *score <= to as f64 {
+                                candidates.push((member.clone(), *score));
                             }
                         }
-                    }
+                    } else {
+                        for (member, score) in redis_results {
+                            if !deltas.removed.contains(&member) {
+                                if let Some(&new_score) = deltas.added.get(&member) {
+                                    if new_score >= from_timestamp as f64 && new_score <= to as f64
+                                    {
+                                        candidates.push((member, new_score));
+                                    }
+                                } else {
+                                    candidates.push((member, score));
+                                }
+                            }
+                        }
 
-                    // Collect seen members for O(1) dedup
-                    let seen: HashSet<Vec<u8>> =
-                        candidates.iter().map(|(m, _)| m.clone()).collect();
+                        // Collect seen members for O(1) dedup
+                        let seen: HashSet<Vec<u8>> =
+                            candidates.iter().map(|(m, _)| m.clone()).collect();
 
-                    for (member, score) in &deltas.added {
-                        if *score >= from_timestamp as f64
-                            && *score <= to as f64
-                            && !seen.contains(member)
-                        {
-                            candidates.push((member.clone(), *score));
+                        for (member, score) in &deltas.added {
+                            if *score >= from_timestamp as f64
+                                && *score <= to as f64
+                                && !seen.contains(member)
+                            {
+                                candidates.push((member.clone(), *score));
+                            }
                         }
                     }
                 }

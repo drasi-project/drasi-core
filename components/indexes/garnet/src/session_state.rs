@@ -25,6 +25,7 @@ use redis::{aio::MultiplexedConnection, Pipeline, ToRedisArgs};
 ///
 /// Three-state enum to distinguish between "buffer has the value",
 /// "key was explicitly deleted in buffer", and "buffer has no info".
+#[derive(Debug)]
 pub enum BufferReadResult<T> {
     /// Buffer has the value — use it directly.
     Found(T),
@@ -57,15 +58,23 @@ enum KeyState {
 }
 
 /// Deltas for a buffered set, used by callers that need to merge with Redis.
+#[derive(Debug)]
 pub struct SetDeltas {
     pub added: HashSet<Vec<u8>>,
     pub removed: HashSet<Vec<u8>>,
+    /// When true, the key was DEL'd then re-added within this session.
+    /// Callers must not fall through to Redis for members not in `added`/`removed`.
+    pub full_replace: bool,
 }
 
 /// Deltas for a buffered sorted set, used by callers that need to merge with Redis.
+#[derive(Debug)]
 pub struct SortedSetDeltas {
     pub added: HashMap<Vec<u8>, f64>,
     pub removed: HashSet<Vec<u8>>,
+    /// When true, the key was DEL'd then re-added within this session.
+    /// Callers must not fall through to Redis for members not in `added`/`removed`.
+    pub full_replace: bool,
 }
 
 /// In-memory write buffer that intercepts all reads and writes during a session.
@@ -123,7 +132,15 @@ impl WriteBuffer {
             Some(KeyState::Hash { fields }) => match fields.get(field) {
                 Some(Some(v)) => BufferReadResult::Found(v.clone()),
                 Some(None) => BufferReadResult::KeyDeleted, // field was deleted
-                None => BufferReadResult::NotInBuffer,      // field not in buffer
+                None => {
+                    if self.cleared_keys.contains(key) {
+                        // Key was DEL'd then re-added as hash — field not in the
+                        // new hash means it doesn't exist.
+                        BufferReadResult::KeyDeleted
+                    } else {
+                        BufferReadResult::NotInBuffer // field not in buffer
+                    }
+                }
             },
             Some(KeyState::Deleted) => BufferReadResult::KeyDeleted,
             _ => BufferReadResult::NotInBuffer,
@@ -199,6 +216,10 @@ impl WriteBuffer {
                     BufferReadResult::Found(true)
                 } else if removed.contains(member) {
                     BufferReadResult::Found(false)
+                } else if self.cleared_keys.contains(key) {
+                    // Key was DEL'd then re-added as a set — member not in
+                    // added/removed means it doesn't exist in the new set.
+                    BufferReadResult::Found(false)
                 } else {
                     BufferReadResult::NotInBuffer
                 }
@@ -215,6 +236,7 @@ impl WriteBuffer {
             Some(KeyState::Set { added, removed }) => BufferReadResult::Found(SetDeltas {
                 added: added.clone(),
                 removed: removed.clone(),
+                full_replace: self.cleared_keys.contains(key),
             }),
             Some(KeyState::Deleted) => BufferReadResult::KeyDeleted,
             _ => BufferReadResult::NotInBuffer,
@@ -274,6 +296,7 @@ impl WriteBuffer {
                 BufferReadResult::Found(SortedSetDeltas {
                     added: added.clone(),
                     removed: removed.clone(),
+                    full_replace: self.cleared_keys.contains(key),
                 })
             }
             Some(KeyState::Deleted) => BufferReadResult::KeyDeleted,
@@ -628,10 +651,11 @@ mod tests {
         buf.hash_set("h1".into(), "f1", b"old".to_vec());
         buf.del("h1".into());
         buf.hash_set("h1".into(), "f2", b"new".to_vec());
-        // f1 should not be in the fresh hash
+        // f1 should not be in the fresh hash — returns KeyDeleted because
+        // the key was cleared and f1 is not in the new hash's fields.
         assert!(matches!(
             buf.hash_get("h1", "f1"),
-            BufferReadResult::NotInBuffer
+            BufferReadResult::KeyDeleted
         ));
         match buf.hash_get("h1", "f2") {
             BufferReadResult::Found(v) => assert_eq!(v, b"new"),
@@ -958,5 +982,89 @@ mod tests {
         state.begin().expect("begin");
         drop(state); // Should warn but not panic
         redis.cleanup().await;
+    }
+
+    // --- Issue 1: cleared_keys / full_replace tests ---
+
+    #[test]
+    fn set_del_then_add_is_member_unknown_returns_false() {
+        let mut buf = WriteBuffer::new();
+        buf.set_add("s1".into(), b"m1".to_vec());
+        buf.del("s1".into());
+        buf.set_add("s1".into(), b"m2".to_vec());
+        // m1 is not in the new set — should return Found(false), not NotInBuffer
+        match buf.set_is_member("s1", b"m1") {
+            BufferReadResult::Found(false) => {}
+            other => panic!("expected Found(false), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_del_then_add_get_deltas_full_replace() {
+        let mut buf = WriteBuffer::new();
+        buf.set_add("s1".into(), b"old".to_vec());
+        buf.del("s1".into());
+        buf.set_add("s1".into(), b"new".to_vec());
+        match buf.set_get_deltas("s1") {
+            BufferReadResult::Found(deltas) => {
+                assert!(
+                    deltas.full_replace,
+                    "full_replace should be true after del+add"
+                );
+                assert!(deltas.added.contains(b"new".as_slice()));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_no_del_get_deltas_not_full_replace() {
+        let mut buf = WriteBuffer::new();
+        buf.set_add("s1".into(), b"m1".to_vec());
+        match buf.set_get_deltas("s1") {
+            BufferReadResult::Found(deltas) => {
+                assert!(
+                    !deltas.full_replace,
+                    "full_replace should be false without del"
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zset_del_then_add_get_deltas_full_replace() {
+        let mut buf = WriteBuffer::new();
+        buf.zset_add("z1".into(), b"old".to_vec(), 1.0);
+        buf.del("z1".into());
+        buf.zset_add("z1".into(), b"new".to_vec(), 2.0);
+        match buf.zset_get_deltas("z1") {
+            BufferReadResult::Found(deltas) => {
+                assert!(
+                    deltas.full_replace,
+                    "full_replace should be true after del+add"
+                );
+                assert_eq!(deltas.added.get(b"new".as_slice()), Some(&2.0));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hash_del_then_set_get_unknown_field_returns_deleted() {
+        let mut buf = WriteBuffer::new();
+        buf.hash_set("h1".into(), "f1", b"v1".to_vec());
+        buf.del("h1".into());
+        buf.hash_set("h1".into(), "f2", b"v2".to_vec());
+        // f1 is not in the new hash — should return KeyDeleted
+        assert!(matches!(
+            buf.hash_get("h1", "f1"),
+            BufferReadResult::KeyDeleted
+        ));
+        // f2 should be found
+        match buf.hash_get("h1", "f2") {
+            BufferReadResult::Found(v) => assert_eq!(v, b"v2"),
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 }

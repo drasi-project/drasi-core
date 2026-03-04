@@ -99,10 +99,9 @@ impl FutureQueue for GarnetFutureQueue {
                         BufferReadResult::Found(deltas) => {
                             if !deltas.added.is_empty() {
                                 Some(true) // has members added in-session, exists
-                            } else if !deltas.removed.is_empty() {
-                                // In-session removals with no additions — treat as
-                                // non-existing to preserve read-your-writes semantics
-                                // rather than falling through to stale Redis EXISTS.
+                            } else if !deltas.removed.is_empty() || deltas.full_replace {
+                                // In-session removals with no additions, or key was
+                                // DEL'd then re-added as empty — treat as non-existing.
                                 Some(false)
                             } else {
                                 None // no in-session changes, check Redis
@@ -174,13 +173,47 @@ impl FutureQueue for GarnetFutureQueue {
         let index_key = self.get_index_key(position_in_query, group_signature);
         let queue_key = self.get_queue_key();
 
-        // Get members from Redis, then merge with buffer deltas
-        let mut con = self.connection.clone();
-        let redis_members: Vec<StoredFutureElementRef> = match con.smembers(&index_key).await {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
+        // Phase 1: Check buffer state (sync block — guard dropped before any await)
+        enum NeedRedis {
+            Yes,
+            No(Vec<StoredFutureElementRef>),
+        }
+        let need_redis = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "write operation requires an active session",
+                ))
+            })?;
+            match buffer.set_get_deltas(&index_key) {
+                BufferReadResult::Found(deltas) if deltas.full_replace => {
+                    // Only buffer additions — no Redis needed
+                    let mut members = Vec::new();
+                    for added_bytes in &deltas.added {
+                        if let Ok(member) = StoredFutureElementRef::decode(added_bytes.as_slice()) {
+                            members.push(member);
+                        }
+                    }
+                    NeedRedis::No(members)
+                }
+                BufferReadResult::Found(_) | BufferReadResult::NotInBuffer => NeedRedis::Yes,
+                BufferReadResult::KeyDeleted => NeedRedis::No(Vec::new()),
+            }
+        }; // guard dropped here
+
+        // Phase 2: Optionally fetch from Redis
+        let redis_members: Vec<StoredFutureElementRef> = match &need_redis {
+            NeedRedis::Yes => {
+                let mut con = self.connection.clone();
+                match con.smembers(&index_key).await {
+                    Ok(v) => v,
+                    Err(e) => return Err(IndexError::other(e)),
+                }
+            }
+            NeedRedis::No(_) => Vec::new(),
         };
 
+        // Phase 3: Re-lock, merge, and buffer removals
         let mut guard = self.session_state.lock()?;
         let buffer = guard.as_mut().ok_or_else(|| {
             IndexError::other(std::io::Error::other(
@@ -188,35 +221,37 @@ impl FutureQueue for GarnetFutureQueue {
             ))
         })?;
 
-        // Collect all members: Redis members + buffer additions - buffer removals
-        let mut all_members: Vec<StoredFutureElementRef> = Vec::new();
-
-        match buffer.set_get_deltas(&index_key) {
-            BufferReadResult::Found(deltas) => {
-                // Add Redis members not in buffer's removed set
-                for m in redis_members {
-                    let m_bytes = (&m).to_redis_args();
-                    let mb = m_bytes.into_iter().next().ok_or_else(|| {
-                        IndexError::other(std::io::Error::other("empty redis args"))
-                    })?;
-                    if !deltas.removed.contains(&mb) {
-                        all_members.push(m);
+        let all_members: Vec<StoredFutureElementRef> = match need_redis {
+            NeedRedis::No(members) => members,
+            NeedRedis::Yes => {
+                let mut members = Vec::new();
+                match buffer.set_get_deltas(&index_key) {
+                    BufferReadResult::Found(deltas) => {
+                        for m in redis_members {
+                            let m_bytes = (&m).to_redis_args();
+                            let mb = m_bytes.into_iter().next().ok_or_else(|| {
+                                IndexError::other(std::io::Error::other("empty redis args"))
+                            })?;
+                            if !deltas.removed.contains(&mb) {
+                                members.push(m);
+                            }
+                        }
+                        for added_bytes in &deltas.added {
+                            if let Ok(member) =
+                                StoredFutureElementRef::decode(added_bytes.as_slice())
+                            {
+                                members.push(member);
+                            }
+                        }
+                    }
+                    BufferReadResult::KeyDeleted => {}
+                    BufferReadResult::NotInBuffer => {
+                        members = redis_members;
                     }
                 }
-                // Add buffer's added members (as StoredFutureElementRef)
-                for added_bytes in &deltas.added {
-                    if let Ok(member) = StoredFutureElementRef::decode(added_bytes.as_slice()) {
-                        all_members.push(member);
-                    }
-                }
+                members
             }
-            BufferReadResult::KeyDeleted => {
-                // Key was deleted — nothing to collect
-            }
-            BufferReadResult::NotInBuffer => {
-                all_members = redis_members;
-            }
-        }
+        };
 
         // Remove each member from the queue sorted set
         for m in all_members {
@@ -240,21 +275,17 @@ impl FutureQueue for GarnetFutureQueue {
     }
 
     async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
-        // Session-aware pop: fetch all queue members from Redis, merge with
-        // buffer deltas (skipping already-removed items), select the head,
-        // and buffer the removal. This allows consecutive pops within one
-        // session to return different items.
+        // Two-phase pop: build candidate list, then sort + select head + buffer removal.
         let mut con = self.connection.clone();
         let queue_key = self.get_queue_key();
 
-        // Fetch all queue members with scores
+        // Fetch all queue members with scores from Redis
         let redis_members: Vec<(StoredFutureElementRefWithContext, f64)> =
             match con.zrangebyscore_withscores(&queue_key, 0, "+inf").await {
                 Ok(v) => v,
                 Err(e) => return Err(IndexError::other(e)),
             };
 
-        // Merge with buffer deltas and select the head
         let head = {
             let mut guard = self.session_state.lock()?;
             let buffer = guard.as_mut().ok_or_else(|| {
@@ -263,87 +294,75 @@ impl FutureQueue for GarnetFutureQueue {
                 ))
             })?;
 
-            match buffer.zset_get_deltas(&queue_key) {
-                BufferReadResult::Found(deltas) => {
-                    // Build merged list: Redis members minus removals, plus additions
-                    let mut entries: Vec<(StoredFutureElementRefWithContext, f64)> = Vec::new();
-                    for (member, score) in redis_members {
-                        let member_bytes = member.to_redis_args();
-                        let mb = member_bytes.into_iter().next().ok_or_else(|| {
-                            IndexError::other(std::io::Error::other("empty redis args"))
-                        })?;
-                        if !deltas.removed.contains(&mb) {
-                            if let Some(&new_score) = deltas.added.get(&mb) {
-                                entries.push((member, new_score));
-                            } else {
-                                entries.push((member, score));
-                            }
-                        }
-                    }
-                    // Add buffer additions not already present
-                    let seen: std::collections::HashSet<Vec<u8>> = entries
-                        .iter()
-                        .filter_map(|(m, _)| m.to_redis_args().into_iter().next())
-                        .collect();
-                    for (member_bytes, score) in &deltas.added {
-                        if !seen.contains(member_bytes) {
+            // Phase 1: Build candidate list
+            let mut entries: Vec<(StoredFutureElementRefWithContext, f64)> =
+                match buffer.zset_get_deltas(&queue_key) {
+                    BufferReadResult::Found(deltas) if deltas.full_replace => {
+                        // Key was DEL'd then re-added — only buffer additions
+                        let mut v = Vec::new();
+                        for (member_bytes, score) in &deltas.added {
                             if let Ok(member) =
                                 StoredFutureElementRefWithContext::decode(member_bytes.as_slice())
                             {
-                                entries.push((member, *score));
+                                v.push((member, *score));
                             }
                         }
+                        v
                     }
-
-                    // Sort by score ascending, pick head
-                    entries
-                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-                    match entries.into_iter().next() {
-                        None => None,
-                        Some((head, _)) => {
-                            // Buffer ZREM and SREM
-                            let index_key = self.get_index_key(
-                                head.position_in_query as usize,
-                                head.group_signature,
-                            );
-                            let ctx_bytes = head.to_redis_args();
-                            let ctx_flat = ctx_bytes.into_iter().next().ok_or_else(|| {
+                    BufferReadResult::Found(deltas) => {
+                        // Merge Redis + buffer deltas
+                        let mut v: Vec<(StoredFutureElementRefWithContext, f64)> = Vec::new();
+                        for (member, score) in redis_members {
+                            let member_bytes = member.to_redis_args();
+                            let mb = member_bytes.into_iter().next().ok_or_else(|| {
                                 IndexError::other(std::io::Error::other("empty redis args"))
                             })?;
-                            let ref_bytes = (&head.future_ref).to_redis_args();
-                            let ref_flat = ref_bytes.into_iter().next().ok_or_else(|| {
-                                IndexError::other(std::io::Error::other("empty redis args"))
-                            })?;
-                            buffer.zset_remove(queue_key, ctx_flat);
-                            buffer.set_remove(index_key, ref_flat);
-                            Some(head)
+                            if !deltas.removed.contains(&mb) {
+                                if let Some(&new_score) = deltas.added.get(&mb) {
+                                    v.push((member, new_score));
+                                } else {
+                                    v.push((member, score));
+                                }
+                            }
                         }
-                    }
-                }
-                BufferReadResult::KeyDeleted => None,
-                BufferReadResult::NotInBuffer => {
-                    // No buffer changes — use Redis head directly
-                    match redis_members.into_iter().next() {
-                        None => None,
-                        Some((head, _)) => {
-                            let index_key = self.get_index_key(
-                                head.position_in_query as usize,
-                                head.group_signature,
-                            );
-                            let ctx_bytes = head.to_redis_args();
-                            let ctx_flat = ctx_bytes.into_iter().next().ok_or_else(|| {
-                                IndexError::other(std::io::Error::other("empty redis args"))
-                            })?;
-                            let ref_bytes = (&head.future_ref).to_redis_args();
-                            let ref_flat = ref_bytes.into_iter().next().ok_or_else(|| {
-                                IndexError::other(std::io::Error::other("empty redis args"))
-                            })?;
-                            buffer.zset_remove(queue_key, ctx_flat);
-                            buffer.set_remove(index_key, ref_flat);
-                            Some(head)
+                        let seen: std::collections::HashSet<Vec<u8>> = v
+                            .iter()
+                            .filter_map(|(m, _)| m.to_redis_args().into_iter().next())
+                            .collect();
+                        for (member_bytes, score) in &deltas.added {
+                            if !seen.contains(member_bytes) {
+                                if let Ok(member) = StoredFutureElementRefWithContext::decode(
+                                    member_bytes.as_slice(),
+                                ) {
+                                    v.push((member, *score));
+                                }
+                            }
                         }
+                        v
                     }
+                    BufferReadResult::KeyDeleted => Vec::new(),
+                    BufferReadResult::NotInBuffer => redis_members,
+                };
+
+            // Phase 2: Sort, select head, buffer removal
+            entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            match entries.into_iter().next() {
+                None => None,
+                Some((head, _)) => {
+                    let index_key =
+                        self.get_index_key(head.position_in_query as usize, head.group_signature);
+                    let ctx_bytes = head.to_redis_args();
+                    let ctx_flat = ctx_bytes.into_iter().next().ok_or_else(|| {
+                        IndexError::other(std::io::Error::other("empty redis args"))
+                    })?;
+                    let ref_bytes = (&head.future_ref).to_redis_args();
+                    let ref_flat = ref_bytes.into_iter().next().ok_or_else(|| {
+                        IndexError::other(std::io::Error::other("empty redis args"))
+                    })?;
+                    buffer.zset_remove(queue_key, ctx_flat);
+                    buffer.set_remove(index_key, ref_flat);
+                    Some(head)
                 }
             }
         };

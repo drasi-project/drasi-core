@@ -529,7 +529,9 @@ mod session {
 
         session_control.rollback().unwrap();
 
-        // Verify nothing persisted
+        // Verify nothing persisted — reads require a session
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_none(), "element should not persist after rollback");
 
@@ -539,6 +541,9 @@ mod session {
             "accumulator should not persist after rollback"
         );
 
+        session_control.rollback().unwrap();
+
+        // peek_due_time runs outside the session by design
         let due = future_queue.peek_due_time().await.unwrap();
         assert!(due.is_none(), "future queue should be empty after rollback");
 
@@ -596,7 +601,9 @@ mod session {
 
         session_control.commit().await.unwrap();
 
-        // Verify data persisted
+        // Verify data persisted — reads require a session
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
 
@@ -607,6 +614,9 @@ mod session {
             other => panic!("expected Count, got {other:?}"),
         }
 
+        session_control.rollback().unwrap();
+
+        // peek_due_time runs outside the session by design
         let due = future_queue.peek_due_time().await.unwrap();
         assert_eq!(due, Some(20));
 
@@ -671,12 +681,16 @@ mod session {
 
         session_control.commit().await.unwrap();
 
-        // Verify still readable after commit
+        // Verify still readable after commit — reads require a session
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
 
         let acc = result_index.get(&result_key, &result_owner).await.unwrap();
         assert!(acc.is_some(), "accumulator should persist after commit");
+
+        session_control.rollback().unwrap();
 
         redis.cleanup().await;
     }
@@ -747,7 +761,9 @@ mod session {
             .unwrap();
         session_control.commit().await.unwrap();
 
-        // Verify v2 persisted (not v1)
+        // Verify v2 persisted (not v1) — reads require a session
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should persist after commit");
         match elem.unwrap().as_ref() {
@@ -765,6 +781,8 @@ mod session {
             }
             other => panic!("expected Count, got {other:?}"),
         }
+
+        session_control.rollback().unwrap();
 
         redis.cleanup().await;
     }
@@ -808,12 +826,16 @@ mod session {
 
         session_control.commit().await.unwrap();
 
-        // After commit: Redis should show 2
+        // After commit: Redis should show 2 — reads require a session
+        session_control.begin().await.unwrap();
+
         let count = result_index
             .get_value_count(1, OrderedFloat(5.0))
             .await
             .unwrap();
         assert_eq!(count, 2, "committed count should be 2");
+
+        session_control.rollback().unwrap();
 
         redis.cleanup().await;
     }
@@ -863,7 +885,9 @@ mod session {
         element_index.set_element(&node_v2, &vec![]).await.unwrap();
         session_control.commit().await.unwrap();
 
-        // Verify v2 persisted
+        // Verify v2 persisted — reads require a session
+        session_control.begin().await.unwrap();
+
         let elem = element_index.get_element(&element_ref).await.unwrap();
         assert!(elem.is_some(), "element should exist after delete+reinsert");
         match elem.unwrap().as_ref() {
@@ -875,6 +899,8 @@ mod session {
             }
             _ => panic!("expected Node"),
         }
+
+        session_control.rollback().unwrap();
 
         redis.cleanup().await;
     }

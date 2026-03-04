@@ -215,25 +215,30 @@ impl GarnetElementIndex {
                 Ok(Vec::new())
             }
             Some(Some(deltas)) => {
-                // Merge with Redis
-                let mut con = self.connection.clone();
-                let redis_members: Vec<Vec<u8>> =
-                    con.smembers(key).await.map_err(IndexError::other)?;
+                if deltas.full_replace {
+                    // Key was DEL'd then re-added — buffer is the sole source of truth
+                    Ok(deltas.added.into_iter().collect())
+                } else {
+                    // Merge with Redis
+                    let mut con = self.connection.clone();
+                    let redis_members: Vec<Vec<u8>> =
+                        con.smembers(key).await.map_err(IndexError::other)?;
 
-                let mut seen: HashSet<Vec<u8>> = HashSet::new();
-                let mut result: Vec<Vec<u8>> = Vec::new();
-                for m in redis_members {
-                    if !deltas.removed.contains(&m) {
-                        seen.insert(m.clone());
-                        result.push(m);
+                    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+                    let mut result: Vec<Vec<u8>> = Vec::new();
+                    for m in redis_members {
+                        if !deltas.removed.contains(&m) {
+                            seen.insert(m.clone());
+                            result.push(m);
+                        }
                     }
-                }
-                for m in deltas.added {
-                    if !seen.contains(&m) {
-                        result.push(m);
+                    for m in deltas.added {
+                        if !seen.contains(&m) {
+                            result.push(m);
+                        }
                     }
+                    Ok(result)
                 }
-                Ok(result)
             }
             None => {
                 // NotInBuffer — just use Redis

@@ -75,17 +75,20 @@ impl AccumulatorIndex for GarnetResultIndex {
         // Check buffer first
         {
             let guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_ref() {
-                match buffer.string_get(&ari_key) {
-                    BufferReadResult::Found(bytes) => {
-                        let stored: StoredValueAccumulator =
-                            redis::from_redis_value(&redis::Value::Data(bytes))
-                                .map_err(IndexError::other)?;
-                        return Ok(Some(stored.into()));
-                    }
-                    BufferReadResult::KeyDeleted => return Ok(None),
-                    BufferReadResult::NotInBuffer => {} // fall through to Redis
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            match buffer.string_get(&ari_key) {
+                BufferReadResult::Found(bytes) => {
+                    let stored: StoredValueAccumulator =
+                        redis::from_redis_value(&redis::Value::Data(bytes))
+                            .map_err(IndexError::other)?;
+                    return Ok(Some(stored.into()));
                 }
+                BufferReadResult::KeyDeleted => return Ok(None),
+                BufferReadResult::NotInBuffer => {} // fall through to Redis
             }
         }
 
@@ -180,26 +183,35 @@ impl LazySortedSetStore for GarnetResultIndex {
             let mut entries: Vec<(String, f64)> = Vec::new();
             match buffer.zset_get_deltas(&set_key) {
                 BufferReadResult::Found(deltas) => {
-                    for (member, score) in &redis_members {
-                        if !deltas.removed.contains(member.as_bytes()) {
-                            if let Some(&new_score) = deltas.added.get(member.as_bytes()) {
-                                entries.push((member.clone(), new_score));
-                            } else {
-                                entries.push((member.clone(), *score));
+                    if deltas.full_replace {
+                        // Key was DEL'd then re-added — only use buffer additions
+                        for (member_bytes, score) in &deltas.added {
+                            if let Ok(member_str) = std::str::from_utf8(member_bytes) {
+                                entries.push((member_str.to_string(), *score));
                             }
                         }
-                    }
-                    // Collect new additions separately to avoid borrow conflict
-                    let seen: HashSet<&str> = entries.iter().map(|(m, _)| m.as_str()).collect();
-                    let mut new_entries: Vec<(String, f64)> = Vec::new();
-                    for (member_bytes, score) in &deltas.added {
-                        if let Ok(member_str) = std::str::from_utf8(member_bytes) {
-                            if !seen.contains(member_str) {
-                                new_entries.push((member_str.to_string(), *score));
+                    } else {
+                        for (member, score) in &redis_members {
+                            if !deltas.removed.contains(member.as_bytes()) {
+                                if let Some(&new_score) = deltas.added.get(member.as_bytes()) {
+                                    entries.push((member.clone(), new_score));
+                                } else {
+                                    entries.push((member.clone(), *score));
+                                }
                             }
                         }
+                        // Collect new additions separately to avoid borrow conflict
+                        let seen: HashSet<&str> = entries.iter().map(|(m, _)| m.as_str()).collect();
+                        let mut new_entries: Vec<(String, f64)> = Vec::new();
+                        for (member_bytes, score) in &deltas.added {
+                            if let Ok(member_str) = std::str::from_utf8(member_bytes) {
+                                if !seen.contains(member_str) {
+                                    new_entries.push((member_str.to_string(), *score));
+                                }
+                            }
+                        }
+                        entries.extend(new_entries);
                     }
-                    entries.extend(new_entries);
                 }
                 BufferReadResult::KeyDeleted => {}
                 BufferReadResult::NotInBuffer => {
@@ -313,15 +325,18 @@ impl GarnetResultIndex {
     async fn get_value_count_internal(&self, key: &str) -> Result<isize, IndexError> {
         {
             let guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_ref() {
-                match buffer.string_get(key) {
-                    BufferReadResult::Found(bytes) => {
-                        let s = String::from_utf8(bytes).map_err(IndexError::other)?;
-                        return s.parse::<isize>().map_err(IndexError::other);
-                    }
-                    BufferReadResult::KeyDeleted => return Ok(0),
-                    BufferReadResult::NotInBuffer => {} // fall through
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            match buffer.string_get(key) {
+                BufferReadResult::Found(bytes) => {
+                    let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                    return s.parse::<isize>().map_err(IndexError::other);
                 }
+                BufferReadResult::KeyDeleted => return Ok(0),
+                BufferReadResult::NotInBuffer => {} // fall through
             }
         }
 
@@ -362,46 +377,43 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
 
         // Extract buffer reads into a sync block so MutexGuard is dropped before any await
-        let result = {
+        let (seq_val, scid_val) = {
             let guard = self.session_state.lock()?;
-            if let Some(buffer) = guard.as_ref() {
-                let seq_val = buffer.string_get(&seq_key);
-                let scid_val = buffer.string_get(&scid_key);
-                Some((seq_val, scid_val))
-            } else {
-                None
-            }
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            let seq_val = buffer.string_get(&seq_key);
+            let scid_val = buffer.string_get(&scid_key);
+            (seq_val, scid_val)
         }; // guard dropped here
 
-        if let Some((seq_val, scid_val)) = result {
-            let sequence = match seq_val {
-                BufferReadResult::Found(bytes) => {
-                    let s = String::from_utf8(bytes).map_err(IndexError::other)?;
-                    s.parse::<u64>().map_err(IndexError::other)?
-                }
-                BufferReadResult::KeyDeleted => 0,
-                BufferReadResult::NotInBuffer => {
-                    return self.get_sequence_from_redis().await;
-                }
-            };
+        let sequence = match seq_val {
+            BufferReadResult::Found(bytes) => {
+                let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                s.parse::<u64>().map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => 0,
+            BufferReadResult::NotInBuffer => {
+                return self.get_sequence_from_redis().await;
+            }
+        };
 
-            let source_change_id = match scid_val {
-                BufferReadResult::Found(bytes) => {
-                    String::from_utf8(bytes).map_err(IndexError::other)?
-                }
-                BufferReadResult::KeyDeleted => String::new(),
-                BufferReadResult::NotInBuffer => {
-                    return self.get_sequence_from_redis().await;
-                }
-            };
+        let source_change_id = match scid_val {
+            BufferReadResult::Found(bytes) => {
+                String::from_utf8(bytes).map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => String::new(),
+            BufferReadResult::NotInBuffer => {
+                return self.get_sequence_from_redis().await;
+            }
+        };
 
-            return Ok(ResultSequence {
-                sequence,
-                source_change_id: Arc::from(source_change_id),
-            });
-        }
-
-        self.get_sequence_from_redis().await
+        Ok(ResultSequence {
+            sequence,
+            source_change_id: Arc::from(source_change_id),
+        })
     }
 }
 
