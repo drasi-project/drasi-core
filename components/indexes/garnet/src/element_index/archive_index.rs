@@ -20,10 +20,10 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::Message;
-use redis::{aio::MultiplexedConnection, AsyncCommands, ToRedisArgs};
+use redis::{aio::MultiplexedConnection, AsyncCommands};
 
 use crate::{
-    session_state::{BufferReadResult, GarnetSessionState},
+    session_state::BufferReadResult,
     storage_models::{StoredElement, StoredElementContainer, StoredElementMetadata},
     ClearByPattern,
 };

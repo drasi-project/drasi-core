@@ -1214,7 +1214,7 @@ mod session {
             },
             properties: ElementPropertyMap::new(),
         };
-        // in_node = target, out_node = source
+        // in_node = source, out_node = target
         let relation = Element::Relation {
             metadata: ElementMetadata {
                 reference: rel_ref.clone(),
@@ -1235,7 +1235,7 @@ mod session {
             .await
             .unwrap();
 
-        // Verify inbound edges: node_a is the in_node (target), so querying
+        // Verify inbound edges: node_a is the in_node (source), so querying
         // by inbound for node_a should return the relation
         let inbound_stream = element_index
             .get_slot_elements_by_inbound(0, &node_a_ref)
@@ -1244,7 +1244,7 @@ mod session {
         let inbound: Vec<_> = inbound_stream.collect().await;
         assert_eq!(inbound.len(), 1, "should have 1 inbound relation");
 
-        // Verify outbound edges: node_b is the out_node (source), so querying
+        // Verify outbound edges: node_b is the out_node (target), so querying
         // by outbound for node_b should return the relation
         let outbound_stream = element_index
             .get_slot_elements_by_outbound(0, &node_b_ref)
