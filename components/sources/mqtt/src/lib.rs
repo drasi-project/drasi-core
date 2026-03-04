@@ -391,7 +391,7 @@ impl Source for MQTTSource {
                     batch_rx,
                     dispatchers,
                     adaptive_config,
-                    source_id.clone(),
+                    source_id_for_span,
                 )
                 .await
             }
@@ -404,13 +404,24 @@ impl Source for MQTTSource {
             batch_tx,
         };
 
-        // TODO understand shutdown behavior. graceful shutdown like http
         // Start the subscriber
-        let mqtt_conn_config = self.config.to_mqtt_connection_config(self.id());
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "mqtt_source_server",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+        let mqtt_conn_config = self.config.to_mqtt_connection_config(self.id().to_string());
 
-        let mut mqtt_connection = connection::MQTTConnectionWrapper::new(mqtt_conn_config, state);
-
-        mqtt_connection.start().await?;
+        let server_handle = tokio::spawn(
+            async move {
+                let mut mqtt_connection = connection::MQTTConnectionWrapper::new(mqtt_conn_config, state);
+                mqtt_connection.start(error_tx).await;
+            }
+            .instrument(span),
+        );
 
         // Setup shutdown channel
         let host = self.config.host.clone();
@@ -434,7 +445,7 @@ impl Source for MQTTSource {
             .send_component_event(
                 ComponentStatus::Running,
                 Some(format!(
-                    "MQTT source running on {host_clone}:{port} with batch support"
+                    "MQTT source running with batch support"
                 )),
             )
             .await?;

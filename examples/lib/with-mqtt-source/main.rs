@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
         .query(r#"
             MATCH (rd:readings)
             RETURN rd.symbol AS symbol,
-                   rd.val AS value
+                   rd.val AS val
         "#)
         .from_source("mqtt-source")
         .auto_start(true)

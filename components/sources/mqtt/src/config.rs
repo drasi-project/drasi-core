@@ -155,8 +155,9 @@ impl MQTTSourceConfig {
         Ok(())
     }
 
-    pub fn to_mqtt_connection_config(&self, id: impl Into<String>) -> MQTTConnectionConfig {
-        let mut options = MqttOptions::new(id.into(), self.host.clone(), self.port);
+    // todo: add tests
+    pub fn to_mqtt_connection_config(&self, id: String) -> MQTTConnectionConfig {
+        let mut options = MqttOptions::new(id.clone(), self.host.clone(), self.port);
         if let Some(username) = &self.username {
             options.set_credentials(username, self.password.as_deref().unwrap_or(""));
         }
@@ -170,11 +171,13 @@ impl MQTTSourceConfig {
             channel_capacity: self.channel_capacity,
             timeout_ms: self.timeout_ms,
             topic: self.topic.clone(),
+            id: id.clone(),
         }
     }
 }
 
 pub struct MQTTConnectionConfig {
+    pub id: String,
     pub options: MqttOptions,
     pub qos: QoS,
     pub channel_capacity: usize,

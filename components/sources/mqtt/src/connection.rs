@@ -1,3 +1,5 @@
+use core::error;
+
 use crate::SourceChangeEvent;
 use crate::{
     config::MQTTConnectionConfig,
@@ -9,6 +11,7 @@ use log::{debug, error, info, trace, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 pub struct MQTTConnectionWrapper {
     client: Box<AsyncClient>,
+    id: String,
     eventloop: Box<EventLoop>,
     options: Box<MqttOptions>,
     state: MqttAppState,
@@ -30,6 +33,7 @@ impl MQTTConnectionWrapper {
             channel_capacity: config.channel_capacity,
             timeout_ms: config.timeout_ms,
             topic: config.topic,
+            id: config.id,
         }
     }
 
@@ -45,18 +49,39 @@ impl MQTTConnectionWrapper {
         &self.options
     }
 
-    pub async fn start(&mut self) -> anyhow::Result<()> {
-        self.client.subscribe(self.topic.clone(), self.qos).await?;
+    pub async fn start(&mut self, error_tx: tokio::sync::oneshot::Sender<String>) {
+        match self.client.subscribe(self.topic.clone(), self.qos).await {
+            Ok(_) => {
+                info!("[{}] Successfully subscribed to topic '{}'", self.id, self.topic);
+            }
+            Err(e) => {
+                error!("[{}] Failed to subscribe to topic '{}': {:?}", self.id, self.topic, e);
+                let _ = error_tx.send(format!("{:?}", e));
+                return;
+            }
+        }
         loop {
-            let event = self.eventloop.poll().await?;
+            let event = match self.eventloop.poll().await {
+                Ok(event) => event,
+                Err(e) => {
+                    error!("[{}] MQTT event loop error: {:?}", self.id, e);
+                    let _ = error_tx.send(format!("{:?}", e));
+                    break;
+                }
+            };
             match event {
                 Event::Incoming(incoming) => match incoming {
                     Incoming::Publish(publish) => {
-                        let event = map_json_to_mqtt_source_change(&String::from_utf8_lossy(
+                        match map_json_to_mqtt_source_change(&String::from_utf8_lossy(
                             &publish.payload,
-                        ))?;
-                        let source_id = "mqtt-source";
-                        Self::process_events(source_id, &self.state, vec![event]).await;
+                        )) {
+                            Ok(event) => {
+                                Self::process_events(&self.id, &self.state, vec![event]).await;
+                            }
+                            Err(e) => {
+                                error!("[{}] Failed to map MQTT payload to source change: {:?}", self.id, e);
+                            }
+                        }
                     }
                     _ => {}
                 },
