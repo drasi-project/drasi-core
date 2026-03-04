@@ -4,7 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
 
@@ -26,3 +31,7 @@ wiremock = "0.6"
 
 [lints]
 workspace = true
+
+[features]
+# default = []
+dynamic-plugin = []
