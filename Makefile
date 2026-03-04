@@ -51,7 +51,7 @@ build-test-plugins:
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
-	cargo test -p drasi-host-sdk --test integration_test
+	cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 # === Plugin Build & Publish (via xtask) ===
