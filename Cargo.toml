@@ -95,9 +95,9 @@ drasi-query-ast = { version = "0.3.2", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.2", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.2", path = "query-gql" }
 drasi-core = { version = "0.4.0", path = "core" }
-drasi-functions-cypher = { version = "0.3.5", path = "functions-cypher" }
-drasi-functions-gql = { version = "0.3.5", path = "functions-gql" }
-drasi-middleware = { version = "0.3.7", path = "middleware" }
+drasi-functions-cypher = { version = "0.4.0", path = "functions-cypher" }
+drasi-functions-gql = { version = "0.4.0", path = "functions-gql" }
+drasi-middleware = { version = "0.4.0", path = "middleware" }
 drasi-lib = { version = "0.4.0", path = "lib" }
 drasi-ffi-primitives = { version = "0.4.0", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.4.0", path = "components/plugin-sdk" }
