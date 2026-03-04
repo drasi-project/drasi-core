@@ -254,7 +254,10 @@ impl TokenManager {
     /// Runs `az account get-access-token --resource <resource>` and parses the
     /// JSON output. Requires `az login` to have been run beforehand.
     async fn refresh_token_azure_cli(&self) -> Result<String> {
-        log::debug!("Acquiring token via Azure CLI for resource: {}", self.resource);
+        log::debug!(
+            "Acquiring token via Azure CLI for resource: {}",
+            self.resource
+        );
 
         let output = tokio::process::Command::new("az")
             .args([

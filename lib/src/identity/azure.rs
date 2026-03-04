@@ -186,13 +186,9 @@ impl AzureIdentityProvider {
         identity_name: impl Into<String>,
     ) -> Result<Self> {
         let secret = azure_core::credentials::Secret::new(client_secret.into());
-        let credential = ClientSecretCredential::new(
-            tenant_id.as_ref(),
-            client_id.into(),
-            secret,
-            None,
-        )
-        .map_err(|e| anyhow!("Failed to create client secret credential: {e}"))?;
+        let credential =
+            ClientSecretCredential::new(tenant_id.as_ref(), client_id.into(), secret, None)
+                .map_err(|e| anyhow!("Failed to create client secret credential: {e}"))?;
 
         Ok(Self {
             credential: credential as Arc<dyn TokenCredential>,
@@ -385,10 +381,7 @@ mod tests {
         )
         .unwrap()
         .with_scope("https://myorg.crm.dynamics.com/.default");
-        assert_eq!(
-            provider.scope,
-            "https://myorg.crm.dynamics.com/.default"
-        );
+        assert_eq!(provider.scope, "https://myorg.crm.dynamics.com/.default");
     }
 }
 

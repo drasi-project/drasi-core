@@ -140,9 +140,7 @@ impl DataverseBootstrapProvider {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "Azure CLI token request failed: {stderr}"
-            ));
+            return Err(anyhow::anyhow!("Azure CLI token request failed: {stderr}"));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -514,10 +512,7 @@ impl DataverseBootstrapProviderBuilder {
     /// When an identity provider is set, it takes precedence over
     /// `tenant_id`/`client_id`/`client_secret` and `use_azure_cli`.
     /// The provider's `get_credentials()` must return `Credentials::Token`.
-    pub fn with_identity_provider(
-        mut self,
-        provider: impl IdentityProvider + 'static,
-    ) -> Self {
+    pub fn with_identity_provider(mut self, provider: impl IdentityProvider + 'static) -> Self {
         self.identity_provider = Some(Box::new(provider));
         self
     }
@@ -668,8 +663,7 @@ mod tests {
 
     #[test]
     fn test_builder_with_identity_provider() {
-        let identity =
-            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let identity = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
         let provider = DataverseBootstrapProvider::builder()
             .with_environment_url("https://test.crm.dynamics.com")
             .with_entities(vec!["account".to_string()])
@@ -681,8 +675,7 @@ mod tests {
 
     #[test]
     fn test_builder_with_identity_provider_still_needs_url() {
-        let identity =
-            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let identity = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
         let result = DataverseBootstrapProvider::builder()
             .with_entities(vec!["account".to_string()])
             .with_identity_provider(identity)
@@ -692,8 +685,7 @@ mod tests {
 
     #[test]
     fn test_builder_with_identity_provider_still_needs_entities() {
-        let identity =
-            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let identity = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
         let result = DataverseBootstrapProvider::builder()
             .with_environment_url("https://test.crm.dynamics.com")
             .with_identity_provider(identity)

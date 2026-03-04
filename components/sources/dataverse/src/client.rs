@@ -21,8 +21,8 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
-use drasi_lib::identity::{Credentials, IdentityProvider};
 use crate::types::ODataDeltaResponse;
+use drasi_lib::identity::{Credentials, IdentityProvider};
 
 /// HTTP client for the Dataverse OData Web API.
 ///
@@ -64,7 +64,9 @@ impl DataverseClient {
         let creds = self.identity_provider.get_credentials().await?;
         match creds {
             Credentials::Token { token, .. } => Ok(token),
-            _ => anyhow::bail!("Dataverse client requires Token credentials from identity provider"),
+            _ => {
+                anyhow::bail!("Dataverse client requires Token credentials from identity provider")
+            }
         }
     }
 

@@ -571,7 +571,10 @@ impl Source for DataverseSource {
         let provider: Arc<dyn IdentityProvider> = if let Some(ref ip) = self.identity_provider {
             Arc::from(ip.clone_box())
         } else if self.config.use_azure_cli {
-            log::info!("[{}] Using Azure CLI authentication (TokenManager)", self.base.id);
+            log::info!(
+                "[{}] Using Azure CLI authentication (TokenManager)",
+                self.base.id
+            );
             Arc::new(TokenManager::azure_cli(&base_url))
         } else {
             let token_url = format!(
@@ -892,10 +895,7 @@ impl DataverseSourceBuilder {
     ///     .with_identity_provider(provider)
     ///     .build()?;
     /// ```
-    pub fn with_identity_provider(
-        mut self,
-        provider: impl IdentityProvider + 'static,
-    ) -> Self {
+    pub fn with_identity_provider(mut self, provider: impl IdentityProvider + 'static) -> Self {
         self.identity_provider = Some(Box::new(provider));
         self
     }
@@ -1278,8 +1278,7 @@ mod tests {
         #[test]
         fn test_builder_with_identity_provider() {
             // When an identity provider is set, client credentials are not required
-            let provider =
-                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
             let source = DataverseSource::builder("test")
                 .with_environment_url("https://test.crm.dynamics.com")
                 .with_entities(vec!["account".to_string()])
@@ -1292,8 +1291,7 @@ mod tests {
 
         #[test]
         fn test_builder_with_identity_provider_still_needs_url() {
-            let provider =
-                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
             let result = DataverseSource::builder("test")
                 .with_entities(vec!["account".to_string()])
                 .with_identity_provider(provider)
@@ -1303,8 +1301,7 @@ mod tests {
 
         #[test]
         fn test_builder_with_identity_provider_still_needs_entities() {
-            let provider =
-                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let provider = drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
             let result = DataverseSource::builder("test")
                 .with_environment_url("https://test.crm.dynamics.com")
                 .with_identity_provider(provider)

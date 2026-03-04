@@ -294,7 +294,10 @@ mod tests {
             entities: vec!["account".to_string()],
             ..Default::default()
         };
-        assert!(config.validate().is_ok(), "Azure CLI mode should not require client credentials");
+        assert!(
+            config.validate().is_ok(),
+            "Azure CLI mode should not require client credentials"
+        );
     }
 
     #[test]
