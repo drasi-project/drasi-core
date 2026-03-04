@@ -6,6 +6,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Build OpenSSL from source for musl
+ENV OPENSSL_VERSION=3.3.1
+RUN curl -sSL https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz | tar xz \
+    && cd openssl-${OPENSSL_VERSION} \
+    && CC=x86_64-linux-musl-gcc ./Configure linux-x86_64 no-shared no-async \
+       --prefix=/usr/local/musl-ssl --openssldir=/usr/local/musl-ssl \
+    && make -j$(nproc) \
+    && make install_sw \
+    && cd .. && rm -rf openssl-${OPENSSL_VERSION}
+
+ENV OPENSSL_DIR=/usr/local/musl-ssl
+ENV OPENSSL_STATIC=1
+ENV PKG_CONFIG_ALLOW_CROSS=1
+
 # Build libjq from source for musl (with bundled oniguruma)
 ENV JQ_VERSION=1.7.1
 RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
