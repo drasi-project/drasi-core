@@ -1,0 +1,48 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5 AS toolchain
+
+FROM ubuntu:20.04
+
+# Remove symlink that conflicts with COPY from toolchain
+RUN rm -rf /usr/local/man
+
+# Copy cross-compiler toolchain (includes qemu) and runner scripts from the cross image
+COPY --from=toolchain /usr/local/ /usr/local/
+COPY --from=toolchain /linux-runner /linux-runner
+COPY --from=toolchain /usr/aarch64-linux-gnu/ /usr/aarch64-linux-gnu/
+COPY --from=toolchain /usr/bin/aarch64-linux-gnu-* /usr/bin/
+
+# Install build dependencies (including aarch64 cross-compiler from Ubuntu repos,
+# since the one copied from the stock cross image may lack shared lib deps)
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc g++ libc6-dev pkg-config \
+    gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+    perl make autoconf automake libtool \
+    protobuf-compiler libprotobuf-dev \
+    libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build libjq from source for aarch64 (with bundled oniguruma)
+ENV JQ_VERSION=1.7.1
+RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
+    && cd jq-${JQ_VERSION} \
+    && autoreconf -fi \
+    && CC=aarch64-linux-gnu-gcc ./configure --host=aarch64-linux-gnu --disable-shared --enable-static --with-oniguruma=builtin --prefix=/usr/local/jq \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf jq-${JQ_VERSION}
+
+ENV JQ_LIB_DIR=/usr/local/jq/lib
+ENV ONIG_LIB_DIR=/usr/local/jq/lib
+ENV JQ_INCLUDE_DIR=/usr/local/jq/include
+ENV LIBJQ_STATIC=1
+ENV LIBONIG_STATIC=1
+
+# Set cross-compilation environment
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+ENV AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=/usr/aarch64-linux-gnu"
+ENV PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig
+ENV PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu=1
