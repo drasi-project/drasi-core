@@ -50,6 +50,21 @@ members = [
   # State Store Plugins
   "components/state_stores/redb",
 
+  # Shared component libraries
+  "components/mssql-common",
+
+  # FFI Primitives (shared FFI types and macros)
+  "components/ffi-primitives",
+
+  # Plugin SDK
+  "components/plugin-sdk",
+
+  # Host SDK (host-side plugin loading and proxy types)
+  "components/host-sdk",
+
+  # Build tooling
+  "xtask",
+
   # Internal
   "shared-tests",
   "query-perf",
@@ -63,6 +78,7 @@ exclude = [
   "query-perf",
   "examples/query",
   "lib-integration-tests",
+  "xtask",
 ]
 
 resolver = "2"
@@ -80,24 +96,31 @@ categories = ["database"]
 drasi-query-ast = { version = "0.3.2", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.2", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.2", path = "query-gql" }
-drasi-core = { version = "0.3.4", path = "core" }
-drasi-functions-cypher = { version = "0.3.4", path = "functions-cypher" }
-drasi-functions-gql = { version = "0.3.4", path = "functions-gql" }
-drasi-middleware = { version = "0.3.6", path = "middleware" }
-drasi-lib = { version = "0.3.9", path = "lib" }
+drasi-core = { version = "0.3.5", path = "core" }
+drasi-functions-cypher = { version = "0.3.5", path = "functions-cypher" }
+drasi-functions-gql = { version = "0.3.5", path = "functions-gql" }
+drasi-middleware = { version = "0.3.7", path = "middleware" }
+drasi-lib = { version = "0.3.10", path = "lib" }
+drasi-ffi-primitives = { version = "0.3.1", path = "components/ffi-primitives" }
+drasi-plugin-sdk = { version = "0.3.1", path = "components/plugin-sdk" }
+drasi-host-sdk = { version = "0.1.0", path = "components/host-sdk" }
 
-# Component plugins
-drasi-source-postgres = { version = "0.1.9", path = "components/sources/postgres" }
-drasi-source-application = { version = "0.1.8", path = "components/sources/application" }
-drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
+# Common dependencies
+utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.2.3", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.5", path = "components/indexes/garnet" }
+
+# Component plugins
 drasi-source-mssql = { version = "0.1.0", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.1.0", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-postgres = { path = "components/bootstrappers/postgres" }
 drasi-reaction-application = { path = "components/reactions/application" }
+drasi-source-postgres = { version = "0.1.10", path = "components/sources/postgres" }
+drasi-source-application = { version = "0.1.9", path = "components/sources/application" }
+drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
+drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
 
 [workspace.lints.rust]
 warnings = "deny"

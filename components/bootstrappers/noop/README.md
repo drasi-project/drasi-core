@@ -319,6 +319,24 @@ Contributions are welcome! The NoOp provider is intentionally simple, but improv
 
 Please see the main Drasi contributing guidelines for more information.
 
+## Plugin Packaging
+
+This bootstrap provider is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `BootstrapPluginDescriptor` with kind `"noop"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-bootstrap-noop
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Bootstrap Provider Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
+
 ## See Also
 
 - [Bootstrap Provider Architecture](../../../lib/src/bootstrap/README.md) - Overview of the bootstrap system

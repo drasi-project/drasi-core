@@ -34,11 +34,22 @@ pub struct MySqlExecutor {
 
 impl MySqlExecutor {
     /// Create a new MySQL executor
-    pub async fn new(config: &MySqlStoredProcReactionConfig) -> Result<Self> {
+    ///
+    /// The `identity_provider` parameter allows injecting a credential provider
+    /// from the runtime context. If provided, it takes precedence over the
+    /// config's identity_provider. Falls back to config's user/password if neither is set.
+    pub async fn new(
+        config: &MySqlStoredProcReactionConfig,
+        identity_provider: Option<std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    ) -> Result<Self> {
         let port = config.get_port();
 
-        // Get credentials from identity provider or fall back to user/password
-        let (username, password) = if let Some(provider) = &config.identity_provider {
+        // Resolve credentials: injected provider > config provider > user/password
+        let effective_provider = identity_provider.as_ref().map(|p| p.as_ref());
+        let config_provider = config.identity_provider.as_deref();
+        let provider = effective_provider.or(config_provider);
+
+        let (username, password) = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
             let credentials = provider.get_credentials().await?;
             if credentials.is_certificate() {
