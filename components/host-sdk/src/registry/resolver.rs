@@ -15,7 +15,9 @@
 //! Version resolver for finding compatible plugin versions from an OCI registry.
 
 use crate::registry::oci::OciRegistryClient;
-use crate::registry::platform::{target_triple_to_arch_suffix, target_triple_to_oci_platform};
+use crate::registry::platform::{
+    fallback_arch_suffixes, target_triple_to_arch_suffix, target_triple_to_oci_platform,
+};
 use crate::registry::types::{annotations, HostVersionInfo, PluginReference, ResolvedPlugin};
 use anyhow::{bail, Context, Result};
 use log::{debug, info, warn};
@@ -50,55 +52,67 @@ impl<'a> PluginResolver<'a> {
     async fn resolve_exact(&self, parsed: &PluginReference, tag: &str) -> Result<ResolvedPlugin> {
         let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
             .context("unsupported platform — cannot determine architecture suffix")?;
-        let platform_tag = format!("{}-{}", tag, arch_suffix);
-        let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, platform_tag);
 
-        debug!(
-            "Resolving exact version: {} (platform tag: {})",
-            tag, platform_tag
-        );
+        // Build list of suffixes to try: primary first, then fallbacks
+        let mut suffixes = vec![arch_suffix];
+        suffixes.extend(fallback_arch_suffixes(&self.host_info.target_triple));
 
-        // Fetch annotations for compatibility check
-        let annotations = self
-            .client
-            .fetch_manifest_annotations(&full_ref)
-            .await
-            .context("failed to fetch manifest annotations")?;
+        let mut last_err = None;
+        for suffix in &suffixes {
+            let platform_tag = format!("{tag}-{suffix}");
+            let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, platform_tag);
 
-        // Validate compatibility
-        self.check_compatibility(&annotations, &full_ref)?;
+            debug!(
+                "Resolving exact version: {} (platform tag: {})",
+                tag, platform_tag
+            );
 
-        // Get digest
-        let digest = self
-            .client
-            .get_digest(&full_ref)
-            .await
-            .context("failed to get digest")?;
+            match self.client.fetch_manifest_annotations(&full_ref).await {
+                Ok(annotations) => {
+                    self.check_compatibility(&annotations, &full_ref)?;
 
-        // Derive filename from metadata
-        let filename = self.derive_filename(&annotations);
+                    let digest = self
+                        .client
+                        .get_digest(&full_ref)
+                        .await
+                        .context("failed to get digest")?;
 
-        Ok(ResolvedPlugin {
-            reference: format!("{}/{}@{}", parsed.registry, parsed.repository, digest),
-            version: tag.to_string(),
-            sdk_version: annotations
-                .get(annotations::SDK_VERSION)
-                .cloned()
-                .unwrap_or_default(),
-            core_version: annotations
-                .get(annotations::CORE_VERSION)
-                .cloned()
-                .unwrap_or_default(),
-            lib_version: annotations
-                .get(annotations::LIB_VERSION)
-                .cloned()
-                .unwrap_or_default(),
-            platform: target_triple_to_oci_platform(&self.host_info.target_triple)
-                .map(|p| p.to_string())
-                .unwrap_or_default(),
-            digest,
-            filename,
-        })
+                    let filename = self.derive_filename(&annotations);
+
+                    return Ok(ResolvedPlugin {
+                        reference: format!("{}/{}@{}", parsed.registry, parsed.repository, digest),
+                        version: tag.to_string(),
+                        sdk_version: annotations
+                            .get(annotations::SDK_VERSION)
+                            .cloned()
+                            .unwrap_or_default(),
+                        core_version: annotations
+                            .get(annotations::CORE_VERSION)
+                            .cloned()
+                            .unwrap_or_default(),
+                        lib_version: annotations
+                            .get(annotations::LIB_VERSION)
+                            .cloned()
+                            .unwrap_or_default(),
+                        platform: target_triple_to_oci_platform(&self.host_info.target_triple)
+                            .map(|p| p.to_string())
+                            .unwrap_or_default(),
+                        digest,
+                        filename,
+                    });
+                }
+                Err(e) => {
+                    if suffixes.len() > 1 {
+                        debug!("Tag {platform_tag} not found, trying next suffix...");
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err
+            .unwrap_or_else(|| anyhow::anyhow!("no matching platform tag found"))
+            .context("failed to fetch manifest annotations"))
     }
 
     /// Resolve the latest compatible version by listing tags and checking each.
@@ -109,6 +123,10 @@ impl<'a> PluginResolver<'a> {
 
         let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
             .context("unsupported platform — cannot determine architecture suffix")?;
+
+        // Build list of suffixes to try: primary first, then fallbacks
+        let mut suffixes = vec![arch_suffix.clone()];
+        suffixes.extend(fallback_arch_suffixes(&self.host_info.target_triple));
 
         // List all tags
         let ref_for_tags = parsed.to_oci_reference();
@@ -122,110 +140,111 @@ impl<'a> PluginResolver<'a> {
             bail!("no tags found for {}", base_ref);
         }
 
-        // Filter to tags matching our platform suffix, then strip the suffix for semver parsing
-        let expected_suffix = format!("-{}", arch_suffix);
-        let mut semver_tags: Vec<(Version, String)> = tags
-            .into_iter()
-            .filter_map(|tag| {
-                // Only consider tags ending with our platform suffix
-                let version_str = tag.strip_suffix(&expected_suffix)?;
-                Version::parse(version_str).ok().and_then(|v| {
-                    // Skip pre-release versions during auto-resolution
-                    if v.pre.is_empty() {
-                        Some((v, version_str.to_string()))
-                    } else {
-                        debug!("  Skipping pre-release tag: {}", version_str);
-                        None
-                    }
+        // Try each suffix in order
+        for suffix in &suffixes {
+            let expected_suffix = format!("-{suffix}");
+            let mut semver_tags: Vec<(Version, String)> = tags
+                .iter()
+                .filter_map(|tag| {
+                    let version_str = tag.strip_suffix(&expected_suffix)?;
+                    Version::parse(version_str).ok().and_then(|v| {
+                        if v.pre.is_empty() {
+                            Some((v, version_str.to_string()))
+                        } else {
+                            debug!("  Skipping pre-release tag: {}", version_str);
+                            None
+                        }
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        semver_tags.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+            semver_tags.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
 
-        if semver_tags.is_empty() {
-            bail!(
-                "no compatible tags found for {} on platform {}",
-                base_ref,
-                arch_suffix
+            if semver_tags.is_empty() {
+                if suffixes.len() > 1 {
+                    debug!("No tags found for suffix {suffix}, trying next...");
+                }
+                continue;
+            }
+
+            debug!(
+                "Found {} semver tags for {}, checking compatibility (newest first)...",
+                semver_tags.len(),
+                suffix
             );
-        }
 
-        debug!(
-            "Found {} semver tags for {}, checking compatibility (newest first)...",
-            semver_tags.len(),
-            arch_suffix
-        );
+            // Check each tag for compatibility
+            for (_version, version_str) in &semver_tags {
+                let platform_tag = format!("{version_str}-{suffix}");
+                let full_ref = format!("{base_ref}:{platform_tag}");
 
-        // Check each tag for compatibility (re-append suffix for the actual OCI reference)
-        for (_version, version_str) in &semver_tags {
-            let platform_tag = format!("{}-{}", version_str, arch_suffix);
-            let full_ref = format!("{}:{}", base_ref, platform_tag);
+                match self.client.fetch_manifest_annotations(&full_ref).await {
+                    Ok(ann) => {
+                        if self.is_compatible(&ann) {
+                            info!("Found compatible version: {} ({})", version_str, full_ref);
 
-            match self.client.fetch_manifest_annotations(&full_ref).await {
-                Ok(ann) => {
-                    if self.is_compatible(&ann) {
-                        info!("Found compatible version: {} ({})", version_str, full_ref);
+                            let digest = self
+                                .client
+                                .get_digest(&full_ref)
+                                .await
+                                .context("failed to get digest")?;
 
-                        let digest = self
-                            .client
-                            .get_digest(&full_ref)
-                            .await
-                            .context("failed to get digest")?;
+                            let filename = self.derive_filename(&ann);
 
-                        let filename = self.derive_filename(&ann);
-
-                        return Ok(ResolvedPlugin {
-                            reference: format!(
-                                "{}/{}@{}",
-                                parsed.registry, parsed.repository, digest
-                            ),
-                            version: version_str.clone(),
-                            sdk_version: ann
-                                .get(annotations::SDK_VERSION)
-                                .cloned()
-                                .unwrap_or_default(),
-                            core_version: ann
-                                .get(annotations::CORE_VERSION)
-                                .cloned()
-                                .unwrap_or_default(),
-                            lib_version: ann
-                                .get(annotations::LIB_VERSION)
-                                .cloned()
-                                .unwrap_or_default(),
-                            platform: target_triple_to_oci_platform(&self.host_info.target_triple)
+                            return Ok(ResolvedPlugin {
+                                reference: format!(
+                                    "{}/{}@{}",
+                                    parsed.registry, parsed.repository, digest
+                                ),
+                                version: version_str.clone(),
+                                sdk_version: ann
+                                    .get(annotations::SDK_VERSION)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                core_version: ann
+                                    .get(annotations::CORE_VERSION)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                lib_version: ann
+                                    .get(annotations::LIB_VERSION)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                platform: target_triple_to_oci_platform(
+                                    &self.host_info.target_triple,
+                                )
                                 .map(|p| p.to_string())
                                 .unwrap_or_default(),
-                            digest,
-                            filename,
-                        });
-                    } else {
-                        debug!(
-                            "  {} — incompatible (sdk: {}, core: {}, lib: {})",
-                            version_str,
-                            ann.get(annotations::SDK_VERSION)
-                                .unwrap_or(&"?".to_string()),
-                            ann.get(annotations::CORE_VERSION)
-                                .unwrap_or(&"?".to_string()),
-                            ann.get(annotations::LIB_VERSION)
-                                .unwrap_or(&"?".to_string()),
-                        );
+                                digest,
+                                filename,
+                            });
+                        } else {
+                            debug!(
+                                "  {} — incompatible (sdk: {}, core: {}, lib: {})",
+                                version_str,
+                                ann.get(annotations::SDK_VERSION)
+                                    .unwrap_or(&"?".to_string()),
+                                ann.get(annotations::CORE_VERSION)
+                                    .unwrap_or(&"?".to_string()),
+                                ann.get(annotations::LIB_VERSION)
+                                    .unwrap_or(&"?".to_string()),
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    warn!("Failed to check {}: {}", full_ref, e);
+                    Err(e) => {
+                        warn!("Failed to check {}: {}", full_ref, e);
+                    }
                 }
             }
         }
 
         bail!(
-            "no compatible version found for {} on platform {}\n  Host versions: SDK {}, core {}, lib {}\n  Checked {} versions (newest first), none matched major.minor",
+            "no compatible version found for {} on platform {}\n  Host versions: SDK {}, core {}, lib {}\n  Checked tags across {} platform suffix(es)",
             base_ref,
             arch_suffix,
             self.host_info.sdk_version,
             self.host_info.core_version,
             self.host_info.lib_version,
-            semver_tags.len()
+            suffixes.len()
         )
     }
 
