@@ -32,8 +32,8 @@ pub use cosign::{
 };
 pub use oci::{DownloadResult, OciRegistryClient, PluginSearchResult, PluginVersionInfo};
 pub use platform::{
-    oci_platform_to_target_triple, strip_arch_suffix, target_triple_to_arch_suffix,
-    target_triple_to_oci_platform, OciPlatform,
+    fallback_arch_suffixes, oci_platform_to_target_triple, strip_arch_suffix,
+    target_triple_to_arch_suffix, target_triple_to_oci_platform, OciPlatform,
 };
 pub use resolver::PluginResolver;
 pub use types::{

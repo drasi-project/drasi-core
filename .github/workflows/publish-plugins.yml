@@ -54,6 +54,9 @@ jobs:
             os: ubuntu-latest-8-cores
             arch_suffix: windows-amd64
             cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            arch_suffix: windows-msvc-amd64
           - target: x86_64-apple-darwin
             os: macos-latest
             arch_suffix: darwin-amd64
@@ -78,6 +81,16 @@ jobs:
         run: |
           brew install jq protobuf
 
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install protoc -y
+          vcpkg install openssl:x64-windows-static-md
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          echo "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static-md" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+
       - name: Set JQ_LIB_DIR (Linux)
         if: runner.os == 'Linux'
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -101,6 +114,7 @@ jobs:
 
       - name: Login to GHCR
         if: ${{ !inputs.dry_run }}
+        shell: bash
         run: echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build plugins
@@ -108,6 +122,7 @@ jobs:
 
       - name: Publish plugins (per-architecture tag)
         if: ${{ !inputs.dry_run }}
+        shell: bash
         env:
           OCI_REGISTRY_USERNAME: ${{ github.actor }}
           OCI_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -120,6 +135,7 @@ jobs:
 
       - name: Publish plugins (dry run)
         if: ${{ inputs.dry_run }}
+        shell: bash
         run: |
           ARGS="--release --target ${{ matrix.target }} --registry ${{ inputs.registry }} --arch-suffix ${{ matrix.arch_suffix }} --dry-run"
           if [ -n "${{ inputs.pre_release }}" ]; then

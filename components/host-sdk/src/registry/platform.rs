@@ -116,13 +116,29 @@ pub fn oci_platform_to_target_triple(platform: &OciPlatform) -> Option<String> {
 /// - `x86_64-unknown-linux-musl` → `linux-musl-amd64`
 /// - `aarch64-apple-darwin` → `darwin-arm64`
 /// - `x86_64-pc-windows-gnu` → `windows-amd64`
+/// - `x86_64-pc-windows-msvc` → `windows-msvc-amd64`
 pub fn target_triple_to_arch_suffix(triple: &str) -> Option<String> {
     let platform = target_triple_to_oci_platform(triple)?;
     if triple.contains("musl") {
         Some(format!("{}-musl-{}", platform.os, platform.architecture))
+    } else if triple.contains("msvc") {
+        Some(format!("{}-msvc-{}", platform.os, platform.architecture))
     } else {
         Some(format!("{}-{}", platform.os, platform.architecture))
     }
+}
+
+/// Return fallback arch suffixes for a target triple.
+///
+/// For MSVC targets, `windows-amd64` (GNU) is a usable fallback when
+/// `windows-msvc-amd64` tags are not yet published.
+pub fn fallback_arch_suffixes(triple: &str) -> Vec<String> {
+    if triple.contains("msvc") {
+        if let Some(platform) = target_triple_to_oci_platform(triple) {
+            return vec![format!("{}-{}", platform.os, platform.architecture)];
+        }
+    }
+    vec![]
 }
 
 /// Strip a known `{os}-{arch}` suffix from a tag and return `(version, suffix)`.
@@ -134,6 +150,7 @@ pub fn strip_arch_suffix(tag: &str) -> Option<(&str, &str)> {
     const KNOWN_SUFFIXES: &[&str] = &[
         "linux-musl-amd64",
         "linux-musl-arm64",
+        "windows-msvc-amd64",
         "linux-amd64",
         "linux-arm64",
         "linux-arm",
@@ -273,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             target_triple_to_arch_suffix("x86_64-pc-windows-msvc"),
-            Some("windows-amd64".to_string())
+            Some("windows-msvc-amd64".to_string())
         );
         assert_eq!(target_triple_to_arch_suffix("unknown-triple"), None);
     }
@@ -300,7 +317,21 @@ mod tests {
             strip_arch_suffix("0.1.8-rc.1-windows-amd64"),
             Some(("0.1.8-rc.1", "windows-amd64"))
         );
+        assert_eq!(
+            strip_arch_suffix("0.1.8-windows-msvc-amd64"),
+            Some(("0.1.8", "windows-msvc-amd64"))
+        );
         assert_eq!(strip_arch_suffix("0.1.8"), None);
         assert_eq!(strip_arch_suffix("latest"), None);
+    }
+
+    #[test]
+    fn test_fallback_arch_suffixes() {
+        assert_eq!(
+            fallback_arch_suffixes("x86_64-pc-windows-msvc"),
+            vec!["windows-amd64"]
+        );
+        assert!(fallback_arch_suffixes("x86_64-pc-windows-gnu").is_empty());
+        assert!(fallback_arch_suffixes("x86_64-unknown-linux-gnu").is_empty());
     }
 }
