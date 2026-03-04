@@ -1,6 +1,6 @@
 [package]
 name = "drasi-host-sdk"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Host-side SDK for loading and interacting with Drasi cdylib plugins"
 license = "Apache-2.0"
