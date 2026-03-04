@@ -29,7 +29,9 @@ use crate::{
 use super::{super::AggregatingFunction, Accumulator, ValueAccumulator};
 
 /// Collect aggregation function that collects all values into a list
-pub struct Collect {}
+pub struct Collect {
+    pub name: String,
+}
 
 #[async_trait]
 impl AggregatingFunction for Collect {
@@ -56,7 +58,7 @@ impl AggregatingFunction for Collect {
     ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
             return Err(FunctionError {
-                function_name: "Collect".to_string(),
+                function_name: self.name.clone(),
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
@@ -65,7 +67,7 @@ impl AggregatingFunction for Collect {
             Accumulator::Value(ValueAccumulator::Value(ElementValue::List(list))) => list,
             _ => {
                 return Err(FunctionError {
-                    function_name: "Collect".to_string(),
+                    function_name: self.name.clone(),
                     error: FunctionEvaluationError::CorruptData,
                 })
             }
@@ -91,7 +93,7 @@ impl AggregatingFunction for Collect {
     ) -> Result<VariableValue, FunctionError> {
         if args.len() != 1 {
             return Err(FunctionError {
-                function_name: "Collect".to_string(),
+                function_name: self.name.clone(),
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
@@ -100,7 +102,7 @@ impl AggregatingFunction for Collect {
             Accumulator::Value(ValueAccumulator::Value(ElementValue::List(list))) => list,
             _ => {
                 return Err(FunctionError {
-                    function_name: "Collect".to_string(),
+                    function_name: self.name.clone(),
                     error: FunctionEvaluationError::CorruptData,
                 })
             }
@@ -132,7 +134,7 @@ impl AggregatingFunction for Collect {
             Accumulator::Value(ValueAccumulator::Value(ElementValue::List(list))) => list,
             _ => {
                 return Err(FunctionError {
-                    function_name: "Collect".to_string(),
+                    function_name: self.name.clone(),
                     error: FunctionEvaluationError::CorruptData,
                 })
             }
@@ -162,7 +164,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_basic() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -212,7 +216,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_with_revert() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -261,7 +267,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_null_values() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -316,7 +324,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_empty_list() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -344,7 +354,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_duplicate_values() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -389,7 +401,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_different_types() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -450,7 +464,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_revert_multiple() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -507,7 +523,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_revert_nonexistent() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
@@ -553,7 +571,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_error_cases() {
-        let collect = Collect {};
+        let collect = Collect {
+            name: "collect".to_owned(),
+        };
         let index = Arc::new(InMemoryResultIndex::new());
         let variables = QueryVariables::new();
         let context =
