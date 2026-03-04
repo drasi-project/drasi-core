@@ -217,7 +217,6 @@ pub mod config;
 pub use config::HttpSourceConfig;
 
 mod models;
-mod time;
 
 // Webhook support modules
 pub mod auth;
@@ -252,12 +251,12 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
 
-use drasi_lib::sources::common::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::auth::{verify_auth, AuthResult};
 use crate::config::{CorsConfig, ErrorBehavior, WebhookConfig};
 use crate::content_parser::{parse_content, ContentType};
 use crate::route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher};
 use crate::template_engine::{TemplateContext, TemplateEngine};
+use drasi_lib::sources::common::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 
 /// Response for event submission
 #[derive(Debug, Serialize, Deserialize)]

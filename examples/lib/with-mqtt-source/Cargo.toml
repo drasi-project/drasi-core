@@ -8,13 +8,15 @@ description = "DrasiLib example demonstrating stock price monitoring with 3 quer
 [workspace]
 
 [dependencies]
-tokio = "1.49.0"
+tokio = { version = "1.6", features = ["full"] }
 anyhow = "1.0"
+axum = "0.7"
 env_logger = "0.10.0"
+serde_json = "1.0"
 drasi-source-mqtt = { path = "../../../components/sources/mqtt" }
 drasi-lib = { path = "../../../lib" }
 drasi-reaction-log = { path = "../../../components/reactions/log" }
 
 [[bin]]
-name = "three-query-example"
+name = "with-mqtt-source"
 path = "main.rs"

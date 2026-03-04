@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
+use drasi_lib::sources::common::time::get_system_time_millis;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -81,7 +82,7 @@ pub fn convert_http_to_source_change(
     let get_timestamp = |ts: Option<u64>| -> u64 {
         ts.map(|nanos| nanos / 1_000_000) // Convert nanoseconds to milliseconds
             .unwrap_or_else(|| {
-                crate::time::get_system_time_millis().unwrap_or_else(|e| {
+                get_system_time_millis().unwrap_or_else(|e| {
                     log::warn!("Failed to get system time for HTTP event: {e}, using fallback");
                     chrono::Utc::now().timestamp_millis() as u64
                 })

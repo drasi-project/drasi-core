@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use core::time;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::vec::Vec;
 
@@ -16,7 +16,7 @@ pub enum QualityOfService {
 /// This schema closely mirrors drasi_core::models::SourceChange for efficient conversion
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
-pub enum MQTTSourceChange {
+pub enum MqttSourceChange {
     /// Insert a new element
     #[serde(rename = "insert")]
     Insert {
@@ -64,34 +64,53 @@ pub enum MQTTElement {
     },
 }
 
-pub fn map_json_to_mqtt_source_change(json_str: &str) -> Result<MQTTSourceChange> {
-    let change: MQTTSourceChange = serde_json::from_str(json_str)?;
+pub fn map_json_to_mqtt_source_change(json_str: &str) -> Result<MqttSourceChange> {
+    let change: MqttSourceChange = serde_json::from_str(json_str)?;
     Ok(change)
 }
 
 pub fn convert_mqtt_to_source_change(
-    mqtt_change: &MQTTSourceChange,
+    mqtt_change: &MqttSourceChange,
     source_id: &str,
 ) -> Result<drasi_core::models::SourceChange> {
-    use drasi_core::models::{ElementMetadata, SourceChange, ElementReference};
+    use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
     match mqtt_change {
-        MQTTSourceChange::Insert { element, timestamp } => {
-            let element = create_element_from_mqtt(element, source_id, timestamp.unwrap_or_else(|| {
-                let now = std::time::SystemTime::now();
-                now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
-            }))?;
+        MqttSourceChange::Insert { element, timestamp } => {
+            let element = create_element_from_mqtt(
+                element,
+                source_id,
+                timestamp.unwrap_or_else(|| {
+                    let now = std::time::SystemTime::now();
+                    now.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64
+                }),
+            )?;
             Ok(SourceChange::Insert { element })
-        },
-        MQTTSourceChange::Update { element, timestamp } => {
-            let element = create_element_from_mqtt(element, source_id, timestamp.unwrap_or_else(|| {
-                let now = std::time::SystemTime::now();
-                now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
-            }))?;
+        }
+        MqttSourceChange::Update { element, timestamp } => {
+            let element = create_element_from_mqtt(
+                element,
+                source_id,
+                timestamp.unwrap_or_else(|| {
+                    let now = std::time::SystemTime::now();
+                    now.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64
+                }),
+            )?;
             Ok(SourceChange::Update { element })
-        },
-        MQTTSourceChange::Delete { id, labels, timestamp } => {
+        }
+        MqttSourceChange::Delete {
+            id,
+            labels,
+            timestamp,
+        } => {
             let metadata = ElementMetadata {
-                reference: ElementReference { source_id: Arc::from(source_id), element_id: Arc::from(id.as_str()) },
+                reference: ElementReference {
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(id.as_str()),
+                },
                 labels: Arc::from(
                     labels
                         .as_ref()
@@ -100,11 +119,13 @@ pub fn convert_mqtt_to_source_change(
                 ),
                 effective_from: timestamp.unwrap_or_else(|| {
                     let now = std::time::SystemTime::now();
-                    now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+                    now.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64
                 }),
             };
             Ok(SourceChange::Delete { metadata })
-        },
+        }
     }
 }
 
@@ -116,14 +137,21 @@ fn create_element_from_mqtt(
     use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
 
     match mqtt_element {
-        MQTTElement::Node { id, labels, properties } => {
+        MQTTElement::Node {
+            id,
+            labels,
+            properties,
+        } => {
             let metadata = ElementMetadata {
-                reference: ElementReference { source_id: Arc::from(source_id), element_id: Arc::from(id.as_str()) },
+                reference: ElementReference {
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(id.as_str()),
+                },
                 labels: Arc::from(
                     labels
-                    .iter()
-                    .map(|s| Arc::from(s.as_str()))
-                    .collect::<Vec<_>>(),
+                        .iter()
+                        .map(|s| Arc::from(s.as_str()))
+                        .collect::<Vec<_>>(),
                 ),
                 effective_from: timestamp,
             };
@@ -131,16 +159,28 @@ fn create_element_from_mqtt(
             for (k, v) in properties {
                 prop_map.insert(k, convert_json_to_element_value(v)?);
             }
-            Ok(Element::Node { metadata, properties: prop_map })
-        },
-        MQTTElement::Relation { id, labels, from, to, properties } => {
+            Ok(Element::Node {
+                metadata,
+                properties: prop_map,
+            })
+        }
+        MQTTElement::Relation {
+            id,
+            labels,
+            from,
+            to,
+            properties,
+        } => {
             let metadata = ElementMetadata {
-                reference: ElementReference { source_id: Arc::from(source_id), element_id: Arc::from(id.as_str()) },
+                reference: ElementReference {
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(id.as_str()),
+                },
                 labels: Arc::from(
                     labels
-                    .iter()
-                    .map(|s| Arc::from(s.as_str()))
-                    .collect::<Vec<_>>(),
+                        .iter()
+                        .map(|s| Arc::from(s.as_str()))
+                        .collect::<Vec<_>>(),
                 ),
                 effective_from: timestamp,
             };
@@ -151,8 +191,14 @@ fn create_element_from_mqtt(
             Ok(Element::Relation {
                 metadata,
                 properties: prop_map,
-                in_node: ElementReference { source_id: Arc::from(source_id), element_id: Arc::from(to.as_str()) },
-                out_node: ElementReference { source_id: Arc::from(source_id), element_id: Arc::from(from.as_str()) },
+                in_node: ElementReference {
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(to.as_str()),
+                },
+                out_node: ElementReference {
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(from.as_str()),
+                },
             })
         }
     }

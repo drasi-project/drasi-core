@@ -1,12 +1,17 @@
-use crate::{config::MQTTConnectionConfig, model::{MQTTSourceChange, convert_mqtt_to_source_change, map_json_to_mqtt_source_change}};
-use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use crate::SourceChangeEvent;
+use crate::{
+    config::MQTTConnectionConfig,
+    model::{convert_mqtt_to_source_change, map_json_to_mqtt_source_change, MqttSourceChange},
+    MqttAppState,
+};
+use anyhow::Result;
 use log::{debug, error, info, trace, warn};
-use anyhow::{Result};
+use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 pub struct MQTTConnectionWrapper {
     client: Box<AsyncClient>,
     eventloop: Box<EventLoop>,
     options: Box<MqttOptions>,
+    state: MqttAppState,
     qos: QoS,
     channel_capacity: usize,
     timeout_ms: u64,
@@ -14,12 +19,13 @@ pub struct MQTTConnectionWrapper {
 }
 
 impl MQTTConnectionWrapper {
-    pub fn new(config: MQTTConnectionConfig) -> Self {
+    pub fn new(config: MQTTConnectionConfig, state: MqttAppState) -> Self {
         let (client, eventloop) = AsyncClient::new(config.options.clone(), config.channel_capacity);
         Self {
             client: Box::new(client),
             eventloop: Box::new(eventloop),
             options: Box::new(config.options),
+            state,
             qos: config.qos,
             channel_capacity: config.channel_capacity,
             timeout_ms: config.timeout_ms,
@@ -44,37 +50,29 @@ impl MQTTConnectionWrapper {
         loop {
             let event = self.eventloop.poll().await?;
             match event {
-                Event::Incoming(incoming) => {
-                    println!("MQTT Incoming: {:?}", incoming);
-
-                    match incoming {
-                        Incoming::Publish(publish) => {
-                            println!(
-                                "Received message on topic {}: {:?}",
-                                publish.topic, publish.payload
-                            );
-                            let event = map_json_to_mqtt_source_change(&String::from_utf8_lossy(&publish.payload))?;
-                            let source_id = "mqtt-source";
-                            Self::process_events(source_id, event).await?;
-                        }
-                        _ => {}
+                Event::Incoming(incoming) => match incoming {
+                    Incoming::Publish(publish) => {
+                        let event = map_json_to_mqtt_source_change(&String::from_utf8_lossy(
+                            &publish.payload,
+                        ))?;
+                        let source_id = "mqtt-source";
+                        Self::process_events(source_id, &self.state, vec![event]).await;
                     }
-                }
-                Event::Outgoing(outgoing) => {
-                    println!("MQTT Outgoing: {:?}", outgoing);
-                }
+                    _ => {}
+                },
+                _ => {}
             }
         }
     }
 
-
-    async fn process_events(
-        source_id: &str,
-        event: MQTTSourceChange,
-    ) -> Result<()> {
+    async fn process_events(source_id: &str, state: &MqttAppState, events: Vec<MqttSourceChange>) {
         trace!("[{}] Processing MQTT event", source_id);
 
-        match convert_mqtt_to_source_change(&event, source_id) {
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        for (idx, event) in events.iter().enumerate() {
+            match convert_mqtt_to_source_change(&event, source_id) {
                 Ok(source_change) => {
                     let change_event = SourceChangeEvent {
                         source_id: source_id.to_string(),
@@ -82,18 +80,31 @@ impl MQTTConnectionWrapper {
                         timestamp: chrono::Utc::now(),
                     };
 
-                    println!(
-                        "[{}] Converted MQTT event to SourceChangeEvent: {:?}",
-                        source_id, change_event
-                    );
+                    if let Err(e) = state.batch_tx.send(change_event).await {
+                        error!(
+                                "[{}] Failed to send SourceChangeEvent (event {}) to batch channel: {:?}",
+                                source_id, idx + 1, e
+                            );
+                        error_count += 1;
+                    } else {
+                        debug!(
+                            "[{}] Successfully sent SourceChangeEvent (event {}) to batch channel",
+                            source_id,
+                            idx + 1
+                        );
+                        success_count += 1;
+                    }
                 }
                 Err(e) => {
-                    error!(
-                        "[{}] Failed to convert MQTT event to SourceChangeEvent: {:?}",
-                        source_id, e
-                    );
+                    error_count += 1;
                 }
+            }
         }
-        Ok(())
+        trace!(
+            "[{}] Finished processing MQTT events: {} successful, {} errors",
+            source_id,
+            success_count,
+            error_count
+        );
     }
 }
