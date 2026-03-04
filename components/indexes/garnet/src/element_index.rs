@@ -130,9 +130,12 @@ impl GarnetElementIndex {
         }
 
         let mut guard = self.session_state.lock()?;
-        if let Some(buffer) = guard.as_mut() {
-            buffer.set_add(key.to_string(), member_bytes);
-        }
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.set_add(key.to_string(), member_bytes);
         Ok(true)
     }
 
@@ -183,9 +186,12 @@ impl GarnetElementIndex {
         }
 
         let mut guard = self.session_state.lock()?;
-        if let Some(buffer) = guard.as_mut() {
-            buffer.set_remove(key.to_string(), member_bytes);
-        }
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.set_remove(key.to_string(), member_bytes);
         Ok(true)
     }
 
@@ -495,7 +501,6 @@ impl GarnetElementIndex {
         Ok(())
     }
 
-    #[allow(clippy::unwrap_used)]
     #[async_recursion]
     async fn set_element_internal(
         &self,
@@ -504,7 +509,7 @@ impl GarnetElementIndex {
     ) -> Result<(), IndexError> {
         let container = StoredElementContainer::new(element);
         let element_as_redis_args = container.to_redis_args();
-        let element = container.element.unwrap();
+        let element = container.element.ok_or(IndexError::CorruptedData)?;
         let eref = element.get_reference();
 
         let element_key = self.key_formatter.get_stored_element_key(eref);

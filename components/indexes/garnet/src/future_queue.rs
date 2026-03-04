@@ -190,9 +190,9 @@ impl FutureQueue for GarnetFutureQueue {
                     // Only buffer additions — no Redis needed
                     let mut members = Vec::new();
                     for added_bytes in &deltas.added {
-                        if let Ok(member) = StoredFutureElementRef::decode(added_bytes.as_slice()) {
-                            members.push(member);
-                        }
+                        let member = StoredFutureElementRef::decode(added_bytes.as_slice())
+                            .map_err(IndexError::other)?;
+                        members.push(member);
                     }
                     NeedRedis::No(members)
                 }
@@ -237,11 +237,9 @@ impl FutureQueue for GarnetFutureQueue {
                             }
                         }
                         for added_bytes in &deltas.added {
-                            if let Ok(member) =
-                                StoredFutureElementRef::decode(added_bytes.as_slice())
-                            {
-                                members.push(member);
-                            }
+                            let member = StoredFutureElementRef::decode(added_bytes.as_slice())
+                                .map_err(IndexError::other)?;
+                            members.push(member);
                         }
                     }
                     BufferReadResult::KeyDeleted => {}
@@ -295,54 +293,53 @@ impl FutureQueue for GarnetFutureQueue {
             })?;
 
             // Phase 1: Build candidate list
-            let mut entries: Vec<(StoredFutureElementRefWithContext, f64)> =
-                match buffer.zset_get_deltas(&queue_key) {
-                    BufferReadResult::Found(deltas) if deltas.full_replace => {
-                        // Key was DEL'd then re-added — only buffer additions
-                        let mut v = Vec::new();
-                        for (member_bytes, score) in &deltas.added {
-                            if let Ok(member) =
+            let mut entries: Vec<(StoredFutureElementRefWithContext, f64)> = match buffer
+                .zset_get_deltas(&queue_key)
+            {
+                BufferReadResult::Found(deltas) if deltas.full_replace => {
+                    // Key was DEL'd then re-added — only buffer additions
+                    let mut v = Vec::new();
+                    for (member_bytes, score) in &deltas.added {
+                        let member =
+                            StoredFutureElementRefWithContext::decode(member_bytes.as_slice())
+                                .map_err(IndexError::other)?;
+                        v.push((member, *score));
+                    }
+                    v
+                }
+                BufferReadResult::Found(deltas) => {
+                    // Merge Redis + buffer deltas
+                    let mut v: Vec<(StoredFutureElementRefWithContext, f64)> = Vec::new();
+                    for (member, score) in redis_members {
+                        let member_bytes = member.to_redis_args();
+                        let mb = member_bytes.into_iter().next().ok_or_else(|| {
+                            IndexError::other(std::io::Error::other("empty redis args"))
+                        })?;
+                        if !deltas.removed.contains(&mb) {
+                            if let Some(&new_score) = deltas.added.get(&mb) {
+                                v.push((member, new_score));
+                            } else {
+                                v.push((member, score));
+                            }
+                        }
+                    }
+                    let seen: std::collections::HashSet<Vec<u8>> = v
+                        .iter()
+                        .filter_map(|(m, _)| m.to_redis_args().into_iter().next())
+                        .collect();
+                    for (member_bytes, score) in &deltas.added {
+                        if !seen.contains(member_bytes) {
+                            let member =
                                 StoredFutureElementRefWithContext::decode(member_bytes.as_slice())
-                            {
-                                v.push((member, *score));
-                            }
+                                    .map_err(IndexError::other)?;
+                            v.push((member, *score));
                         }
-                        v
                     }
-                    BufferReadResult::Found(deltas) => {
-                        // Merge Redis + buffer deltas
-                        let mut v: Vec<(StoredFutureElementRefWithContext, f64)> = Vec::new();
-                        for (member, score) in redis_members {
-                            let member_bytes = member.to_redis_args();
-                            let mb = member_bytes.into_iter().next().ok_or_else(|| {
-                                IndexError::other(std::io::Error::other("empty redis args"))
-                            })?;
-                            if !deltas.removed.contains(&mb) {
-                                if let Some(&new_score) = deltas.added.get(&mb) {
-                                    v.push((member, new_score));
-                                } else {
-                                    v.push((member, score));
-                                }
-                            }
-                        }
-                        let seen: std::collections::HashSet<Vec<u8>> = v
-                            .iter()
-                            .filter_map(|(m, _)| m.to_redis_args().into_iter().next())
-                            .collect();
-                        for (member_bytes, score) in &deltas.added {
-                            if !seen.contains(member_bytes) {
-                                if let Ok(member) = StoredFutureElementRefWithContext::decode(
-                                    member_bytes.as_slice(),
-                                ) {
-                                    v.push((member, *score));
-                                }
-                            }
-                        }
-                        v
-                    }
-                    BufferReadResult::KeyDeleted => Vec::new(),
-                    BufferReadResult::NotInBuffer => redis_members,
-                };
+                    v
+                }
+                BufferReadResult::KeyDeleted => Vec::new(),
+                BufferReadResult::NotInBuffer => redis_members,
+            };
 
             // Phase 2: Sort, select head, buffer removal
             entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));

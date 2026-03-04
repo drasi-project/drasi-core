@@ -341,8 +341,8 @@ impl GarnetResultIndex {
         }
 
         let mut con = self.connection.clone();
-        match con.get::<&str, isize>(key).await {
-            Ok(v) => Ok(v),
+        match con.get::<&str, Option<isize>>(key).await {
+            Ok(v) => Ok(v.unwrap_or(0)),
             Err(e) => Err(IndexError::other(e)),
         }
     }
