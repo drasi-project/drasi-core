@@ -160,6 +160,20 @@ impl DataverseBootstrapConfig {
         Ok(())
     }
 
+    /// Validate config when an external identity provider handles authentication.
+    ///
+    /// Only checks `environment_url` and `entities`; credential fields are not
+    /// required because the identity provider supplies tokens directly.
+    pub fn validate_with_identity_provider(&self) -> Result<(), String> {
+        if self.environment_url.is_empty() {
+            return Err("environment_url is required".to_string());
+        }
+        if self.entities.is_empty() {
+            return Err("at least one entity is required".to_string());
+        }
+        Ok(())
+    }
+
     /// Get the entity set name for a given entity logical name.
     ///
     /// Checks overrides first, then falls back to appending 's'.

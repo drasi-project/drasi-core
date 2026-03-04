@@ -178,6 +178,21 @@ impl DataverseSourceConfig {
         Ok(())
     }
 
+    /// Validate config when an external identity provider handles authentication.
+    ///
+    /// Only checks that `environment_url` and `entities` are set — credential
+    /// fields (`tenant_id`, `client_id`, `client_secret`) are not required
+    /// because the identity provider supplies tokens directly.
+    pub fn validate_with_identity_provider(&self) -> Result<(), String> {
+        if self.environment_url.is_empty() {
+            return Err("environment_url is required".to_string());
+        }
+        if self.entities.is_empty() {
+            return Err("entities list must not be empty".to_string());
+        }
+        Ok(())
+    }
+
     /// Get the entity set name (plural form) for a given entity logical name.
     ///
     /// First checks `entity_set_overrides`, then falls back to appending 's'.

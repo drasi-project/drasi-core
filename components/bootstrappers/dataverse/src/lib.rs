@@ -67,6 +67,7 @@ use log::{debug, info, warn};
 
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, SourceChangeEvent};
+use drasi_lib::identity::{Credentials, IdentityProvider};
 
 /// Dataverse bootstrap provider for initial data loading.
 ///
@@ -75,13 +76,19 @@ use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, SourceChangeEven
 /// to page through records, matching the platform's `BootstrapHandler` behavior.
 pub struct DataverseBootstrapProvider {
     config: DataverseBootstrapConfig,
+    /// Optional identity provider. When set, takes precedence over
+    /// config-based client credentials / Azure CLI for token acquisition.
+    identity_provider: Option<Box<dyn IdentityProvider>>,
 }
 
 impl DataverseBootstrapProvider {
     /// Create a new bootstrap provider with a given configuration.
     pub fn new(config: DataverseBootstrapConfig) -> Result<Self> {
         config.validate().map_err(|e| anyhow::anyhow!(e))?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            identity_provider: None,
+        })
     }
 
     /// Create a builder for constructing a bootstrap provider.
@@ -91,10 +98,20 @@ impl DataverseBootstrapProvider {
 
     /// Fetch an authentication token.
     ///
-    /// When `use_azure_cli` is enabled, obtains a token via
-    /// `az account get-access-token`. Otherwise falls back to the OAuth2
-    /// client credentials flow.
+    /// Priority:
+    /// 1. Identity provider (if set) — delegates to `get_credentials()`
+    /// 2. Azure CLI (`az account get-access-token`) when `use_azure_cli` is true
+    /// 3. OAuth2 client credentials flow
     async fn get_token(&self, http_client: &reqwest::Client) -> Result<String> {
+        if let Some(ref provider) = self.identity_provider {
+            let creds = provider.get_credentials().await?;
+            return match creds {
+                Credentials::Token { token, .. } => Ok(token),
+                _ => Err(anyhow::anyhow!(
+                    "Dataverse bootstrap requires Token credentials from identity provider"
+                )),
+            };
+        }
         if self.config.use_azure_cli {
             self.get_token_azure_cli().await
         } else {
@@ -441,6 +458,7 @@ pub struct DataverseBootstrapProviderBuilder {
     entity_columns: HashMap<String, Vec<String>>,
     api_version: String,
     page_size: usize,
+    identity_provider: Option<Box<dyn IdentityProvider>>,
 }
 
 impl DataverseBootstrapProviderBuilder {
@@ -457,6 +475,7 @@ impl DataverseBootstrapProviderBuilder {
             entity_columns: HashMap::new(),
             api_version: "v9.2".to_string(),
             page_size: 5000,
+            identity_provider: None,
         }
     }
 
@@ -487,6 +506,19 @@ impl DataverseBootstrapProviderBuilder {
     /// Use Azure CLI authentication instead of client credentials.
     pub fn with_azure_cli_auth(mut self) -> Self {
         self.use_azure_cli = true;
+        self
+    }
+
+    /// Set an identity provider for token acquisition.
+    ///
+    /// When an identity provider is set, it takes precedence over
+    /// `tenant_id`/`client_id`/`client_secret` and `use_azure_cli`.
+    /// The provider's `get_credentials()` must return `Credentials::Token`.
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl IdentityProvider + 'static,
+    ) -> Self {
+        self.identity_provider = Some(Box::new(provider));
         self
     }
 
@@ -545,7 +577,20 @@ impl DataverseBootstrapProviderBuilder {
             api_version: self.api_version,
             page_size: self.page_size,
         };
-        DataverseBootstrapProvider::new(config)
+
+        // When an identity provider is supplied, skip client credential validation
+        if self.identity_provider.is_some() {
+            config
+                .validate_with_identity_provider()
+                .map_err(|e| anyhow::anyhow!(e))?;
+        } else {
+            config.validate().map_err(|e| anyhow::anyhow!(e))?;
+        }
+
+        Ok(DataverseBootstrapProvider {
+            config,
+            identity_provider: self.identity_provider,
+        })
     }
 }
 
@@ -619,6 +664,41 @@ mod tests {
             .build()
             .expect("should build");
         assert_eq!(provider.config.page_size, 1000);
+    }
+
+    #[test]
+    fn test_builder_with_identity_provider() {
+        let identity =
+            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let provider = DataverseBootstrapProvider::builder()
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_entities(vec!["account".to_string()])
+            .with_identity_provider(identity)
+            .build()
+            .expect("should build with identity provider and no client credentials");
+        assert!(provider.identity_provider.is_some());
+    }
+
+    #[test]
+    fn test_builder_with_identity_provider_still_needs_url() {
+        let identity =
+            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let result = DataverseBootstrapProvider::builder()
+            .with_entities(vec!["account".to_string()])
+            .with_identity_provider(identity)
+            .build();
+        assert!(result.is_err(), "should fail without environment_url");
+    }
+
+    #[test]
+    fn test_builder_with_identity_provider_still_needs_entities() {
+        let identity =
+            drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+        let result = DataverseBootstrapProvider::builder()
+            .with_environment_url("https://test.crm.dynamics.com")
+            .with_identity_provider(identity)
+            .build();
+        assert!(result.is_err(), "should fail without entities");
     }
 
     #[test]

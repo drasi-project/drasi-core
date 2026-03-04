@@ -85,6 +85,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use drasi_lib::channels::{ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper};
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -107,6 +108,9 @@ pub struct DataverseSource {
     base: SourceBase,
     /// Dataverse source configuration.
     config: DataverseSourceConfig,
+    /// Optional identity provider for token acquisition.
+    /// When set, takes precedence over config-based client credentials / Azure CLI.
+    identity_provider: Option<Box<dyn IdentityProvider>>,
 }
 
 impl DataverseSource {
@@ -126,6 +130,7 @@ impl DataverseSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            identity_provider: None,
         })
     }
 
@@ -561,27 +566,31 @@ impl Source for DataverseSource {
         // Create token manager and client
         let base_url = self.config.environment_url.clone();
 
-        let token_manager = if self.config.use_azure_cli {
-            log::info!("[{}] Using Azure CLI authentication", self.base.id);
-            TokenManager::azure_cli(&base_url)
+        // Build the identity provider for token acquisition.
+        // Priority: explicit identity_provider > Azure CLI > client credentials
+        let provider: Arc<dyn IdentityProvider> = if let Some(ref ip) = self.identity_provider {
+            Arc::from(ip.clone_box())
+        } else if self.config.use_azure_cli {
+            log::info!("[{}] Using Azure CLI authentication (TokenManager)", self.base.id);
+            Arc::new(TokenManager::azure_cli(&base_url))
         } else {
             let token_url = format!(
                 "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
                 self.config.tenant_id
             );
-            TokenManager::with_token_url(
+            Arc::new(TokenManager::with_token_url(
                 &self.config.tenant_id,
                 &self.config.client_id,
                 &self.config.client_secret,
                 &base_url,
                 &token_url,
-            )
+            ))
         };
 
         let client = Arc::new(DataverseClient::new(
             &base_url,
             &self.config.api_version,
-            token_manager,
+            provider,
         ));
 
         // Create shutdown channel (watch channel for multiple receivers)
@@ -788,6 +797,7 @@ pub struct DataverseSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
+    identity_provider: Option<Box<dyn IdentityProvider>>,
     auto_start: bool,
 }
 
@@ -811,6 +821,7 @@ impl DataverseSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            identity_provider: None,
             auto_start: true,
         }
     }
@@ -849,6 +860,43 @@ impl DataverseSourceBuilder {
     /// When using Azure CLI auth, `tenant_id`, `client_id`, and `client_secret` are not required.
     pub fn with_azure_cli_auth(mut self) -> Self {
         self.use_azure_cli = true;
+        self
+    }
+
+    /// Set an identity provider for token acquisition.
+    ///
+    /// When an identity provider is set, it takes precedence over
+    /// `tenant_id`/`client_id`/`client_secret` and `use_azure_cli`.
+    /// The provider's `get_credentials()` must return `Credentials::Token`.
+    ///
+    /// This enables using any of the platform's identity providers, including:
+    /// - `AzureIdentityProvider::with_client_secret(...)` for client credentials
+    /// - `AzureIdentityProvider::with_default_credentials(...)` for managed identity
+    /// - `AzureIdentityProvider::with_developer_tools(...)` for local dev (CLI, azd, PS)
+    /// - `AzureIdentityProvider::with_workload_identity(...)` for Kubernetes workloads
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_lib::identity::AzureIdentityProvider;
+    /// use drasi_source_dataverse::DataverseSource;
+    ///
+    /// let provider = AzureIdentityProvider::with_client_secret(
+    ///     "tenant-id", "client-id", "client-secret", "dataverse",
+    /// )?
+    /// .with_scope("https://myorg.crm.dynamics.com/.default");
+    ///
+    /// let source = DataverseSource::builder("dv-source")
+    ///     .with_environment_url("https://myorg.crm.dynamics.com")
+    ///     .with_entities(vec!["account".to_string()])
+    ///     .with_identity_provider(provider)
+    ///     .build()?;
+    /// ```
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl IdentityProvider + 'static,
+    ) -> Self {
+        self.identity_provider = Some(Box::new(provider));
         self
     }
 
@@ -949,7 +997,15 @@ impl DataverseSourceBuilder {
             api_version: self.api_version,
         };
 
-        config.validate().map_err(|e| anyhow::anyhow!(e))?;
+        // When an identity provider is supplied, skip client credential validation
+        // (only environment_url and entities are required)
+        if self.identity_provider.is_some() {
+            config
+                .validate_with_identity_provider()
+                .map_err(|e| anyhow::anyhow!(e))?;
+        } else {
+            config.validate().map_err(|e| anyhow::anyhow!(e))?;
+        }
 
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
@@ -965,6 +1021,7 @@ impl DataverseSourceBuilder {
         Ok(DataverseSource {
             base: SourceBase::new(params)?,
             config,
+            identity_provider: self.identity_provider,
         })
     }
 }
@@ -1139,6 +1196,7 @@ mod tests {
             assert_eq!(source.config.min_interval_ms, 500);
             assert_eq!(source.config.max_interval_seconds, 30);
             assert_eq!(source.config.api_version, "v9.2");
+            assert!(source.identity_provider.is_none());
         }
 
         #[test]
@@ -1215,6 +1273,43 @@ mod tests {
                 source.config.select_columns("account"),
                 Some("name,revenue".to_string())
             );
+        }
+
+        #[test]
+        fn test_builder_with_identity_provider() {
+            // When an identity provider is set, client credentials are not required
+            let provider =
+                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let source = DataverseSource::builder("test")
+                .with_environment_url("https://test.crm.dynamics.com")
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(provider)
+                .build()
+                .expect("should build with identity provider and no client credentials");
+
+            assert!(source.identity_provider.is_some());
+        }
+
+        #[test]
+        fn test_builder_with_identity_provider_still_needs_url() {
+            let provider =
+                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let result = DataverseSource::builder("test")
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(provider)
+                .build();
+            assert!(result.is_err(), "should fail without environment_url");
+        }
+
+        #[test]
+        fn test_builder_with_identity_provider_still_needs_entities() {
+            let provider =
+                drasi_lib::identity::PasswordIdentityProvider::new("user", "token");
+            let result = DataverseSource::builder("test")
+                .with_environment_url("https://test.crm.dynamics.com")
+                .with_identity_provider(provider)
+                .build();
+            assert!(result.is_err(), "should fail without entities");
         }
     }
 

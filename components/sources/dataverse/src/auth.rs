@@ -21,10 +21,13 @@
 //! Tokens are cached and refreshed automatically before expiry (30-second buffer).
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+use drasi_lib::identity::{Credentials, IdentityProvider};
 
 /// Authentication method for acquiring Dataverse access tokens.
 #[derive(Debug, Clone)]
@@ -325,6 +328,34 @@ impl TokenManager {
     /// Get the auth method.
     pub fn auth_method(&self) -> &AuthMethod {
         &self.auth_method
+    }
+}
+
+impl Clone for TokenManager {
+    fn clone(&self) -> Self {
+        Self {
+            auth_method: self.auth_method.clone(),
+            resource: self.resource.clone(),
+            scope: self.scope.clone(),
+            token_url: self.token_url.clone(),
+            http_client: self.http_client.clone(),
+            cached_token: self.cached_token.clone(), // shared cache via Arc
+        }
+    }
+}
+
+#[async_trait]
+impl IdentityProvider for TokenManager {
+    async fn get_credentials(&self) -> Result<Credentials> {
+        let token = self.get_token().await?;
+        Ok(Credentials::Token {
+            username: "dataverse".to_string(),
+            token,
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn IdentityProvider> {
+        Box::new(self.clone())
     }
 }
 

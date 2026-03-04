@@ -19,8 +19,9 @@
 //! delta links.
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 
-use crate::auth::TokenManager;
+use drasi_lib::identity::{Credentials, IdentityProvider};
 use crate::types::ODataDeltaResponse;
 
 /// HTTP client for the Dataverse OData Web API.
@@ -32,7 +33,7 @@ use crate::types::ODataDeltaResponse;
 pub struct DataverseClient {
     base_url: String,
     api_version: String,
-    token_manager: TokenManager,
+    identity_provider: Arc<dyn IdentityProvider>,
     http_client: reqwest::Client,
 }
 
@@ -43,14 +44,27 @@ impl DataverseClient {
     ///
     /// * `environment_url` - Dataverse environment URL (e.g., `https://myorg.crm.dynamics.com`)
     /// * `api_version` - Web API version (e.g., `v9.2`)
-    /// * `token_manager` - OAuth2 token manager for authentication
-    pub fn new(environment_url: &str, api_version: &str, token_manager: TokenManager) -> Self {
+    /// * `identity_provider` - Identity provider for authentication
+    pub fn new(
+        environment_url: &str,
+        api_version: &str,
+        identity_provider: Arc<dyn IdentityProvider>,
+    ) -> Self {
         let base_url = environment_url.trim_end_matches('/').to_string();
         Self {
             base_url,
             api_version: api_version.to_string(),
-            token_manager,
+            identity_provider,
             http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Get a bearer token from the identity provider.
+    async fn get_token(&self) -> Result<String> {
+        let creds = self.identity_provider.get_credentials().await?;
+        match creds {
+            Credentials::Token { token, .. } => Ok(token),
+            _ => anyhow::bail!("Dataverse client requires Token credentials from identity provider"),
         }
     }
 
@@ -72,7 +86,7 @@ impl DataverseClient {
         entity_set_name: &str,
         select: Option<&str>,
     ) -> Result<ODataDeltaResponse> {
-        let token = self.token_manager.get_token().await?;
+        let token = self.get_token().await?;
 
         let mut url = format!(
             "{}/api/data/{}/{}",
@@ -119,7 +133,7 @@ impl DataverseClient {
     ///
     /// * `delta_link` - The delta link URL from a previous response
     pub async fn follow_delta_link(&self, delta_link: &str) -> Result<ODataDeltaResponse> {
-        let token = self.token_manager.get_token().await?;
+        let token = self.get_token().await?;
 
         let response = self
             .http_client
@@ -154,7 +168,7 @@ impl DataverseClient {
     ///
     /// * `next_link` - The next link URL from the current page
     pub async fn follow_next_link(&self, next_link: &str) -> Result<ODataDeltaResponse> {
-        let token = self.token_manager.get_token().await?;
+        let token = self.get_token().await?;
 
         let response = self
             .http_client
@@ -194,7 +208,7 @@ impl DataverseClient {
         entity_set_name: &str,
         select: Option<&str>,
     ) -> Result<ODataDeltaResponse> {
-        let token = self.token_manager.get_token().await?;
+        let token = self.get_token().await?;
 
         let mut url = format!(
             "{}/api/data/{}/{}",

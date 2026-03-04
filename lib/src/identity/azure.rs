@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use azure_core::credentials::TokenCredential;
 use azure_identity::{
-    DeveloperToolsCredential, ManagedIdentityCredential, ManagedIdentityCredentialOptions,
-    UserAssignedId, WorkloadIdentityCredential,
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential,
 };
 use std::sync::Arc;
 
@@ -153,6 +153,52 @@ impl AzureIdentityProvider {
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = scope.into();
         self
+    }
+
+    /// Create provider using client credentials (client ID + client secret).
+    ///
+    /// This is appropriate for service-to-service authentication where the
+    /// application has an Azure AD app registration with a client secret.
+    ///
+    /// # Arguments
+    ///
+    /// * `tenant_id` - Azure AD tenant (directory) ID
+    /// * `client_id` - Azure AD application (client) ID
+    /// * `client_secret` - Client secret for the application
+    /// * `identity_name` - Display name for logging/diagnostics
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use drasi_lib::identity::AzureIdentityProvider;
+    ///
+    /// let provider = AzureIdentityProvider::with_client_secret(
+    ///     "tenant-id",
+    ///     "client-id",
+    ///     "my-secret",
+    ///     "app-service-principal",
+    /// )?;
+    /// ```
+    pub fn with_client_secret(
+        tenant_id: impl AsRef<str>,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        identity_name: impl Into<String>,
+    ) -> Result<Self> {
+        let secret = azure_core::credentials::Secret::new(client_secret.into());
+        let credential = ClientSecretCredential::new(
+            tenant_id.as_ref(),
+            client_id.into(),
+            secret,
+            None,
+        )
+        .map_err(|e| anyhow!("Failed to create client secret credential: {e}"))?;
+
+        Ok(Self {
+            credential: credential as Arc<dyn TokenCredential>,
+            identity_name: identity_name.into(),
+            scope: DEFAULT_AZURE_SCOPE.to_string(),
+        })
     }
 }
 
@@ -313,6 +359,36 @@ mod tests {
     fn test_provider_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AzureIdentityProvider>();
+    }
+
+    #[test]
+    fn test_with_client_secret() {
+        let provider = AzureIdentityProvider::with_client_secret(
+            "00000000-0000-0000-0000-000000000001",
+            "client-id",
+            "my-secret",
+            "app-principal",
+        )
+        .expect("Failed to create client secret provider");
+
+        assert_eq!(provider.identity_name, "app-principal");
+        assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
+    }
+
+    #[test]
+    fn test_with_client_secret_custom_scope() {
+        let provider = AzureIdentityProvider::with_client_secret(
+            "00000000-0000-0000-0000-000000000001",
+            "client-id",
+            "my-secret",
+            "app-principal",
+        )
+        .unwrap()
+        .with_scope("https://myorg.crm.dynamics.com/.default");
+        assert_eq!(
+            provider.scope,
+            "https://myorg.crm.dynamics.com/.default"
+        );
     }
 }
 
