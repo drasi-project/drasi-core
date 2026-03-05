@@ -30,12 +30,22 @@ pub enum SqliteCommand {
         sql: String,
         response_tx: oneshot::Sender<Result<usize>>,
     },
+    ExecuteParameterized {
+        sql: String,
+        params: Vec<SqliteParam>,
+        response_tx: oneshot::Sender<Result<usize>>,
+    },
     ExecuteBatch {
         sql: String,
         response_tx: oneshot::Sender<Result<()>>,
     },
     QueryRows {
         sql: String,
+        response_tx: oneshot::Sender<Result<Vec<JsonRow>>>,
+    },
+    QueryRowsParameterized {
+        sql: String,
+        params: Vec<SqliteParam>,
         response_tx: oneshot::Sender<Result<Vec<JsonRow>>>,
     },
     BeginTransaction {
@@ -48,6 +58,16 @@ pub enum SqliteCommand {
         response_tx: oneshot::Sender<Result<()>>,
     },
     Shutdown,
+}
+
+/// A parameter value for parameterized SQL execution.
+#[derive(Debug, Clone)]
+pub enum SqliteParam {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +300,27 @@ pub fn run_sqlite_thread(
                 }
                 let _ = response_tx.send(result);
             }
+            SqliteCommand::ExecuteParameterized {
+                sql,
+                params,
+                response_tx,
+            } => {
+                let rusqlite_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    params.iter().map(sqlite_param_to_rusqlite).collect();
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    rusqlite_params.iter().map(|p| p.as_ref()).collect();
+                let result = conn
+                    .execute(sql.as_str(), param_refs.as_slice())
+                    .map_err(anyhow::Error::from);
+                if result.is_ok() {
+                    let _ = refresh_schema_cache_for_runtime(
+                        &conn,
+                        &schema_cache,
+                        allowed_tables.as_ref(),
+                    );
+                }
+                let _ = response_tx.send(result);
+            }
             SqliteCommand::ExecuteBatch { sql, response_tx } => {
                 let result = conn
                     .execute_batch(sql.as_str())
@@ -294,7 +335,18 @@ pub fn run_sqlite_thread(
                 let _ = response_tx.send(result);
             }
             SqliteCommand::QueryRows { sql, response_tx } => {
-                let _ = response_tx.send(query_rows(&conn, sql.as_str()));
+                let _ = response_tx.send(query_rows(&conn, sql.as_str(), &[]));
+            }
+            SqliteCommand::QueryRowsParameterized {
+                sql,
+                params,
+                response_tx,
+            } => {
+                let rusqlite_params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    params.iter().map(sqlite_param_to_rusqlite).collect();
+                let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                    rusqlite_params.iter().map(|p| p.as_ref()).collect();
+                let _ = response_tx.send(query_rows(&conn, sql.as_str(), param_refs.as_slice()));
             }
             SqliteCommand::BeginTransaction { response_tx } => {
                 let result = conn
@@ -394,7 +446,13 @@ fn column_name(schema: &TableSchema, index: i32) -> String {
         .columns
         .get(index as usize)
         .cloned()
-        .unwrap_or_else(|| format!("col_{index}"))
+        .unwrap_or_else(|| {
+            log::warn!(
+                "Column index {index} out of range (schema has {} columns), using fallback name",
+                schema.columns.len()
+            );
+            format!("col_{index}")
+        })
 }
 
 fn value_ref_to_json(value: ValueRef<'_>) -> Value {
@@ -409,7 +467,21 @@ fn value_ref_to_json(value: ValueRef<'_>) -> Value {
     }
 }
 
-fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<JsonRow>> {
+fn sqlite_param_to_rusqlite(p: &SqliteParam) -> Box<dyn rusqlite::types::ToSql> {
+    match p {
+        SqliteParam::Null => Box::new(rusqlite::types::Null) as Box<dyn rusqlite::types::ToSql>,
+        SqliteParam::Integer(v) => Box::new(*v),
+        SqliteParam::Real(v) => Box::new(*v),
+        SqliteParam::Text(v) => Box::new(v.clone()),
+        SqliteParam::Bool(v) => Box::new(*v),
+    }
+}
+
+fn query_rows(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::types::ToSql],
+) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
     let columns = stmt
         .column_names()
@@ -417,7 +489,7 @@ fn query_rows(conn: &Connection, sql: &str) -> Result<Vec<JsonRow>> {
         .map(|name| (*name).to_string())
         .collect::<Vec<_>>();
 
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query(params)?;
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
         let mut item = serde_json::Map::new();
