@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! SQLite source plugin for Drasi.
 //!
 //! This source owns an embedded SQLite connection running in a dedicated thread.
@@ -28,6 +30,7 @@
 
 mod config;
 mod convert;
+pub mod descriptor;
 mod rest_api;
 mod thread;
 
@@ -433,3 +436,15 @@ impl Source for SqliteSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 }
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "sqlite-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::SqliteSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
