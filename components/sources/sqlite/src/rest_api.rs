@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+use crate::thread::SqliteParam;
 use crate::{RestApiConfig, SqliteSourceHandle, TableKeyConfig};
 
 #[derive(Clone)]
@@ -144,7 +145,7 @@ async fn get_row(
     Path((table, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
     validate_table(&state, &table).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let where_clause = build_where_by_id(&state, &table, &id)
+    let (where_clause, params) = build_where_by_id(&state, &table, &id)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let sql = format!(
@@ -154,7 +155,7 @@ async fn get_row(
     );
     let mut rows = state
         .handle
-        .query(sql)
+        .query_parameterized(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -174,18 +175,19 @@ async fn insert_row(
     validate_columns(&data).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let columns = data.keys().map(|c| quote_ident(c)).collect::<Vec<_>>();
-    let values = data.values().map(value_to_sql_literal).collect::<Vec<_>>();
+    let placeholders = (0..data.len()).map(|_| "?").collect::<Vec<_>>();
+    let params = data.values().map(json_value_to_param).collect::<Vec<_>>();
 
     let sql = format!(
         "INSERT INTO {} ({}) VALUES ({})",
         quote_ident(&table),
         columns.join(", "),
-        values.join(", ")
+        placeholders.join(", ")
     );
 
     state
         .handle
-        .execute(sql)
+        .execute_parameterized(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -199,15 +201,18 @@ async fn update_row(
 ) -> Result<Json<Value>, StatusCode> {
     validate_table(&state, &table).map_err(|_| StatusCode::BAD_REQUEST)?;
     validate_columns(&data).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let where_clause = build_where_by_id(&state, &table, &id)
+    let (where_clause, where_params) = build_where_by_id(&state, &table, &id)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let set_clause = data
-        .iter()
-        .map(|(col, value)| format!("{} = {}", quote_ident(col), value_to_sql_literal(value)))
+        .keys()
+        .map(|col| format!("{} = ?", quote_ident(col)))
         .collect::<Vec<_>>()
         .join(", ");
+
+    let mut params: Vec<SqliteParam> = data.values().map(json_value_to_param).collect();
+    params.extend(where_params);
 
     let sql = format!(
         "UPDATE {} SET {} WHERE {}",
@@ -218,7 +223,7 @@ async fn update_row(
 
     state
         .handle
-        .execute(sql)
+        .execute_parameterized(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -230,14 +235,14 @@ async fn delete_row(
     Path((table, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
     validate_table(&state, &table).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let where_clause = build_where_by_id(&state, &table, &id)
+    let (where_clause, params) = build_where_by_id(&state, &table, &id)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let sql = format!("DELETE FROM {} WHERE {}", quote_ident(&table), where_clause);
     state
         .handle
-        .execute(sql)
+        .execute_parameterized(sql, params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -250,70 +255,87 @@ async fn batch_operations(
 ) -> Result<Json<Value>, StatusCode> {
     let mut statements = Vec::new();
     for op in &request.operations {
-        let sql = operation_to_sql(&state, op)
+        let (sql, params) = operation_to_parameterized_sql(&state, op)
             .await
             .map_err(|_| StatusCode::BAD_REQUEST)?;
-        statements.push(sql);
+        statements.push((sql, params));
     }
 
     state
         .handle
-        .execute_statements_in_transaction(statements)
+        .execute_parameterized_in_transaction(statements)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
-async fn operation_to_sql(state: &RestApiState, operation: &BatchOperation) -> Result<String> {
+async fn operation_to_parameterized_sql(
+    state: &RestApiState,
+    operation: &BatchOperation,
+) -> Result<(String, Vec<SqliteParam>)> {
     match operation {
         BatchOperation::Insert { table, data } => {
             validate_table_ref(state, table)?;
             validate_columns(data)?;
             let columns = data.keys().map(|c| quote_ident(c)).collect::<Vec<_>>();
-            let values = data.values().map(value_to_sql_literal).collect::<Vec<_>>();
-            Ok(format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                quote_ident(table),
-                columns.join(", "),
-                values.join(", ")
+            let placeholders = (0..data.len()).map(|_| "?").collect::<Vec<_>>();
+            let params = data.values().map(json_value_to_param).collect();
+            Ok((
+                format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    quote_ident(table),
+                    columns.join(", "),
+                    placeholders.join(", ")
+                ),
+                params,
             ))
         }
         BatchOperation::Update { table, id, data } => {
             validate_table_ref(state, table)?;
             validate_columns(data)?;
-            let where_clause = build_where_by_id_ref(state, table, id).await?;
+            let (where_clause, where_params) = build_where_by_id_ref(state, table, id).await?;
             let set_clause = data
-                .iter()
-                .map(|(col, value)| {
-                    format!("{} = {}", quote_ident(col), value_to_sql_literal(value))
-                })
+                .keys()
+                .map(|col| format!("{} = ?", quote_ident(col)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            Ok(format!(
-                "UPDATE {} SET {} WHERE {}",
-                quote_ident(table),
-                set_clause,
-                where_clause
+            let mut params: Vec<SqliteParam> = data.values().map(json_value_to_param).collect();
+            params.extend(where_params);
+            Ok((
+                format!(
+                    "UPDATE {} SET {} WHERE {}",
+                    quote_ident(table),
+                    set_clause,
+                    where_clause
+                ),
+                params,
             ))
         }
         BatchOperation::Delete { table, id } => {
             validate_table_ref(state, table)?;
-            let where_clause = build_where_by_id_ref(state, table, id).await?;
-            Ok(format!(
-                "DELETE FROM {} WHERE {}",
-                quote_ident(table),
-                where_clause
+            let (where_clause, params) = build_where_by_id_ref(state, table, id).await?;
+            Ok((
+                format!("DELETE FROM {} WHERE {}", quote_ident(table), where_clause),
+                params,
             ))
         }
     }
 }
 
-async fn build_where_by_id(state: &RestApiState, table: &str, id: &str) -> Result<String> {
+async fn build_where_by_id(
+    state: &RestApiState,
+    table: &str,
+    id: &str,
+) -> Result<(String, Vec<SqliteParam>)> {
     build_where_by_id_ref(state, table, id).await
 }
 
-async fn build_where_by_id_ref(state: &RestApiState, table: &str, id: &str) -> Result<String> {
+async fn build_where_by_id_ref(
+    state: &RestApiState,
+    table: &str,
+    id: &str,
+) -> Result<(String, Vec<SqliteParam>)> {
     let key_columns = if let Some(found) = state.table_keys.iter().find(|k| k.table == table) {
         found.key_columns.clone()
     } else {
@@ -331,17 +353,15 @@ async fn build_where_by_id_ref(state: &RestApiState, table: &str, id: &str) -> R
 
     let where_parts = key_columns
         .iter()
-        .zip(id_parts.iter())
-        .map(|(column, part)| {
-            format!(
-                "{} = {}",
-                quote_ident(column),
-                value_to_sql_literal(&Value::String((*part).to_string()))
-            )
-        })
+        .map(|column| format!("{} = ?", quote_ident(column)))
         .collect::<Vec<_>>();
 
-    Ok(where_parts.join(" AND "))
+    let params = id_parts
+        .iter()
+        .map(|part| SqliteParam::Text((*part).to_string()))
+        .collect();
+
+    Ok((where_parts.join(" AND "), params))
 }
 
 async fn detect_primary_keys(handle: &SqliteSourceHandle, table: &str) -> Result<Vec<String>> {
@@ -403,21 +423,21 @@ fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn value_to_sql_literal(value: &Value) -> String {
+fn json_value_to_param(value: &Value) -> SqliteParam {
     match value {
-        Value::Null => "NULL".to_string(),
-        Value::Bool(v) => {
-            if *v {
-                "1".to_string()
+        Value::Null => SqliteParam::Null,
+        Value::Bool(v) => SqliteParam::Bool(*v),
+        Value::Number(v) => {
+            if let Some(i) = v.as_i64() {
+                SqliteParam::Integer(i)
+            } else if let Some(f) = v.as_f64() {
+                SqliteParam::Real(f)
             } else {
-                "0".to_string()
+                SqliteParam::Text(v.to_string())
             }
         }
-        Value::Number(v) => v.to_string(),
-        Value::String(v) => format!("'{}'", v.replace('\'', "''")),
-        Value::Array(_) | Value::Object(_) => {
-            format!("'{}'", value.to_string().replace('\'', "''"))
-        }
+        Value::String(v) => SqliteParam::Text(v.clone()),
+        Value::Array(_) | Value::Object(_) => SqliteParam::Text(value.to_string()),
     }
 }
 
@@ -441,19 +461,39 @@ mod tests {
     }
 
     #[test]
-    fn value_to_sql_literal_handles_core_types() {
-        assert_eq!(value_to_sql_literal(&Value::Null), "NULL");
-        assert_eq!(value_to_sql_literal(&Value::Bool(true)), "1");
-        assert_eq!(value_to_sql_literal(&Value::Bool(false)), "0");
-        assert_eq!(value_to_sql_literal(&Value::Number(42.into())), "42");
-        assert_eq!(
-            value_to_sql_literal(&Value::String("O'Reilly".to_string())),
-            "'O''Reilly'"
-        );
-        assert_eq!(
-            value_to_sql_literal(&serde_json::json!({"x": "y"})),
-            "'{\"x\":\"y\"}'"
-        );
+    fn json_value_to_param_handles_core_types() {
+        assert!(matches!(
+            json_value_to_param(&Value::Null),
+            SqliteParam::Null
+        ));
+        assert!(matches!(
+            json_value_to_param(&Value::Bool(true)),
+            SqliteParam::Bool(true)
+        ));
+        assert!(matches!(
+            json_value_to_param(&Value::Bool(false)),
+            SqliteParam::Bool(false)
+        ));
+        assert!(matches!(
+            json_value_to_param(&Value::Number(42.into())),
+            SqliteParam::Integer(42)
+        ));
+        match json_value_to_param(&Value::String("hello".to_string())) {
+            SqliteParam::Text(s) => assert_eq!(s, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+        match json_value_to_param(&serde_json::json!({"x": "y"})) {
+            SqliteParam::Text(s) => assert!(s.contains("\"x\"")),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_value_to_param_handles_strings_with_quotes() {
+        match json_value_to_param(&Value::String("O'Reilly".to_string())) {
+            SqliteParam::Text(s) => assert_eq!(s, "O'Reilly"),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     #[test]

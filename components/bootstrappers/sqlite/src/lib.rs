@@ -132,8 +132,8 @@ impl BootstrapProvider for SqliteBootstrapProvider {
                 let key_columns = self.key_columns_for_table(&conn, &table)?;
                 let rows = read_table_rows(&conn, &table)?;
 
-                for row in rows {
-                    let element_id = generate_element_id(&table, &row, &key_columns);
+                for (row, rowid) in rows {
+                    let element_id = generate_element_id(&table, &row, &key_columns, Some(rowid));
                     let mut properties = ElementPropertyMap::new();
                     for (name, value) in row {
                         properties.insert(&name, value);
@@ -144,10 +144,7 @@ impl BootstrapProvider for SqliteBootstrapProvider {
                         metadata: ElementMetadata {
                             reference: ElementReference::new(&context.source_id, &element_id),
                             labels,
-                            effective_from: chrono::Utc::now()
-                                .timestamp_nanos_opt()
-                                .unwrap_or_default()
-                                as u64,
+                            effective_from: chrono::Utc::now().timestamp_millis() as u64,
                         },
                         properties,
                     };
@@ -196,23 +193,28 @@ fn resolve_tables(
     Ok(tables)
 }
 
-fn read_table_rows(conn: &Connection, table: &str) -> Result<Vec<Vec<(String, ElementValue)>>> {
-    let query = format!("SELECT * FROM {}", quote_ident(table));
+fn read_table_rows(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<(Vec<(String, ElementValue)>, i64)>> {
+    let query = format!("SELECT rowid, * FROM {}", quote_ident(table));
     let mut stmt = conn.prepare(&query)?;
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = (0..column_count)
+    // First column is rowid, remaining are user columns
+    let column_names: Vec<String> = (1..column_count)
         .map(|index| stmt.column_name(index).unwrap_or("").to_string())
         .collect();
 
     let mut rows = stmt.query([])?;
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
+        let rowid: i64 = row.get(0)?;
         let mut values = Vec::with_capacity(column_names.len());
-        for (index, name) in column_names.iter().enumerate() {
-            let value_ref = row.get_ref(index)?;
+        for (i, name) in column_names.iter().enumerate() {
+            let value_ref = row.get_ref(i + 1)?;
             values.push((name.clone(), value_ref_to_element_value(value_ref)));
         }
-        result.push(values);
+        result.push((values, rowid));
     }
     Ok(result)
 }
@@ -249,31 +251,31 @@ fn generate_element_id(
     table: &str,
     values: &[(String, ElementValue)],
     key_columns: &[String],
+    rowid: Option<i64>,
 ) -> String {
-    if key_columns.is_empty() {
-        let all_values = values
+    if !key_columns.is_empty() {
+        let key_parts = key_columns
             .iter()
-            .map(|(_, value)| value_to_id_fragment(value))
+            .filter_map(|column| {
+                values
+                    .iter()
+                    .find(|(name, _)| name == column)
+                    .map(|(_, v)| v)
+            })
+            .map(value_to_id_fragment)
             .collect::<Vec<_>>();
-        return format!("{table}:{}", all_values.join(":"));
+
+        if !key_parts.is_empty() {
+            return format!("{table}:{}", key_parts.join(":"));
+        }
     }
 
-    let key_parts = key_columns
-        .iter()
-        .filter_map(|column| {
-            values
-                .iter()
-                .find(|(name, _)| name == column)
-                .map(|(_, v)| v)
-        })
-        .map(value_to_id_fragment)
-        .collect::<Vec<_>>();
-
-    if key_parts.is_empty() {
-        format!("{table}:missing-key")
-    } else {
-        format!("{table}:{}", key_parts.join(":"))
+    // Fall back to rowid, matching the source's CDC behavior
+    if let Some(id) = rowid {
+        return format!("{table}:{id}");
     }
+
+    format!("{table}:unknown")
 }
 
 fn value_to_id_fragment(value: &ElementValue) -> String {
@@ -290,6 +292,141 @@ fn value_to_id_fragment(value: &ElementValue) -> String {
 
 fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_element_id_uses_key_columns_when_provided() {
+        let values = vec![
+            ("id".to_string(), ElementValue::Integer(42)),
+            ("name".to_string(), ElementValue::String(Arc::from("test"))),
+        ];
+        let keys = vec!["id".to_string()];
+        assert_eq!(
+            generate_element_id("sensors", &values, &keys, Some(1)),
+            "sensors:42"
+        );
+    }
+
+    #[test]
+    fn generate_element_id_uses_composite_keys() {
+        let values = vec![
+            ("tenant".to_string(), ElementValue::String(Arc::from("t1"))),
+            (
+                "event_id".to_string(),
+                ElementValue::String(Arc::from("e1")),
+            ),
+        ];
+        let keys = vec!["tenant".to_string(), "event_id".to_string()];
+        assert_eq!(
+            generate_element_id("events", &values, &keys, Some(99)),
+            "events:t1:e1"
+        );
+    }
+
+    #[test]
+    fn generate_element_id_falls_back_to_rowid_when_no_keys() {
+        let values = vec![
+            ("name".to_string(), ElementValue::String(Arc::from("test"))),
+            ("value".to_string(), ElementValue::Integer(100)),
+        ];
+        let keys: Vec<String> = vec![];
+        assert_eq!(
+            generate_element_id("data", &values, &keys, Some(7)),
+            "data:7"
+        );
+    }
+
+    #[test]
+    fn generate_element_id_returns_unknown_without_keys_or_rowid() {
+        let values = vec![("x".to_string(), ElementValue::Integer(1))];
+        let keys: Vec<String> = vec![];
+        assert_eq!(
+            generate_element_id("data", &values, &keys, None),
+            "data:unknown"
+        );
+    }
+
+    #[test]
+    fn read_table_rows_returns_rows_with_rowid() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE items (name TEXT, value INTEGER); INSERT INTO items VALUES ('a', 1); INSERT INTO items VALUES ('b', 2);")
+            .expect("setup");
+
+        let rows = read_table_rows(&conn, "items").expect("read");
+        assert_eq!(rows.len(), 2);
+
+        let (first_row, first_rowid) = &rows[0];
+        assert_eq!(*first_rowid, 1);
+        assert_eq!(first_row.len(), 2);
+        assert_eq!(first_row[0].0, "name");
+
+        let (second_row, second_rowid) = &rows[1];
+        assert_eq!(*second_rowid, 2);
+        assert_eq!(second_row.len(), 2);
+        let _ = second_row;
+    }
+
+    #[test]
+    fn detect_primary_key_finds_pk_columns() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE sensors (id INTEGER PRIMARY KEY, name TEXT)")
+            .expect("setup");
+
+        let pks = detect_primary_key(&conn, "sensors").expect("detect");
+        assert_eq!(pks, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn detect_primary_key_returns_empty_for_no_pk() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE data (x TEXT, y TEXT)")
+            .expect("setup");
+
+        let pks = detect_primary_key(&conn, "data").expect("detect");
+        assert!(pks.is_empty());
+    }
+
+    #[test]
+    fn element_id_matches_between_bootstrap_and_source_with_pk() {
+        // Verifies that bootstrap and source produce the same element ID
+        // when a table has a declared PK.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch("CREATE TABLE sensors (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO sensors VALUES (42, 'test');")
+            .expect("setup");
+
+        let pks = detect_primary_key(&conn, "sensors").expect("detect pk");
+        let rows = read_table_rows(&conn, "sensors").expect("read");
+        let (row, rowid) = &rows[0];
+
+        let bootstrap_id = generate_element_id("sensors", row, &pks, Some(*rowid));
+        // Source would produce "sensors:42" via PK column "id"
+        assert_eq!(bootstrap_id, "sensors:42");
+    }
+
+    #[test]
+    fn element_id_matches_between_bootstrap_and_source_without_pk() {
+        // Verifies that bootstrap falls back to rowid just like source does
+        // when no PK is declared.
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE data (x TEXT, y TEXT); INSERT INTO data VALUES ('a', 'b');",
+        )
+        .expect("setup");
+
+        let pks = detect_primary_key(&conn, "data").expect("detect pk");
+        assert!(pks.is_empty());
+
+        let rows = read_table_rows(&conn, "data").expect("read");
+        let (row, rowid) = &rows[0];
+
+        let bootstrap_id = generate_element_id("data", row, &pks, Some(*rowid));
+        // Source would produce "data:1" via rowid fallback
+        assert_eq!(bootstrap_id, "data:1");
+    }
 }
 
 /// Dynamic plugin entry point.

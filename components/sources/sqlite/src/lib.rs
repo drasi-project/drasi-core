@@ -37,6 +37,7 @@ mod thread;
 pub use config::{
     RestApiConfig, SqliteSourceBuilder, SqliteSourceConfig, StartFrom, TableKeyConfig,
 };
+pub use thread::SqliteParam;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -84,6 +85,25 @@ impl SqliteSourceHandle {
             .map_err(|_| anyhow!("sqlite thread closed response channel"))?
     }
 
+    /// Execute a parameterized SQL statement with bind parameters.
+    pub async fn execute_parameterized(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<SqliteParam>,
+    ) -> Result<usize> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender()
+            .await?
+            .send(SqliteCommand::ExecuteParameterized {
+                sql: sql.into(),
+                params,
+                response_tx,
+            })?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("sqlite thread closed response channel"))?
+    }
+
     /// Execute a SQL script batch.
     pub async fn execute_batch(&self, sql: impl Into<String>) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
@@ -106,6 +126,25 @@ impl SqliteSourceHandle {
             sql: sql.into(),
             response_tx,
         })?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("sqlite thread closed response channel"))?
+    }
+
+    /// Execute a parameterized query and return rows as JSON objects.
+    pub async fn query_parameterized(
+        &self,
+        sql: impl Into<String>,
+        params: Vec<SqliteParam>,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.sender()
+            .await?
+            .send(SqliteCommand::QueryRowsParameterized {
+                sql: sql.into(),
+                params,
+                response_tx,
+            })?;
         response_rx
             .await
             .map_err(|_| anyhow!("sqlite thread closed response channel"))?
@@ -147,6 +186,23 @@ impl SqliteSourceHandle {
 
         for statement in statements {
             if let Err(err) = self.execute(statement).await {
+                let _ = self.rollback_transaction().await;
+                return Err(err);
+            }
+        }
+
+        self.commit_transaction().await
+    }
+
+    /// Execute multiple parameterized statements atomically in a transaction.
+    pub async fn execute_parameterized_in_transaction(
+        &self,
+        statements: Vec<(String, Vec<SqliteParam>)>,
+    ) -> Result<()> {
+        self.begin_transaction().await?;
+
+        for (sql, params) in statements {
+            if let Err(err) = self.execute_parameterized(sql, params).await {
                 let _ = self.rollback_transaction().await;
                 return Err(err);
             }
