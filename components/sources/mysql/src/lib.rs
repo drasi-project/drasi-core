@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +19,7 @@
 
 mod config;
 mod decoder;
+pub mod descriptor;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -404,3 +406,15 @@ impl MySqlSourceBuilder {
         })
     }
 }
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mysql-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySqlSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
