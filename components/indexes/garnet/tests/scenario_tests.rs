@@ -316,8 +316,10 @@ mod linear_regression {
 }
 
 mod index {
+    use std::sync::Arc;
+
     use super::GarnetQueryConfig;
-    use drasi_core::interface::FutureQueue;
+    use drasi_core::interface::{FutureQueue, NoOpSessionControl};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -326,8 +328,10 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 
@@ -337,8 +341,10 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 
@@ -348,7 +354,9 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 
@@ -358,8 +366,10 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 }

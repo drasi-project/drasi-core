@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +35,7 @@
 
 pub mod application;
 pub mod config;
+pub mod descriptor;
 pub mod subscription;
 
 pub use application::ApplicationReaction;
@@ -125,3 +127,5 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
     }
 }
+
+// Core plugin — registered statically by the server, not exported for dynamic loading.

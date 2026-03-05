@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -128,6 +129,7 @@
 
 mod config;
 mod conversion;
+pub mod descriptor;
 mod mock;
 mod time;
 
@@ -136,3 +138,18 @@ mod tests;
 
 pub use config::{DataType, MockSourceConfig};
 pub use mock::{MockSource, MockSourceBuilder};
+
+/// Dynamic plugin entry point (legacy dylib).
+///
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mock-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MockSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

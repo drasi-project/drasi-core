@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +32,7 @@
 use std::collections::HashMap;
 
 pub mod config;
+pub mod descriptor;
 pub mod sse;
 
 pub use config::{QueryConfig, SseExtension, SseReactionConfig, TemplateSpec};
@@ -274,3 +276,17 @@ impl SseReactionBuilder {
 
 #[cfg(test)]
 mod tests;
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "sse-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::SseReactionDescriptor],
+    bootstrap_descriptors = [],
+);

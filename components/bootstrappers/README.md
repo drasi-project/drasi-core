@@ -15,6 +15,7 @@ This guide explains how to create custom bootstrap provider plugins for Drasi. B
 - [Key Files Reference](#key-files-reference)
 - [Implementation Checklist](#implementation-checklist)
 - [Best Practices](#best-practices)
+- [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)
 - [Additional Resources](#additional-resources)
 
 ## Overview
@@ -716,6 +717,9 @@ When creating a new bootstrap provider plugin:
   - [ ] Empty request handling
 - [ ] Add integration tests with sources
 - [ ] Document configuration options
+- [ ] (If packaging as dynamic plugin) Add `cdylib` crate type, `drasi-plugin-sdk` and `utoipa` dependencies
+- [ ] (If packaging as dynamic plugin) Create `descriptor.rs` with DTO, OpenApi schema, and `BootstrapPluginDescriptor` impl
+- [ ] (If packaging as dynamic plugin) Add `export_plugin!` macro invocation in `lib.rs`
 
 ## Best Practices
 
@@ -905,6 +909,161 @@ For `ScriptFileBootstrapProvider`, files use JSONL (JSON Lines) format with thes
 | `Comment` | No | Comments (filtered out during processing) |
 | `Label` | No | Checkpoint markers |
 | `Finish` | No | End marker (stops processing) |
+
+## Packaging as a Dynamic Plugin
+
+Bootstrap providers can be packaged as dynamic plugins (cdylib shared libraries) so they can be loaded at runtime by the Drasi host. See `scriptfile/` for a complete working example.
+
+### Cargo.toml Setup
+
+Add `cdylib` to the crate types and include the `drasi-plugin-sdk` and `utoipa` dependencies:
+
+```toml
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+# ... other dependencies ...
+
+[features]
+dynamic-plugin = []
+```
+
+The `lib` crate type keeps the crate usable as a normal Rust dependency, while `cdylib` produces the `.so`/`.dylib`/`.dll` for dynamic loading. The `dynamic-plugin` feature gates the plugin entry point so it is only compiled when building the shared library. See `scriptfile/Cargo.toml` for reference.
+
+### Configuration DTOs
+
+Create a `descriptor.rs` module with a configuration DTO struct and an OpenApi schema generator:
+
+```rust
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+/// Configuration DTO for the bootstrap provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = bootstrap::mykind::MyBootstrapConfig)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MyBootstrapConfigDto {
+    #[serde(default)]
+    pub file_paths: Vec<String>,
+}
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(MyBootstrapConfigDto)))]
+struct MyBootstrapSchemas;
+```
+
+The `#[schema(as = bootstrap::mykind::MyBootstrapConfig)]` attribute controls the schema path name used during registration. The `OpenApi` derive struct generates the JSON schema from the DTO at runtime.
+
+### The BootstrapPluginDescriptor Trait
+
+Implement `BootstrapPluginDescriptor` to tell the host how to create your provider from JSON configuration:
+
+```rust
+use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+pub struct MyBootstrapDescriptor;
+
+#[async_trait]
+impl BootstrapPluginDescriptor for MyBootstrapDescriptor {
+    fn kind(&self) -> &str {
+        "mykind"
+    }
+
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn config_schema_name(&self) -> &str {
+        "bootstrap.mykind.MyBootstrapConfig"
+    }
+
+    fn config_schema_json(&self) -> String {
+        let api = MyBootstrapSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
+    }
+
+    async fn create_bootstrap_provider(
+        &self,
+        config_json: &serde_json::Value,
+        _source_config_json: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn BootstrapProvider>> {
+        let dto: MyBootstrapConfigDto = serde_json::from_value(config_json.clone())?;
+
+        let config = MyBootstrapConfig {
+            file_paths: dto.file_paths,
+        };
+
+        Ok(Box::new(MyBootstrapProvider::new(config)))
+    }
+}
+```
+
+| Method | Purpose |
+|--------|---------|
+| `kind()` | Plugin kind identifier used in config files (e.g. `"scriptfile"`) |
+| `config_version()` | Semantic version of the config schema (e.g. `"1.0.0"`) |
+| `config_schema_name()` | Dot-delimited path matching the `#[schema(as = ...)]` attribute |
+| `config_schema_json()` | JSON schema generated from the utoipa `OpenApi` derive |
+| `create_bootstrap_provider()` | Deserializes the DTO from `config_json` and constructs the provider |
+
+### The export_plugin! Macro
+
+In `lib.rs`, invoke the macro to generate the C ABI entry points. Gate it behind the `dynamic-plugin` feature:
+
+```rust
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MyBootstrapDescriptor],
+);
+```
+
+### Building
+
+Build the shared library with the `dynamic-plugin` feature enabled:
+
+```bash
+cargo build --features dynamic-plugin
+```
+
+This produces a shared library in `target/debug/` (e.g. `libdrasi_bootstrap_mykind.so` on Linux, `.dylib` on macOS, `.dll` on Windows). Place it in the host's `plugins/` directory for runtime loading.
+
+### Bundling with a Source
+
+A bootstrap provider can be exported from the same plugin crate as its associated source. Add it to `bootstrap_descriptors` alongside `source_descriptors`:
+
+```rust
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [source_descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [bootstrap_descriptor::MyBootstrapDescriptor],
+);
+```
+
+This keeps related components in a single shared library, simplifying deployment.
+
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
 
 ## Additional Resources
 
