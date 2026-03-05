@@ -29,6 +29,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -101,20 +102,28 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 2);
         println!("Node Result - Add p1: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c1")),
-                "name" => VariableValue::from(json!("nginx"))
-            )
-        }));
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c2")),
-                "name" => VariableValue::from(json!("redis"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c1")),
+                    "name" => VariableValue::from(json!("nginx"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c2")),
+                    "name" => VariableValue::from(json!("redis"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add additional container
@@ -161,13 +170,17 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Update p1: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c3")),
-                "name" => VariableValue::from(json!("dapr"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c3")),
+                    "name" => VariableValue::from(json!("dapr"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //remove container / update container
@@ -211,26 +224,34 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
         println!("Node Result - Update p1: {result:?}");
         assert_eq!(result.len(), 2);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c2")),
-                "name" => VariableValue::from(json!("redis"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c2")),
+                    "name" => VariableValue::from(json!("redis"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c1")),
-                "name" => VariableValue::from(json!("nginx"))
-            ),
-            after: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c1")),
-                "name" => VariableValue::from(json!("nginx2"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c1")),
+                    "name" => VariableValue::from(json!("nginx"))
+                ),
+                after: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c1")),
+                    "name" => VariableValue::from(json!("nginx2"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //remove pod
@@ -250,21 +271,29 @@ pub async fn unwind(config: &(impl QueryTestConfig + Send)) {
         println!("Node Result - Delete p1: {result:?}");
         assert_eq!(result.len(), 2);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c1")),
-                "name" => VariableValue::from(json!("nginx2"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c1")),
+                    "name" => VariableValue::from(json!("nginx2"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-                "pod" => VariableValue::from(json!("pod-1")),
-                "containerID" => VariableValue::from(json!("c3")),
-                "name" => VariableValue::from(json!("dapr"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                    "pod" => VariableValue::from(json!("pod-1")),
+                    "containerID" => VariableValue::from(json!("c3")),
+                    "name" => VariableValue::from(json!("dapr"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 

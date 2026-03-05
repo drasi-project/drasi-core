@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-sse"
-version = "0.1.1"
+version = "0.2.7"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "SSE reaction plugin for Drasi"
@@ -26,8 +26,11 @@ categories = ["web-programming"]
 [lints]
 workspace = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
-drasi-lib = { version = "0.2.3", path = "../../../lib" }
+drasi-lib.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -44,11 +47,20 @@ uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
 handlebars = "5.1"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["stream"] }
-drasi-source-application = { version = "0.1.0", path = "../../sources/application" }
+drasi-core.workspace = true
 eventsource-stream = "0.2"
 futures-util = "0.3"
 env_logger = "0.11"
+ordered-float = "3.0"
+chrono = "0.4"
 
+
+
+[features]
+# default = []
+dynamic-plugin = []

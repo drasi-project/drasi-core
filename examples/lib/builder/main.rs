@@ -50,7 +50,7 @@ use axum::{
 use drasi_lib::{DrasiLib, Query};
 use drasi_source_http::HttpSource;
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
-use drasi_reaction_log::LogReaction;
+use drasi_reaction_log::{LogReaction, QueryConfig, TemplateSpec};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -124,10 +124,12 @@ async fn main() -> Result<()> {
 
     let log_reaction = LogReaction::builder("console-logger")
         .from_query("all-prices")
-        .with_added_template("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")
-        .with_updated_template("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})")
-        .with_deleted_template("[-] {{before.symbol}} removed")
-        .build();
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new("[+] {{after.symbol}}: ${{after.price}} (prev: ${{after.previous_close}}, vol: {{after.volume}})")),
+            updated: Some(TemplateSpec::new("[~] {{after.symbol}}: ${{before.price}} -> ${{after.price}} (vol: {{after.volume}})")),
+            deleted: Some(TemplateSpec::new("[-] {{before.symbol}} removed")),
+        })
+        .build()?;
 
     // =========================================================================
     // Step 5: Build DrasiLib

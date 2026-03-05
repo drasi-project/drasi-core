@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,10 +34,9 @@
 //!     .build();
 //!
 //! // Or using configuration
-//! use drasi_bootstrap_postgres::PostgresSourceConfig;
-//! use drasi_source_postgres::SslMode;
+//! use drasi_bootstrap_postgres::{PostgresBootstrapConfig, SslMode};
 //!
-//! let config = PostgresSourceConfig {
+//! let config = PostgresBootstrapConfig {
 //!     host: "localhost".to_string(),
 //!     port: 5432,
 //!     database: "mydb".to_string(),
@@ -51,8 +51,23 @@
 //! let provider = PostgresBootstrapProvider::new(config);
 //! ```
 
+pub mod config;
+pub mod descriptor;
 pub mod postgres;
 
-pub use postgres::{
-    PostgresBootstrapProvider, PostgresBootstrapProviderBuilder, PostgresSourceConfig,
-};
+pub use config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
+pub use postgres::{PostgresBootstrapProvider, PostgresBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "postgres-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::PostgresBootstrapDescriptor],
+);

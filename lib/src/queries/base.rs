@@ -160,11 +160,30 @@ impl QueryBase {
         // Arc-wrap for zero-copy sharing across dispatchers
         let arc_result = Arc::new(result);
 
-        // Send to all dispatchers
+        // Fan out to all dispatchers concurrently so one slow reaction
+        // cannot block delivery to the others.
         let dispatchers = self.dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
-            if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
-                debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
+        if dispatchers.len() <= 1 {
+            // Fast path: single or no dispatcher, no need to spawn tasks
+            for dispatcher in dispatchers.iter() {
+                if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
+                    debug!("[{}] Failed to dispatch result: {}", self.config.id, e);
+                }
+            }
+        } else {
+            // Multiple dispatchers: fan out concurrently via join_all.
+            // We create the futures while holding the read lock, then await them.
+            // The futures borrow the dispatchers so the lock must stay held,
+            // but that's fine — no writes happen during dispatch.
+            let futures: Vec<_> = dispatchers
+                .iter()
+                .map(|d| d.dispatch_change(arc_result.clone()))
+                .collect();
+            let query_id = &self.config.id;
+            for result in futures::future::join_all(futures).await {
+                if let Err(e) = result {
+                    debug!("[{query_id}] Failed to dispatch result: {e}");
+                }
             }
         }
 

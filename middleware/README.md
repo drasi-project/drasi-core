@@ -1,12 +1,81 @@
-# Drasi Middleware Development Guide
+# Drasi Middleware
 
 ## Introduction
 
-Middleware components are pluggable modules that process incoming changes before they are processed by a a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
+Middleware components are pluggable modules that process incoming changes before they are processed by a continuous query. Middlewares can transform, enrich, filter, or route source-changes and they can be chained together in a pipeline.
 
 Learn more about [middlewares in Drasi here](https://drasi.io/concepts/middleware/).
 
-This guide explains how to develop custom middleware in Drasi core.
+## Using Drasi Middleware
+
+### Feature Flags
+
+All middleware types are **optional** and disabled by default. Enable only the middleware you need:
+
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
+```
+
+### Available Middleware Features
+
+- **`jq`** - JQ query language transformations (requires system `jq` library)
+- **`bundled-jq`** - JQ transformations with bundled jq compiled from source (requires build tools)
+- **`decoder`** - Decode encoded strings (base64, hex, URL encoding)
+- **`map`** - JSONPath-based property mapping
+- **`parse_json`** - Parse JSON strings into structured objects
+- **`promote`** - Promote nested properties to top level
+- **`relabel`** - Transform element labels
+- **`unwind`** - Unwind arrays into multiple elements
+- **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
+
+### JQ Middleware Options
+
+You can use the JQ middleware in two ways:
+
+#### Option 1: Using System JQ Library (`jq` feature)
+Uses your system's installed jq library. Install jq on your system:
+
+**macOS:**
+```bash
+brew install jq
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install libjq-dev
+```
+
+Then enable the `jq` feature:
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["jq"] }
+```
+
+#### Option 2: Bundled JQ (`bundled-jq` feature)
+Compiles jq from source during build. Requires build tools:
+
+**macOS:**
+```bash
+brew install autoconf automake libtool
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install autoconf automake libtool flex bison
+```
+
+Then enable the `bundled-jq` feature:
+```toml
+[dependencies]
+drasi-middleware = { version = "0.3", features = ["bundled-jq"] }
+```
+
+**Note:** If you don't need JQ middleware, you can use other middleware without installing jq or these build tools.
+
+## Middleware Development Guide
+
+This section explains how to develop custom middleware in Drasi core.
 
 ## Core Concepts
 

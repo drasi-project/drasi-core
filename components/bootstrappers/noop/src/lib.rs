@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +14,8 @@
 // limitations under the License.
 
 //! No-op bootstrap provider for sources without bootstrap support
+
+pub mod descriptor;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -82,3 +85,5 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         Ok(0)
     }
 }
+
+// Core plugin — registered statically by the server, not exported for dynamic loading.

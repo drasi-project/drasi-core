@@ -30,6 +30,7 @@ use drasi_query_cypher::CypherParser;
 
 use self::data::get_bootstrap_data;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -213,35 +214,43 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                  "RoomId" =>  VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" =>  VariableValue::from(json!(50))
-                ),
-                after: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" =>  VariableValue::from(json!(54))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                      "RoomId" =>  VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" =>  VariableValue::from(json!(50))
+                    ),
+                    after: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" =>  VariableValue::from(json!(54))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = floor_comfort_level_calc_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-                default_before: false,
-                default_after: false,
-                before: Some(variablemap!(
-                  "FloorId" =>  VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" =>  VariableValue::from(json!(50))
-                )),
-                after: variablemap!(
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" =>  VariableValue::from(json!(51))
-                ),
-                grouping_keys: vec!["FloorId".into()],
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Aggregation {
+                    default_before: false,
+                    default_after: false,
+                    before: Some(variablemap!(
+                      "FloorId" =>  VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" =>  VariableValue::from(json!(50))
+                    )),
+                    after: variablemap!(
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" =>  VariableValue::from(json!(51))
+                    ),
+                    grouping_keys: vec!["FloorId".into()],
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = building_comfort_level_calc_query
                 .process_source_change(change.clone())
@@ -249,87 +258,107 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .unwrap();
             assert_eq!(result.len(), 1);
             // println!("res {:?}", result);
-            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-                grouping_keys: vec!["BuildingId".into()],
-                default_before: false,
-                default_after: false,
-                before: Some(variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.0))
-                )),
-                after: variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.5))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Aggregation {
+                    grouping_keys: vec!["BuildingId".into()],
+                    default_before: false,
+                    default_after: false,
+                    before: Some(variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.0))
+                    )),
+                    after: variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.5))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = room_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(54))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(54))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = floor_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(51))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(51))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = building_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Adding {
-                after: variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.5))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Adding {
+                    after: variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.5))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = ui_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "RoomName" => VariableValue::from(json!("Room 01_01_01")),
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "FloorName" => VariableValue::from(json!("Floor 01_01")),
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "BuildingName" => VariableValue::from(json!("Building 01")),
-                  "Temperature" => VariableValue::from(json!(72)),
-                  "CO2" => VariableValue::from(json!(500)),
-                  "Humidity" => VariableValue::from(json!(42)),
-                  "ComfortLevel" => VariableValue::from(json!(50))
-                ),
-                after: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "RoomName" => VariableValue::from(json!("Room 01_01_01")),
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "FloorName" => VariableValue::from(json!("Floor 01_01")),
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "BuildingName" => VariableValue::from(json!("Building 01")),
-                  "Temperature" => VariableValue::from(json!(74)),
-                  "CO2" => VariableValue::from(json!(500)),
-                  "Humidity" => VariableValue::from(json!(44)),
-                  "ComfortLevel" => VariableValue::from(json!(54))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "RoomName" => VariableValue::from(json!("Room 01_01_01")),
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "FloorName" => VariableValue::from(json!("Floor 01_01")),
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "BuildingName" => VariableValue::from(json!("Building 01")),
+                      "Temperature" => VariableValue::from(json!(72)),
+                      "CO2" => VariableValue::from(json!(500)),
+                      "Humidity" => VariableValue::from(json!(42)),
+                      "ComfortLevel" => VariableValue::from(json!(50))
+                    ),
+                    after: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "RoomName" => VariableValue::from(json!("Room 01_01_01")),
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "FloorName" => VariableValue::from(json!("Floor 01_01")),
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "BuildingName" => VariableValue::from(json!("Building 01")),
+                      "Temperature" => VariableValue::from(json!(74)),
+                      "CO2" => VariableValue::from(json!(500)),
+                      "Humidity" => VariableValue::from(json!(44)),
+                      "ComfortLevel" => VariableValue::from(json!(54))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
         }
     }
 
@@ -355,124 +384,152 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(54.0))
-                ),
-                after: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.0))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(54.0))
+                    ),
+                    after: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.0))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = floor_comfort_level_calc_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-                grouping_keys: vec!["FloorId".into()],
-                default_before: false,
-                default_after: false,
-                before: Some(variablemap!(
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(51.0))
-                )),
-                after: variablemap!(
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.0))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Aggregation {
+                    grouping_keys: vec!["FloorId".into()],
+                    default_before: false,
+                    default_after: false,
+                    before: Some(variablemap!(
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(51.0))
+                    )),
+                    after: variablemap!(
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.0))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = building_comfort_level_calc_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-                grouping_keys: vec!["BuildingId".into()],
-                default_before: false,
-                default_after: false,
-                before: Some(variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.5))
-                )),
-                after: variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.0))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Aggregation {
+                    grouping_keys: vec!["BuildingId".into()],
+                    default_before: false,
+                    default_after: false,
+                    before: Some(variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.5))
+                    )),
+                    after: variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.0))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = room_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Removing {
-                before: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(54))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Removing {
+                    before: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(54))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = floor_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Removing {
-                before: variablemap!(
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "ComfortLevel" => VariableValue::from(json!(51))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Removing {
+                    before: variablemap!(
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "ComfortLevel" => VariableValue::from(json!(51))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = building_comfort_level_alert_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Removing {
-                before: variablemap!(
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "ComfortLevel" => VariableValue::from(json!(50.5))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Removing {
+                    before: variablemap!(
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "ComfortLevel" => VariableValue::from(json!(50.5))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
 
             let result = ui_query
                 .process_source_change(change.clone())
                 .await
                 .unwrap();
             assert_eq!(result.len(), 1);
-            assert!(result.contains(&QueryPartEvaluationContext::Updating {
-                before: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "RoomName" => VariableValue::from(json!("Room 01_01_01")),
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "FloorName" => VariableValue::from(json!("Floor 01_01")),
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "BuildingName" => VariableValue::from(json!("Building 01")),
-                  "ComfortLevel" => VariableValue::from(json!(54)),
-                  "Temperature" => VariableValue::from(json!(74)),
-                  "CO2" => VariableValue::from(json!(500)),
-                  "Humidity" => VariableValue::from(json!(44)),
-                  "ComfortLevel" => VariableValue::from(json!(54))
-                ),
-                after: variablemap!(
-                  "RoomId" => VariableValue::from(json!("room_01_01_01")),
-                  "RoomName" => VariableValue::from(json!("Room 01_01_01")),
-                  "FloorId" => VariableValue::from(json!("floor_01_01")),
-                  "FloorName" => VariableValue::from(json!("Floor 01_01")),
-                  "BuildingId" => VariableValue::from(json!("building_01")),
-                  "BuildingName" => VariableValue::from(json!("Building 01")),
-                  "ComfortLevel" => VariableValue::from(json!(50)),
-                  "Temperature" => VariableValue::from(json!(72)),
-                  "CO2" => VariableValue::from(json!(500)),
-                  "Humidity" => VariableValue::from(json!(42)),
-                  "ComfortLevel" => VariableValue::from(json!(50))
-                ),
-            }));
+            assert!(contains_data(
+                &result,
+                &QueryPartEvaluationContext::Updating {
+                    before: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "RoomName" => VariableValue::from(json!("Room 01_01_01")),
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "FloorName" => VariableValue::from(json!("Floor 01_01")),
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "BuildingName" => VariableValue::from(json!("Building 01")),
+                      "ComfortLevel" => VariableValue::from(json!(54)),
+                      "Temperature" => VariableValue::from(json!(74)),
+                      "CO2" => VariableValue::from(json!(500)),
+                      "Humidity" => VariableValue::from(json!(44)),
+                      "ComfortLevel" => VariableValue::from(json!(54))
+                    ),
+                    after: variablemap!(
+                      "RoomId" => VariableValue::from(json!("room_01_01_01")),
+                      "RoomName" => VariableValue::from(json!("Room 01_01_01")),
+                      "FloorId" => VariableValue::from(json!("floor_01_01")),
+                      "FloorName" => VariableValue::from(json!("Floor 01_01")),
+                      "BuildingId" => VariableValue::from(json!("building_01")),
+                      "BuildingName" => VariableValue::from(json!("Building 01")),
+                      "ComfortLevel" => VariableValue::from(json!(50)),
+                      "Temperature" => VariableValue::from(json!(72)),
+                      "CO2" => VariableValue::from(json!(500)),
+                      "Humidity" => VariableValue::from(json!(42)),
+                      "ComfortLevel" => VariableValue::from(json!(50))
+                    ),
+                    row_signature: IGNORED_ROW_SIGNATURE,
+                }
+            ));
         }
     }
 }

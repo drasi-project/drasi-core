@@ -102,7 +102,7 @@ pub fn get_scenarios(
 ) -> Vec<Box<dyn PerformanceTestScenario>> {
     let mut scenarios: Vec<Box<dyn PerformanceTestScenario>> = Vec::new();
 
-    // TODO: Could do this more cleanly with dyanamic loading of modules.
+    // TODO: Could do this more cleanly with dynamic loading of modules.
     if scenario_filter == "all" || "single_node_property_projection".contains(scenario_filter) {
         scenarios.push(Box::new(SingleNodePropertyProjectionScenario::new(
             iterations, seed,

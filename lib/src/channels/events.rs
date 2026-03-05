@@ -27,7 +27,7 @@ pub trait Timestamped {
 /// Type of Drasi component
 ///
 /// Used for identifying component types in events and monitoring.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentType {
     Source,
     Query,
@@ -162,6 +162,7 @@ pub enum ComponentStatus {
     Running,
     Stopping,
     Stopped,
+    Reconfiguring,
     Error,
 }
 
@@ -183,6 +184,8 @@ pub enum SourceControl {
         rel_labels: Vec<String>,
         operation: ControlOperation,
     },
+    /// Signal from FutureQueueSource that one or more future items are due.
+    FuturesDue,
 }
 
 /// Control operation types
@@ -200,10 +203,6 @@ pub enum SourceEvent {
     Change(SourceChange),
     /// Control event for query coordination
     Control(SourceControl),
-    /// Bootstrap start marker for a specific query
-    BootstrapStart { query_id: String },
-    /// Bootstrap end marker for a specific query
-    BootstrapEnd { query_id: String },
 }
 
 /// Wrapper for source events with metadata

@@ -586,14 +586,12 @@ impl ReplicationStream {
         // Generate element ID (should be the same for both old and new tuples)
         let element_id = self.generate_element_id(relation, &new_tuple).await?;
 
-        // If we don't have old_tuple, treat as INSERT
-        let Some(_old_tuple) = old_tuple else {
-            warn!("UPDATE without old tuple for relation {relation_id}, treating as INSERT");
-            return self.convert_insert(relation_id, new_tuple).await;
-        };
+        if old_tuple.is_none() {
+            warn!("UPDATE without old tuple for relation {relation_id}, preserving UPDATE");
+        }
 
         // Create properties for after state
-        // Note: We validated old_tuple exists to ensure this is a proper UPDATE
+        // Note: We allow UPDATE without old_tuple to avoid converting to INSERT.
         let mut after_properties = drasi_core::models::ElementPropertyMap::new();
 
         // Process new tuple (after state)
@@ -608,10 +606,6 @@ impl ReplicationStream {
                 }
             }
         }
-
-        // Note: SourceChange::Update only needs the after element
-        // The before state is tracked internally by drasi-core
-        // We still process old_tuple to ensure we have the correct element_id
 
         let after_element = Element::Node {
             metadata: ElementMetadata {
@@ -786,4 +780,31 @@ fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let low = u64::from_str_radix(parts[1], 16)?;
 
     Ok((high << 32) | low)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use drasi_core::models::validate_effective_from;
+
+    /// Validates that the timestamp pattern used in convert_insert/convert_update/convert_delete
+    /// produces a value in the millisecond range.
+    #[test]
+    fn effective_from_uses_milliseconds() {
+        let effective_from = Utc::now().timestamp_millis() as u64;
+        assert!(
+            validate_effective_from(effective_from).is_ok(),
+            "Postgres CDC effective_from ({effective_from}) should be in millisecond range"
+        );
+    }
+
+    /// Verifies that using nanoseconds would be caught by the validator.
+    #[test]
+    fn effective_from_rejects_nanoseconds_pattern() {
+        let bad_effective_from = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+        assert!(
+            validate_effective_from(bad_effective_from).is_err(),
+            "Nanosecond timestamp ({bad_effective_from}) should be rejected"
+        );
+    }
 }
