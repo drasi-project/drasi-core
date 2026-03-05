@@ -51,4 +51,4 @@ utoipa = { workspace = true }
 
 [features]
 # default = []
-dynamic-plugin = []
+dynamic-plugin = ["drasi-reaction-http/dynamic-plugin"]
