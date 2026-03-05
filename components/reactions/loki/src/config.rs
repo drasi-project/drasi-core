@@ -12,20 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 
-fn default_endpoint() -> String {
-    "http://localhost:3100".to_string()
-}
-
-fn default_timeout_ms() -> u64 {
-    5000
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BasicAuth {
     pub username: String,
     pub password: String,
@@ -39,35 +30,28 @@ impl std::fmt::Debug for BasicAuth {
             .finish()
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LokiReactionConfig {
-    #[serde(default = "default_endpoint")]
     pub endpoint: String,
-    #[serde(default)]
     pub labels: HashMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub basic_auth: Option<BasicAuth>,
-    #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_template: Option<QueryConfig>,
 }
 
 impl Default for LokiReactionConfig {
     fn default() -> Self {
         Self {
-            endpoint: default_endpoint(),
+            endpoint: "http://localhost:3100".to_string(),
             labels: HashMap::new(),
             tenant_id: None,
             token: None,
             basic_auth: None,
-            timeout_ms: default_timeout_ms(),
+            timeout_ms: 5000,
             routes: HashMap::new(),
             default_template: None,
         }
