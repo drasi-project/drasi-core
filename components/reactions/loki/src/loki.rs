@@ -420,8 +420,6 @@ impl Reaction for LokiReaction {
             )
             .await?;
 
-        self.base.subscribe_to_queries().await?;
-
         self.base
             .set_status_with_event(
                 ComponentStatus::Running,
@@ -585,6 +583,13 @@ impl Reaction for LokiReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }
 
