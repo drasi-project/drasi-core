@@ -17,24 +17,20 @@
 //! These types are defined locally to keep this component independent
 //! and self-contained, without dependencies on other components.
 
-use serde::{Deserialize, Serialize};
-
 /// Table key configuration for MySQL bootstrap
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableKeyConfig {
     pub table: String,
     pub key_columns: Vec<String>,
 }
 
 /// MySQL bootstrap provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MySqlBootstrapConfig {
     /// MySQL host
-    #[serde(default = "default_mysql_host")]
     pub host: String,
 
     /// MySQL port
-    #[serde(default = "default_mysql_port")]
     pub port: u16,
 
     /// Database name
@@ -44,24 +40,13 @@ pub struct MySqlBootstrapConfig {
     pub user: String,
 
     /// Database password
-    #[serde(default)]
     pub password: String,
 
     /// Tables to bootstrap
-    #[serde(default)]
     pub tables: Vec<String>,
 
     /// Table key configurations
-    #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
-}
-
-fn default_mysql_host() -> String {
-    "localhost".to_string()
-}
-
-fn default_mysql_port() -> u16 {
-    3306
 }
 
 pub(crate) fn is_valid_identifier(value: &str) -> bool {
