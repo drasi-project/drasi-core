@@ -32,6 +32,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -95,13 +96,17 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         //println!("Result: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            after: variablemap!("value"=>VariableValue::Float(Float::from(2.0))),
-            before: None,
-            grouping_keys: vec![],
-            default_before: false,
-            default_after: false
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                after: variablemap!("value"=>VariableValue::Float(Float::from(2.0))),
+                before: None,
+                grouping_keys: vec![],
+                default_before: false,
+                default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //create order 2
@@ -124,13 +129,17 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("Result: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            after: variablemap!("value"=>VariableValue::Float(Float::from(3.0))),
-            before: Some(variablemap!("value"=>VariableValue::Float(Float::from(2.0))),),
-            grouping_keys: vec![],
-            default_before: true,
-            default_after: false
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                after: variablemap!("value"=>VariableValue::Float(Float::from(3.0))),
+                before: Some(variablemap!("value"=>VariableValue::Float(Float::from(2.0))),),
+                grouping_keys: vec![],
+                default_before: true,
+                default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -186,16 +195,20 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         //println!("Result: {:?}", result);
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            after: variablemap!(
-                "value"=>VariableValue::Float(Float::from(2.0)),
-                "category"=>VariableValue::from("A")
-            ),
-            before: None,
-            grouping_keys: vec!["category".into()],
-            default_before: false,
-            default_after: false
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                after: variablemap!(
+                    "value"=>VariableValue::Float(Float::from(2.0)),
+                    "category"=>VariableValue::from("A")
+                ),
+                before: None,
+                grouping_keys: vec!["category".into()],
+                default_before: false,
+                default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //create order 2
@@ -219,19 +232,23 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("Result: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Aggregation {
-            after: variablemap!(
-                "value"=>VariableValue::Float(Float::from(3.0)),
-                "category"=>VariableValue::from("A")
-            ),
-            before: Some(variablemap!(
-                "value"=>VariableValue::Float(Float::from(2.0)),
-                "category"=>VariableValue::from("A")
-            )),
-            grouping_keys: vec!["category".into()],
-            default_before: true,
-            default_after: false
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Aggregation {
+                after: variablemap!(
+                    "value"=>VariableValue::Float(Float::from(3.0)),
+                    "category"=>VariableValue::from("A")
+                ),
+                before: Some(variablemap!(
+                    "value"=>VariableValue::Float(Float::from(2.0)),
+                    "category"=>VariableValue::from("A")
+                )),
+                grouping_keys: vec!["category".into()],
+                default_before: true,
+                default_after: false,
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -286,9 +303,13 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
         println!("Result: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!("id"=>VariableValue::from("i1"))
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!("id"=>VariableValue::from("i1")),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //create Comment for Issue 1
@@ -327,8 +348,12 @@ pub async fn truelater_max(config: &(impl QueryTestConfig + Send)) {
         let result = cq.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
         println!("Result: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!("id"=>VariableValue::from("i1"))
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!("id"=>VariableValue::from("i1")),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

@@ -51,13 +51,6 @@ To modify or create agentic workflows, you'll need to:
 
 ## Standard Workflows
 
-### [automerge.yml](automerge.yml)
-- **Purpose**: Automatically merges Renovate dependency update PRs after a waiting period based on the update type (patch vs minor versions).
-- **Triggers**:
-  - Scheduled to run every Wednesday at 12:00 PM Pacific Time (19:00 UTC)
-  - Can be manually triggered via workflow dispatch
-
-
 ### [ci-lint.yml](ci-lint.yml)
 - **Purpose**: Runs linting checks to ensure code quality and adherence to coding standards.
 - **Trigger**: 
@@ -73,6 +66,20 @@ To modify or create agentic workflows, you'll need to:
   - Pushes to `main`.
   - Pull requests targeting `main`.
   - Scheduled weekly (every Sunday at 00:30 UTC).
+
+### [pr-assignment-check.yml](pr-assignment-check.yml)
+- **Purpose**: Ensures external contributors have a linked issue and are assigned to it before submitting a PR. Maintainers (write/admin access) are exempt.
+- **Trigger**: `pull_request_target` on `opened`, `reopened`, or `edited`.
+- **Behavior**:
+  - If no linked issue is found, adds the `needs-issue` label and comments with instructions.
+  - If the author is not assigned to the linked issue, closes the PR with an explanation.
+
+### [pr-first-approval-label.yml](pr-first-approval-label.yml) + [pr-first-approval-label-run.yml](pr-first-approval-label-run.yml)
+- **Purpose**: Manages the `need-2nd-review` label based on PR approval count — adds it on the first approval and removes it once a second approval is received.
+- **Trigger**: `pull_request_review` on `submitted` (approval only).
+- **Design**: Uses a two-stage `workflow_run` pattern because the `pull_request_review` event provides only a read-only `GITHUB_TOKEN` for fork PRs:
+  1. **Stage 1** (`pr-first-approval-label.yml`): Saves the PR number as an artifact.
+  2. **Stage 2** (`pr-first-approval-label-run.yml`): Runs in the base-repo context with write permissions, re-queries reviews from the API, and manages the label.
 
 ### [release-plz.yml](release-plz.yml)
 - **Purpose**: Automates version bumps, changelog generation, and crate publishing using release-plz.

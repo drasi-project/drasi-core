@@ -16,14 +16,14 @@ name: PR Assignment Check
 
 on:
   pull_request_target:
-    types: [opened, reopened]
+    types: [opened, reopened, edited]
 
 jobs:
   check-assignment:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: read
+      issues: write
     steps:
       - name: Check PR has linked issue and author is assigned
         uses: actions/github-script@v7
@@ -35,6 +35,18 @@ jobs:
             const prBody = context.payload.pull_request.body || '';
 
             console.log(`Checking PR #${prNumber} by @${prAuthor}`);
+
+            // Skip check for maintainers (write or admin access)
+            const { data: permData } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner,
+              repo,
+              username: prAuthor,
+            });
+            const permission = permData.permission;
+            if (permission === 'admin' || permission === 'write') {
+              console.log(`@${prAuthor} has '${permission}' access — skipping assignment check`);
+              return;
+            }
 
             // Extract linked issue numbers from PR body
             // Matches: "Fixes #123", "Closes #123", "Resolves #123", "#123", etc.
@@ -51,6 +63,9 @@ jobs:
 
             // Case 1: No linked issue found
             if (uniqueIssues.length === 0) {
+              const prLabels = context.payload.pull_request.labels.map(l => l.name);
+              const alreadyLabeled = prLabels.includes('needs-issue');
+
               await github.rest.issues.addLabels({
                 owner,
                 repo,
@@ -58,11 +73,13 @@ jobs:
                 labels: ['needs-issue']
               });
 
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: prNumber,
-                body: `Hi @${prAuthor}, thanks for your contribution!
+              // Only comment the first time to avoid spamming on repeated edits
+              if (!alreadyLabeled) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: `Hi @${prAuthor}, thanks for your contribution!
 
             This PR doesn't appear to have a linked issue. Per our [contributing guidelines](https://github.com/drasi-project/drasi-core/blob/main/CONTRIBUTING.md#current-status), please:
 
@@ -72,10 +89,13 @@ jobs:
 
             Please update the PR description to link to the relevant issue. If you need help finding an appropriate issue, check our [good first issues](https://github.com/drasi-project/drasi-core/issues?q=is:issue+is:open+label:%22good+first+issue%22).
 
-Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
-              });
+            Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
+                });
+              }
 
-              console.log('Added label and comment for missing linked issue');
+              console.log(alreadyLabeled
+                ? 'PR already labeled needs-issue, skipping duplicate comment'
+                : 'Added label and comment for missing linked issue');
               return;
             }
 
@@ -125,7 +145,7 @@ Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainer
 
             If you believe this was closed in error (e.g., you were assigned but the automation didn't detect it), please let us know.
 
-Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
+            Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
               });
 
               await github.rest.pulls.update({

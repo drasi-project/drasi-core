@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,12 +43,27 @@
 //! ]);
 //! ```
 
+pub mod descriptor;
 pub mod script_file;
 pub mod script_reader;
 pub mod script_types;
 
 pub use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
 pub use script_file::{ScriptFileBootstrapProvider, ScriptFileBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "scriptfile-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::ScriptFileBootstrapDescriptor],
+);
 
 #[cfg(test)]
 mod tests {

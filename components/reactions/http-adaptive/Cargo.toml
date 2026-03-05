@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-http-adaptive"
-version = "0.2.2"
+version = "0.2.6"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP Adaptive reaction plugin for Drasi"
@@ -25,6 +25,9 @@ categories = ["network-programming"]
 
 [lints]
 workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -42,3 +45,10 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+
+
+[features]
+# default = []
+dynamic-plugin = ["drasi-reaction-http/dynamic-plugin"]

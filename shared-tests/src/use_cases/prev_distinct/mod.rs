@@ -28,6 +28,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -98,13 +99,17 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update contract 1 tags
@@ -131,18 +136,22 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag2")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag2")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add contract 2
@@ -193,18 +202,22 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "tags" => VariableValue::from(json!("tag2")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag3")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "tags" => VariableValue::from(json!("tag2")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag3")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update contract 2 with active status
@@ -280,13 +293,17 @@ pub async fn prev_unique(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c2"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c2"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -348,13 +365,17 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update contract 1 tags
@@ -381,18 +402,22 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag2")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag2")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add contract 2
@@ -443,18 +468,22 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
 
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-              "tags" => VariableValue::from(json!("tag2")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag3")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c1"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                  "tags" => VariableValue::from(json!("tag2")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag3")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c1"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //update contract 2 with active status
@@ -530,12 +559,16 @@ pub async fn prev_unique_with_match(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "tags" => VariableValue::from(json!("tag1")),
-              "status" => VariableValue::from(json!("active")),
-              "id" => VariableValue::from(json!("c2"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "tags" => VariableValue::from(json!("tag1")),
+                  "status" => VariableValue::from(json!("active")),
+                  "id" => VariableValue::from(json!("c2"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

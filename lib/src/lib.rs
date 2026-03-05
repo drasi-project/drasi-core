@@ -28,6 +28,9 @@ pub mod state_store;
 /// Error types for drasi-lib
 pub mod error;
 
+/// Identity providers for authentication credentials
+pub mod identity;
+
 // ============================================================================
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
@@ -134,7 +137,7 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use sources::Source;
 
 /// Reaction traits for implementing reaction plugins
-pub use reactions::{QueryProvider, Reaction};
+pub use reactions::Reaction;
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;

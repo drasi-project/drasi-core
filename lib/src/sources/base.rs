@@ -38,6 +38,7 @@ use tracing::Instrument;
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
@@ -160,6 +161,10 @@ pub struct SourceBase {
     pub shutdown_tx: Arc<RwLock<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// Optional bootstrap provider - plugins set this if they support bootstrap
     bootstrap_provider: Arc<RwLock<Option<Arc<dyn BootstrapProvider>>>>,
+    /// Optional identity provider for credential management.
+    /// Set either programmatically (via `set_identity_provider`) or automatically
+    /// from the runtime context during `initialize()`.
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
 }
 
 impl SourceBase {
@@ -205,6 +210,7 @@ impl SourceBase {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
+            identity_provider: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -232,6 +238,14 @@ impl SourceBase {
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
         }
+
+        // Store identity provider from context if not already set programmatically
+        if let Some(ip) = context.identity_provider.as_ref() {
+            let mut guard = self.identity_provider.write().await;
+            if guard.is_none() {
+                *guard = Some(ip.clone());
+            }
+        }
     }
 
     /// Get the runtime context if initialized.
@@ -246,6 +260,24 @@ impl SourceBase {
     /// Returns `None` if no state store was provided in the context.
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>> {
         self.state_store.read().await.clone()
+    }
+
+    /// Get the identity provider if set.
+    ///
+    /// Returns the identity provider set either programmatically via
+    /// `set_identity_provider()` or from the runtime context during `initialize()`.
+    /// Programmatically-set providers take precedence over context providers.
+    pub async fn identity_provider(&self) -> Option<Arc<dyn IdentityProvider>> {
+        self.identity_provider.read().await.clone()
+    }
+
+    /// Set the identity provider programmatically.
+    ///
+    /// This is typically called during source construction when the provider
+    /// is available from configuration (e.g., `with_identity_provider()` builder).
+    /// Providers set this way take precedence over context-injected providers.
+    pub async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(provider);
     }
 
     /// Get the status channel Arc for internal use by spawned tasks
@@ -276,6 +308,7 @@ impl SourceBase {
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),
+            identity_provider: self.identity_provider.clone(),
         }
     }
 
@@ -600,6 +633,29 @@ impl SourceBase {
 
         *self.status.write().await = ComponentStatus::Stopped;
         info!("Source '{}' stopped", self.id);
+        Ok(())
+    }
+
+    /// Clear the source's state store partition.
+    ///
+    /// This is called during deprovision to remove all persisted state
+    /// associated with this source. Sources that override `deprovision()`
+    /// can call this to clean up their state store.
+    pub async fn deprovision_common(&self) -> Result<()> {
+        info!("Deprovisioning source '{}'", self.id);
+        if let Some(store) = self.state_store().await {
+            let count = store.clear_store(&self.id).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to clear state store for source '{}': {}",
+                    self.id,
+                    e
+                )
+            })?;
+            info!(
+                "Cleared {} keys from state store for source '{}'",
+                count, self.id
+            );
+        }
         Ok(())
     }
 

@@ -76,6 +76,12 @@ The main query evaluation logic is in `core/src/evaluation/` which processes con
 - Production: Persistent storage via RocksDB or Redis/Garnet backends
 - Index management in `core/src/in_memory_index/` and separate storage crates
 
+## Plugin Publishing and Signing
+
+- The `publish-plugins` xtask command supports `--sign` for cosign keyless signing of published plugins
+- The CI workflow (`publish-plugins.yml`) signs all published plugins using cosign keyless mode via GitHub Actions OIDC
+- `PluginMetadata` includes `git_commit` and `build_timestamp` fields populated at build time
+
 ## Testing Infrastructure
 - Redis service required for some tests (configured in CI)
 - Performance benchmarks in `query-perf/` crate

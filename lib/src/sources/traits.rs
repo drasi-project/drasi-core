@@ -157,6 +157,20 @@ pub trait Source: Send + Sync {
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
+    /// Permanently clean up internal state when the source is being removed.
+    ///
+    /// This is called when `remove_source(id, cleanup: true)` is used.
+    /// Use this to release external resources that should not persist after
+    /// the source is deleted (e.g., drop a replication slot, remove cursors).
+    ///
+    /// The default implementation is a no-op. Override only if your source
+    /// manages external state that needs explicit teardown.
+    ///
+    /// Errors are logged but do not prevent the source from being removed.
+    async fn deprovision(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Initialize the source with runtime context.
     ///
     /// This method is called automatically by DrasiLib when the source is added
@@ -232,6 +246,10 @@ impl Source for Box<dyn Source + 'static> {
 
     fn as_any(&self) -> &dyn std::any::Any {
         (**self).as_any()
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        (**self).deprovision().await
     }
 
     async fn initialize(&self, context: SourceRuntimeContext) {

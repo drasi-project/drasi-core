@@ -39,21 +39,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
 
-use crate::channels::ComponentStatus;
+use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
-use crate::queries::Query;
-
-/// Trait for providing access to queries without requiring full DrasiLib dependency.
-///
-/// This trait provides a way for reactions to access query instances for subscription
-/// without needing a direct dependency on the server core.
-#[async_trait]
-pub trait QueryProvider: Send + Sync {
-    /// Get a query instance by ID
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
-}
 
 /// Trait defining the interface for all reaction implementations.
 ///
@@ -71,12 +59,10 @@ pub trait QueryProvider: Send + Sync {
 ///
 /// # Subscription Model
 ///
-/// Reactions manage their own subscriptions to queries using the broadcast channel pattern:
-/// - QueryProvider is injected via `inject_query_provider()` at add time
-/// - Reactions access queries via `query_provider.get_query_instance()`
-/// - For each query, reactions call `query.subscribe(reaction_id)`
-/// - Each subscription provides a broadcast receiver for that query's results
-/// - Reactions use a priority queue to process results from multiple queries in timestamp order
+/// Query subscriptions are managed by the host (DrasiLib/ReactionManager).
+/// After `start()` succeeds, the host subscribes to the reaction's configured queries
+/// and forwards results via `enqueue_query_result()`. Reactions should NOT
+/// subscribe to queries themselves.
 ///
 /// # Example Implementation
 ///
@@ -163,7 +149,6 @@ pub trait Reaction: Send + Sync {
     /// - `reaction_id`: The reaction's unique identifier
     /// - `event_tx`: Channel for reporting component lifecycle events
     /// - `state_store`: Optional persistent state storage
-    /// - `query_provider`: Access to query instances for subscription
     ///
     /// Implementation should delegate to `self.base.initialize(context).await`.
     async fn initialize(&self, context: ReactionRuntimeContext);
@@ -171,12 +156,11 @@ pub trait Reaction: Send + Sync {
     /// Start the reaction
     ///
     /// The reaction should:
-    /// 1. Subscribe to all configured queries (using injected QueryProvider)
-    /// 2. Start its processing loop
-    /// 3. Update its status to Running
+    /// 1. Start its processing loop
+    /// 2. Update its status to Running
     ///
-    /// Note: QueryProvider is already available via `inject_query_provider()` which
-    /// is called when the reaction is added to DrasiLib.
+    /// Query subscriptions are managed by the host after start() returns.
+    /// Results are forwarded via `enqueue_query_result()`.
     async fn start(&self) -> Result<()>;
 
     /// Stop the reaction, cleaning up all subscriptions and tasks
@@ -184,6 +168,30 @@ pub trait Reaction: Send + Sync {
 
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
+
+    /// Enqueue a query result for processing.
+    ///
+    /// The host calls this to forward query results to the reaction.
+    /// The default implementation pushes to the reaction's priority queue
+    /// via `ReactionBase`.
+    ///
+    /// Returns `Ok(())` on success, or `Err` if the queue is closed or the
+    /// reaction has stopped accepting results.
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()>;
+
+    /// Permanently clean up internal state when the reaction is being removed.
+    ///
+    /// This is called when `remove_reaction(id, cleanup: true)` is used.
+    /// Use this to release external resources that should not persist after
+    /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
+    ///
+    /// The default implementation is a no-op. Override only if your reaction
+    /// manages external state that needs explicit teardown.
+    ///
+    /// Errors are logged but do not prevent the reaction from being removed.
+    async fn deprovision(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Blanket implementation of Reaction for `Box<dyn Reaction>`
@@ -225,5 +233,13 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn status(&self) -> ComponentStatus {
         (**self).status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        (**self).enqueue_query_result(result).await
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        (**self).deprovision().await
     }
 }
