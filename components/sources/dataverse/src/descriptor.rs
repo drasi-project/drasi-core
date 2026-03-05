@@ -134,9 +134,15 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let environment_url = mapper.resolve_string(&dto.environment_url)?;
-        let tenant_id = mapper.resolve_optional_string(&dto.tenant_id)?.unwrap_or_default();
-        let client_id = mapper.resolve_optional_string(&dto.client_id)?.unwrap_or_default();
-        let client_secret = mapper.resolve_optional_string(&dto.client_secret)?.unwrap_or_default();
+        let tenant_id = mapper
+            .resolve_optional_string(&dto.tenant_id)?
+            .unwrap_or_default();
+        let client_id = mapper
+            .resolve_optional_string(&dto.client_id)?
+            .unwrap_or_default();
+        let client_secret = mapper
+            .resolve_optional_string(&dto.client_secret)?
+            .unwrap_or_default();
         let polling_interval_ms = mapper.resolve_typed(&dto.polling_interval_ms)?;
         let min_interval_ms = mapper.resolve_typed(&dto.min_interval_ms)?;
         let max_interval_seconds = mapper.resolve_typed(&dto.max_interval_seconds)?;
