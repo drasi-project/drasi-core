@@ -55,10 +55,20 @@ async fn wait_for_query_results(
     let start = Instant::now();
     let timeout = Duration::from_secs(20);
     loop {
-        let results = core.get_query_results(query_id).await?;
-        if predicate(&results) {
-            return Ok(());
+        // Try to get results, but don't fail if query isn't running yet
+        // (it might still be completing bootstrap)
+        match core.get_query_results(query_id).await {
+            Ok(results) => {
+                if predicate(&results) {
+                    return Ok(());
+                }
+            }
+            Err(e) if e.to_string().contains("is not running") => {
+                // Query isn't running yet, keep waiting
+            }
+            Err(e) => return Err(e.into()),
         }
+
         if start.elapsed() > timeout {
             anyhow::bail!("Timed out waiting for query results for query_id `{query_id}`")
         }
