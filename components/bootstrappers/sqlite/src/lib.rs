@@ -26,13 +26,12 @@ use log::{info, warn};
 use ordered_float::OrderedFloat;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub mod descriptor;
 
 /// Per-table key configuration for stable element IDs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableKeyConfig {
     pub table: String,
     pub key_columns: Vec<String>,
