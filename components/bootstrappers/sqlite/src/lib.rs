@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 use anyhow::Result;
 use async_trait::async_trait;
 use base64::Engine;
@@ -26,6 +28,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+pub mod descriptor;
 
 /// Per-table key configuration for stable element IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,3 +292,15 @@ fn value_to_id_fragment(value: &ElementValue) -> String {
 fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "sqlite-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::SqliteBootstrapDescriptor],
+);
