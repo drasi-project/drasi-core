@@ -77,10 +77,7 @@ pub struct MySqlBootstrapConfigDto {
 // ── Descriptor ───────────────────────────────────────────────────────────────
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(
-    MySqlBootstrapConfigDto,
-    MySqlTableKeyConfigDto,
-)))]
+#[openapi(components(schemas(MySqlBootstrapConfigDto, MySqlTableKeyConfigDto,)))]
 struct MySqlBootstrapSchemas;
 
 /// Plugin descriptor for the MySQL bootstrap provider.

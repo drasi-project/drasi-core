@@ -17,15 +17,12 @@
 //! This source monitors MySQL databases using binlog replication to stream
 //! data changes as they occur.
 
-use serde::{Deserialize, Serialize};
-
 // =============================================================================
 // SSL Configuration
 // =============================================================================
 
 /// SSL mode for MySQL connections
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
     /// Disable SSL encryption (required by mysql_cdc runtime)
     Disabled,
@@ -50,15 +47,14 @@ impl Default for SslMode {
 // =============================================================================
 
 /// Table key configuration for MySQL sources
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableKeyConfig {
     pub table: String,
     pub key_columns: Vec<String>,
 }
 
 /// Where to start the binlog replication stream
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StartPosition {
     FromStart,
     FromEnd,
@@ -73,14 +69,12 @@ impl Default for StartPosition {
 }
 
 /// MySQL replication source configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MySqlSourceConfig {
     /// MySQL host
-    #[serde(default = "default_mysql_host")]
     pub host: String,
 
     /// MySQL port
-    #[serde(default = "default_mysql_port")]
     pub port: u16,
 
     /// Database name
@@ -90,48 +84,25 @@ pub struct MySqlSourceConfig {
     pub user: String,
 
     /// Database password
-    #[serde(default)]
     pub password: String,
 
     /// Tables to replicate
-    #[serde(default)]
     pub tables: Vec<String>,
 
     /// SSL mode
-    #[serde(default)]
     pub ssl_mode: SslMode,
 
     /// Table key configurations
-    #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
 
     /// Starting position
-    #[serde(default)]
     pub start_position: StartPosition,
 
     /// Replication server ID
-    #[serde(default = "default_server_id")]
     pub server_id: u32,
 
     /// Heartbeat interval in seconds
-    #[serde(default = "default_heartbeat_seconds")]
     pub heartbeat_interval_seconds: u64,
-}
-
-fn default_mysql_host() -> String {
-    "localhost".to_string()
-}
-
-fn default_mysql_port() -> u16 {
-    3306
-}
-
-fn default_server_id() -> u32 {
-    65535
-}
-
-fn default_heartbeat_seconds() -> u64 {
-    30
 }
 
 impl MySqlSourceConfig {

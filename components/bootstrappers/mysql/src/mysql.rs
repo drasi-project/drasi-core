@@ -189,6 +189,8 @@ impl MySqlBootstrapHandler {
                 if keys.contains(&col_name) {
                     key_parts.push(format_value_for_key(&value));
                 }
+            } else if col_name.eq_ignore_ascii_case("id") {
+                key_parts.push(format_value_for_key(&value));
             }
 
             properties.insert(&col_name, value);

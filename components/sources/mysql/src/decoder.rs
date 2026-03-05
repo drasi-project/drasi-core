@@ -73,16 +73,13 @@ impl MySqlDecoder {
         table: &TableMapEvent,
         cells: &[Option<MySqlValue>],
     ) -> Result<(Element, ElementMetadata)> {
-        let table_name = if table.database_name.is_empty() {
-            table.table_name.clone()
-        } else {
-            format!("{}.{}", table.database_name, table.table_name)
-        };
+        // Use bare table name for element IDs (no database prefix) to match bootstrap.
+        let table_name = &table.table_name;
         let label = table.table_name.clone();
 
         let mut properties = ElementPropertyMap::new();
         let mut key_parts: Vec<String> = Vec::new();
-        let configured_keys = self.table_keys.get(&table_name);
+        let configured_keys = self.table_keys.get(table_name.as_str());
         let column_names = self.extract_column_names(table);
 
         let fallback_key = if configured_keys.is_none() && !column_names.is_empty() {
@@ -128,11 +125,6 @@ impl MySqlDecoder {
             format!("{}:{}", table_name, uuid::Uuid::new_v4())
         };
 
-        properties.insert(
-            "_element_id",
-            ElementValue::String(Arc::from(element_id.as_str())),
-        );
-
         let metadata = ElementMetadata {
             reference: ElementReference::new(&self.source_id, &element_id),
             labels: Arc::from(vec![Arc::from(label)]),
@@ -175,8 +167,8 @@ fn mysql_value_to_element_value(value: &MySqlValue) -> ElementValue {
         MySqlValue::Bit(v) => {
             ElementValue::List(v.iter().map(|b| ElementValue::Bool(*b)).collect::<Vec<_>>())
         }
-        MySqlValue::Enum(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::Set(v) => ElementValue::Integer(*v as i64),
+        MySqlValue::Enum(v) => ElementValue::String(Arc::from(v.to_string())),
+        MySqlValue::Set(v) => ElementValue::String(Arc::from(v.to_string())),
         MySqlValue::Blob(v) => {
             let encoded = base64::engine::general_purpose::STANDARD.encode(v);
             ElementValue::String(Arc::from(encoded.as_str()))
@@ -194,7 +186,15 @@ fn mysql_value_to_element_value(value: &MySqlValue) -> ElementValue {
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
             dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.millis
         ))),
-        MySqlValue::Timestamp(ts) => ElementValue::Integer(*ts as i64),
+        MySqlValue::Timestamp(ts) => {
+            let secs = *ts as i64;
+            match chrono::DateTime::from_timestamp(secs, 0) {
+                Some(dt) => {
+                    ElementValue::String(Arc::from(dt.format("%Y-%m-%d %H:%M:%S.000").to_string()))
+                }
+                None => ElementValue::Integer(secs),
+            }
+        }
     }
 }
 

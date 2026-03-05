@@ -14,6 +14,8 @@
 
 //! Binlog replication stream for MySQL sources.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc as StdArc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -26,9 +28,7 @@ use mysql_cdc::replica_options::ReplicaOptions;
 use mysql_cdc::ssl_mode::SslMode as MySqlCdcSslMode;
 
 use drasi_core::models::SourceChange;
-use drasi_lib::channels::{
-    ComponentEvent, ComponentStatus, ComponentType, SourceEvent, SourceEventWrapper,
-};
+use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::SourceBase;
 
 use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
@@ -47,10 +47,20 @@ pub struct ReplicationStream {
     current_binlog_file: String,
     current_binlog_position: u32,
     current_gtid: Option<String>,
+    shutdown: StdArc<AtomicBool>,
 }
 
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+const INITIAL_RECONNECT_DELAY_SECS: u64 = 5;
+const MAX_RECONNECT_DELAY_SECS: u64 = 60;
+
 impl ReplicationStream {
-    pub fn new(config: MySqlSourceConfig, source_id: String, base: SourceBase) -> Self {
+    pub fn new(
+        config: MySqlSourceConfig,
+        source_id: String,
+        base: SourceBase,
+        shutdown: StdArc<AtomicBool>,
+    ) -> Self {
         let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
         Self {
             config,
@@ -62,6 +72,7 @@ impl ReplicationStream {
             current_binlog_file: String::new(),
             current_binlog_position: 0,
             current_gtid: None,
+            shutdown,
         }
     }
 
@@ -69,39 +80,81 @@ impl ReplicationStream {
         info!("Starting MySQL replication for source {}", self.source_id);
 
         let state_store = self.base.state_store().await;
-        let start_position = self.load_start_position(state_store.as_deref()).await?;
+        let mut attempts = 0u32;
 
-        let options = self.build_replica_options(start_position)?;
+        loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                info!("Shutdown requested for source {}", self.source_id);
+                return Ok(());
+            }
 
+            let start_position = self.load_start_position(state_store.as_deref()).await?;
+            let options = self.build_replica_options(start_position)?;
+
+            match self
+                .run_replication_loop(options, state_store.as_deref())
+                .await
+            {
+                Ok(()) => {
+                    // Graceful shutdown
+                    return Ok(());
+                }
+                Err(e) => {
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        info!("Shutdown during replication for source {}", self.source_id);
+                        return Ok(());
+                    }
+
+                    attempts += 1;
+                    if attempts > MAX_RECONNECT_ATTEMPTS {
+                        error!(
+                            "Replication failed after {MAX_RECONNECT_ATTEMPTS} reconnect attempts \
+                             for source {}: {e}",
+                            self.source_id
+                        );
+                        return Err(anyhow!(
+                            "Replication failed after {MAX_RECONNECT_ATTEMPTS} attempts: {e}"
+                        ));
+                    }
+
+                    let delay = std::cmp::min(
+                        INITIAL_RECONNECT_DELAY_SECS * 2u64.saturating_pow(attempts - 1),
+                        MAX_RECONNECT_DELAY_SECS,
+                    );
+                    warn!(
+                        "Replication connection lost for source {} (attempt {attempts}/{MAX_RECONNECT_ATTEMPTS}), \
+                         reconnecting in {delay}s: {e}",
+                        self.source_id
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                }
+            }
+        }
+    }
+
+    async fn run_replication_loop(
+        &mut self,
+        options: ReplicaOptions,
+        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
+    ) -> Result<()> {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1000);
         let source_id = self.source_id.clone();
-        let status_tx = self.base.status_tx();
-        let status = self.base.status.clone();
+        let shutdown = self.shutdown.clone();
 
         tokio::task::spawn_blocking(move || {
             let mut client = BinlogClient::new(options);
             let events = match client.replicate() {
                 Ok(events) => events,
                 Err(e) => {
-                    if let Ok(mut status) = status.try_write() {
-                        *status = ComponentStatus::Error;
-                    }
-                    if let Ok(status_guard) = status_tx.try_read() {
-                        if let Some(tx) = status_guard.as_ref() {
-                            let _ = tx.try_send(ComponentEvent {
-                                component_id: source_id.clone(),
-                                component_type: ComponentType::Source,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!("Replication failed: {e:?}")),
-                            });
-                        }
-                    }
+                    error!("Failed to start binlog replication for {source_id}: {e:?}");
                     return;
                 }
             };
 
             for result in events {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
                 match result {
                     Ok((header, event)) => {
                         client.commit(&header, &event);
@@ -118,21 +171,24 @@ impl ReplicationStream {
         });
 
         while let Some((header, event)) = event_rx.recv().await {
-            if let Err(e) = self.process_event(&header, &event).await {
+            if let Err(e) = self.process_event(&header, &event, state_store).await {
                 error!("Error processing binlog event: {e:?}");
-            }
-
-            if let Some(state_store) = state_store.as_deref() {
-                if let Err(e) = self.persist_state(state_store, &header).await {
-                    warn!("Failed to persist replication state: {e:?}");
-                }
             }
         }
 
-        Ok(())
+        if self.shutdown.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(anyhow!("Binlog replication channel closed unexpectedly"))
+        }
     }
 
-    async fn process_event(&mut self, header: &EventHeader, event: &BinlogEvent) -> Result<()> {
+    async fn process_event(
+        &mut self,
+        header: &EventHeader,
+        event: &BinlogEvent,
+        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
+    ) -> Result<()> {
         match event {
             BinlogEvent::TableMapEvent(table_event) => {
                 self.table_mapping.update(table_event.clone());
@@ -205,13 +261,13 @@ impl ReplicationStream {
                 }
             }
             BinlogEvent::XidEvent(_) => {
-                self.flush_transaction().await?;
+                self.flush_transaction(state_store, header).await?;
             }
             BinlogEvent::QueryEvent(query_event) => {
                 if query_event.sql_statement.eq_ignore_ascii_case("COMMIT")
                     || query_event.sql_statement.eq_ignore_ascii_case("ROLLBACK")
                 {
-                    self.flush_transaction().await?;
+                    self.flush_transaction(state_store, header).await?;
                 }
             }
             _ => {
@@ -243,7 +299,11 @@ impl ReplicationStream {
             .await
     }
 
-    async fn flush_transaction(&mut self) -> Result<()> {
+    async fn flush_transaction(
+        &mut self,
+        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
+        header: &EventHeader,
+    ) -> Result<()> {
         if let Some(changes) = self.pending_changes.take() {
             for change in changes {
                 let wrapper = SourceEventWrapper::new(
@@ -259,6 +319,13 @@ impl ReplicationStream {
                 .await?;
             }
         }
+
+        if let Some(store) = state_store {
+            if let Err(e) = self.persist_state(store, header).await {
+                warn!("Failed to persist replication state: {e:?}");
+            }
+        }
+
         Ok(())
     }
 
