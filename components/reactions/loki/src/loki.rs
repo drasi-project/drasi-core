@@ -585,10 +585,7 @@ impl Reaction for LokiReaction {
         self.base.get_status().await
     }
 
-    async fn enqueue_query_result(
-        &self,
-        result: drasi_lib::channels::QueryResult,
-    ) -> Result<()> {
+    async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
         self.base.enqueue_query_result(result).await
     }
 }
