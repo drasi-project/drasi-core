@@ -28,6 +28,8 @@ mod types;
 pub use config::{MySqlSourceConfig, SslMode, StartPosition, TableKeyConfig};
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc as StdArc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -44,6 +46,7 @@ use crate::stream::ReplicationStream;
 pub struct MySqlReplicationSource {
     base: SourceBase,
     config: MySqlSourceConfig,
+    shutdown: StdArc<AtomicBool>,
 }
 
 impl MySqlReplicationSource {
@@ -53,6 +56,7 @@ impl MySqlReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            shutdown: StdArc::new(AtomicBool::new(false)),
         })
     }
 
@@ -73,6 +77,7 @@ impl MySqlReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            shutdown: StdArc::new(AtomicBool::new(false)),
         })
     }
 
@@ -136,6 +141,7 @@ impl Source for MySqlReplicationSource {
         }
 
         self.base.set_status(ComponentStatus::Starting).await;
+        self.shutdown.store(false, Ordering::Relaxed);
         info!("Starting MySQL replication source: {}", self.base.id);
 
         let config = self.config.clone();
@@ -143,6 +149,7 @@ impl Source for MySqlReplicationSource {
         let base = self.base.clone_shared();
         let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
+        let shutdown = self.shutdown.clone();
 
         let instance_id = self
             .base
@@ -161,7 +168,7 @@ impl Source for MySqlReplicationSource {
 
         let task = tokio::spawn(
             async move {
-                let mut stream = ReplicationStream::new(config, source_id.clone(), base);
+                let mut stream = ReplicationStream::new(config, source_id.clone(), base, shutdown);
                 if let Err(e) = stream.run().await {
                     error!("Replication task failed for {source_id}: {e}");
                     *status_clone.write().await = ComponentStatus::Error;
@@ -202,6 +209,7 @@ impl Source for MySqlReplicationSource {
         info!("Stopping MySQL replication source: {}", self.base.id);
 
         self.base.set_status(ComponentStatus::Stopping).await;
+        self.shutdown.store(true, Ordering::Relaxed);
 
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
@@ -403,6 +411,7 @@ impl MySqlSourceBuilder {
         Ok(MySqlReplicationSource {
             base: SourceBase::new(params)?,
             config,
+            shutdown: StdArc::new(AtomicBool::new(false)),
         })
     }
 }
