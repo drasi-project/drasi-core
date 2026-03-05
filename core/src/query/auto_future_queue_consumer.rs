@@ -13,23 +13,19 @@
 // limitations under the License.
 
 use std::{
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::AtomicU64, Arc, Weak},
     time::{Duration, SystemTime},
 };
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::{
-    evaluation::context::QueryPartEvaluationContext,
-    interface::{FutureElementRef, FutureQueueConsumer},
-    models::SourceChange,
-};
+use crate::{evaluation::context::QueryPartEvaluationContext, interface::FutureQueueConsumer};
 
 use super::ContinuousQuery;
 
 pub struct AutoFutureQueueConsumer {
-    continuous_query: Arc<ContinuousQuery>,
+    continuous_query: Weak<ContinuousQuery>,
     channel_tx: mpsc::UnboundedSender<Vec<QueryPartEvaluationContext>>,
     channel_rx: Mutex<mpsc::UnboundedReceiver<Vec<QueryPartEvaluationContext>>>,
     now_override: Option<Arc<AtomicU64>>,
@@ -40,7 +36,7 @@ impl AutoFutureQueueConsumer {
         let (channel_tx, channel_rx) = mpsc::unbounded_channel();
 
         AutoFutureQueueConsumer {
-            continuous_query,
+            continuous_query: Arc::downgrade(&continuous_query),
             channel_tx,
             channel_rx: Mutex::new(channel_rx),
             now_override: None,
@@ -64,30 +60,22 @@ impl AutoFutureQueueConsumer {
 
 #[async_trait]
 impl FutureQueueConsumer for AutoFutureQueueConsumer {
-    async fn on_due(
-        &self,
-        future_ref: &FutureElementRef,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let change = SourceChange::Future {
-            future_ref: future_ref.clone(),
-        };
+    async fn on_items_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cq = self
+            .continuous_query
+            .upgrade()
+            .ok_or("ContinuousQuery has been dropped")?;
 
-        let result = self.continuous_query.process_source_change(change).await?;
-        if !result.is_empty() {
-            self.channel_tx.send(result)?;
+        if let Some(due_result) = cq.process_due_futures().await? {
+            if !due_result.results.is_empty() {
+                self.channel_tx.send(due_result.results)?;
+            }
         }
         Ok(())
     }
-    async fn on_error(
-        &self,
-        future_ref: &FutureElementRef,
-        error: Box<dyn std::error::Error + Send + Sync>,
-    ) {
-        log::error!(
-            "Error processing {} off future queue: {:?}",
-            future_ref.element_ref,
-            error
-        );
+
+    async fn on_error(&self, error: Box<dyn std::error::Error + Send + Sync>) {
+        log::error!("Error processing future queue item: {error:?}");
     }
 
     fn now(&self) -> u64 {
@@ -97,7 +85,7 @@ impl FutureQueueConsumer for AutoFutureQueueConsumer {
 
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs()
             * 1000
     }

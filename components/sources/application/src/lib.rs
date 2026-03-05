@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -151,7 +152,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ComponentType, *};
+use drasi_lib::channels::{ComponentStatus, ComponentType, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;

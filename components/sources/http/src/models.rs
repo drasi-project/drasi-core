@@ -364,4 +364,53 @@ mod tests {
             _ => panic!("Expected Delete operation"),
         }
     }
+
+    /// Validates that HTTP source converts nanosecond wire timestamps to
+    /// milliseconds when constructing SourceChange elements.
+    #[test]
+    fn test_effective_from_converts_nanos_to_millis() {
+        use drasi_core::models::validate_effective_from;
+
+        // Simulate a nanosecond timestamp on the wire (Feb 2026)
+        let nanos_on_wire: u64 = 1_771_000_000_000_000_000;
+        let json = format!(
+            r#"{{ "operation": "insert", "element": {{ "type": "node", "id": "n1", "labels": ["Test"], "properties": {{}} }}, "timestamp": {nanos_on_wire} }}"#
+        );
+
+        let http_change: HttpSourceChange = serde_json::from_str(&json).unwrap();
+        let source_change = convert_http_to_source_change(&http_change, "test-src").unwrap();
+
+        match source_change {
+            drasi_core::models::SourceChange::Insert { element } => {
+                let ef = element.get_effective_from();
+                assert!(
+                    validate_effective_from(ef).is_ok(),
+                    "HTTP effective_from ({ef}) should be in millisecond range after conversion from nanos"
+                );
+            }
+            _ => panic!("Expected Insert"),
+        }
+    }
+
+    /// Validates that HTTP source auto-generates a valid millisecond timestamp
+    /// when no timestamp is provided on the wire.
+    #[test]
+    fn test_effective_from_auto_generated_is_millis() {
+        use drasi_core::models::validate_effective_from;
+
+        let json = r#"{ "operation": "insert", "element": { "type": "node", "id": "n1", "labels": ["Test"], "properties": {} } }"#;
+        let http_change: HttpSourceChange = serde_json::from_str(json).unwrap();
+        let source_change = convert_http_to_source_change(&http_change, "test-src").unwrap();
+
+        match source_change {
+            drasi_core::models::SourceChange::Insert { element } => {
+                let ef = element.get_effective_from();
+                assert!(
+                    validate_effective_from(ef).is_ok(),
+                    "HTTP auto-generated effective_from ({ef}) should be in millisecond range"
+                );
+            }
+            _ => panic!("Expected Insert"),
+        }
+    }
 }

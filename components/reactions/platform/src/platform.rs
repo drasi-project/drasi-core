@@ -60,10 +60,10 @@ use crate::types::{CloudEvent, CloudEventConfig, ControlSignal, ResultControlEve
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 use publisher::{PublisherConfig, RedisStreamPublisher};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -281,10 +281,6 @@ impl Reaction for PlatformReaction {
         if let Err(e) = self.emit_control_event(ControlSignal::Running).await {
             log::warn!("Failed to emit Running control event: {e}");
         }
-
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base
@@ -522,5 +518,12 @@ impl Reaction for PlatformReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }

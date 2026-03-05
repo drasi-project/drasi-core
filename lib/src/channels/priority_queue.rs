@@ -252,6 +252,10 @@ where
     /// In broadcast mode, use the non-blocking `enqueue()` method instead.
     pub async fn enqueue_wait(&self, event: Arc<T>) {
         loop {
+            // Register notified future BEFORE acquiring lock to avoid race
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+
             let mut heap = self.heap.lock().await;
 
             // Check if there's capacity
@@ -306,10 +310,11 @@ where
             }
 
             // Drop lock and wait for notification
+            notified.as_mut().enable();
             drop(heap);
 
             // Wait for dequeue to create space
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -338,7 +343,12 @@ where
     /// Dequeue the oldest event, waiting if the queue is empty
     pub async fn dequeue(&self) -> Arc<T> {
         loop {
-            // Try to dequeue
+            // Register the Notified future BEFORE checking the heap.
+            // This avoids a race where an enqueue + notify_one() happens
+            // between dropping the lock and calling notified().await.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+
             let mut heap = self.heap.lock().await;
             if let Some(pq_event) = heap.pop() {
                 let event = pq_event.event;
@@ -355,10 +365,13 @@ where
 
                 return event;
             }
+
+            // Enable the notified future while still holding the lock,
+            // ensuring no notification is missed between lock release and await.
+            notified.as_mut().enable();
             drop(heap);
 
-            // Wait for notification
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
