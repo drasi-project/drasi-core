@@ -71,8 +71,10 @@ impl AzureIdentityProvider {
         identity_name: impl Into<String>,
         client_id: impl Into<String>,
     ) -> Result<Self> {
-        let mut options = ManagedIdentityCredentialOptions::default();
-        options.user_assigned_id = Some(UserAssignedId::ClientId(client_id.into()));
+        let options = ManagedIdentityCredentialOptions {
+            user_assigned_id: Some(UserAssignedId::ClientId(client_id.into())),
+            ..Default::default()
+        };
         let credential = ManagedIdentityCredential::new(Some(options))
             .map_err(|e| anyhow!("Failed to create managed identity credential: {e}"))?;
 
@@ -317,6 +319,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 mod integration_tests {
     use super::*;
 

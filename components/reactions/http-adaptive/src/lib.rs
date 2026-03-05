@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,6 +34,7 @@
 
 mod adaptive_batcher;
 pub mod config;
+pub mod descriptor;
 pub mod http_adaptive;
 
 pub use config::HttpAdaptiveReactionConfig;
@@ -219,3 +221,17 @@ mod tests {
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "http-adaptive-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::HttpAdaptiveReactionDescriptor],
+    bootstrap_descriptors = [],
+);

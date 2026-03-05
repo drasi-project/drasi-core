@@ -185,7 +185,7 @@ async fn test_default_template_applies_to_all_queries() {
         retry_attempts: 3,
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test that default template is used for query1
@@ -302,7 +302,7 @@ async fn test_route_overrides_default_template() {
         retry_attempts: 3,
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Execute with route-specific template
@@ -469,7 +469,7 @@ async fn test_multiple_queries_with_different_routes() {
         retry_attempts: 3,
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Execute normal query (uses default)
@@ -651,7 +651,7 @@ async fn test_executor_with_various_data_types() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test with various data types using ParameterParser
@@ -764,7 +764,7 @@ async fn test_executor_with_string_numbers() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     // Test with string that looks like a number (simulating MockSource behavior)
     let params = vec![json!("25.789")];
@@ -914,7 +914,7 @@ async fn test_parser_and_executor_with_nested_parameters() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
     let parser = ParameterParser::new();
 
     // Test ADD operation with @after.field syntax
@@ -1143,7 +1143,7 @@ async fn test_parser_with_deeply_nested_fields() {
         ..Default::default()
     };
 
-    let executor = MySqlExecutor::new(&config).await.unwrap();
+    let executor = MySqlExecutor::new(&config, None).await.unwrap();
 
     executor
         .execute_procedure(&proc_name, params)

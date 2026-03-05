@@ -21,7 +21,7 @@ use crate::channels::*;
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
-use crate::managers::ComponentLogRegistry;
+use crate::managers::{ComponentEventHistory, ComponentLogRegistry};
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -308,11 +308,10 @@ impl DrasiLib {
 
         info!("Initializing Drasi Server Core");
 
-        // Inject QueryProvider into ReactionManager
-        // This allows reactions to access queries when they start
-        let query_provider: Arc<dyn crate::reactions::QueryProvider> = self.as_arc();
+        // Inject QueryManager into ReactionManager
+        // This allows the host to subscribe reactions to query results
         self.reaction_manager
-            .inject_query_provider(query_provider)
+            .inject_query_manager(Arc::clone(&self.query_manager))
             .await;
 
         // Inject StateStoreProvider into SourceManager and ReactionManager
@@ -488,6 +487,32 @@ impl DrasiLib {
         Arc::clone(&self.middleware_registry)
     }
 
+    /// Get access to the component log registry.
+    ///
+    /// The log registry captures structured log messages from components and
+    /// supports live streaming via subscriptions. This is used by the REST API
+    /// to serve log streams and by dynamic plugin loading to wire plugin logs
+    /// into the same registry as statically-linked components.
+    pub fn log_registry(&self) -> Arc<ComponentLogRegistry> {
+        Arc::clone(&self.log_registry)
+    }
+
+    /// Get access to the source event history.
+    ///
+    /// Contains lifecycle events (starting, running, stopped, error) for sources.
+    /// Used by the REST API to report source status and by dynamic plugin loading
+    /// to wire plugin lifecycle events into the same history.
+    pub fn source_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
+        self.source_manager.event_history()
+    }
+
+    /// Get access to the reaction event history.
+    ///
+    /// Contains lifecycle events (starting, running, stopped, error) for reactions.
+    pub fn reaction_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
+        self.reaction_manager.event_history()
+    }
+
     // ============================================================================
     // Configuration Snapshot
     // ============================================================================
@@ -612,22 +637,6 @@ impl DrasiLib {
     /// ```
     pub fn get_config(&self) -> &RuntimeConfig {
         &self.config
-    }
-}
-
-// ============================================================================
-// QueryProvider Trait Implementation
-// ============================================================================
-
-// Implement QueryProvider trait for DrasiLib
-// This breaks the circular dependency by providing a minimal interface for reactions
-#[async_trait::async_trait]
-impl crate::reactions::QueryProvider for DrasiLib {
-    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn crate::queries::Query>> {
-        self.query_manager
-            .get_query_instance(id)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 

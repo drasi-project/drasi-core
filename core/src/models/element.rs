@@ -45,6 +45,53 @@ impl Display for ElementReference {
 /// Timestamp type used for elements, measured in milliseconds since UNIX epoch.
 pub type ElementTimestamp = u64;
 
+/// Maximum plausible `effective_from` value in milliseconds.
+///
+/// Corresponds to approximately year 2286. Any value above this threshold
+/// is almost certainly in the wrong unit (e.g., nanoseconds or microseconds
+/// instead of milliseconds).
+///
+/// A nanosecond-scale timestamp from the current era is ~10^18, which exceeds
+/// this threshold by 5 orders of magnitude—making the check extremely reliable
+/// with zero false positives for any date before year 2286.
+pub const MAX_REASONABLE_MILLIS_TIMESTAMP: u64 = 10_000_000_000_000;
+
+/// Validates that an `ElementTimestamp` value is in the expected millisecond range.
+///
+/// Returns `Ok(())` if the value is zero (used by bootstrap providers for "unknown")
+/// or falls below [`MAX_REASONABLE_MILLIS_TIMESTAMP`].
+///
+/// Returns `Err` with a descriptive message if the value appears to be in the wrong
+/// unit (e.g., nanoseconds instead of milliseconds).
+///
+/// # Examples
+/// ```
+/// use drasi_core::models::element::validate_effective_from;
+///
+/// // Valid millisecond timestamp (Feb 2026)
+/// assert!(validate_effective_from(1_771_000_000_000).is_ok());
+///
+/// // Zero is allowed (bootstrap "unknown" sentinel)
+/// assert!(validate_effective_from(0).is_ok());
+///
+/// // Nanosecond timestamp is rejected
+/// assert!(validate_effective_from(1_771_000_000_000_000_000).is_err());
+/// ```
+pub fn validate_effective_from(value: ElementTimestamp) -> Result<(), String> {
+    if value == 0 {
+        return Ok(());
+    }
+    if value > MAX_REASONABLE_MILLIS_TIMESTAMP {
+        return Err(format!(
+            "effective_from value {} ({:.2e}) appears to be in nanoseconds or microseconds, \
+             not milliseconds. Expected a value < {} (~year 2286). \
+             Use timestamp_millis() instead of timestamp_nanos_opt().",
+            value, value as f64, MAX_REASONABLE_MILLIS_TIMESTAMP
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ElementMetadata {
     pub reference: ElementReference,
@@ -207,5 +254,52 @@ impl From<&Element> for serde_json::Value {
                 serde_json::Value::Object(properties)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_effective_from_accepts_zero() {
+        assert!(validate_effective_from(0).is_ok());
+    }
+
+    #[test]
+    fn validate_effective_from_accepts_valid_millis() {
+        // Feb 2026 in milliseconds
+        assert!(validate_effective_from(1_771_000_000_000).is_ok());
+        // Jan 2000 in milliseconds
+        assert!(validate_effective_from(946_684_800_000).is_ok());
+        // Year 2100 in milliseconds
+        assert!(validate_effective_from(4_102_444_800_000).is_ok());
+    }
+
+    #[test]
+    fn validate_effective_from_rejects_nanoseconds() {
+        // Feb 2026 in nanoseconds (~1.77 × 10^18)
+        let nanos = 1_771_000_000_000_000_000u64;
+        let result = validate_effective_from(nanos);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nanoseconds"));
+    }
+
+    #[test]
+    fn validate_effective_from_rejects_microseconds() {
+        // Feb 2026 in microseconds (~1.77 × 10^15)
+        let micros = 1_771_000_000_000_000u64;
+        let result = validate_effective_from(micros);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_effective_from_accepts_boundary_value() {
+        // Just under the threshold (year ~2286)
+        assert!(validate_effective_from(MAX_REASONABLE_MILLIS_TIMESTAMP - 1).is_ok());
+        // At the threshold
+        assert!(validate_effective_from(MAX_REASONABLE_MILLIS_TIMESTAMP).is_ok());
+        // Just over the threshold
+        assert!(validate_effective_from(MAX_REASONABLE_MILLIS_TIMESTAMP + 1).is_err());
     }
 }

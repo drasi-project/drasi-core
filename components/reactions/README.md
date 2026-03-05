@@ -17,6 +17,7 @@ This guide explains how to create custom reaction plugins for Drasi. Reactions a
 - [Key Files Reference](#key-files-reference)
 - [Implementation Checklist](#implementation-checklist)
 - [Best Practices](#best-practices)
+- [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)
 - [Additional Resources](#additional-resources)
 
 ## Overview
@@ -870,6 +871,9 @@ When creating a new reaction plugin:
 - [ ] Add unit tests
 - [ ] Add integration tests
 - [ ] Document configuration options
+- [ ] Add `cdylib` crate type and plugin SDK dependencies to `Cargo.toml`
+- [ ] Create `descriptor.rs` with configuration DTOs and `ReactionPluginDescriptor` impl
+- [ ] Invoke `export_plugin!` macro in `lib.rs`
 
 ## Best Practices
 
@@ -1049,6 +1053,153 @@ let batcher = AdaptiveBatcher::new(batcher_config);
 ```
 
 See `http-adaptive/` and `grpc-adaptive/` for examples.
+
+## Packaging as a Dynamic Plugin
+
+Reactions can be compiled as `cdylib` shared libraries and loaded at runtime by the Drasi server. The log reaction (`log/`) is the canonical reference.
+
+### Cargo.toml Setup
+
+Add a `cdylib` crate type so the compiler produces a shared library, and pull in the plugin SDK and `utoipa` for schema generation:
+
+```toml
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+# ... other dependencies
+```
+
+See `log/Cargo.toml` for a complete example.
+
+### Configuration DTOs
+
+Create a `descriptor.rs` module that defines Data Transfer Objects for your plugin's configuration. These DTOs are serialized to JSON schema so the server can validate configuration at load time.
+
+```rust
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+/// Configuration DTO for the reaction plugin.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = reaction::myreaction::MyReactionConfig)]
+#[serde(rename_all = "camelCase")]
+pub struct MyReactionConfigDto {
+    /// An endpoint URL (supports env-var resolution via ConfigValue).
+    pub endpoint: ConfigValue<String>,
+
+    /// Optional timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Generates the OpenAPI component schemas for this plugin.
+#[derive(OpenApi)]
+#[openapi(components(schemas(MyReactionConfigDto)))]
+struct MyReactionSchemas;
+```
+
+Key points:
+- Derive `Serialize`, `Deserialize`, and `utoipa::ToSchema` on every DTO struct.
+- The `#[schema(as = reaction::kind::ConfigName)]` attribute sets the schema path that must match what `config_schema_name()` returns.
+- Use `ConfigValue<T>` for fields that should support environment-variable resolution (e.g. `"${MY_ENDPOINT}"`).
+
+### The ReactionPluginDescriptor Trait
+
+Implement `ReactionPluginDescriptor` to tell the host SDK how to create instances of your reaction:
+
+```rust
+pub struct MyReactionDescriptor;
+
+#[async_trait]
+impl ReactionPluginDescriptor for MyReactionDescriptor {
+    /// Unique kind identifier for this reaction type.
+    fn kind(&self) -> &str {
+        "my-reaction"
+    }
+
+    /// Semantic version of the configuration schema.
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    /// Schema name matching the `#[schema(as = ...)]` attribute on the config DTO,
+    /// using dot notation (e.g. `reaction.myreaction.MyReactionConfig`).
+    fn config_schema_name(&self) -> &str {
+        "reaction.myreaction.MyReactionConfig"
+    }
+
+    /// Serializes the OpenAPI component schemas to JSON.
+    fn config_schema_json(&self) -> String {
+        let api = MyReactionSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
+    }
+
+    /// Deserializes config JSON into the DTO, maps to internal types,
+    /// and returns a boxed `Reaction` instance.
+    async fn create_reaction(
+        &self,
+        id: &str,
+        query_ids: Vec<String>,
+        config_json: &serde_json::Value,
+        auto_start: bool,
+    ) -> anyhow::Result<Box<dyn Reaction>> {
+        let dto: MyReactionConfigDto = serde_json::from_value(config_json.clone())?;
+
+        let reaction = MyReactionBuilder::new(id)
+            .with_queries(query_ids)
+            .with_auto_start(auto_start)
+            .with_endpoint(&dto.endpoint.resolve()?)
+            .build()?;
+
+        Ok(Box::new(reaction))
+    }
+}
+```
+
+See `log/src/descriptor.rs` for the full working implementation.
+
+### The export_plugin! Macro
+
+In `lib.rs`, invoke the `export_plugin!` macro to generate the C ABI entry points (`drasi_plugin_init` and `drasi_plugin_metadata`) that the host SDK looks for when loading the shared library:
+
+```rust
+pub mod descriptor;
+
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MyReactionDescriptor],
+    bootstrap_descriptors = [],
+);
+```
+
+The `source_descriptors` and `bootstrap_descriptors` arrays are empty because this crate only provides a reaction. A single cdylib can export multiple descriptors of any type.
+
+### Building
+
+A standard `cargo build` produces the shared library:
+
+```bash
+cargo build          # target/debug/libmy_reaction.so   (Linux)
+                     # target/debug/libmy_reaction.dylib (macOS)
+                     # target/debug/my_reaction.dll      (Windows)
+```
+
+Copy the resulting library into the Drasi server's `plugins/` directory. The server discovers and loads it automatically on startup.
+
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
 
 ## Additional Resources
 
