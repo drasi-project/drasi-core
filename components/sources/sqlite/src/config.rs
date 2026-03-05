@@ -16,12 +16,11 @@ use anyhow::Result;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::DispatchMode;
 use drasi_lib::sources::base::SourceBaseParams;
-use serde::{Deserialize, Serialize};
 
 use crate::SqliteSource;
 
 /// Element ID key configuration for a SQLite table.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableKeyConfig {
     /// Table name.
     pub table: String,
@@ -30,13 +29,11 @@ pub struct TableKeyConfig {
 }
 
 /// Runtime configuration for the optional REST API.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestApiConfig {
     /// Address to bind.
-    #[serde(default = "default_rest_host")]
     pub host: String,
     /// Port to bind.
-    #[serde(default = "default_rest_port")]
     pub port: u16,
 }
 
@@ -59,8 +56,7 @@ fn default_rest_port() -> u16 {
 
 /// Initial start behavior. SQLite source does not use persisted cursors, but this
 /// is exposed for API consistency with other source plugins.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StartFrom {
     /// Start immediately (default behavior).
     #[default]
@@ -72,22 +68,17 @@ pub enum StartFrom {
 }
 
 /// SQLite source configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteSourceConfig {
     /// SQLite file path. When `None`, an in-memory database is used.
-    #[serde(default)]
     pub path: Option<String>,
     /// Optional explicit table allow-list. `None` means all user tables.
-    #[serde(default)]
     pub tables: Option<Vec<String>>,
     /// Optional explicit key config for element ID generation.
-    #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
     /// Optional REST API configuration.
-    #[serde(default)]
     pub rest_api: Option<RestApiConfig>,
     /// Initial start behavior.
-    #[serde(default)]
     pub start_from: StartFrom,
 }
 
