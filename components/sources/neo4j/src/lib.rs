@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +20,7 @@
 
 pub mod cdc;
 pub mod config;
+pub mod descriptor;
 pub mod mapping;
 
 pub use config::{CdcMode, Neo4jSourceConfig, StartCursor};
@@ -517,3 +519,15 @@ mod tests {
         assert_eq!(source.unwrap().id(), "neo4j-source");
     }
 }
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "neo4j-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::Neo4jSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
