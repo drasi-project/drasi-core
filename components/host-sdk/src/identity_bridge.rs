@@ -22,7 +22,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use drasi_lib::identity::IdentityProvider;
+use drasi_lib::identity::{CredentialContext, IdentityProvider};
 use drasi_plugin_sdk::ffi::{credentials_to_ffi, FfiCredentialsResult, IdentityProviderVtable};
 
 /// Builds an `IdentityProviderVtable` from a host-side `Arc<dyn IdentityProvider>`.
@@ -34,20 +34,33 @@ impl IdentityProviderVtableBuilder {
     /// The returned vtable owns an Arc reference. The plugin can clone_fn to
     /// create additional references and must call drop_fn when done.
     pub fn build(provider: Arc<dyn IdentityProvider>) -> IdentityProviderVtable {
-        extern "C" fn get_credentials_fn(state: *const c_void) -> FfiCredentialsResult {
+        extern "C" fn get_credentials_fn(
+            state: *const c_void,
+            context_json: *const u8,
+            context_len: usize,
+        ) -> FfiCredentialsResult {
             let provider = unsafe { &*(state as *const Arc<dyn IdentityProvider>) };
             let provider_clone = provider.clone();
 
+            // Deserialize context from JSON
+            let context = if context_json.is_null() || context_len == 0 {
+                CredentialContext::default()
+            } else {
+                let json_bytes = unsafe { std::slice::from_raw_parts(context_json, context_len) };
+                let json_str = std::str::from_utf8(json_bytes).unwrap_or("{}");
+                let properties: std::collections::HashMap<String, String> =
+                    serde_json::from_str(json_str).unwrap_or_default();
+                CredentialContext { properties }
+            };
+
             // Spawn a separate thread to avoid nesting tokio block_on calls.
-            // We return the Rust Result inside the thread (Send-safe) and
-            // convert to FFI types on the calling thread.
             let result = std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e}"))?;
 
-                rt.block_on(provider_clone.get_credentials())
+                rt.block_on(provider_clone.get_credentials(&context))
             })
             .join();
 

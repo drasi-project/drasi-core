@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::identity::{Credentials, IdentityProvider};
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 use drasi_plugin_sdk::descriptor::IdentityProviderPluginDescriptor;
 use drasi_plugin_sdk::ffi::{FfiStr, IdentityProviderPluginVtable};
 use libloading::Library;
@@ -53,14 +53,26 @@ impl HostIdentityProviderProxy {
 
 #[async_trait]
 impl IdentityProvider for HostIdentityProviderProxy {
-    async fn get_credentials(&self) -> anyhow::Result<Credentials> {
-        let state = self.vtable.state;
+    async fn get_credentials(&self, context: &CredentialContext) -> anyhow::Result<Credentials> {
+        let state_addr = self.vtable.state as usize;
         let get_fn = self.vtable.get_credentials_fn;
-        // The get_credentials_fn is blocking — call from a blocking thread
-        let result = tokio::task::spawn_blocking(move || (get_fn)(state as *const c_void))
-            .await
-            .map_err(|e| anyhow::anyhow!("IdentityProvider blocking task failed: {e}"))?;
-        unsafe { result.into_result() }
+        // Serialize context as JSON for FFI transport
+        let context_json =
+            serde_json::to_string(&context.properties).unwrap_or_else(|_| "{}".to_string());
+
+        // The get_credentials_fn is blocking — call from a separate thread.
+        // We pass state as usize (which is Send) and reconstruct the pointer inside.
+        // Safety: The state pointer is backed by an Arc<dyn IdentityProvider> and is
+        // safe to use from another thread (the vtable is Send+Sync).
+        let result = std::thread::spawn(move || {
+            let state = state_addr as *const c_void;
+            let ffi_result =
+                (get_fn)(state, context_json.as_ptr(), context_json.len());
+            unsafe { ffi_result.into_result() }
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("IdentityProvider thread panicked"))?;
+        result
     }
 
     fn clone_box(&self) -> Box<dyn IdentityProvider> {

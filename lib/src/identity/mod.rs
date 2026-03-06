@@ -16,12 +16,55 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
+
+/// Context information that callers provide to identity providers.
+///
+/// This allows identity providers to generate context-specific credentials
+/// (e.g., endpoint-specific tokens) without coupling their configuration
+/// to a particular resource type.
+///
+/// # Common Properties
+///
+/// | Key        | Description                         | Example                            |
+/// |------------|-------------------------------------|------------------------------------|
+/// | `hostname` | Target endpoint hostname            | `"mydb.rds.amazonaws.com"`          |
+/// | `port`     | Target endpoint port                | `"5432"`                            |
+/// | `database` | Target database name                | `"mydb"`                            |
+#[derive(Debug, Clone, Default)]
+pub struct CredentialContext {
+    /// Key-value properties that the identity provider may use.
+    pub properties: HashMap<String, String>,
+}
+
+impl CredentialContext {
+    /// Create a new empty context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set a property on the context, returning self for chaining.
+    pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.properties.insert(key.into(), value.into());
+        self
+    }
+
+    /// Get a property value.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.properties.get(key).map(|s| s.as_str())
+    }
+}
 
 /// Trait for identity providers that supply authentication credentials.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync {
     /// Fetch credentials for authentication.
-    async fn get_credentials(&self) -> Result<Credentials>;
+    ///
+    /// The `context` parameter provides optional caller-specific information
+    /// (such as target hostname/port) that the provider may use to generate
+    /// context-specific credentials. Providers that don't need this context
+    /// can safely ignore it.
+    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials>;
 
     /// Clone the provider into a boxed trait object.
     fn clone_box(&self) -> Box<dyn IdentityProvider>;
@@ -103,7 +146,10 @@ mod tests {
     #[tokio::test]
     async fn test_password_provider() {
         let provider = PasswordIdentityProvider::new("testuser", "testpass");
-        let credentials = provider.get_credentials().await.unwrap();
+        let credentials = provider
+            .get_credentials(&CredentialContext::default())
+            .await
+            .unwrap();
 
         match credentials {
             Credentials::UsernamePassword { username, password } => {
@@ -120,7 +166,10 @@ mod tests {
             Box::new(PasswordIdentityProvider::new("user", "pass"));
         let cloned = provider.clone();
 
-        let credentials = cloned.get_credentials().await.unwrap();
+        let credentials = cloned
+            .get_credentials(&CredentialContext::default())
+            .await
+            .unwrap();
         assert!(matches!(credentials, Credentials::UsernamePassword { .. }));
     }
 }

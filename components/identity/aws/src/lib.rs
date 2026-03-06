@@ -14,8 +14,10 @@
 
 //! AWS identity provider plugin for Drasi.
 //!
-//! Provides AWS IAM database authentication as a pluggable identity provider
-//! for sources and reactions connecting to Amazon RDS or Aurora databases.
+//! Provides AWS IAM authentication as a pluggable identity provider
+//! for sources and reactions. When used with RDS/Aurora databases,
+//! the caller provides endpoint details (hostname, port) via
+//! [`CredentialContext`](drasi_lib::identity::CredentialContext).
 
 mod provider;
 
@@ -31,12 +33,6 @@ use drasi_plugin_sdk::prelude::*;
 pub struct AwsIdentityProviderConfigDto {
     /// IAM database username.
     pub username: String,
-
-    /// RDS endpoint hostname.
-    pub hostname: String,
-
-    /// Database port (typically 5432 for PostgreSQL, 3306 for MySQL).
-    pub port: u16,
 
     /// AWS region (e.g., `"us-west-2"`). If omitted, loaded from environment.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,18 +77,11 @@ impl IdentityProviderPluginDescriptor for AwsIdentityProviderDescriptor {
         let dto: AwsIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
 
         let provider = if let Some(role_arn) = dto.role_arn {
-            AwsIdentityProvider::with_assumed_role(
-                dto.username,
-                dto.hostname,
-                dto.port,
-                role_arn,
-                dto.session_name,
-            )
-            .await?
+            AwsIdentityProvider::with_assumed_role(dto.username, role_arn, dto.session_name).await?
         } else if let Some(region) = dto.region {
-            AwsIdentityProvider::with_region(dto.username, dto.hostname, dto.port, region).await?
+            AwsIdentityProvider::with_region(dto.username, region).await?
         } else {
-            AwsIdentityProvider::new(dto.username, dto.hostname, dto.port).await?
+            AwsIdentityProvider::new(dto.username).await?
         };
 
         Ok(Box::new(provider))

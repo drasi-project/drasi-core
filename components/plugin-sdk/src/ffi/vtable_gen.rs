@@ -2203,16 +2203,32 @@ pub fn build_identity_provider_vtable_from_boxed(
         inner: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>,
     }
 
-    extern "C" fn get_credentials_fn(state: *const c_void) -> FfiCredentialsResult {
+    extern "C" fn get_credentials_fn(
+        state: *const c_void,
+        context_json: *const u8,
+        context_len: usize,
+    ) -> FfiCredentialsResult {
         let w = unsafe { &*(state as *const IdentityProviderWrapper) };
         let provider = w.inner.clone();
+
+        // Deserialize context from JSON
+        let context = if context_json.is_null() || context_len == 0 {
+            drasi_lib::identity::CredentialContext::default()
+        } else {
+            let json_bytes = unsafe { std::slice::from_raw_parts(context_json, context_len) };
+            let json_str = std::str::from_utf8(json_bytes).unwrap_or("{}");
+            let properties: std::collections::HashMap<String, String> =
+                serde_json::from_str(json_str).unwrap_or_default();
+            drasi_lib::identity::CredentialContext { properties }
+        };
+
         // Run the async get_credentials on a new tokio runtime to avoid nesting
         let result = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("failed to build tokio runtime for identity provider");
-            rt.block_on(provider.get_credentials())
+            rt.block_on(provider.get_credentials(&context))
         })
         .join()
         .unwrap_or_else(|_| Err(anyhow::anyhow!("Identity provider thread panicked")));

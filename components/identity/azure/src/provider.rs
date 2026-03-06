@@ -19,7 +19,7 @@ use azure_identity::{
     DeveloperToolsCredential, ManagedIdentityCredential, ManagedIdentityCredentialOptions,
     UserAssignedId, WorkloadIdentityCredential,
 };
-use drasi_lib::identity::{Credentials, IdentityProvider};
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 use std::sync::Arc;
 
 const DEFAULT_AZURE_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.default";
@@ -109,7 +109,7 @@ impl AzureIdentityProvider {
 
 #[async_trait]
 impl IdentityProvider for AzureIdentityProvider {
-    async fn get_credentials(&self) -> Result<Credentials> {
+    async fn get_credentials(&self, _context: &CredentialContext) -> Result<Credentials> {
         let token_response = self
             .credential
             .get_token(&[&self.scope], None)

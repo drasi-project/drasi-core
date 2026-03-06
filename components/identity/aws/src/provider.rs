@@ -15,19 +15,24 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use aws_config::SdkConfig;
-use drasi_lib::identity::{Credentials, IdentityProvider};
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 use std::sync::Arc;
 
-/// Identity provider for AWS IAM database authentication.
+/// Identity provider for AWS IAM authentication.
 ///
-/// Uses AWS RDS IAM authentication to generate temporary database passwords.
-/// This works with Amazon RDS and Aurora databases that have IAM authentication enabled.
+/// Uses AWS IAM credentials to generate authentication tokens.
+/// For RDS/Aurora databases, the caller provides hostname and port via
+/// [`CredentialContext`] so the provider can generate endpoint-specific tokens.
+///
+/// # Context Properties
+///
+/// When used with RDS/Aurora databases, the caller should provide:
+/// - `hostname` — the RDS endpoint (e.g., `"mydb.cluster-xxx.us-west-2.rds.amazonaws.com"`)
+/// - `port` — the database port (e.g., `"5432"`)
 #[derive(Clone)]
 pub struct AwsIdentityProvider {
     config: Arc<SdkConfig>,
     username: String,
-    hostname: String,
-    port: u16,
     region: String,
 }
 
@@ -35,11 +40,7 @@ impl AwsIdentityProvider {
     /// Create a new AWS IAM identity provider.
     ///
     /// Loads AWS configuration from the environment (credentials, region, etc.).
-    pub async fn new(
-        username: impl Into<String>,
-        hostname: impl Into<String>,
-        port: u16,
-    ) -> Result<Self> {
+    pub async fn new(username: impl Into<String>) -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let region = config
             .region()
@@ -49,8 +50,6 @@ impl AwsIdentityProvider {
         Ok(Self {
             config: Arc::new(config),
             username: username.into(),
-            hostname: hostname.into(),
-            port,
             region,
         })
     }
@@ -58,8 +57,6 @@ impl AwsIdentityProvider {
     /// Create a provider with an explicit region.
     pub async fn with_region(
         username: impl Into<String>,
-        hostname: impl Into<String>,
-        port: u16,
         region: impl Into<String>,
     ) -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -67,8 +64,6 @@ impl AwsIdentityProvider {
         Ok(Self {
             config: Arc::new(config),
             username: username.into(),
-            hostname: hostname.into(),
-            port,
             region: region.into(),
         })
     }
@@ -77,15 +72,11 @@ impl AwsIdentityProvider {
     pub fn with_config(
         config: SdkConfig,
         username: impl Into<String>,
-        hostname: impl Into<String>,
-        port: u16,
         region: impl Into<String>,
     ) -> Self {
         Self {
             config: Arc::new(config),
             username: username.into(),
-            hostname: hostname.into(),
-            port,
             region: region.into(),
         }
     }
@@ -93,8 +84,6 @@ impl AwsIdentityProvider {
     /// Create a provider that assumes an IAM role.
     pub async fn with_assumed_role(
         username: impl Into<String>,
-        hostname: impl Into<String>,
-        port: u16,
         role_arn: impl Into<String>,
         session_name: Option<String>,
     ) -> Result<Self> {
@@ -126,8 +115,6 @@ impl AwsIdentityProvider {
         Ok(Self {
             config: Arc::new(config),
             username: username.into(),
-            hostname: hostname.into(),
-            port,
             region: region.to_string(),
         })
     }
@@ -135,12 +122,30 @@ impl AwsIdentityProvider {
 
 #[async_trait]
 impl IdentityProvider for AwsIdentityProvider {
-    async fn get_credentials(&self) -> Result<Credentials> {
+    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
         use aws_sdk_rds::auth_token::{AuthTokenGenerator, Config};
 
+        let hostname = context.get("hostname").ok_or_else(|| {
+            anyhow!(
+                "AWS identity provider requires 'hostname' in credential context \
+                 (e.g., the RDS endpoint)"
+            )
+        })?;
+
+        let port: u64 = context
+            .get("port")
+            .ok_or_else(|| {
+                anyhow!(
+                    "AWS identity provider requires 'port' in credential context \
+                     (e.g., 5432 for PostgreSQL)"
+                )
+            })?
+            .parse()
+            .map_err(|e| anyhow!("Invalid port in credential context: {e}"))?;
+
         let auth_config = Config::builder()
-            .hostname(&self.hostname)
-            .port(self.port as u64)
+            .hostname(hostname)
+            .port(port)
             .username(&self.username)
             .build()
             .map_err(|e| anyhow!("Failed to build auth token config: {e}"))?;
@@ -168,13 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_region_creates_provider() {
-        let result = AwsIdentityProvider::with_region(
-            "mydbuser",
-            "mydb.rds.amazonaws.com",
-            5432,
-            "us-west-2",
-        )
-        .await;
+        let result = AwsIdentityProvider::with_region("mydbuser", "us-west-2").await;
         assert!(result.is_ok());
         let provider = result.unwrap();
         assert_eq!(provider.username, "mydbuser");
@@ -184,13 +183,7 @@ mod tests {
     #[test]
     fn test_with_config_creates_provider() {
         let config = SdkConfig::builder().build();
-        let provider = AwsIdentityProvider::with_config(
-            config,
-            "testuser",
-            "testdb.rds.amazonaws.com",
-            3306,
-            "eu-west-1",
-        );
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "eu-west-1");
         assert_eq!(provider.username, "testuser");
         assert_eq!(provider.region, "eu-west-1");
     }
