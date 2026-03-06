@@ -23,7 +23,10 @@ use drasi_core::{
     query::QueryBuilder,
 };
 use drasi_functions_cypher::CypherFunctionSet;
-use drasi_index_garnet::{element_index::GarnetElementIndex, result_index::GarnetResultIndex};
+use drasi_index_garnet::{
+    element_index::GarnetElementIndex, result_index::GarnetResultIndex, GarnetSessionControl,
+    GarnetSessionState,
+};
 use drasi_index_rocksdb::{
     element_index::{RocksDbElementIndex, RocksIndexOptions},
     open_unified_db,
@@ -84,8 +87,20 @@ async fn main() {
         let mut builder = QueryBuilder::new(&scenario_config.query, parser)
             .with_function_registry(function_registry);
 
-        // Open shared Redis connection if either index type needs it
-        let redis_connection = if test_run_config.element_index_type == IndexType::Redis
+        // Reject mixed persistent backends — session transactions require a single backend
+        if matches!(
+            (
+                test_run_config.element_index_type,
+                test_run_config.result_index_type
+            ),
+            (IndexType::RocksDB, IndexType::Redis) | (IndexType::Redis, IndexType::RocksDB)
+        ) {
+            panic!("Mixed persistent backends (RocksDB + Redis) are not supported — session transactions require a single backend");
+        }
+
+        // Open shared Redis connection and session state if either index type needs it
+        let (redis_connection, garnet_session_state) = if test_run_config.element_index_type
+            == IndexType::Redis
             || test_run_config.result_index_type == IndexType::Redis
         {
             let url = match env::var("REDIS_URL") {
@@ -93,9 +108,11 @@ async fn main() {
                 Err(_) => "redis://127.0.0.1:6379".to_string(),
             };
             let client = redis::Client::open(url.as_str()).unwrap();
-            Some(client.get_multiplexed_async_connection().await.unwrap())
+            let con = client.get_multiplexed_async_connection().await.unwrap();
+            let session_state = Arc::new(GarnetSessionState::new(con.clone()));
+            (Some(con), Some(session_state))
         } else {
-            None
+            (None, None)
         };
 
         // Open shared RocksDB if either index type needs it (avoids LOCK conflict
@@ -123,8 +140,9 @@ async fn main() {
         builder = match test_run_config.element_index_type {
             IndexType::Memory => builder,
             IndexType::Redis => {
-                let element_index =
-                    GarnetElementIndex::new(&query_id, redis_connection.clone().unwrap(), false);
+                let con = redis_connection.clone().unwrap();
+                let session_state = garnet_session_state.clone().unwrap();
+                let element_index = GarnetElementIndex::new(&query_id, con, false, session_state);
 
                 builder.with_element_index(Arc::new(element_index))
             }
@@ -147,7 +165,9 @@ async fn main() {
         builder = match test_run_config.result_index_type {
             IndexType::Memory => builder,
             IndexType::Redis => {
-                let ari = GarnetResultIndex::new(&query_id, redis_connection.clone().unwrap());
+                let con = redis_connection.clone().unwrap();
+                let session_state = garnet_session_state.clone().unwrap();
+                let ari = GarnetResultIndex::new(&query_id, con, session_state);
 
                 builder.with_result_index(Arc::new(ari))
             }
@@ -161,11 +181,13 @@ async fn main() {
             }
         };
 
-        // Wire up session control for RocksDB so that process_source_change
-        // can begin/commit transactions around index operations.
+        // Wire session control for persistent indexes
         if let Some(session_state) = rocks_session_state {
-            builder =
-                builder.with_session_control(Arc::new(RocksDbSessionControl::new(session_state)));
+            let session_control = Arc::new(RocksDbSessionControl::new(session_state));
+            builder = builder.with_session_control(session_control);
+        } else if let Some(session_state) = garnet_session_state {
+            let session_control = Arc::new(GarnetSessionControl::new(session_state));
+            builder = builder.with_session_control(session_control);
         }
 
         let cq = builder.build().await;
