@@ -42,16 +42,25 @@ async fn wait_for_query_results(
     let start = Instant::now();
     let timeout = Duration::from_secs(30);
     loop {
-        let results = core.get_query_results(query_id).await?;
-        if predicate(&results) {
-            return Ok(());
+        // The query may still be bootstrapping (Starting state), so tolerate errors
+        match core.get_query_results(query_id).await {
+            Ok(results) => {
+                if predicate(&results) {
+                    return Ok(());
+                }
+                if start.elapsed() > timeout {
+                    anyhow::bail!(
+                        "Timed out waiting for query results for query_id `{query_id}`. Latest results: {results:?}"
+                    );
+                }
+            }
+            Err(e) => {
+                if start.elapsed() > timeout {
+                    return Err(e.into());
+                }
+            }
         }
-        if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Timed out waiting for query results for query_id `{query_id}`. Latest results: {results:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
