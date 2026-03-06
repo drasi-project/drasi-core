@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use drasi_kubernetes_common::KubernetesSourceConfig;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_plugin_sdk::prelude::*;
-use drasi_source_kubernetes::KubernetesSourceConfig;
 use utoipa::OpenApi;
 
 use crate::config::KubernetesBootstrapConfig;

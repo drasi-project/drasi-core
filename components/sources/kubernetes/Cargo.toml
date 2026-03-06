@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-kubernetes-common.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"

@@ -13,15 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
 pub mod descriptor;
-pub mod mapping;
-pub mod properties;
 mod source;
 
-pub use config::{
+pub use drasi_kubernetes_common::config;
+pub use drasi_kubernetes_common::mapping;
+pub use drasi_kubernetes_common::properties;
+pub use drasi_kubernetes_common::{
     default_annotation_excludes, AuthMode, KubernetesSourceConfig, ResourceSpec, StartFrom,
 };
+
 pub use source::{KubernetesSource, KubernetesSourceBuilder};
 
 #[cfg(test)]

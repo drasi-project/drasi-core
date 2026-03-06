@@ -15,14 +15,15 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
+use drasi_kubernetes_common::mapping::build_insert_changes;
+use drasi_kubernetes_common::{
+    build_client, is_cluster_scoped_kind, parse_api_version, AuthMode, KubernetesSourceConfig,
+    ResourceSpec,
+};
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_kubernetes::mapping::build_insert_changes;
-use drasi_source_kubernetes::{AuthMode, KubernetesSourceConfig, ResourceSpec};
 use kube::api::{Api, DynamicObject, ListParams};
-use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, GroupVersionKind};
-use kube::{Client, Config};
 use log::info;
 
 use crate::config::KubernetesBootstrapConfig;
@@ -179,41 +180,6 @@ fn build_bootstrap_targets(config: &KubernetesSourceConfig) -> Vec<BootstrapTarg
         }
     }
     targets
-}
-
-fn is_cluster_scoped_kind(kind: &str) -> bool {
-    matches!(kind, "Node" | "Namespace")
-}
-
-fn parse_api_version(api_version: &str) -> Result<(String, String)> {
-    if let Some((group, version)) = api_version.split_once('/') {
-        if group.is_empty() || version.is_empty() {
-            return Err(anyhow!("Invalid apiVersion '{api_version}'"));
-        }
-        return Ok((group.to_string(), version.to_string()));
-    }
-    if api_version.is_empty() {
-        return Err(anyhow!("Invalid empty apiVersion"));
-    }
-    Ok(("".to_string(), api_version.to_string()))
-}
-
-async fn build_client(config: &KubernetesSourceConfig) -> Result<Client> {
-    let kube_config = if let Some(content) = &config.kubeconfig_content {
-        let cfg = Kubeconfig::from_yaml(content)?;
-        Config::from_custom_kubeconfig(cfg, &KubeConfigOptions::default()).await?
-    } else if let Some(path) = &config.kubeconfig_path {
-        let cfg = Kubeconfig::read_from(path)?;
-        Config::from_custom_kubeconfig(cfg, &KubeConfigOptions::default()).await?
-    } else {
-        match config.auth_mode {
-            AuthMode::InCluster => Config::incluster_env()
-                .map_err(|e| anyhow!("Failed to load in-cluster kube config: {e}"))?,
-            AuthMode::Kubeconfig => Config::from_kubeconfig(&KubeConfigOptions::default()).await?,
-        }
-    };
-
-    Ok(Client::try_from(kube_config)?)
 }
 
 fn matches_labels(request: &BootstrapRequest, change: &SourceChange) -> bool {

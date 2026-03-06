@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use drasi_kubernetes_common::config::{
     is_cluster_scoped_kind, AuthMode, KubernetesSourceConfig, ResourceSpec, StartFrom,
 };
-use crate::mapping::{
+use drasi_kubernetes_common::mapping::{
     build_delete_changes, build_insert_changes, build_update_changes, extract_resource_version,
     extract_uid, object_created_at_millis,
 };
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+use drasi_kubernetes_common::{build_client, parse_api_version};
 use drasi_lib::channels::{
     ComponentStatus, DispatchMode, SourceEvent, SourceEventWrapper, SubscriptionResponse,
 };
@@ -31,11 +32,10 @@ use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::{BootstrapProvider, Source};
 use futures::stream::{BoxStream, SelectAll};
 use futures::StreamExt;
-use kube::api::{Api, DynamicObject, ResourceExt};
-use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::api::{Api, DynamicObject};
 use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::watcher::{self, Event};
-use kube::{Client, Config};
+use kube::Client;
 use log::{debug, error, info, warn};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -377,19 +377,6 @@ impl WatchTarget {
     }
 }
 
-fn parse_api_version(api_version: &str) -> Result<(String, String)> {
-    if let Some((group, version)) = api_version.split_once('/') {
-        if group.is_empty() || version.is_empty() {
-            return Err(anyhow!("Invalid apiVersion '{api_version}'"));
-        }
-        return Ok((group.to_string(), version.to_string()));
-    }
-    if api_version.is_empty() {
-        return Err(anyhow!("Invalid empty apiVersion"));
-    }
-    Ok(("".to_string(), api_version.to_string()))
-}
-
 fn build_watch_targets(config: &KubernetesSourceConfig) -> Vec<WatchTarget> {
     let mut targets = Vec::new();
     for res in &config.resources {
@@ -420,25 +407,6 @@ fn build_watch_targets(config: &KubernetesSourceConfig) -> Vec<WatchTarget> {
         }
     }
     targets
-}
-
-async fn build_client(config: &KubernetesSourceConfig) -> Result<Client> {
-    let kube_config = if let Some(content) = &config.kubeconfig_content {
-        let cfg = Kubeconfig::from_yaml(content)?;
-        Config::from_custom_kubeconfig(cfg, &KubeConfigOptions::default()).await?
-    } else if let Some(path) = &config.kubeconfig_path {
-        let cfg = Kubeconfig::read_from(path)?;
-        Config::from_custom_kubeconfig(cfg, &KubeConfigOptions::default()).await?
-    } else {
-        match config.auth_mode {
-            AuthMode::InCluster => Config::incluster_env()
-                .map_err(|e| anyhow!("Failed to load in-cluster kube config: {e}"))?,
-            AuthMode::Kubeconfig => Config::from_kubeconfig(&KubeConfigOptions::default()).await?,
-        }
-    };
-
-    let client = Client::try_from(kube_config)?;
-    Ok(client)
 }
 
 async fn run_source_stream(
@@ -520,6 +488,11 @@ async fn run_source_stream(
                                 }
                             }
                             Event::InitApply(obj) => {
+                                // Always track UIDs for insert-vs-update classification,
+                                // even when not dispatching events
+                                if let Some(uid) = extract_uid(&obj) {
+                                    seen_uids.insert(uid);
+                                }
                                 if matches!(config.start_from, StartFrom::Now) {
                                     continue;
                                 }
@@ -562,6 +535,11 @@ async fn run_source_stream(
                             Event::Delete(obj) => {
                                 if matches!(config.start_from, StartFrom::Now) && !init_done.get(&target_key).copied().unwrap_or(false) {
                                     continue;
+                                }
+                                // Remove from seen_uids so re-created objects with same UID are treated as inserts
+                                if let Some(uid) = extract_uid(&obj) {
+                                    seen_uids.remove(&uid);
+                                    save_seen_uids(source_id, &state_store, &seen_uids).await?;
                                 }
                                 let changes = build_delete_changes(source_id, &target.kind, &obj, &config)?;
                                 dispatch_changes(source_id, dispatchers.clone(), changes).await?;

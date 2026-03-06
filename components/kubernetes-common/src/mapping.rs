@@ -76,7 +76,7 @@ pub fn build_delete_changes(
     let mut changes = vec![SourceChange::Delete { metadata }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_deletes(source_id, kind, obj));
+        changes.extend(build_owner_relation_deletes(source_id, obj));
     }
 
     Ok(changes)
@@ -164,11 +164,7 @@ fn build_owner_relation_upserts(
     out
 }
 
-fn build_owner_relation_deletes(
-    source_id: &str,
-    child_kind: &str,
-    obj: &DynamicObject,
-) -> Vec<SourceChange> {
+fn build_owner_relation_deletes(source_id: &str, obj: &DynamicObject) -> Vec<SourceChange> {
     let child_uid = match obj.metadata.uid.clone() {
         Some(uid) => uid,
         None => return Vec::new(),
@@ -183,7 +179,6 @@ fn build_owner_relation_deletes(
             labels: Arc::from([Arc::<str>::from("OWNS")]),
             effective_from: Utc::now().timestamp_millis() as u64,
         };
-        let _ = child_kind;
         out.push(SourceChange::Delete { metadata });
     }
     out

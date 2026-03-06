@@ -22,7 +22,6 @@ pub fn build_node_properties(
     kind: &str,
     config: &KubernetesSourceConfig,
 ) -> anyhow::Result<ElementPropertyMap> {
-    let full: Value = serde_json::to_value(obj)?;
     let mut props = ElementPropertyMap::new();
 
     let name = obj.metadata.name.clone().unwrap_or_default();
@@ -71,14 +70,14 @@ pub fn build_node_properties(
     let annotations_value = serde_json::to_value(annotations)?;
     props.insert("annotations", ElementValue::from(&annotations_value));
 
-    add_kind_specific_properties(&mut props, kind, &full);
+    add_kind_specific_properties(&mut props, kind, &obj.data);
 
     Ok(props)
 }
 
-fn add_kind_specific_properties(props: &mut ElementPropertyMap, kind: &str, full: &Value) {
-    let spec = full.get("spec").unwrap_or(&Value::Null);
-    let status = full.get("status").unwrap_or(&Value::Null);
+fn add_kind_specific_properties(props: &mut ElementPropertyMap, kind: &str, data: &Value) {
+    let spec = data.get("spec").unwrap_or(&Value::Null);
+    let status = data.get("status").unwrap_or(&Value::Null);
 
     match kind {
         "Pod" => add_pod_properties(props, spec, status),
@@ -86,7 +85,7 @@ fn add_kind_specific_properties(props: &mut ElementPropertyMap, kind: &str, full
         "ReplicaSet" => add_replicaset_properties(props, spec, status),
         "Node" => add_node_properties(props, spec, status),
         "Service" => add_service_properties(props, spec, status),
-        "ConfigMap" => add_configmap_properties(props, full),
+        "ConfigMap" => add_configmap_properties(props, data),
         "Namespace" => add_namespace_properties(props, status),
         _ => {
             props.insert("spec", ElementValue::from(&to_json_string(spec)));
@@ -277,19 +276,23 @@ fn add_service_properties(props: &mut ElementPropertyMap, spec: &Value, status: 
     );
 }
 
-fn add_configmap_properties(props: &mut ElementPropertyMap, full: &Value) {
-    let data = full
+fn add_configmap_properties(props: &mut ElementPropertyMap, data: &Value) {
+    let data_map = data
         .get("data")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let binary_data = full
+    let binary_data = data
         .get("binaryData")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
 
-    let data_keys = data.keys().cloned().map(Value::String).collect::<Vec<_>>();
+    let data_keys = data_map
+        .keys()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
     props.insert("dataKeys", ElementValue::from(&Value::Array(data_keys)));
 
     let binary_keys = binary_data
@@ -304,7 +307,7 @@ fn add_configmap_properties(props: &mut ElementPropertyMap, full: &Value) {
 
     props.insert(
         "data",
-        ElementValue::from(&Value::Object(Map::<String, Value>::from_iter(data))),
+        ElementValue::from(&Value::Object(Map::<String, Value>::from_iter(data_map))),
     );
 }
 
