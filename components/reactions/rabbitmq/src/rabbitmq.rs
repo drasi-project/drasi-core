@@ -155,15 +155,15 @@ impl RabbitMQReaction {
 
     fn build_tls_config(
         cert_path: Option<&str>,
-        key_path: Option<&str>,
+        pfx_path: Option<&str>,
     ) -> anyhow::Result<lapin::tcp::OwnedTLSConfig> {
         let mut tls_config = lapin::tcp::OwnedTLSConfig::default();
         if let Some(cert_path) = cert_path {
             let cert_chain = fs::read_to_string(cert_path)?;
             tls_config.cert_chain = Some(cert_chain);
         }
-        if let Some(key_path) = key_path {
-            let identity_bytes = fs::read(key_path)?;
+        if let Some(pfx_path) = pfx_path {
+            let identity_bytes = fs::read(pfx_path)?;
             tls_config.identity = Some(lapin::tcp::OwnedIdentity {
                 der: identity_bytes,
                 password: String::new(),
@@ -200,7 +200,7 @@ impl RabbitMQReaction {
         reaction_name: &str,
         tls_enabled: bool,
         tls_cert_path: Option<&str>,
-        tls_key_path: Option<&str>,
+        tls_pfx_path: Option<&str>,
         exchange_name: &str,
         exchange_type: &ExchangeType,
         exchange_durable: bool,
@@ -209,7 +209,7 @@ impl RabbitMQReaction {
             ConnectionProperties::default().with_connection_name(reaction_name.to_string().into());
 
         let connection = if tls_enabled {
-            let tls_config = Self::build_tls_config(tls_cert_path, tls_key_path)?;
+            let tls_config = Self::build_tls_config(tls_cert_path, tls_pfx_path)?;
             Connection::connect_with_config(connection_string, connection_props, tls_config).await?
         } else {
             Connection::connect(connection_string, connection_props).await?
@@ -255,6 +255,7 @@ impl RabbitMQReaction {
         if let Some(after) = after {
             context.insert("after".to_string(), after.clone());
         }
+        context.insert("data".to_string(), raw_data.clone());
 
         context.insert("query_id".to_string(), Value::String(query_id.to_string()));
         context.insert(
@@ -390,7 +391,7 @@ impl Reaction for RabbitMQReaction {
         let connection_string = self.config.connection_string.clone();
         let tls_enabled = self.config.tls_enabled;
         let tls_cert_path = self.config.tls_cert_path.clone();
-        let tls_key_path = self.config.tls_key_path.clone();
+        let tls_pfx_path = self.config.tls_pfx_path.clone();
         let priority_queue = self.base.priority_queue.clone();
 
         let processing_task_handle = tokio::spawn(async move {
@@ -400,7 +401,7 @@ impl Reaction for RabbitMQReaction {
                 &reaction_name,
                 tls_enabled,
                 tls_cert_path.as_deref(),
-                tls_key_path.as_deref(),
+                tls_pfx_path.as_deref(),
                 &exchange_name,
                 &exchange_type,
                 exchange_durable,
@@ -441,15 +442,25 @@ impl Reaction for RabbitMQReaction {
                 if !channel.status().connected() {
                     info!("[{reaction_name}] Channel disconnected, attempting to reconnect...");
                     let mut reconnected = false;
+                    let mut shutdown_requested = false;
                     for attempt in 1u32..=5 {
                         let delay = std::time::Duration::from_secs(2u64.pow(attempt.min(4)));
-                        tokio::time::sleep(delay).await;
+                        // Respect shutdown signal during backoff sleep
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => {
+                                debug!("[{reaction_name}] Shutdown signal received during reconnect backoff");
+                                shutdown_requested = true;
+                                break;
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                         match Self::establish_connection(
                             &connection_string,
                             &reaction_name,
                             tls_enabled,
                             tls_cert_path.as_deref(),
-                            tls_key_path.as_deref(),
+                            tls_pfx_path.as_deref(),
                             &exchange_name,
                             &exchange_type,
                             exchange_durable,
@@ -471,10 +482,12 @@ impl Reaction for RabbitMQReaction {
                         }
                     }
                     if !reconnected {
-                        error!(
-                            "[{reaction_name}] Failed to reconnect after 5 attempts, shutting down"
-                        );
-                        *status.write().await = ComponentStatus::Error;
+                        if !shutdown_requested {
+                            error!(
+                                "[{reaction_name}] Failed to reconnect after 5 attempts, shutting down"
+                            );
+                            *status.write().await = ComponentStatus::Error;
+                        }
                         break;
                     }
                 }

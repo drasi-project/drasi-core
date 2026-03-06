@@ -85,10 +85,10 @@ pub struct RabbitMQReactionConfigDto {
     #[schema(value_type = Option<ConfigValueString>)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_cert_path: Option<ConfigValue<String>>,
-    /// Optional PKCS#12 client identity (PFX).
+    /// Optional PKCS#12 (PFX) client identity file path.
     #[schema(value_type = Option<ConfigValueString>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tls_key_path: Option<ConfigValue<String>>,
+    pub tls_pfx_path: Option<ConfigValue<String>>,
     /// Query-specific publish configuration.
     #[serde(default)]
     pub query_configs: HashMap<String, QueryPublishConfigDto>,
@@ -200,11 +200,11 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
                     Some(value) => Some(mapper.resolve_string(value)?),
                     None => None,
                 };
-                let tls_key_path = match dto.tls_key_path.as_ref() {
+                let tls_pfx_path = match dto.tls_pfx_path.as_ref() {
                     Some(value) => Some(mapper.resolve_string(value)?),
                     None => None,
                 };
-                builder = builder.with_tls(tls_cert_path, tls_key_path);
+                builder = builder.with_tls(tls_cert_path, tls_pfx_path);
             }
         }
 

@@ -40,7 +40,7 @@ pub struct RabbitMQReactionBuilder {
     message_persistent: bool,
     tls_enabled: bool,
     tls_cert_path: Option<String>,
-    tls_key_path: Option<String>,
+    tls_pfx_path: Option<String>,
     query_configs: HashMap<String, QueryPublishConfig>,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
@@ -60,7 +60,7 @@ impl RabbitMQReactionBuilder {
             message_persistent: defaults.message_persistent,
             tls_enabled: defaults.tls_enabled,
             tls_cert_path: defaults.tls_cert_path,
-            tls_key_path: defaults.tls_key_path,
+            tls_pfx_path: defaults.tls_pfx_path,
             query_configs: defaults.query_configs,
             priority_queue_capacity: None,
             auto_start: true,
@@ -108,11 +108,11 @@ impl RabbitMQReactionBuilder {
         self
     }
 
-    /// Enable TLS with optional cert and key paths.
-    pub fn with_tls(mut self, cert_path: Option<String>, key_path: Option<String>) -> Self {
+    /// Enable TLS with optional cert and PFX identity paths.
+    pub fn with_tls(mut self, cert_path: Option<String>, pfx_path: Option<String>) -> Self {
         self.tls_enabled = true;
         self.tls_cert_path = cert_path;
-        self.tls_key_path = key_path;
+        self.tls_pfx_path = pfx_path;
         self
     }
 
@@ -147,7 +147,7 @@ impl RabbitMQReactionBuilder {
         self.message_persistent = config.message_persistent;
         self.tls_enabled = config.tls_enabled;
         self.tls_cert_path = config.tls_cert_path;
-        self.tls_key_path = config.tls_key_path;
+        self.tls_pfx_path = config.tls_pfx_path;
         self.query_configs = config.query_configs;
         self
     }
@@ -162,7 +162,7 @@ impl RabbitMQReactionBuilder {
             message_persistent: self.message_persistent,
             tls_enabled: self.tls_enabled,
             tls_cert_path: self.tls_cert_path,
-            tls_key_path: self.tls_key_path,
+            tls_pfx_path: self.tls_pfx_path,
             query_configs: self.query_configs,
         };
 
