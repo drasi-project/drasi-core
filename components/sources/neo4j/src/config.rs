@@ -12,19 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-
-fn default_database() -> String {
-    "neo4j".to_string()
-}
-
-fn default_poll_interval_ms() -> u64 {
-    500
-}
-
 /// Neo4j CDC enrichment mode expected on the remote database.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CdcMode {
     Diff,
     Full,
@@ -37,8 +26,7 @@ impl Default for CdcMode {
 }
 
 /// Startup behavior for CDC cursor initialization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "mode", content = "value", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartCursor {
     /// Start reading from the earliest available CDC record.
     Beginning,
@@ -58,23 +46,16 @@ impl Default for StartCursor {
 }
 
 /// Configuration for the Neo4j CDC source.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Neo4jSourceConfig {
     pub uri: String,
     pub user: String,
-    #[serde(default)]
     pub password: String,
-    #[serde(default = "default_database")]
     pub database: String,
-    #[serde(default)]
     pub labels: Vec<String>,
-    #[serde(default)]
     pub rel_types: Vec<String>,
-    #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
-    #[serde(default)]
     pub cdc_mode: CdcMode,
-    #[serde(default)]
     pub start_cursor: StartCursor,
 }
 
@@ -118,10 +99,10 @@ mod tests {
             uri: "bolt://localhost:7687".to_string(),
             user: "neo4j".to_string(),
             password: "secret".to_string(),
-            database: default_database(),
+            database: "neo4j".to_string(),
             labels: Vec::new(),
             rel_types: Vec::new(),
-            poll_interval_ms: default_poll_interval_ms(),
+            poll_interval_ms: 500,
             cdc_mode: CdcMode::default(),
             start_cursor: StartCursor::default(),
         };
