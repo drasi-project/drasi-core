@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::{AuthMode, KubernetesSourceBuilder, KubernetesSourceConfig, ResourceSpec, StartFrom};
+use drasi_kubernetes_common::default_annotation_excludes;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
@@ -143,7 +144,7 @@ impl SourcePluginDescriptor for KubernetesSourceDescriptor {
             include_owner_relations: dto.include_owner_relations,
             start_from,
             exclude_annotations: if dto.exclude_annotations.is_empty() {
-                crate::default_annotation_excludes()
+                default_annotation_excludes()
             } else {
                 dto.exclude_annotations
             },

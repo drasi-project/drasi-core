@@ -12,6 +12,7 @@ members = [
 
   # Shared component libraries
   "components/mssql-common",
+  "components/kubernetes-common",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -121,6 +122,7 @@ drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrapp
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
+drasi-kubernetes-common = { version = "0.1.0", path = "components/kubernetes-common" }
 drasi-source-kubernetes = { version = "0.1.0", path = "components/sources/kubernetes" }
 drasi-bootstrap-kubernetes = { version = "0.1.0", path = "components/bootstrappers/kubernetes" }
 
