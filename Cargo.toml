@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/kubernetes",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/kubernetes",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -119,6 +121,8 @@ drasi-bootstrap-application = { version = "0.1.11", path = "components/bootstrap
 drasi-reaction-http = { version = "0.1.12", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.9", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.1", path = "components/mssql-common" }
+drasi-source-kubernetes = { version = "0.1.0", path = "components/sources/kubernetes" }
+drasi-bootstrap-kubernetes = { version = "0.1.0", path = "components/bootstrappers/kubernetes" }
 
 [workspace.lints.rust]
 warnings = "deny"
