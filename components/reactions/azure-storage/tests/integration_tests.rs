@@ -35,8 +35,30 @@ use testcontainers::GenericImage;
 use tokio::time::sleep;
 
 const AZURITE_ACCOUNT: &str = "devstoreaccount1";
+// DevSkim: ignore DS137138; Azurite well-known development key used only for integration tests
 const AZURITE_KEY: &str =
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const POLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll until `check` returns `Ok(true)` or the timeout is exceeded.
+async fn poll_until<F, Fut>(check: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = tokio::time::Instant::now();
+    loop {
+        if check().await {
+            return true;
+        }
+        if start.elapsed() >= POLL_TIMEOUT {
+            return false;
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
 
 struct AzuriteRuntime {
     #[allow(dead_code)]
@@ -140,7 +162,8 @@ async fn start_drasi_with_reaction(
         .await?;
 
     drasi.start().await?;
-    sleep(Duration::from_millis(1200)).await;
+    // Brief pause to allow async subscription wiring to complete
+    sleep(Duration::from_millis(500)).await;
     Ok((drasi, handle))
 }
 
@@ -159,7 +182,6 @@ async fn emit_insert_update_delete(
                 .build(),
         )
         .await?;
-    sleep(Duration::from_millis(1200)).await;
 
     handle
         .send_node_update(
@@ -173,10 +195,8 @@ async fn emit_insert_update_delete(
                 .build(),
         )
         .await?;
-    sleep(Duration::from_millis(1200)).await;
 
     handle.send_delete("sensor-1", vec!["Sensor"]).await?;
-    sleep(Duration::from_millis(1200)).await;
     Ok(())
 }
 
@@ -240,34 +260,33 @@ async fn test_queue_reaction_insert_update_delete() {
         .await
         .expect("events should be emitted");
 
+    // Poll until at least 3 messages are available
     let queue_client = azurite.queue_client().queue_client(queue_name);
-    let mut collected = Vec::new();
-    for _ in 0..6 {
-        let response = queue_client
-            .get_messages()
-            .await
-            .expect("get messages should succeed");
-        if response.messages.is_empty() {
-            sleep(Duration::from_millis(400)).await;
-            continue;
+    let collected: std::sync::Arc<tokio::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let found = poll_until(|| {
+        let qc = queue_client.clone();
+        let collected = collected.clone();
+        async move {
+            if let Ok(response) = qc.get_messages().await {
+                let mut c = collected.lock().await;
+                for message in response.messages {
+                    let text = message.message_text.clone();
+                    c.push(text);
+                    let _ = qc.pop_receipt_client(message).delete().await;
+                }
+                c.len() >= 3
+            } else {
+                false
+            }
         }
-        for message in response.messages {
-            let message_text = message.message_text.clone();
-            collected.push(message_text);
-            queue_client
-                .pop_receipt_client(message)
-                .delete()
-                .await
-                .expect("message delete should succeed");
-        }
-        if collected.len() >= 3 {
-            break;
-        }
-    }
+    })
+    .await;
 
+    let collected = collected.lock().await;
     assert!(
-        collected.len() >= 3,
-        "expected at least 3 queue messages, got {}",
+        found,
+        "expected at least 3 queue messages within timeout, got {}",
         collected.len()
     );
 
@@ -329,6 +348,9 @@ async fn test_blob_reaction_insert_update_delete() {
         .await
         .expect("drasi should start");
 
+    let blob_client = azurite.blob_client();
+
+    // INSERT
     handle
         .send_node_insert(
             "sensor-1",
@@ -342,13 +364,20 @@ async fn test_blob_reaction_insert_update_delete() {
         )
         .await
         .expect("insert should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let add_content = read_blob_text(&azurite.blob_client(), container_name, "sensor-1.txt")
-        .await
-        .expect("blob content should be readable after add");
-    assert_eq!(add_content, "ADD:Alpha");
+    let add_ok = poll_until(|| {
+        let c = blob_client.clone();
+        async move {
+            read_blob_text(&c, container_name, "sensor-1.txt")
+                .await
+                .map(|t| t == "ADD:Alpha")
+                .unwrap_or(false)
+        }
+    })
+    .await;
+    assert!(add_ok, "blob should contain 'ADD:Alpha' after insert");
 
+    // UPDATE
     handle
         .send_node_update(
             "sensor-1",
@@ -362,24 +391,38 @@ async fn test_blob_reaction_insert_update_delete() {
         )
         .await
         .expect("update should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let update_content = read_blob_text(&azurite.blob_client(), container_name, "sensor-1.txt")
-        .await
-        .expect("blob content should be readable after update");
-    assert_eq!(update_content, "UPDATE:Alpha Updated");
+    let update_ok = poll_until(|| {
+        let c = blob_client.clone();
+        async move {
+            read_blob_text(&c, container_name, "sensor-1.txt")
+                .await
+                .map(|t| t == "UPDATE:Alpha Updated")
+                .unwrap_or(false)
+        }
+    })
+    .await;
+    assert!(
+        update_ok,
+        "blob should contain 'UPDATE:Alpha Updated' after update"
+    );
 
+    // DELETE
     handle
         .send_delete("sensor-1", vec!["Sensor"])
         .await
         .expect("delete should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let delete_read = read_blob_text(&azurite.blob_client(), container_name, "sensor-1.txt").await;
-    assert!(
-        delete_read.is_err(),
-        "blob should not exist after delete, got {delete_read:?}"
-    );
+    let delete_ok = poll_until(|| {
+        let c = blob_client.clone();
+        async move {
+            read_blob_text(&c, container_name, "sensor-1.txt")
+                .await
+                .is_err()
+        }
+    })
+    .await;
+    assert!(delete_ok, "blob should not exist after delete");
 
     drasi.stop().await.expect("drasi should stop");
 }
@@ -424,6 +467,13 @@ async fn test_table_reaction_insert_update_delete() {
         .await
         .expect("drasi should start");
 
+    let entity_client = azurite
+        .table_client()
+        .table_client(table_name)
+        .partition_key_client("west")
+        .entity_client("sensor-1");
+
+    // INSERT
     handle
         .send_node_insert(
             "sensor-1",
@@ -437,27 +487,29 @@ async fn test_table_reaction_insert_update_delete() {
         )
         .await
         .expect("insert should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let entity_client = azurite
-        .table_client()
-        .table_client(table_name)
-        .partition_key_client("west")
-        .entity_client("sensor-1");
-
-    let add_response = entity_client
-        .get::<Value>()
-        .await
-        .expect("entity should exist after add");
-    assert_eq!(
-        add_response
-            .entity
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "Alpha"
+    let add_ok = poll_until(|| {
+        let ec = entity_client.clone();
+        async move {
+            ec.get::<Value>()
+                .await
+                .map(|r| {
+                    r.entity
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|n| n == "Alpha")
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        }
+    })
+    .await;
+    assert!(
+        add_ok,
+        "table entity with name=Alpha should exist after add"
     );
 
+    // UPDATE
     handle
         .send_node_update(
             "sensor-1",
@@ -471,29 +523,40 @@ async fn test_table_reaction_insert_update_delete() {
         )
         .await
         .expect("update should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let update_response = entity_client
-        .get::<Value>()
-        .await
-        .expect("entity should exist after update");
-    assert_eq!(
-        update_response
-            .entity
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "Alpha Updated"
+    let update_ok = poll_until(|| {
+        let ec = entity_client.clone();
+        async move {
+            ec.get::<Value>()
+                .await
+                .map(|r| {
+                    r.entity
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|n| n == "Alpha Updated")
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+        }
+    })
+    .await;
+    assert!(
+        update_ok,
+        "table entity name should be 'Alpha Updated' after update"
     );
 
+    // DELETE
     handle
         .send_delete("sensor-1", vec!["Sensor"])
         .await
         .expect("delete should succeed");
-    sleep(Duration::from_millis(1200)).await;
 
-    let deleted = entity_client.get::<Value>().await;
-    assert!(deleted.is_err(), "entity should be deleted");
+    let delete_ok = poll_until(|| {
+        let ec = entity_client.clone();
+        async move { ec.get::<Value>().await.is_err() }
+    })
+    .await;
+    assert!(delete_ok, "table entity should be deleted");
 
     drasi.stop().await.expect("drasi should stop");
 }

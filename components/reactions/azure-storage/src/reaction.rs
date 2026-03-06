@@ -17,7 +17,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
