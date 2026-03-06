@@ -220,12 +220,12 @@ impl FileReaction {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let lock = Self::get_file_lock(file_locks, output_file).await;
-        let _guard = lock.lock().await;
         let content = format!("{content}\n");
 
         match mode {
             WriteMode::Append => {
+                let lock = Self::get_file_lock(file_locks, output_file).await;
+                let _guard = lock.lock().await;
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -234,16 +234,13 @@ impl FileReaction {
                 file.write_all(content.as_bytes()).await?;
             }
             WriteMode::Overwrite => {
+                let lock = Self::get_file_lock(file_locks, output_file).await;
+                let _guard = lock.lock().await;
                 tokio::fs::write(output_file, content.as_bytes()).await?;
             }
             WriteMode::PerChange => {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(output_file)
-                    .await?;
-                file.write_all(content.as_bytes()).await?;
+                // No lock needed — each file is unique (UUID-based filenames).
+                tokio::fs::write(output_file, content.as_bytes()).await?;
             }
         }
 
@@ -280,6 +277,7 @@ impl FileReaction {
         match diff {
             ResultDiff::Add { data } => {
                 context.insert("after".into(), data.clone());
+                context.insert("data".into(), data.clone());
             }
             ResultDiff::Update {
                 before,
@@ -293,12 +291,9 @@ impl FileReaction {
             }
             ResultDiff::Delete { data } => {
                 context.insert("before".into(), data.clone());
+                context.insert("data".into(), data.clone());
             }
-            ResultDiff::Aggregation { before, after } => {
-                context.insert("before".into(), before.clone().unwrap_or(Value::Null));
-                context.insert("after".into(), after.clone());
-            }
-            ResultDiff::Noop => {}
+            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
         }
 
         let filename_template = config
@@ -334,8 +329,11 @@ impl FileReaction {
         file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         query_result: &QueryResult,
         reaction_name: &str,
-    ) -> Result<()> {
+    ) {
         for diff in &query_result.results {
+            if matches!(diff, ResultDiff::Noop | ResultDiff::Aggregation { .. }) {
+                continue;
+            }
             match Self::render_output(
                 config,
                 handlebars,
@@ -361,8 +359,6 @@ impl FileReaction {
                 }
             }
         }
-
-        Ok(())
     }
 }
 
@@ -402,11 +398,6 @@ impl FileReactionBuilder {
     }
 
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
-        self.queries.push(query_id.into());
-        self
-    }
-
-    pub fn from_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
@@ -549,17 +540,14 @@ impl Reaction for FileReaction {
                     result = priority_queue.dequeue() => result,
                 };
 
-                if let Err(e) = Self::process_result(
+                Self::process_result(
                     &config,
                     &handlebars,
                     &file_locks,
                     query_result_arc.as_ref(),
                     &reaction_name,
                 )
-                .await
-                {
-                    error!("[{reaction_name}] Failed processing query result: {e}");
-                }
+                .await;
             }
         });
 
@@ -665,9 +653,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test")
-            .await
-            .expect("process result");
+        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
 
         let output_file = temp_dir.path().join("order_a_b_ADD.json");
         assert!(output_file.exists());
@@ -692,9 +678,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test")
-            .await
-            .expect("process result");
+        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
 
         let output_file = temp_dir.path().join("orders_ADD_1.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -731,9 +715,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test")
-            .await
-            .expect("process result");
+        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
 
         let output_file = temp_dir.path().join("unknown-query.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -776,9 +758,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test")
-            .await
-            .expect("process result");
+        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
 
         let output_file = temp_dir.path().join("orders.log");
         let content = tokio::fs::read_to_string(output_file)
