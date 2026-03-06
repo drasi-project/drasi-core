@@ -128,6 +128,7 @@ impl McpState {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     #[serde(default)]
     id: Option<Value>,
@@ -500,17 +501,17 @@ impl Reaction for McpReaction {
                         continue;
                     }
 
-                    let mut sessions_guard = sessions.write().await;
                     let mut to_cleanup = Vec::new();
-                    for session_id in subscribed_sessions {
-                        if let Some(session) = sessions_guard.get(&session_id) {
-                            if session.sender.send(notification_text.clone()).is_err() {
-                                to_cleanup.push(session_id);
+                    {
+                        let sessions_guard = sessions.read().await;
+                        for session_id in subscribed_sessions {
+                            if let Some(session) = sessions_guard.get(&session_id) {
+                                if session.sender.send(notification_text.clone()).is_err() {
+                                    to_cleanup.push(session_id);
+                                }
                             }
                         }
                     }
-
-                    drop(sessions_guard);
 
                     for session_id in to_cleanup {
                         cleanup_session_maps(
@@ -560,10 +561,7 @@ enum DiffKind {
     Delete,
 }
 
-fn template_for<'a>(
-    config: Option<&'a QueryConfig>,
-    kind: DiffKind,
-) -> Option<NotificationTemplate> {
+fn template_for(config: Option<&QueryConfig>, kind: DiffKind) -> Option<NotificationTemplate> {
     match kind {
         DiffKind::Add => config.and_then(|cfg| cfg.added.clone()).or_else(|| {
             Some(NotificationTemplate {
@@ -965,6 +963,11 @@ async fn handle_post(
                     )
                     .into_response()
                 }
+                "notifications/initialized" => {
+                    // Client acknowledgement after initialize — accept silently
+                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                }
+                "ping" => jsonrpc_result(request_id.clone(), json!({})).into_response(),
                 _ => (
                     StatusCode::BAD_REQUEST,
                     jsonrpc_error(request_id.clone(), -32601, "Method not found"),

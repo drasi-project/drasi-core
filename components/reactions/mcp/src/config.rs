@@ -14,7 +14,7 @@
 
 //! Configuration types for MCP reactions.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 
 fn default_port() -> u16 {
@@ -22,14 +22,14 @@ fn default_port() -> u16 {
 }
 
 /// Template definition for MCP notifications.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NotificationTemplate {
     /// Handlebars template string.
     pub template: String,
 }
 
 /// Per-query MCP configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct QueryConfig {
     /// Human-readable title for the query resource.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,7 +53,7 @@ pub struct QueryConfig {
 }
 
 /// MCP reaction configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct McpReactionConfig {
     /// HTTP server port.
     #[serde(default = "default_port")]
@@ -101,8 +101,7 @@ mod tests {
                 }
             }
         });
-        let config: McpReactionConfig =
-            serde_json::from_value(raw).expect("valid json");
+        let config: McpReactionConfig = serde_json::from_value(raw).expect("valid json");
         assert_eq!(config.port, 4000);
         assert_eq!(config.bearer_token.as_deref(), Some("secret"));
         assert!(config.routes.contains_key("query1"));

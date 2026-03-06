@@ -158,13 +158,12 @@ async fn wait_for_port(handle: &Arc<AtomicU16>) -> Result<u16> {
 #[tokio::test]
 #[ignore]
 async fn test_mcp_reaction_end_to_end() -> Result<()> {
-    let (source, source_handle) =
-        ApplicationSource::new(
-            "test-source",
-            ApplicationSourceConfig {
-                properties: std::collections::HashMap::new(),
-            },
-        )?;
+    let (source, source_handle) = ApplicationSource::new(
+        "test-source",
+        ApplicationSourceConfig {
+            properties: std::collections::HashMap::new(),
+        },
+    )?;
 
     let query = Query::cypher("test-query")
         .query("MATCH (n:TestNode) RETURN n.id AS id, n.value AS value")
