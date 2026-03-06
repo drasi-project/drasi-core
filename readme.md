@@ -363,7 +363,7 @@ Drasi-core includes a pluggable identity provider system for authenticating with
 | `drasi-identity-azure` | Azure AD (managed identity, workload identity, developer tools) |
 | `drasi-identity-aws` | AWS IAM (RDS auth tokens, assumed roles) |
 
-See [IDENTITY_PROVIDER_DESIGN.md](IDENTITY_PROVIDER_DESIGN.md) for the full design document, and the [DrasiLib README](lib/README.md#identity-providers) for usage examples.
+See the Identity Providers section in the [DrasiLib README](lib/README.md#identity-providers) for the full design and usage examples.
 
 
 ## Storage implementations
