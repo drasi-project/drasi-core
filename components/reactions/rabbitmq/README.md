@@ -43,7 +43,7 @@ let config = RabbitMQReactionConfig {
     message_persistent: true,
     tls_enabled: false,
     tls_cert_path: None,
-    tls_key_path: None,
+    tls_pfx_path: None,
     query_configs: routes,
 };
 
@@ -63,7 +63,7 @@ The following values are available in Handlebars templates:
 ## TLS Notes
 
 When `tls_enabled` is true, the connection string must use `amqps://`.
-If `tls_key_path` is provided, it is treated as a PKCS#12 (PFX) identity with an empty password.
+If `tls_pfx_path` is provided, it must be a PKCS#12 (PFX) identity file (`.p12` or `.pfx`) with an empty password.
 
 ## Integration Test
 

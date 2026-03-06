@@ -81,8 +81,8 @@ pub struct RabbitMQReactionConfig {
     pub tls_enabled: bool,
     /// Optional PEM certificate chain for TLS.
     pub tls_cert_path: Option<String>,
-    /// Optional PKCS#12 client identity (PFX).
-    pub tls_key_path: Option<String>,
+    /// Optional PKCS#12 (PFX) client identity file path.
+    pub tls_pfx_path: Option<String>,
     /// Query-specific publish configuration.
     pub query_configs: HashMap<String, QueryPublishConfig>,
 }
@@ -97,7 +97,7 @@ impl Default for RabbitMQReactionConfig {
             message_persistent: true,
             tls_enabled: false,
             tls_cert_path: None,
-            tls_key_path: None,
+            tls_pfx_path: None,
             query_configs: HashMap::new(),
         }
     }
@@ -116,9 +116,9 @@ impl RabbitMQReactionConfig {
                 "tls_enabled requires an amqps:// connection_string"
             ));
         }
-        if !self.tls_enabled && (self.tls_cert_path.is_some() || self.tls_key_path.is_some()) {
+        if !self.tls_enabled && (self.tls_cert_path.is_some() || self.tls_pfx_path.is_some()) {
             return Err(anyhow::anyhow!(
-                "tls_cert_path/tls_key_path require tls_enabled = true"
+                "tls_cert_path/tls_pfx_path require tls_enabled = true"
             ));
         }
         Ok(())

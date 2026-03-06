@@ -161,7 +161,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         message_persistent: false,
         tls_enabled: false,
         tls_cert_path: None,
-        tls_key_path: None,
+        tls_pfx_path: None,
         query_configs: routes,
     };
 
