@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::config::{PublishSpec, QueryPublishConfig, RabbitMQReactionConfig};
+use super::config::{ExchangeType, PublishSpec, QueryPublishConfig, RabbitMQReactionConfig};
 use crate::RabbitMQReactionBuilder;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -193,6 +193,44 @@ impl RabbitMQReaction {
         );
     }
 
+    /// Establish a connection and channel to RabbitMQ, declaring the exchange.
+    #[allow(clippy::too_many_arguments)]
+    async fn establish_connection(
+        connection_string: &str,
+        reaction_name: &str,
+        tls_enabled: bool,
+        tls_cert_path: Option<&str>,
+        tls_key_path: Option<&str>,
+        exchange_name: &str,
+        exchange_type: &ExchangeType,
+        exchange_durable: bool,
+    ) -> Result<(Connection, Channel)> {
+        let connection_props =
+            ConnectionProperties::default().with_connection_name(reaction_name.to_string().into());
+
+        let connection = if tls_enabled {
+            let tls_config = Self::build_tls_config(tls_cert_path, tls_key_path)?;
+            Connection::connect_with_config(connection_string, connection_props, tls_config).await?
+        } else {
+            Connection::connect(connection_string, connection_props).await?
+        };
+
+        let channel = connection.create_channel().await?;
+        channel
+            .exchange_declare(
+                exchange_name,
+                exchange_type.as_exchange_kind(),
+                ExchangeDeclareOptions {
+                    durable: exchange_durable,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+
+        Ok((connection, channel))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn publish_result(
         channel: &Channel,
@@ -200,8 +238,10 @@ impl RabbitMQReaction {
         exchange_name: &str,
         message_persistent: bool,
         publish_spec: &PublishSpec,
-        result_type: &str,
-        data: &Value,
+        operation: &str,
+        before: Option<&Value>,
+        after: Option<&Value>,
+        raw_data: &Value,
         query_id: &str,
         timestamp: &chrono::DateTime<chrono::Utc>,
         metadata: &HashMap<String, Value>,
@@ -209,37 +249,17 @@ impl RabbitMQReaction {
     ) -> Result<()> {
         let mut context = Map::new();
 
-        match result_type {
-            "ADD" => {
-                context.insert("after".to_string(), data.clone());
-            }
-            "UPDATE" => {
-                if let Some(obj) = data.as_object() {
-                    if let Some(before) = obj.get("before") {
-                        context.insert("before".to_string(), before.clone());
-                    }
-                    if let Some(after) = obj.get("after") {
-                        context.insert("after".to_string(), after.clone());
-                    }
-                    if let Some(data_field) = obj.get("data") {
-                        context.insert("data".to_string(), data_field.clone());
-                    }
-                } else {
-                    context.insert("after".to_string(), data.clone());
-                }
-            }
-            "DELETE" => {
-                context.insert("before".to_string(), data.clone());
-            }
-            _ => {
-                context.insert("data".to_string(), data.clone());
-            }
+        if let Some(before) = before {
+            context.insert("before".to_string(), before.clone());
+        }
+        if let Some(after) = after {
+            context.insert("after".to_string(), after.clone());
         }
 
         context.insert("query_id".to_string(), Value::String(query_id.to_string()));
         context.insert(
             "operation".to_string(),
-            Value::String(result_type.to_string()),
+            Value::String(operation.to_string()),
         );
         context.insert(
             "timestamp".to_string(),
@@ -260,7 +280,7 @@ impl RabbitMQReaction {
             debug!("[{reaction_name}] Rendered body: {rendered}");
             rendered
         } else {
-            serde_json::to_string(&data)?
+            serde_json::to_string(raw_data)?
         };
 
         let mut headers = FieldTable::default();
@@ -351,20 +371,13 @@ impl Reaction for RabbitMQReaction {
         let reaction_name = self.base.id.clone();
         let exchange_name = self.config.exchange_name.clone();
         info!(
-            "[{reaction_name}] RabbitMQ reaction started - publishing to exchange: {exchange_name}"
+            "[{reaction_name}] RabbitMQ reaction starting - publishing to exchange: {exchange_name}"
         );
 
         self.base
             .set_status_with_event(
                 ComponentStatus::Starting,
                 Some("Starting RabbitMQ reaction".to_string()),
-            )
-            .await?;
-
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Running,
-                Some("RabbitMQ reaction started".to_string()),
             )
             .await?;
 
@@ -381,29 +394,20 @@ impl Reaction for RabbitMQReaction {
         let priority_queue = self.base.priority_queue.clone();
 
         let processing_task_handle = tokio::spawn(async move {
-            let connection_props =
-                ConnectionProperties::default().with_connection_name(reaction_name.clone().into());
-
-            let connection_result = if tls_enabled {
-                let tls_config = match RabbitMQReaction::build_tls_config(
-                    tls_cert_path.as_deref(),
-                    tls_key_path.as_deref(),
-                ) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        error!("[{reaction_name}] Failed to load TLS config: {e}");
-                        *status.write().await = ComponentStatus::Error;
-                        return;
-                    }
-                };
-                Connection::connect_with_config(&connection_string, connection_props, tls_config)
-                    .await
-            } else {
-                Connection::connect(&connection_string, connection_props).await
-            };
-
-            let connection = match connection_result {
-                Ok(conn) => conn,
+            // Establish initial connection
+            let (mut _connection, mut channel) = match Self::establish_connection(
+                &connection_string,
+                &reaction_name,
+                tls_enabled,
+                tls_cert_path.as_deref(),
+                tls_key_path.as_deref(),
+                &exchange_name,
+                &exchange_type,
+                exchange_durable,
+            )
+            .await
+            {
+                Ok(result) => result,
                 Err(e) => {
                     error!("[{reaction_name}] Failed to connect to RabbitMQ: {e}");
                     *status.write().await = ComponentStatus::Error;
@@ -411,31 +415,8 @@ impl Reaction for RabbitMQReaction {
                 }
             };
 
-            let channel = match connection.create_channel().await {
-                Ok(chan) => chan,
-                Err(e) => {
-                    error!("[{reaction_name}] Failed to create channel: {e}");
-                    *status.write().await = ComponentStatus::Error;
-                    return;
-                }
-            };
-
-            if let Err(e) = channel
-                .exchange_declare(
-                    &exchange_name,
-                    exchange_type.as_exchange_kind(),
-                    ExchangeDeclareOptions {
-                        durable: exchange_durable,
-                        ..Default::default()
-                    },
-                    FieldTable::default(),
-                )
-                .await
-            {
-                error!("[{reaction_name}] Failed to declare exchange: {e}");
-                *status.write().await = ComponentStatus::Error;
-                return;
-            }
+            info!("[{reaction_name}] Connected to RabbitMQ successfully");
+            *status.write().await = ComponentStatus::Running;
 
             let mut handlebars = Handlebars::new();
             Self::register_helpers(&mut handlebars);
@@ -454,6 +435,48 @@ impl Reaction for RabbitMQReaction {
 
                 if !matches!(*status.read().await, ComponentStatus::Running) {
                     break;
+                }
+
+                // Check connection health and reconnect if needed
+                if !channel.status().connected() {
+                    info!("[{reaction_name}] Channel disconnected, attempting to reconnect...");
+                    let mut reconnected = false;
+                    for attempt in 1u32..=5 {
+                        let delay = std::time::Duration::from_secs(2u64.pow(attempt.min(4)));
+                        tokio::time::sleep(delay).await;
+                        match Self::establish_connection(
+                            &connection_string,
+                            &reaction_name,
+                            tls_enabled,
+                            tls_cert_path.as_deref(),
+                            tls_key_path.as_deref(),
+                            &exchange_name,
+                            &exchange_type,
+                            exchange_durable,
+                        )
+                        .await
+                        {
+                            Ok((new_conn, new_chan)) => {
+                                _connection = new_conn;
+                                channel = new_chan;
+                                info!(
+                                    "[{reaction_name}] Reconnected to RabbitMQ on attempt {attempt}"
+                                );
+                                reconnected = true;
+                                break;
+                            }
+                            Err(e) => {
+                                error!("[{reaction_name}] Reconnect attempt {attempt} failed: {e}");
+                            }
+                        }
+                    }
+                    if !reconnected {
+                        error!(
+                            "[{reaction_name}] Failed to reconnect after 5 attempts, shutting down"
+                        );
+                        *status.write().await = ComponentStatus::Error;
+                        break;
+                    }
                 }
 
                 if query_result.results.is_empty() {
@@ -513,6 +536,8 @@ impl Reaction for RabbitMQReaction {
                                     message_persistent,
                                     spec,
                                     "ADD",
+                                    None,
+                                    Some(data),
                                     data,
                                     query_name,
                                     &query_result.timestamp,
@@ -534,6 +559,8 @@ impl Reaction for RabbitMQReaction {
                                     message_persistent,
                                     spec,
                                     "DELETE",
+                                    Some(data),
+                                    None,
                                     data,
                                     query_name,
                                     &query_result.timestamp,
@@ -546,10 +573,13 @@ impl Reaction for RabbitMQReaction {
                                 }
                             }
                         }
-                        ResultDiff::Update { .. } => {
+                        ResultDiff::Update {
+                            data,
+                            before,
+                            after,
+                            ..
+                        } => {
                             if let Some(spec) = query_config.updated.as_ref() {
-                                let data_to_process = serde_json::to_value(result)
-                                    .expect("ResultDiff serialization should succeed");
                                 if let Err(e) = Self::publish_result(
                                     &channel,
                                     &handlebars,
@@ -557,7 +587,9 @@ impl Reaction for RabbitMQReaction {
                                     message_persistent,
                                     spec,
                                     "UPDATE",
-                                    &data_to_process,
+                                    Some(before),
+                                    Some(after),
+                                    data,
                                     query_name,
                                     &query_result.timestamp,
                                     &query_result.metadata,
