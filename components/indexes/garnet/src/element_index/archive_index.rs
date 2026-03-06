@@ -20,7 +20,7 @@ use drasi_core::{
     models::{Element, ElementReference, ElementTimestamp, TimestampBound, TimestampRange},
 };
 use prost::Message;
-use redis::{aio::MultiplexedConnection, AsyncCommands};
+use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
 use crate::{
     session_state::BufferReadResult,
@@ -42,17 +42,8 @@ impl ElementArchiveIndex for GarnetElementIndex {
     ) -> Result<Option<Arc<Element>>, IndexError> {
         let key = self.key_formatter.get_archive_key(element_ref);
 
-        // Fetch all Redis elements up to `time` for merging with buffer
-        let mut con = self.connection.clone();
-        let all_redis: Vec<(Vec<u8>, f64)> = match con
-            .zrangebyscore_withscores::<&str, u64, u64, Vec<(Vec<u8>, f64)>>(&key, 0, time)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return Err(IndexError::other(e)),
-        };
-
-        // Merge with buffer deltas
+        // Check buffer first (cheap: mutex + hashmap lookup) to decide
+        // whether we need a full scan or can use the optimized single-element query.
         let deltas_result = {
             let guard = self.session_state.lock()?;
             let buffer = guard.as_ref().ok_or_else(|| {
@@ -67,63 +58,72 @@ impl ElementArchiveIndex for GarnetElementIndex {
             }
         }; // guard dropped here
 
-        let candidates = match deltas_result {
+        match deltas_result {
+            Some(None) => Ok(None), // key deleted in-session
+            None => {
+                // No buffer deltas — use optimized O(log N) single-element query
+                let mut con = self.connection.clone();
+                let result: Vec<Vec<u8>> = cmd("ZRANGE")
+                    .arg(&key)
+                    .arg(time)
+                    .arg("-inf")
+                    .arg("BYSCORE")
+                    .arg("REV")
+                    .arg("LIMIT")
+                    .arg(0)
+                    .arg(1)
+                    .query_async(&mut con)
+                    .await
+                    .map_err(IndexError::other)?;
+
+                match result.first() {
+                    None => Ok(None),
+                    Some(bytes) => Self::decode_element(bytes),
+                }
+            }
             Some(Some(deltas)) => {
-                if deltas.full_replace {
-                    // Key was DEL'd then re-added — only use buffer additions
+                // Buffer has deltas — full scan + merge required
+                let mut con = self.connection.clone();
+                let all_redis: Vec<(Vec<u8>, f64)> = con
+                    .zrangebyscore_withscores::<&str, u64, u64, Vec<(Vec<u8>, f64)>>(&key, 0, time)
+                    .await
+                    .map_err(IndexError::other)?;
+
+                let mut candidates: Vec<(Vec<u8>, f64)> = if deltas.full_replace {
                     deltas
                         .added
                         .into_iter()
                         .filter(|(_, score)| *score <= time as f64)
                         .collect()
                 } else {
-                    let mut candidates: Vec<(Vec<u8>, f64)> = Vec::new();
+                    let mut merged: Vec<(Vec<u8>, f64)> = Vec::new();
                     for (member, score) in all_redis {
                         if !deltas.removed.contains(&member) {
                             if let Some(&new_score) = deltas.added.get(&member) {
-                                candidates.push((member, new_score));
+                                merged.push((member, new_score));
                             } else {
-                                candidates.push((member, score));
+                                merged.push((member, score));
                             }
                         }
                     }
 
-                    // Collect seen members for O(1) dedup
-                    let seen: HashSet<Vec<u8>> =
-                        candidates.iter().map(|(m, _)| m.clone()).collect();
+                    let seen: HashSet<Vec<u8>> = merged.iter().map(|(m, _)| m.clone()).collect();
 
-                    // Add buffer additions with score <= time
                     for (member, score) in &deltas.added {
                         if *score <= time as f64 && !seen.contains(member) {
-                            candidates.push((member.clone(), *score));
+                            merged.push((member.clone(), *score));
                         }
                     }
-                    candidates
+                    merged
+                };
+
+                candidates
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                match candidates.first() {
+                    None => Ok(None),
+                    Some((bytes, _)) => Self::decode_element(bytes),
                 }
-            }
-            Some(None) => return Ok(None), // key deleted
-            None => {
-                // NotInBuffer — use Redis results directly
-                all_redis
-            }
-        };
-
-        // Sort by score descending and take the first (most recent <= time)
-        let mut candidates = candidates;
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        match candidates.first() {
-            None => Ok(None),
-            Some((bytes, _)) => {
-                let stored_element: StoredElement =
-                    match StoredElementContainer::decode(bytes.as_slice()) {
-                        Ok(container) => match container.element {
-                            Some(element) => element,
-                            None => return Err(IndexError::CorruptedData),
-                        },
-                        Err(e) => return Err(IndexError::other(e)),
-                    };
-                Ok(Some(Arc::new(stored_element.into())))
             }
         }
     }
@@ -149,14 +149,6 @@ impl ElementArchiveIndex for GarnetElementIndex {
                 }
             }
         };
-
-        let has_session = { self.session_state.lock()?.is_some() };
-
-        if !has_session {
-            return Err(IndexError::other(std::io::Error::other(
-                "read operation requires an active session",
-            )));
-        }
 
         // Eager collection with buffer merge
         let redis_results: Vec<(Vec<u8>, f64)> = con
@@ -249,6 +241,17 @@ impl ElementArchiveIndex for GarnetElementIndex {
 }
 
 impl GarnetElementIndex {
+    fn decode_element(bytes: &[u8]) -> Result<Option<Arc<Element>>, IndexError> {
+        let stored_element: StoredElement = match StoredElementContainer::decode(bytes) {
+            Ok(container) => match container.element {
+                Some(element) => element,
+                None => return Err(IndexError::CorruptedData),
+            },
+            Err(e) => return Err(IndexError::other(e)),
+        };
+        Ok(Some(Arc::new(stored_element.into())))
+    }
+
     pub async fn insert_archive(
         &self,
         metadata: &StoredElementMetadata,

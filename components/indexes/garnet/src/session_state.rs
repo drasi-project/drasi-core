@@ -459,6 +459,10 @@ impl GarnetSessionState {
     ///
     /// Takes the buffer, drains it into an atomic Redis pipeline (MULTI/EXEC),
     /// and executes it.
+    ///
+    /// Note: the buffer is consumed before the pipeline executes. If the
+    /// pipeline fails, the buffer cannot be retried — the caller must
+    /// retry the entire source change.
     pub(crate) async fn commit(&self) -> Result<(), IndexError> {
         let mut buffer = {
             let mut guard = self

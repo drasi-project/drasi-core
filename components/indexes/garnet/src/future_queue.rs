@@ -99,12 +99,13 @@ impl FutureQueue for GarnetFutureQueue {
                         BufferReadResult::Found(deltas) => {
                             if !deltas.added.is_empty() {
                                 Some(true) // has members added in-session, exists
-                            } else if !deltas.removed.is_empty() || deltas.full_replace {
-                                // In-session removals with no additions, or key was
-                                // DEL'd then re-added as empty — treat as non-existing.
+                            } else if deltas.full_replace {
+                                // Key was DEL'd then re-added as empty — non-existing.
                                 Some(false)
                             } else {
-                                None // no in-session changes, check Redis
+                                // Removals exist but Redis may still have other
+                                // members — fall through to check Redis.
+                                None
                             }
                         }
                         BufferReadResult::KeyDeleted => Some(false), // deleted, doesn't exist
