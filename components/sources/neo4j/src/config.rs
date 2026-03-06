@@ -85,6 +85,14 @@ impl Neo4jSourceConfig {
                  Please specify a polling interval in milliseconds"
             ));
         }
+        if let StartCursor::Timestamp(ts) = &self.start_cursor {
+            if *ts < 0 {
+                return Err(anyhow::anyhow!(
+                    "Validation error: start_cursor timestamp cannot be negative. \
+                     Please specify a non-negative millisecond epoch timestamp"
+                ));
+            }
+        }
         Ok(())
     }
 }

@@ -32,10 +32,10 @@ See: https://neo4j.com/licensing/
 - `labels`: Node labels to monitor (empty means all)
 - `rel_types`: Relationship types to monitor (empty means all)
 - `poll_interval_ms`: CDC polling interval (default 500 ms)
-- `start_cursor`:
-  - `now`
-  - `beginning`
-  - `timestamp(<ms>)`
+- `start_cursor`: Where to start reading CDC events (serde-tagged enum):
+  - `{"mode": "now"}` — start from the current point (default)
+  - `{"mode": "beginning"}` — replay from the earliest available CDC entry
+  - `{"mode": "timestamp", "value": <ms_since_epoch>}` — start from a specific epoch timestamp
 
 ## Integration Test
 

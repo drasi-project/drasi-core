@@ -149,7 +149,6 @@ impl Source for Neo4jSource {
         let database = self.config.database.clone();
         let poll_interval = Duration::from_millis(self.config.poll_interval_ms);
         let start_cursor_filter = self.config.start_cursor.clone();
-        let status = self.base.status.clone();
         let base = self.base.clone_shared();
         let instance_id = self
             .base
@@ -186,7 +185,10 @@ impl Source for Neo4jSource {
                                 Ok(None) => {}
                                 Err(e) => {
                                     error!("Neo4j CDC poll failed for source '{source_id}': {e}");
-                                    *status.write().await = ComponentStatus::Error;
+                                    let _ = base.set_status_with_event(
+                                        ComponentStatus::Error,
+                                        Some(format!("CDC poll failed: {e}")),
+                                    ).await;
                                 }
                             }
                         }
