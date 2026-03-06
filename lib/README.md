@@ -149,8 +149,6 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
     .await?;
 ```
 
-For the full design document, see [IDENTITY_PROVIDER_DESIGN.md](../IDENTITY_PROVIDER_DESIGN.md).
-
 ---
 
 ## Initialization Methods
