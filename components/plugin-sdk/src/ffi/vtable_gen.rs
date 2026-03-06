@@ -2196,11 +2196,13 @@ fn wrap_subscription_response(
 /// into an FFI-safe vtable that the host can pass to source/reaction plugins.
 pub fn build_identity_provider_vtable_from_boxed(
     provider: Box<dyn drasi_lib::identity::IdentityProvider>,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
 ) -> super::identity::IdentityProviderVtable {
     use super::identity::{FfiCredentialsResult, IdentityProviderVtable};
 
     struct IdentityProviderWrapper {
         inner: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>,
+        runtime_handle: fn() -> &'static tokio::runtime::Runtime,
     }
 
     extern "C" fn get_credentials_fn(
@@ -2222,16 +2224,11 @@ pub fn build_identity_provider_vtable_from_boxed(
             drasi_lib::identity::CredentialContext { properties }
         };
 
-        // Run the async get_credentials on a new tokio runtime to avoid nesting
-        let result = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for identity provider");
-            rt.block_on(provider.get_credentials(&context))
-        })
-        .join()
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("Identity provider thread panicked")));
+        // Reuse the plugin's existing tokio runtime via dispatch_to_runtime
+        let handle = (w.runtime_handle)().handle().clone();
+        let result = dispatch_to_runtime(&handle, async move {
+            provider.get_credentials(&context).await
+        });
 
         match result {
             Ok(creds) => FfiCredentialsResult::ok(super::identity::credentials_to_ffi(creds)),
@@ -2243,6 +2240,7 @@ pub fn build_identity_provider_vtable_from_boxed(
         let w = unsafe { &*(state as *const IdentityProviderWrapper) };
         let cloned = Box::new(IdentityProviderWrapper {
             inner: w.inner.clone(),
+            runtime_handle: w.runtime_handle,
         });
         Box::into_raw(cloned) as *mut c_void
     }
@@ -2253,6 +2251,7 @@ pub fn build_identity_provider_vtable_from_boxed(
 
     let wrapper = Box::new(IdentityProviderWrapper {
         inner: std::sync::Arc::from(provider),
+        runtime_handle: runtime,
     });
 
     IdentityProviderVtable {
@@ -2338,7 +2337,7 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
 
         match result {
             Ok(provider) => {
-                let vtable = build_identity_provider_vtable_from_boxed(provider);
+                let vtable = build_identity_provider_vtable_from_boxed(provider, w.runtime_handle);
                 Box::into_raw(Box::new(vtable))
             }
             Err(e) => {
