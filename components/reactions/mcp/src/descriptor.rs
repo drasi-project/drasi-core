@@ -61,6 +61,11 @@ pub struct McpQueryConfigDto {
 #[schema(as = reaction::mcp::McpReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct McpReactionConfigDto {
+    /// HTTP server bind address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub host: Option<ConfigValue<String>>,
+
     /// HTTP server port.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU16>)]
@@ -70,6 +75,14 @@ pub struct McpReactionConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
     pub bearer_token: Option<ConfigValue<String>>,
+
+    /// Maximum number of concurrent sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<usize>,
+
+    /// Per-session notification channel capacity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_channel_capacity: Option<usize>,
 
     /// Query-specific configurations.
     #[serde(default)]
@@ -138,12 +151,24 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
             .with_queries(query_ids)
             .with_auto_start(auto_start);
 
+        if let Some(ref host) = dto.host {
+            builder = builder.with_host(mapper.resolve_string(host)?);
+        }
+
         if let Some(ref port) = dto.port {
             builder = builder.with_port(mapper.resolve_typed(port)?);
         }
 
         if let Some(ref token) = dto.bearer_token {
             builder = builder.with_bearer_token(mapper.resolve_string(token)?);
+        }
+
+        if let Some(max_sessions) = dto.max_sessions {
+            builder = builder.with_max_sessions(max_sessions);
+        }
+
+        if let Some(capacity) = dto.session_channel_capacity {
+            builder = builder.with_session_channel_capacity(capacity);
         }
 
         for (query_id, config) in &dto.routes {
@@ -161,13 +186,17 @@ mod tests {
 
     #[test]
     fn test_config_value_resolution() {
-        std::env::set_var("MCP_TEST_PORT", "3456");
+        let env_var = format!("MCP_TEST_PORT_{}", std::process::id());
+        std::env::set_var(&env_var, "3456");
         let dto = McpReactionConfigDto {
             port: Some(ConfigValue::EnvironmentVariable {
-                name: "MCP_TEST_PORT".to_string(),
+                name: env_var.clone(),
                 default: None,
             }),
             bearer_token: Some(ConfigValue::Static("token".to_string())),
+            host: None,
+            max_sessions: None,
+            session_channel_capacity: None,
             routes: HashMap::new(),
         };
 
@@ -179,5 +208,7 @@ mod tests {
 
         assert_eq!(port, 3456);
         assert_eq!(token, "token");
+
+        std::env::remove_var(&env_var);
     }
 }

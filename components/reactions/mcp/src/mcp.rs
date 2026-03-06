@@ -19,7 +19,7 @@ use axum::http::header::{HeaderName, AUTHORIZATION};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::{routing::get, routing::post, Json, Router};
+use axum::{routing::post, Json, Router};
 use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use mcp_core::types::{
@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tower_http::cors::{Any, CorsLayer};
 use url::Url;
@@ -60,8 +60,8 @@ const MCP_SESSION_HEADER: &str = "mcp-session-id";
 
 #[derive(Debug, Clone)]
 struct SessionState {
-    sender: mpsc::UnboundedSender<String>,
-    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+    sender: mpsc::Sender<String>,
+    receiver: Arc<Mutex<Option<mpsc::Receiver<String>>>>,
 }
 
 #[derive(Debug)]
@@ -155,7 +155,7 @@ struct JsonRpcErrorObject {
 }
 
 struct SessionStream {
-    inner: UnboundedReceiverStream<String>,
+    inner: ReceiverStream<String>,
     state: Arc<McpState>,
     session_id: String,
 }
@@ -301,7 +301,7 @@ impl Reaction for McpReaction {
         let mut props = HashMap::new();
         props.insert(
             "port".to_string(),
-            Value::Number((self.config.port as u64).into()),
+            Value::Number((self.bound_port() as u64).into()),
         );
         props.insert(
             "requires_auth".to_string(),
@@ -417,7 +417,10 @@ impl Reaction for McpReaction {
                         ResultDiff::Delete { .. } => {
                             (template_for(query_config, DiffKind::Delete), "deleted")
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => (None, "noop"),
+                        ResultDiff::Aggregation { .. } => {
+                            (template_for(query_config, DiffKind::Update), "updated")
+                        }
+                        ResultDiff::Noop => (None, "noop"),
                     };
 
                     let template = match template {
@@ -506,8 +509,15 @@ impl Reaction for McpReaction {
                         let sessions_guard = sessions.read().await;
                         for session_id in subscribed_sessions {
                             if let Some(session) = sessions_guard.get(&session_id) {
-                                if session.sender.send(notification_text.clone()).is_err() {
-                                    to_cleanup.push(session_id);
+                                match session.sender.try_send(notification_text.clone()) {
+                                    Ok(_) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        warn!("[{reaction_id}] Session {session_id} channel full, disconnecting");
+                                        to_cleanup.push(session_id);
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        to_cleanup.push(session_id);
+                                    }
                                 }
                             }
                         }
@@ -648,6 +658,22 @@ async fn cleanup_session_maps(
     }
 }
 
+const QUERY_URI_PREFIX: &str = "drasi://query/";
+
+/// Validate a subscription URI and extract the query ID.
+/// Returns `Some(query_id)` if the URI is well-formed and matches a known query.
+fn validate_subscription_uri<'a>(uri: &'a str, query_ids: &[String]) -> Option<&'a str> {
+    let query_id = uri.strip_prefix(QUERY_URI_PREFIX)?;
+    if query_id.is_empty() {
+        return None;
+    }
+    if query_ids.iter().any(|id| id == query_id) {
+        Some(query_id)
+    } else {
+        None
+    }
+}
+
 fn resource_uri(query_id: &str) -> Option<Url> {
     Url::parse(&format!("drasi://query/{query_id}")).ok()
 }
@@ -707,7 +733,8 @@ async fn run_server(state: Arc<McpState>, bound_port: Arc<AtomicU16>) -> Result<
                 .allow_origin(Any),
         );
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", state.config.port)).await?;
+    let listener =
+        tokio::net::TcpListener::bind((state.config.host.as_str(), state.config.port)).await?;
     let addr = listener.local_addr()?;
     bound_port.store(addr.port(), Ordering::SeqCst);
 
@@ -768,8 +795,18 @@ async fn handle_post(
             let session_id = match session_id {
                 Some(id) if state.sessions.read().await.contains_key(&id) => id,
                 _ => {
+                    let sessions = state.sessions.read().await;
+                    if sessions.len() >= state.config.max_sessions {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            jsonrpc_error(request.id, -32000, "Maximum session limit reached"),
+                        )
+                            .into_response();
+                    }
+                    drop(sessions);
+
                     let session_id = Uuid::new_v4().to_string();
-                    let (tx, rx) = mpsc::unbounded_channel();
+                    let (tx, rx) = mpsc::channel(state.config.session_channel_capacity);
                     let session = SessionState {
                         sender: tx,
                         receiver: Arc::new(Mutex::new(Some(rx))),
@@ -849,6 +886,17 @@ async fn handle_post(
                                 .into_response();
                         }
                     };
+                    if validate_subscription_uri(uri, &state.query_ids).is_none() {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            jsonrpc_error(
+                                request_id.clone(),
+                                -32602,
+                                "Invalid URI (expected drasi://query/{known-query-id})",
+                            ),
+                        )
+                            .into_response();
+                    }
                     state.add_subscription(&session_id, uri).await;
                     jsonrpc_result(request_id.clone(), json!({})).into_response()
                 }
@@ -868,6 +916,17 @@ async fn handle_post(
                                 .into_response();
                         }
                     };
+                    if validate_subscription_uri(uri, &state.query_ids).is_none() {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            jsonrpc_error(
+                                request_id.clone(),
+                                -32602,
+                                "Invalid URI (expected drasi://query/{known-query-id})",
+                            ),
+                        )
+                            .into_response();
+                    }
                     state.remove_subscription(&session_id, uri).await;
                     jsonrpc_result(request_id.clone(), json!({})).into_response()
                 }
@@ -1013,7 +1072,7 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
     };
 
     let stream = SessionStream {
-        inner: UnboundedReceiverStream::new(receiver),
+        inner: ReceiverStream::new(receiver),
         state: state.clone(),
         session_id,
     };
@@ -1093,5 +1152,41 @@ mod tests {
         assert!(subscriptions
             .get("session1")
             .is_some_and(|set| set.contains("drasi://query/query1")));
+    }
+
+    #[test]
+    fn test_validate_subscription_uri() {
+        let query_ids = vec!["query1".to_string(), "query2".to_string()];
+
+        // Valid URIs
+        assert_eq!(
+            validate_subscription_uri("drasi://query/query1", &query_ids),
+            Some("query1")
+        );
+        assert_eq!(
+            validate_subscription_uri("drasi://query/query2", &query_ids),
+            Some("query2")
+        );
+
+        // Invalid: unknown query
+        assert_eq!(
+            validate_subscription_uri("drasi://query/unknown", &query_ids),
+            None
+        );
+
+        // Invalid: wrong prefix
+        assert_eq!(
+            validate_subscription_uri("http://query/query1", &query_ids),
+            None
+        );
+
+        // Invalid: empty query id
+        assert_eq!(
+            validate_subscription_uri("drasi://query/", &query_ids),
+            None
+        );
+
+        // Invalid: no prefix match
+        assert_eq!(validate_subscription_uri("query1", &query_ids), None);
     }
 }

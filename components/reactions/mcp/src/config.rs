@@ -21,6 +21,21 @@ fn default_port() -> u16 {
     3000
 }
 
+fn default_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+const DEFAULT_MAX_SESSIONS: usize = 100;
+const DEFAULT_SESSION_CHANNEL_CAPACITY: usize = 1024;
+
+fn default_max_sessions() -> usize {
+    DEFAULT_MAX_SESSIONS
+}
+
+fn default_session_channel_capacity() -> usize {
+    DEFAULT_SESSION_CHANNEL_CAPACITY
+}
+
 /// Template definition for MCP notifications.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct NotificationTemplate {
@@ -32,36 +47,42 @@ pub struct NotificationTemplate {
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct QueryConfig {
     /// Human-readable title for the query resource.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
     /// Description of what the resource represents.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
     /// Template for ADD operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub added: Option<NotificationTemplate>,
 
     /// Template for UPDATE operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<NotificationTemplate>,
 
     /// Template for DELETE operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted: Option<NotificationTemplate>,
 }
 
 /// MCP reaction configuration.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct McpReactionConfig {
+    /// HTTP server bind address.
+    #[serde(default = "default_host")]
+    pub host: String,
+
     /// HTTP server port.
     #[serde(default = "default_port")]
     pub port: u16,
 
     /// Optional bearer token for authentication.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
+
+    /// Maximum number of concurrent sessions.
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+
+    /// Per-session notification channel capacity.
+    #[serde(default = "default_session_channel_capacity")]
+    pub session_channel_capacity: usize,
 
     /// Query-specific template configurations.
     #[serde(default)]
@@ -71,8 +92,11 @@ pub struct McpReactionConfig {
 impl Default for McpReactionConfig {
     fn default() -> Self {
         Self {
+            host: default_host(),
             port: default_port(),
             bearer_token: None,
+            max_sessions: default_max_sessions(),
+            session_channel_capacity: default_session_channel_capacity(),
             routes: HashMap::new(),
         }
     }
@@ -85,8 +109,11 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = McpReactionConfig::default();
+        assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 3000);
         assert!(config.bearer_token.is_none());
+        assert_eq!(config.max_sessions, 100);
+        assert_eq!(config.session_channel_capacity, 1024);
     }
 
     #[test]
