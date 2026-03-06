@@ -300,6 +300,21 @@ drasi_ffi_primitives::ffi_vtable! {
     }
 }
 
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for an IdentityProviderPluginDescriptor (factory).
+    /// The host calls `create_identity_provider_fn` to construct an
+    /// `IdentityProviderVtable` from config JSON.
+    pub struct IdentityProviderPluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
+
+        /// Factory: create an IdentityProviderVtable from JSON config.
+        fn create_identity_provider_fn(state: *mut, config_json: FfiStr) -> *mut super::identity::IdentityProviderVtable,
+    }
+}
+
 // ============================================================================
 // State store vtable — reverse direction (host → plugin)
 // ============================================================================
@@ -370,6 +385,8 @@ pub struct FfiPluginRegistration {
     pub reaction_plugin_count: usize,
     pub bootstrap_plugins: *mut BootstrapPluginVtable,
     pub bootstrap_plugin_count: usize,
+    pub identity_provider_plugins: *mut IdentityProviderPluginVtable,
+    pub identity_provider_plugin_count: usize,
     /// Host calls this to provide a log callback with an opaque context pointer.
     /// The plugin stores both the callback and context, passing context back on every call.
     pub set_log_callback:
