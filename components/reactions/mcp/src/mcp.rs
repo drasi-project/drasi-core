@@ -1,0 +1,1094 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use anyhow::Result;
+use async_trait::async_trait;
+use axum::extract::State;
+use axum::http::header::{HeaderName, AUTHORIZATION};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
+use axum::{routing::get, routing::post, Json, Router};
+use handlebars::Handlebars;
+use log::{debug, error, info, warn};
+use mcp_core::types::{
+    Implementation, InitializeRequest, InitializeResponse, ReadResourceRequest,
+    ReadResourceResponse, Resource, ResourceCapabilities, ResourceContents, ResourcesListResponse,
+    ServerCapabilities, LATEST_PROTOCOL_VERSION,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use subtle::ConstantTimeEq;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::Stream;
+use tower_http::cors::{Any, CorsLayer};
+use url::Url;
+use uuid::Uuid;
+
+use drasi_lib::channels::{ComponentStatus, QueryResult, ResultDiff};
+use drasi_lib::managers::log_component_start;
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::Reaction;
+
+use super::config::{McpReactionConfig, NotificationTemplate, QueryConfig};
+use super::{register_json_helper, McpReactionBuilder};
+
+const DEFAULT_ADDED_TEMPLATE: &str = r#"{"operation":"added","data":{{json after}}}"#;
+const DEFAULT_UPDATED_TEMPLATE: &str =
+    r#"{"operation":"updated","before":{{json before}},"after":{{json after}}}"#;
+const DEFAULT_DELETED_TEMPLATE: &str = r#"{"operation":"deleted","data":{{json before}}}"#;
+
+const MCP_SESSION_HEADER: &str = "mcp-session-id";
+
+#[derive(Debug, Clone)]
+struct SessionState {
+    sender: mpsc::UnboundedSender<String>,
+    receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
+}
+
+#[derive(Debug)]
+struct McpState {
+    reaction_id: String,
+    config: McpReactionConfig,
+    query_ids: Vec<String>,
+    sessions: Arc<RwLock<HashMap<String, SessionState>>>,
+    subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    subscribers_by_uri: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    current_results: Arc<RwLock<HashMap<String, Vec<Value>>>>,
+}
+
+impl McpState {
+    async fn add_subscription(&self, session_id: &str, uri: &str) {
+        let mut subscriptions = self.subscriptions.write().await;
+        subscriptions
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(uri.to_string());
+
+        let mut subscribers_by_uri = self.subscribers_by_uri.write().await;
+        subscribers_by_uri
+            .entry(uri.to_string())
+            .or_default()
+            .insert(session_id.to_string());
+    }
+
+    async fn remove_subscription(&self, session_id: &str, uri: &str) {
+        let mut subscriptions = self.subscriptions.write().await;
+        if let Some(set) = subscriptions.get_mut(session_id) {
+            set.remove(uri);
+            if set.is_empty() {
+                subscriptions.remove(session_id);
+            }
+        }
+
+        let mut subscribers_by_uri = self.subscribers_by_uri.write().await;
+        if let Some(set) = subscribers_by_uri.get_mut(uri) {
+            set.remove(session_id);
+            if set.is_empty() {
+                subscribers_by_uri.remove(uri);
+            }
+        }
+    }
+
+    async fn cleanup_session(&self, session_id: &str) {
+        self.sessions.write().await.remove(session_id);
+
+        let mut subscriptions = self.subscriptions.write().await;
+        if let Some(uris) = subscriptions.remove(session_id) {
+            let mut subscribers_by_uri = self.subscribers_by_uri.write().await;
+            for uri in uris {
+                if let Some(set) = subscribers_by_uri.get_mut(&uri) {
+                    set.remove(session_id);
+                    if set.is_empty() {
+                        subscribers_by_uri.remove(&uri);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcResponse {
+    jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<JsonRpcErrorObject>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonRpcErrorObject {
+    code: i64,
+    message: String,
+}
+
+struct SessionStream {
+    inner: UnboundedReceiverStream<String>,
+    state: Arc<McpState>,
+    session_id: String,
+}
+
+impl Stream for SessionStream {
+    type Item = Result<Event, Infallible>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(message)) => Poll::Ready(Some(Ok(Event::default().data(message)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for SessionStream {
+    fn drop(&mut self) {
+        let state = self.state.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            state.cleanup_session(&session_id).await;
+        });
+    }
+}
+
+/// MCP reaction exposes Drasi query results via MCP protocol.
+pub struct McpReaction {
+    base: ReactionBase,
+    config: McpReactionConfig,
+    sessions: Arc<RwLock<HashMap<String, SessionState>>>,
+    subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    subscribers_by_uri: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    current_results: Arc<RwLock<HashMap<String, Vec<Value>>>>,
+    server_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    bound_port: Arc<AtomicU16>,
+}
+
+impl std::fmt::Debug for McpReaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpReaction")
+            .field("id", &self.base.id)
+            .field("config", &self.config)
+            .field("sessions", &"<sessions>")
+            .finish()
+    }
+}
+
+impl McpReaction {
+    /// Create a builder for McpReaction.
+    pub fn builder(id: impl Into<String>) -> McpReactionBuilder {
+        McpReactionBuilder::new(id)
+    }
+
+    /// Create a new MCP reaction.
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: McpReactionConfig) -> Self {
+        Self::create_internal(id.into(), queries, config, None, true)
+    }
+
+    /// Create a new MCP reaction with custom priority queue capacity.
+    pub fn with_priority_queue_capacity(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: McpReactionConfig,
+        priority_queue_capacity: usize,
+    ) -> Self {
+        Self::create_internal(
+            id.into(),
+            queries,
+            config,
+            Some(priority_queue_capacity),
+            true,
+        )
+    }
+
+    /// Create from builder (internal method).
+    pub(crate) fn from_builder(
+        id: String,
+        queries: Vec<String>,
+        config: McpReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: McpReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
+        let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
+        if let Some(capacity) = priority_queue_capacity {
+            params = params.with_priority_queue_capacity(capacity);
+        }
+
+        Self {
+            base: ReactionBase::new(params),
+            config,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
+            current_results: Arc::new(RwLock::new(HashMap::new())),
+            server_task: Arc::new(Mutex::new(None)),
+            bound_port: Arc::new(AtomicU16::new(0)),
+        }
+    }
+
+    pub(crate) fn config(&self) -> &McpReactionConfig {
+        &self.config
+    }
+
+    /// Get the actual bound port (useful when configured with port 0).
+    pub fn bound_port(&self) -> u16 {
+        let bound = self.bound_port.load(Ordering::SeqCst);
+        if bound == 0 {
+            self.config.port
+        } else {
+            bound
+        }
+    }
+
+    /// Get a handle to the bound port for external observation.
+    pub fn bound_port_handle(&self) -> Arc<AtomicU16> {
+        self.bound_port.clone()
+    }
+}
+
+#[async_trait]
+impl Reaction for McpReaction {
+    fn id(&self) -> &str {
+        &self.base.id
+    }
+
+    fn type_name(&self) -> &str {
+        "mcp"
+    }
+
+    fn properties(&self) -> HashMap<String, Value> {
+        let mut props = HashMap::new();
+        props.insert(
+            "port".to_string(),
+            Value::Number((self.config.port as u64).into()),
+        );
+        props.insert(
+            "requires_auth".to_string(),
+            Value::Bool(self.config.bearer_token.is_some()),
+        );
+        props
+    }
+
+    fn query_ids(&self) -> Vec<String> {
+        self.base.queries.clone()
+    }
+
+    fn auto_start(&self) -> bool {
+        self.base.get_auto_start()
+    }
+
+    async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
+        self.base.initialize(context).await;
+    }
+
+    async fn start(&self) -> Result<()> {
+        log_component_start("MCP Reaction", &self.base.id);
+
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Starting,
+                Some("Starting MCP reaction".to_string()),
+            )
+            .await?;
+
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Running,
+                Some("MCP reaction started".to_string()),
+            )
+            .await?;
+
+        let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
+        let reaction_id = self.base.id.clone();
+        let config = self.config.clone();
+        let query_ids = self.base.queries.clone();
+        let sessions = self.sessions.clone();
+        let subscriptions = self.subscriptions.clone();
+        let subscribers_by_uri = self.subscribers_by_uri.clone();
+        let current_results = self.current_results.clone();
+        let bound_port = self.bound_port.clone();
+
+        let server_task = tokio::spawn(async move {
+            let state = Arc::new(McpState {
+                reaction_id,
+                config,
+                query_ids,
+                sessions,
+                subscriptions,
+                subscribers_by_uri,
+                current_results,
+            });
+
+            if let Err(error) = run_server(state, bound_port).await {
+                error!("MCP server failed: {error}");
+            }
+        });
+
+        *self.server_task.lock().await = Some(server_task);
+
+        let status = self.base.status.clone();
+        let subscriptions = self.subscriptions.clone();
+        let subscribers_by_uri = self.subscribers_by_uri.clone();
+        let sessions = self.sessions.clone();
+        let priority_queue = self.base.priority_queue.clone();
+        let current_results = self.current_results.clone();
+        let reaction_id = self.base.id.clone();
+        let query_configs = self.config.routes.clone();
+
+        let processing_handle = tokio::spawn(async move {
+            info!("[{reaction_id}] MCP result processing task started");
+            let mut handlebars = Handlebars::new();
+            register_json_helper(&mut handlebars);
+
+            loop {
+                if !matches!(*status.read().await, ComponentStatus::Running) {
+                    break;
+                }
+
+                let query_result = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
+                        break;
+                    }
+                    result = priority_queue.dequeue() => result,
+                };
+
+                if query_result.results.is_empty() {
+                    continue;
+                }
+
+                let query_id = query_result.query_id.clone();
+                let query_config = get_query_config(&query_id, &query_configs);
+                let uri = format!("drasi://query/{query_id}");
+
+                for diff in &query_result.results {
+                    apply_diff(&query_id, diff, &current_results).await;
+
+                    let (template, operation) = match diff {
+                        ResultDiff::Add { .. } => {
+                            (template_for(query_config, DiffKind::Add), "added")
+                        }
+                        ResultDiff::Update { .. } => {
+                            (template_for(query_config, DiffKind::Update), "updated")
+                        }
+                        ResultDiff::Delete { .. } => {
+                            (template_for(query_config, DiffKind::Delete), "deleted")
+                        }
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => (None, "noop"),
+                    };
+
+                    let template = match template {
+                        Some(t) => t,
+                        None => continue,
+                    };
+
+                    let mut context = Map::new();
+                    context.insert("queryId".to_string(), Value::String(query_id.clone()));
+
+                    match diff {
+                        ResultDiff::Add { data } => {
+                            context.insert("after".to_string(), data.clone());
+                        }
+                        ResultDiff::Update {
+                            data,
+                            before,
+                            after,
+                            ..
+                        } => {
+                            context.insert("before".to_string(), before.clone());
+                            context.insert("after".to_string(), after.clone());
+                            context.insert("data".to_string(), data.clone());
+                        }
+                        ResultDiff::Delete { data } => {
+                            context.insert("before".to_string(), data.clone());
+                        }
+                        ResultDiff::Aggregation { before, after } => {
+                            if let Some(before) = before {
+                                context.insert("before".to_string(), before.clone());
+                            }
+                            context.insert("after".to_string(), after.clone());
+                        }
+                        ResultDiff::Noop => {}
+                    }
+
+                    let rendered = match handlebars.render_template(&template.template, &context) {
+                        Ok(rendered) => rendered,
+                        Err(err) => {
+                            warn!(
+                                "[{reaction_id}] Failed to render template for {query_id}: {err}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let payload: Value = match serde_json::from_str(&rendered) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            warn!(
+                                "[{reaction_id}] Template output was not valid JSON for {query_id}: {err}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let notification = json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": {
+                            "uri": uri,
+                            "operation": operation,
+                            "data": payload
+                        }
+                    });
+
+                    let notification_text = match serde_json::to_string(&notification) {
+                        Ok(text) => text,
+                        Err(err) => {
+                            warn!("[{reaction_id}] Failed to serialize notification: {err}");
+                            continue;
+                        }
+                    };
+
+                    let subscribed_sessions = {
+                        let subscribers = subscribers_by_uri.read().await;
+                        subscribers.get(&uri).cloned().unwrap_or_else(HashSet::new)
+                    };
+
+                    if subscribed_sessions.is_empty() {
+                        continue;
+                    }
+
+                    let mut sessions_guard = sessions.write().await;
+                    let mut to_cleanup = Vec::new();
+                    for session_id in subscribed_sessions {
+                        if let Some(session) = sessions_guard.get(&session_id) {
+                            if session.sender.send(notification_text.clone()).is_err() {
+                                to_cleanup.push(session_id);
+                            }
+                        }
+                    }
+
+                    drop(sessions_guard);
+
+                    for session_id in to_cleanup {
+                        cleanup_session_maps(
+                            &session_id,
+                            &sessions,
+                            &subscriptions,
+                            &subscribers_by_uri,
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+
+        self.base.set_processing_task(processing_handle).await;
+
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        if let Some(task) = self.server_task.lock().await.take() {
+            task.abort();
+        }
+        self.base.stop_common().await?;
+        self.base
+            .set_status_with_event(
+                ComponentStatus::Stopped,
+                Some("MCP reaction stopped".into()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn status(&self) -> ComponentStatus {
+        self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DiffKind {
+    Add,
+    Update,
+    Delete,
+}
+
+fn template_for<'a>(
+    config: Option<&'a QueryConfig>,
+    kind: DiffKind,
+) -> Option<NotificationTemplate> {
+    match kind {
+        DiffKind::Add => config.and_then(|cfg| cfg.added.clone()).or_else(|| {
+            Some(NotificationTemplate {
+                template: DEFAULT_ADDED_TEMPLATE.to_string(),
+            })
+        }),
+        DiffKind::Update => config.and_then(|cfg| cfg.updated.clone()).or_else(|| {
+            Some(NotificationTemplate {
+                template: DEFAULT_UPDATED_TEMPLATE.to_string(),
+            })
+        }),
+        DiffKind::Delete => config.and_then(|cfg| cfg.deleted.clone()).or_else(|| {
+            Some(NotificationTemplate {
+                template: DEFAULT_DELETED_TEMPLATE.to_string(),
+            })
+        }),
+    }
+}
+
+fn get_query_config<'a>(
+    query_id: &str,
+    routes: &'a HashMap<String, QueryConfig>,
+) -> Option<&'a QueryConfig> {
+    routes.get(query_id).or_else(|| {
+        if query_id.contains('.') {
+            query_id
+                .rsplit('.')
+                .next()
+                .and_then(|name| routes.get(name))
+        } else {
+            None
+        }
+    })
+}
+
+async fn apply_diff(
+    query_id: &str,
+    diff: &ResultDiff,
+    current: &Arc<RwLock<HashMap<String, Vec<Value>>>>,
+) {
+    let mut results = current.write().await;
+    let entry = results.entry(query_id.to_string()).or_default();
+    match diff {
+        ResultDiff::Add { data } => entry.push(data.clone()),
+        ResultDiff::Delete { data } => remove_first(entry, data),
+        ResultDiff::Update { before, after, .. } => {
+            remove_first(entry, before);
+            entry.push(after.clone());
+        }
+        ResultDiff::Aggregation { before, after } => {
+            if let Some(before) = before {
+                remove_first(entry, before);
+            }
+            entry.push(after.clone());
+        }
+        ResultDiff::Noop => {}
+    }
+}
+
+fn remove_first(list: &mut Vec<Value>, target: &Value) {
+    if let Some(index) = list.iter().position(|item| item == target) {
+        list.remove(index);
+    }
+}
+
+async fn cleanup_session_maps(
+    session_id: &str,
+    sessions: &Arc<RwLock<HashMap<String, SessionState>>>,
+    subscriptions: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    subscribers_by_uri: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    sessions.write().await.remove(session_id);
+    let mut subscriptions_guard = subscriptions.write().await;
+    if let Some(uris) = subscriptions_guard.remove(session_id) {
+        let mut subscribers_guard = subscribers_by_uri.write().await;
+        for uri in uris {
+            if let Some(set) = subscribers_guard.get_mut(&uri) {
+                set.remove(session_id);
+                if set.is_empty() {
+                    subscribers_guard.remove(&uri);
+                }
+            }
+        }
+    }
+}
+
+fn resource_uri(query_id: &str) -> Option<Url> {
+    Url::parse(&format!("drasi://query/{query_id}")).ok()
+}
+
+fn parse_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
+fn check_authorization(headers: &HeaderMap, token: &Option<String>) -> bool {
+    let expected = match token {
+        Some(token) => token,
+        None => return true,
+    };
+    match parse_bearer_token(headers) {
+        Some(provided) => expected.as_bytes().ct_eq(provided.as_bytes()).into(),
+        None => false,
+    }
+}
+
+fn jsonrpc_error(
+    id: Option<Value>,
+    code: i64,
+    message: impl Into<String>,
+) -> Json<JsonRpcResponse> {
+    Json(JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcErrorObject {
+            code,
+            message: message.into(),
+        }),
+    })
+}
+
+fn jsonrpc_result(id: Option<Value>, result: Value) -> Json<JsonRpcResponse> {
+    Json(JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: Some(result),
+        error: None,
+    })
+}
+
+async fn run_server(state: Arc<McpState>, bound_port: Arc<AtomicU16>) -> Result<()> {
+    let app = Router::new()
+        .route("/", post(handle_post).get(handle_sse))
+        .with_state(state.clone())
+        .layer(
+            CorsLayer::new()
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers(Any)
+                .allow_origin(Any),
+        );
+
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", state.config.port)).await?;
+    let addr = listener.local_addr()?;
+    bound_port.store(addr.port(), Ordering::SeqCst);
+
+    info!("[{}] MCP server listening on {}", state.reaction_id, addr);
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn handle_post(
+    State(state): State<Arc<McpState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    if !check_authorization(&headers, &state.config.bearer_token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            jsonrpc_error(None, -32000, "Unauthorized"),
+        )
+            .into_response();
+    }
+
+    let request: JsonRpcRequest = match serde_json::from_value(payload) {
+        Ok(req) => req,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                jsonrpc_error(None, -32700, format!("Parse error: {err}")),
+            )
+                .into_response();
+        }
+    };
+
+    let session_id = headers
+        .get(MCP_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    match request.method.as_str() {
+        "initialize" => {
+            let params = request.params.clone().unwrap_or(Value::Null);
+            let init_request: InitializeRequest = match serde_json::from_value(params) {
+                Ok(req) => req,
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        jsonrpc_error(request.id, -32602, format!("Invalid params: {err}")),
+                    )
+                        .into_response();
+                }
+            };
+
+            debug!(
+                "[{}] Initialize request with protocol {}",
+                state.reaction_id, init_request.protocol_version
+            );
+
+            let session_id = match session_id {
+                Some(id) if state.sessions.read().await.contains_key(&id) => id,
+                _ => {
+                    let session_id = Uuid::new_v4().to_string();
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let session = SessionState {
+                        sender: tx,
+                        receiver: Arc::new(Mutex::new(Some(rx))),
+                    };
+                    state
+                        .sessions
+                        .write()
+                        .await
+                        .insert(session_id.clone(), session);
+                    session_id
+                }
+            };
+
+            let response = InitializeResponse {
+                protocol_version: LATEST_PROTOCOL_VERSION.as_str().to_string(),
+                capabilities: ServerCapabilities {
+                    resources: Some(ResourceCapabilities {
+                        subscribe: Some(true),
+                        list_changed: Some(true),
+                    }),
+                    ..ServerCapabilities::default()
+                },
+                server_info: Implementation {
+                    name: "drasi-mcp-reaction".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                instructions: Some("Drasi MCP server providing query resources.".to_string()),
+            };
+
+            let mut response = jsonrpc_result(
+                request.id,
+                serde_json::to_value(response).unwrap_or(Value::Null),
+            )
+            .into_response();
+            if let Ok(header_value) = HeaderValue::from_str(&session_id) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static(MCP_SESSION_HEADER), header_value);
+            }
+            response
+        }
+        _ => {
+            let request_id = request.id.clone();
+            let session_id = match session_id {
+                Some(id) => id,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        jsonrpc_error(request_id.clone(), -32000, "Missing session ID"),
+                    )
+                        .into_response();
+                }
+            };
+
+            if !state.sessions.read().await.contains_key(&session_id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    jsonrpc_error(request_id.clone(), -32000, "Invalid session ID"),
+                )
+                    .into_response();
+            }
+
+            match request.method.as_str() {
+                "resources/subscribe" => {
+                    let uri = request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("uri"))
+                        .and_then(Value::as_str);
+                    let uri = match uri {
+                        Some(uri) => uri,
+                        None => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                jsonrpc_error(request_id.clone(), -32602, "URI is required"),
+                            )
+                                .into_response();
+                        }
+                    };
+                    state.add_subscription(&session_id, uri).await;
+                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                }
+                "resources/unsubscribe" => {
+                    let uri = request
+                        .params
+                        .as_ref()
+                        .and_then(|params| params.get("uri"))
+                        .and_then(Value::as_str);
+                    let uri = match uri {
+                        Some(uri) => uri,
+                        None => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                jsonrpc_error(request_id.clone(), -32602, "URI is required"),
+                            )
+                                .into_response();
+                        }
+                    };
+                    state.remove_subscription(&session_id, uri).await;
+                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                }
+                "resources/list" => {
+                    let mut resources = Vec::new();
+                    for query_id in &state.query_ids {
+                        let uri = match resource_uri(query_id) {
+                            Some(uri) => uri,
+                            None => continue,
+                        };
+                        let query_config = get_query_config(query_id, &state.config.routes);
+                        let (name, description) = match query_config {
+                            Some(config) => (
+                                config.title.clone().unwrap_or_else(|| query_id.clone()),
+                                config.description.clone(),
+                            ),
+                            None => (query_id.clone(), None),
+                        };
+                        resources.push(Resource {
+                            uri,
+                            name,
+                            description,
+                            mime_type: Some("application/json".to_string()),
+                            annotations: None,
+                            size: None,
+                        });
+                    }
+
+                    let response = ResourcesListResponse {
+                        resources,
+                        next_cursor: None,
+                        meta: None,
+                    };
+                    jsonrpc_result(
+                        request_id.clone(),
+                        serde_json::to_value(response).unwrap_or(Value::Null),
+                    )
+                    .into_response()
+                }
+                "resources/read" => {
+                    let params = request.params.clone().unwrap_or(Value::Null);
+                    let read_request: ReadResourceRequest = match serde_json::from_value(params) {
+                        Ok(req) => req,
+                        Err(err) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                jsonrpc_error(
+                                    request_id.clone(),
+                                    -32602,
+                                    format!("Invalid params: {err}"),
+                                ),
+                            )
+                                .into_response();
+                        }
+                    };
+
+                    let query_id = match read_request.uri.host_str() {
+                        Some("query") => {
+                            read_request.uri.path().trim_start_matches('/').to_string()
+                        }
+                        _ => String::new(),
+                    };
+
+                    if query_id.is_empty() || !state.query_ids.contains(&query_id) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            jsonrpc_error(
+                                request_id.clone(),
+                                -32602,
+                                "Invalid URI format (expected drasi://query/{id})",
+                            ),
+                        )
+                            .into_response();
+                    }
+
+                    let current = state.current_results.read().await;
+                    let results = current.get(&query_id).cloned().unwrap_or_default();
+                    let contents = ResourceContents {
+                        uri: read_request.uri.clone(),
+                        mime_type: Some("application/json".to_string()),
+                        text: Some(
+                            serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".into()),
+                        ),
+                        blob: None,
+                    };
+                    let response = ReadResourceResponse {
+                        contents: vec![contents],
+                        meta: None,
+                    };
+                    jsonrpc_result(
+                        request_id.clone(),
+                        serde_json::to_value(response).unwrap_or(Value::Null),
+                    )
+                    .into_response()
+                }
+                _ => (
+                    StatusCode::BAD_REQUEST,
+                    jsonrpc_error(request_id.clone(), -32601, "Method not found"),
+                )
+                    .into_response(),
+            }
+        }
+    }
+}
+
+async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> impl IntoResponse {
+    if !check_authorization(&headers, &state.config.bearer_token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let session_id = headers
+        .get(MCP_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let session_id = match session_id {
+        Some(id) => id,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let session = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).cloned()
+    };
+
+    let session = match session {
+        Some(session) => session,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let receiver = {
+        let mut receiver_guard = session.receiver.lock().await;
+        receiver_guard.take()
+    };
+
+    let receiver = match receiver {
+        Some(receiver) => receiver,
+        None => return StatusCode::CONFLICT.into_response(),
+    };
+
+    let stream = SessionStream {
+        inner: UnboundedReceiverStream::new(receiver),
+        state: state.clone(),
+        session_id,
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_first() {
+        let mut values = vec![json!({"id": 1}), json!({"id": 2})];
+        remove_first(&mut values, &json!({"id": 1}));
+        assert_eq!(values, vec![json!({"id": 2})]);
+    }
+
+    #[test]
+    fn test_auth_validation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token"),
+        );
+        assert!(check_authorization(
+            &headers,
+            &Some("secret-token".to_string())
+        ));
+        assert!(!check_authorization(
+            &headers,
+            &Some("wrong-token".to_string())
+        ));
+    }
+
+    #[test]
+    fn test_resource_uri_format() {
+        let uri = resource_uri("test-query").expect("should build resource uri");
+        assert_eq!(uri.scheme(), "drasi");
+        assert_eq!(uri.host_str(), Some("query"));
+        assert_eq!(uri.path(), "/test-query");
+    }
+
+    #[test]
+    fn test_template_rendering() {
+        let mut handlebars = Handlebars::new();
+        register_json_helper(&mut handlebars);
+        let mut context = Map::new();
+        context.insert("after".to_string(), json!({"id": 1}));
+        let rendered = handlebars
+            .render_template(DEFAULT_ADDED_TEMPLATE, &context)
+            .expect("template should render");
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(parsed["operation"], "added");
+        assert_eq!(parsed["data"]["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_subscription_tracking() {
+        let state = McpState {
+            reaction_id: "test".to_string(),
+            config: McpReactionConfig::default(),
+            query_ids: vec!["query1".to_string()],
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
+            current_results: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        state
+            .add_subscription("session1", "drasi://query/query1")
+            .await;
+
+        let subscriptions = state.subscriptions.read().await;
+        assert!(subscriptions
+            .get("session1")
+            .is_some_and(|set| set.contains("drasi://query/query1")));
+    }
+}
