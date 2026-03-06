@@ -2272,10 +2272,6 @@ struct IdentityProviderPluginWrapper<T: IdentityProviderPluginDescriptor + 'stat
     cached_kind: String,
     cached_config_version: String,
     cached_schema_name: String,
-    #[allow(dead_code)]
-    executor: AsyncExecutorFn,
-    #[allow(dead_code)]
-    lifecycle_emitter: LifecycleEmitterFn,
     runtime_handle: fn() -> &'static tokio::runtime::Runtime,
 }
 
@@ -2284,7 +2280,7 @@ struct IdentityProviderPluginWrapper<T: IdentityProviderPluginDescriptor + 'stat
 pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor + 'static>(
     descriptor: T,
     executor: AsyncExecutorFn,
-    lifecycle_emitter: LifecycleEmitterFn,
+    _lifecycle_emitter: LifecycleEmitterFn,
     runtime: fn() -> &'static tokio::runtime::Runtime,
 ) -> super::vtables::IdentityProviderPluginVtable {
     extern "C" fn kind_fn<T: IdentityProviderPluginDescriptor + 'static>(
@@ -2368,8 +2364,6 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
         cached_kind,
         cached_config_version,
         cached_schema_name,
-        executor,
-        lifecycle_emitter,
         runtime_handle: runtime,
     });
 
