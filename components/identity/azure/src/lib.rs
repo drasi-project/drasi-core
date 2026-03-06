@@ -106,9 +106,7 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
         let dto: AzureIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
 
         let mut provider = match dto.auth_method {
-            AzureAuthMethod::ManagedIdentity => {
-                AzureIdentityProvider::new(&dto.identity_name)?
-            }
+            AzureAuthMethod::ManagedIdentity => AzureIdentityProvider::new(&dto.identity_name)?,
             AzureAuthMethod::ManagedIdentityUserAssigned => {
                 let client_id = dto.client_id.ok_or_else(|| {
                     anyhow::anyhow!(

@@ -2226,9 +2226,11 @@ pub fn build_identity_provider_vtable_from_boxed(
 
         // Reuse the plugin's existing tokio runtime via dispatch_to_runtime
         let handle = (w.runtime_handle)().handle().clone();
-        let result = dispatch_to_runtime(&handle, async move {
-            provider.get_credentials(&context).await
-        });
+        let result =
+            dispatch_to_runtime(
+                &handle,
+                async move { provider.get_credentials(&context).await },
+            );
 
         match result {
             Ok(creds) => FfiCredentialsResult::ok(super::identity::credentials_to_ffi(creds)),
@@ -2351,7 +2353,11 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
     }
 
     extern "C" fn drop_fn<T: IdentityProviderPluginDescriptor + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut IdentityProviderPluginWrapper<T>)) };
+        unsafe {
+            drop(Box::from_raw(
+                state as *mut IdentityProviderPluginWrapper<T>,
+            ))
+        };
     }
 
     let cached_kind = descriptor.kind().to_string();

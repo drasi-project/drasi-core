@@ -66,8 +66,7 @@ impl IdentityProvider for HostIdentityProviderProxy {
         // safe to use from another thread (the vtable is Send+Sync).
         let result = std::thread::spawn(move || {
             let state = state_addr as *const c_void;
-            let ffi_result =
-                (get_fn)(state, context_json.as_ptr(), context_json.len());
+            let ffi_result = (get_fn)(state, context_json.as_ptr(), context_json.len());
             unsafe { ffi_result.into_result() }
         })
         .join()

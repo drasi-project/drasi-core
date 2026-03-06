@@ -254,7 +254,10 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("state_store_provider", &"<dyn StateStoreProvider>")
             .field(
                 "identity_provider",
-                &self.identity_provider.as_ref().map(|_| "<dyn IdentityProvider>"),
+                &self
+                    .identity_provider
+                    .as_ref()
+                    .map(|_| "<dyn IdentityProvider>"),
             )
             .field("queries", &self.queries)
             .finish()

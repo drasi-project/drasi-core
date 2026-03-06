@@ -53,11 +53,8 @@ impl IdentityProvider for FfiIdentityProviderProxy {
         // Serialize context as JSON for FFI transport
         let context_json =
             serde_json::to_string(&context.properties).unwrap_or_else(|_| "{}".to_string());
-        let result = (vtable.get_credentials_fn)(
-            vtable.state,
-            context_json.as_ptr(),
-            context_json.len(),
-        );
+        let result =
+            (vtable.get_credentials_fn)(vtable.state, context_json.as_ptr(), context_json.len());
         unsafe { result.into_result() }
     }
 
