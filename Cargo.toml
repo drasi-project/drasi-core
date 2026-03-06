@@ -19,6 +19,7 @@ members = [
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
+  "components/bootstrappers/neo4j",
   "components/bootstrappers/mssql",
 
   # Source Plugins
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/neo4j",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -119,6 +121,8 @@ drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrapp
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
+drasi-source-neo4j = { version = "0.1.0", path = "components/sources/neo4j" }
+drasi-bootstrap-neo4j = { version = "0.1.0", path = "components/bootstrappers/neo4j" }
 
 [workspace.lints.rust]
 warnings = "deny"
