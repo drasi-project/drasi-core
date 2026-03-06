@@ -14,28 +14,10 @@
 
 //! Configuration types for RabbitMQ reactions.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-fn default_connection_string() -> String {
-    "amqp://guest:guest@localhost:5672/%2f".to_string()
-}
-
-fn default_exchange_name() -> String {
-    "drasi-events".to_string()
-}
-
-fn default_exchange_durable() -> bool {
-    true
-}
-
-fn default_message_persistent() -> bool {
-    true
-}
-
 /// Exchange type mapping for RabbitMQ.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExchangeType {
     Direct,
     Topic,
@@ -61,75 +43,58 @@ impl ExchangeType {
 }
 
 /// Publish specification for a single operation type.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PublishSpec {
     /// Routing key (supports Handlebars templates).
     pub routing_key: String,
     /// Custom AMQP headers (values support Handlebars templates).
-    #[serde(default)]
     pub headers: HashMap<String, String>,
     /// Optional Handlebars template for message body.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub body_template: Option<String>,
 }
 
 /// Query-specific publish configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryPublishConfig {
     /// Publish specification for ADD operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub added: Option<PublishSpec>,
     /// Publish specification for UPDATE operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<PublishSpec>,
     /// Publish specification for DELETE operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted: Option<PublishSpec>,
 }
 
 /// RabbitMQ reaction configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RabbitMQReactionConfig {
     /// AMQP connection string.
-    #[serde(default = "default_connection_string")]
     pub connection_string: String,
     /// Exchange name for publishing.
-    #[serde(default = "default_exchange_name")]
     pub exchange_name: String,
     /// Exchange type.
-    #[serde(default)]
     pub exchange_type: ExchangeType,
     /// Whether the exchange is durable.
-    #[serde(default = "default_exchange_durable")]
     pub exchange_durable: bool,
     /// Whether messages are published as persistent.
-    #[serde(default = "default_message_persistent")]
     pub message_persistent: bool,
     /// Enable TLS for AMQPS connections.
-    #[serde(default)]
     pub tls_enabled: bool,
     /// Optional PEM certificate chain for TLS.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_cert_path: Option<String>,
     /// Optional PKCS#12 client identity (PFX).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_key_path: Option<String>,
     /// Query-specific publish configuration.
-    #[serde(default)]
     pub query_configs: HashMap<String, QueryPublishConfig>,
 }
 
 impl Default for RabbitMQReactionConfig {
     fn default() -> Self {
         Self {
-            connection_string: default_connection_string(),
-            exchange_name: default_exchange_name(),
+            connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            exchange_name: "drasi-events".to_string(),
             exchange_type: ExchangeType::default(),
-            exchange_durable: default_exchange_durable(),
-            message_persistent: default_message_persistent(),
+            exchange_durable: true,
+            message_persistent: true,
             tls_enabled: false,
             tls_cert_path: None,
             tls_key_path: None,
