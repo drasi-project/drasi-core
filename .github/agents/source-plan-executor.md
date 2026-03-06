@@ -710,6 +710,12 @@ Document in completion report:
 - Ensure no debug/test code in core components
 - Verify all TODOs resolved
 
+### 9. Review
+
+- Review the new components for bugs and issues
+- Fix any issues found during review
+- Do a second pass review and fix any further issues
+
 ## Runtime Debugging Guide
 
 ### Container/Connection Issues (External System Sources)
