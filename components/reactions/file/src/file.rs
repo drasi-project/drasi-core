@@ -293,7 +293,12 @@ impl FileReaction {
                 context.insert("before".into(), data.clone());
                 context.insert("data".into(), data.clone());
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+            ResultDiff::Aggregation { before, after } => {
+                context.insert("before".into(), before.clone().unwrap_or(Value::Null));
+                context.insert("after".into(), after.clone());
+                context.insert("data".into(), after.clone());
+            }
+            ResultDiff::Noop => {}
         }
 
         let filename_template = config
@@ -331,7 +336,7 @@ impl FileReaction {
         reaction_name: &str,
     ) {
         for diff in &query_result.results {
-            if matches!(diff, ResultDiff::Noop | ResultDiff::Aggregation { .. }) {
+            if matches!(diff, ResultDiff::Noop) {
                 continue;
             }
             match Self::render_output(
