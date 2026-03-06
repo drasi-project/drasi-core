@@ -67,7 +67,11 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
 
     fn config_schema_json(&self) -> String {
         let schema = <AzureIdentityProviderConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap_or_default()
+        let components = utoipa::openapi::ComponentsBuilder::new()
+            .schema(self.config_schema_name(), schema)
+            .build();
+        serde_json::to_string(&components.schemas)
+            .expect("failed to serialize AzureIdentityProviderConfigDto schema map")
     }
 
     fn config_schema_name(&self) -> &str {
