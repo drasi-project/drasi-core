@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.2.4"
+version = "0.2.6"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC reaction plugin for Drasi"
@@ -25,6 +25,9 @@ categories = ["network-programming"]
 
 [lints]
 workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -43,5 +46,13 @@ uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
 
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+
 [build-dependencies]
 tonic-build = "0.11"
+
+
+[features]
+# default = []
+dynamic-plugin = []

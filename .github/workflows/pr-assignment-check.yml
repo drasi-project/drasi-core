@@ -89,7 +89,7 @@ jobs:
 
             Please update the PR description to link to the relevant issue. If you need help finding an appropriate issue, check our [good first issues](https://github.com/drasi-project/drasi-core/issues?q=is:issue+is:open+label:%22good+first+issue%22).
 
-Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
+            Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
                 });
               }
 
@@ -145,7 +145,7 @@ Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainer
 
             If you believe this was closed in error (e.g., you were assigned but the automation didn't detect it), please let us know.
 
-Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
+            Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
               });
 
               await github.rest.pulls.update({

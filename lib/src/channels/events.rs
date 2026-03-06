@@ -184,6 +184,8 @@ pub enum SourceControl {
         rel_labels: Vec<String>,
         operation: ControlOperation,
     },
+    /// Signal from FutureQueueSource that one or more future items are due.
+    FuturesDue,
 }
 
 /// Control operation types
@@ -201,10 +203,6 @@ pub enum SourceEvent {
     Change(SourceChange),
     /// Control event for query coordination
     Control(SourceControl),
-    /// Bootstrap start marker for a specific query
-    BootstrapStart { query_id: String },
-    /// Bootstrap end marker for a specific query
-    BootstrapEnd { query_id: String },
 }
 
 /// Wrapper for source events with metadata

@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,6 +38,7 @@
 //! ```
 
 mod config;
+pub mod descriptor;
 mod log;
 
 #[cfg(test)]
@@ -44,3 +46,18 @@ mod tests;
 
 pub use config::{LogReactionConfig, QueryConfig, TemplateSpec};
 pub use log::{LogReaction, LogReactionBuilder};
+
+/// Dynamic plugin entry point (legacy dylib).
+///
+
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "log-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::LogReactionDescriptor],
+    bootstrap_descriptors = [],
+);

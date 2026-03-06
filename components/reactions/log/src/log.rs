@@ -19,12 +19,11 @@ use handlebars::Handlebars;
 use log::debug;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 pub struct LogReaction {
     base: ReactionBase,
@@ -355,10 +354,6 @@ impl Reaction for LogReaction {
             )
             .await?;
 
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
-
         // Transition to Running
         self.base
             .set_status_with_event(
@@ -614,5 +609,12 @@ impl Reaction for LogReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }

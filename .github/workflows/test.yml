@@ -43,10 +43,10 @@ jobs:
     - name: Show Rust toolchain
       run: rustup show
 
-    - name: Install jq and oniguruma dependencies
+    - name: Install jq, oniguruma, and protobuf dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y libjq-dev libonig-dev
+        sudo apt-get install -y libjq-dev libonig-dev protobuf-compiler
 
     - name: Set JQ_LIB_DIR
       run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
@@ -80,8 +80,11 @@ jobs:
         REDIS_URL: redis://localhost:6379
       run: |
         cargo install junitify
-        cargo test -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
+        cargo test --workspace --exclude drasi-host-sdk -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
         ls
+
+    - name: Run host-sdk integration tests
+      run: make test-host-sdk
 
     - name: Publish Test Results
       uses: EnricoMi/publish-unit-test-result-action@567cc7f8dcea3eba5da355f6ebc95663310d8a07 # v2.17.0

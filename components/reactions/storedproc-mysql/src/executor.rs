@@ -15,6 +15,7 @@
 //! MySQL executor for stored procedure invocation.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::Credentials;
 use log::{debug, info};
 use mysql_async::prelude::*;
 use mysql_async::{OptsBuilder, Pool, SslOpts};
@@ -33,8 +34,36 @@ pub struct MySqlExecutor {
 
 impl MySqlExecutor {
     /// Create a new MySQL executor
-    pub async fn new(config: &MySqlStoredProcReactionConfig) -> Result<Self> {
+    ///
+    /// The `identity_provider` parameter allows injecting a credential provider
+    /// from the runtime context. If provided, it takes precedence over the
+    /// config's identity_provider. Falls back to config's user/password if neither is set.
+    pub async fn new(
+        config: &MySqlStoredProcReactionConfig,
+        identity_provider: Option<std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    ) -> Result<Self> {
         let port = config.get_port();
+
+        // Resolve credentials: injected provider > config provider > user/password
+        let effective_provider = identity_provider.as_ref().map(|p| p.as_ref());
+        let config_provider = config.identity_provider.as_deref();
+        let provider = effective_provider.or(config_provider);
+
+        let (username, password) = if let Some(provider) = provider {
+            debug!("Using identity provider for authentication");
+            let credentials = provider.get_credentials().await?;
+            if credentials.is_certificate() {
+                anyhow::bail!(
+                    "Certificate-based authentication is not supported for MySQL. \
+                     The mysql_async driver requires PKCS12 format which is incompatible \
+                     with PEM-based credentials. Use token or password authentication instead."
+                );
+            }
+            credentials.into_auth_pair()
+        } else {
+            debug!("Using username/password for authentication");
+            (config.user.clone(), config.password.clone())
+        };
 
         info!(
             "Connecting to MySQL: {}:{}/{}",
@@ -45,11 +74,13 @@ impl MySqlExecutor {
         let mut opts_builder = OptsBuilder::default()
             .ip_or_hostname(&config.hostname)
             .tcp_port(port)
-            .user(Some(&config.user))
-            .pass(Some(&config.password))
+            .user(Some(&username))
+            .pass(Some(&password))
             .db_name(Some(&config.database));
 
         // Configure SSL if enabled
+        // Uses system trust store for certificate validation
+        // For AWS RDS on macOS: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/rds-ca-bundle.pem
         if config.ssl {
             opts_builder = opts_builder.ssl_opts(Some(SslOpts::default()));
         }

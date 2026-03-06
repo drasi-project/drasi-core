@@ -54,9 +54,9 @@ impl GarnetQueryConfig {
     }
 
     pub async fn build_future_queue(&self, query_id: &str) -> GarnetFutureQueue {
-        GarnetFutureQueue::connect(query_id, &self.url)
-            .await
-            .unwrap()
+        let client = redis::Client::open(self.url.as_str()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        GarnetFutureQueue::new(query_id, connection)
     }
 
     pub fn get_element_index(&self) -> Arc<dyn ElementIndex> {
@@ -71,18 +71,12 @@ impl QueryTestConfig for GarnetQueryConfig {
         log::info!("using in Garnet indexes");
         let query_id = format!("test-{}", Uuid::new_v4());
 
-        let mut element_index = GarnetElementIndex::connect(&query_id, &self.url)
-            .await
-            .unwrap();
-        let ari = GarnetResultIndex::connect(&query_id, &self.url)
-            .await
-            .unwrap();
+        let client = redis::Client::open(self.url.as_str()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
 
-        let fq = GarnetFutureQueue::connect(&query_id, &self.url)
-            .await
-            .unwrap();
-
-        element_index.enable_archive();
+        let element_index = GarnetElementIndex::new(&query_id, connection.clone(), true);
+        let ari = GarnetResultIndex::new(&query_id, connection.clone());
+        let fq = GarnetFutureQueue::new(&query_id, connection);
 
         let element_index = Arc::new(element_index);
         let archive_index = element_index.clone();
@@ -322,8 +316,10 @@ mod linear_regression {
 }
 
 mod index {
+    use std::sync::Arc;
+
     use super::GarnetQueryConfig;
-    use drasi_core::interface::FutureQueue;
+    use drasi_core::interface::{FutureQueue, NoOpSessionControl};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -332,8 +328,10 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 
@@ -343,8 +341,22 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &session_control).await;
+        test_config.redis_grd.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn future_queue_clear_removes_all() {
+        let test_config = GarnetQueryConfig::new(false).await;
+        let fqi = test_config
+            .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
+            .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 
@@ -354,8 +366,10 @@ mod index {
         let fqi = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
+        let session_control: Arc<dyn drasi_core::interface::SessionControl> =
+            Arc::new(NoOpSessionControl);
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &session_control).await;
         test_config.redis_grd.cleanup().await;
     }
 }

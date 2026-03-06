@@ -1,0 +1,12 @@
+[package]
+name = "drasi-ffi-primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core FFI-safe types and vtable generation macros for the Drasi plugin boundary"
+readme = "README.md"
+
+[dependencies]
+
+[lints]
+workspace = true

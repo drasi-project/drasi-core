@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-postgres"
-version = "0.1.7"
+version = "0.1.10"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL source plugin for Drasi"
@@ -23,12 +23,17 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "postgres"]
 categories = ["database"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -61,3 +66,8 @@ env_logger = "0.10.0"
 serial_test = "3.0"
 testcontainers = "0.23"
 tokio-test = "0.4"
+
+
+[features]
+# default = []
+dynamic-plugin = []
