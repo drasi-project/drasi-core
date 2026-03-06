@@ -100,6 +100,54 @@ impl TemplateRouting for AzureStorageReactionConfig {
 }
 
 impl AzureStorageReactionConfig {
+    /// Return a normalized copy with trimmed non-template fields.
+    pub fn normalized(&self) -> Self {
+        let mut normalized = self.clone();
+        normalized.account_name = normalized.account_name.trim().to_string();
+        normalized.access_key = normalized.access_key.trim().to_string();
+        normalized.blob_endpoint = normalized
+            .blob_endpoint
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        normalized.queue_endpoint = normalized
+            .queue_endpoint
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        normalized.table_endpoint = normalized
+            .table_endpoint
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        normalized.target = match &normalized.target {
+            StorageTarget::Blob {
+                container_name,
+                blob_path_template,
+                content_type,
+            } => StorageTarget::Blob {
+                container_name: container_name.trim().to_string(),
+                blob_path_template: blob_path_template.clone(),
+                content_type: content_type.trim().to_string(),
+            },
+            StorageTarget::Queue { queue_name } => StorageTarget::Queue {
+                queue_name: queue_name.trim().to_string(),
+            },
+            StorageTarget::Table {
+                table_name,
+                partition_key_template,
+                row_key_template,
+            } => StorageTarget::Table {
+                table_name: table_name.trim().to_string(),
+                partition_key_template: partition_key_template.clone(),
+                row_key_template: row_key_template.clone(),
+            },
+        };
+
+        normalized
+    }
+
     /// Validate required fields.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.account_name.trim().is_empty() {
@@ -206,6 +254,33 @@ mod tests {
         assert_eq!(
             spec.expect("template should exist").template,
             "{{json after}}"
+        );
+    }
+
+    #[test]
+    fn test_config_normalization_trims_credentials() {
+        let config = AzureStorageReactionConfig {
+            account_name: "  acct  ".to_string(),
+            access_key: "  key  ".to_string(),
+            target: StorageTarget::Queue {
+                queue_name: " events ".to_string(),
+            },
+            queue_endpoint: Some(" http://127.0.0.1:10001/devstoreaccount1 ".to_string()),
+            ..Default::default()
+        };
+
+        let normalized = config.normalized();
+        assert_eq!(normalized.account_name, "acct");
+        assert_eq!(normalized.access_key, "key");
+        assert_eq!(
+            normalized.target,
+            StorageTarget::Queue {
+                queue_name: "events".to_string(),
+            }
+        );
+        assert_eq!(
+            normalized.queue_endpoint.as_deref(),
+            Some("http://127.0.0.1:10001/devstoreaccount1")
         );
     }
 }

@@ -90,6 +90,7 @@ impl AzureStorageReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
+        let config = config.normalized();
         config.validate()?;
 
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -406,38 +407,51 @@ impl Reaction for AzureStorageReaction {
                 }
 
                 for result in &query_result.results {
-                    let op_and_data = match result {
-                        ResultDiff::Add { data } => Some((OperationType::Add, "ADD", data.clone())),
-                        ResultDiff::Update { .. } => Some((
-                            OperationType::Update,
-                            "UPDATE",
-                            serde_json::to_value(result)
-                                .expect("ResultDiff should serialize to JSON"),
-                        )),
-                        ResultDiff::Delete { data } => {
-                            Some((OperationType::Delete, "DELETE", data.clone()))
+                    let op_and_data: Result<Option<(OperationType, &str, Value)>> = match result {
+                        ResultDiff::Add { data } => {
+                            Ok(Some((OperationType::Add, "ADD", data.clone())))
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => None,
+                        ResultDiff::Update { .. } => match serde_json::to_value(result) {
+                            Ok(payload) => Ok(Some((OperationType::Update, "UPDATE", payload))),
+                            Err(err) => Err(anyhow::anyhow!(
+                                "failed to serialize UPDATE ResultDiff into JSON payload: {err}"
+                            )),
+                        },
+                        ResultDiff::Delete { data } => {
+                            Ok(Some((OperationType::Delete, "DELETE", data.clone())))
+                        }
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => Ok(None),
                     };
 
-                    if let Some((operation, operation_name, data)) = op_and_data {
-                        if let Err(err) = Self::process_one(
-                            &service_client,
-                            &target,
-                            &config,
-                            &handlebars,
-                            operation_name,
-                            operation,
-                            &query_result.query_id,
-                            &data,
-                        )
-                        .await
-                        {
+                    let Some((operation, operation_name, data)) = (match op_and_data {
+                        Ok(value) => value,
+                        Err(err) => {
                             warn!(
-                                "[{reaction_name}] Failed processing {} operation for query {}: {}",
-                                operation_name, query_result.query_id, err
+                                "[{reaction_name}] Failed to prepare payload for query {}: {}",
+                                query_result.query_id, err
                             );
+                            continue;
                         }
+                    }) else {
+                        continue;
+                    };
+
+                    if let Err(err) = Self::process_one(
+                        &service_client,
+                        &target,
+                        &config,
+                        &handlebars,
+                        operation_name,
+                        operation,
+                        &query_result.query_id,
+                        &data,
+                    )
+                    .await
+                    {
+                        warn!(
+                            "[{reaction_name}] Failed processing {} operation for query {}: {}",
+                            operation_name, query_result.query_id, err
+                        );
                     }
                 }
             }
