@@ -61,9 +61,10 @@ pub enum WriteModeDto {
 #[schema(as = reaction::file::FileReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct FileReactionConfigDto {
-    /// Base directory for generated files.
-    #[schema(value_type = ConfigValueString)]
-    pub output_path: ConfigValue<String>,
+    /// Base directory for generated files. Defaults to `"."` (current directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub output_path: Option<ConfigValue<String>>,
     /// File write mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_mode: Option<WriteModeDto>,
@@ -148,8 +149,11 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
 
         let mut builder = FileReactionBuilder::new(id)
             .with_queries(query_ids)
-            .with_auto_start(auto_start)
-            .with_output_path(mapper.resolve_string(&dto.output_path)?);
+            .with_auto_start(auto_start);
+
+        if let Some(output_path) = dto.output_path {
+            builder = builder.with_output_path(mapper.resolve_string(&output_path)?);
+        }
 
         if let Some(write_mode) = dto.write_mode {
             builder = builder.with_write_mode(map_write_mode(write_mode));
