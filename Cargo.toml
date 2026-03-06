@@ -69,7 +69,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "lib-integration-tests", "temp/neo4j-poc-verification",
+  "lib-integration-tests",
   ]
 
 # Exclude internal crates from workspace packaging
