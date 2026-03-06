@@ -13,54 +13,48 @@
 # limitations under the License.
 
 [package]
-name = "drasi-reaction-storedproc-postgres"
-version = "0.2.6"
+name = "drasi-source-mysql"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "PostgreSQL Stored Procedure reaction plugin for Drasi"
+description = "MySQL source plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "postgresql", "storedproc"]
+keywords = ["drasi", "plugin", "mysql"]
 categories = ["database"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
-[dependencies]
-drasi-lib.workspace = true
-
-# Async runtime
-tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
-
-# PostgreSQL
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
-postgres-types = { version = "0.2", features = ["derive"] }
-postgres-native-tls = "0.5"
-native-tls = "0.2"
-bytes = "1.0"
-
-# Utilities
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-regex = "1.10"
-log = "0.4"
-anyhow = "1.0"
-chrono = "0.4"
-drasi-plugin-sdk = { workspace = true }
-utoipa = { workspace = true }
-
-[dev-dependencies]
-tokio-test = "0.4"
-env_logger = "0.10.0"
-serial_test = "3.0"
-testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
-
 [lints]
 workspace = true
 
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ordered-float = "3.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+mysql_cdc = "0.2.1"
+bytes = "1.0"
+base64 = "0.22"
 
 [features]
-# default = []
 dynamic-plugin = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14", features = ["mysql"] }
+drasi-reaction-application = { path = "../../reactions/application" }
+drasi-bootstrap-mysql = { path = "../../bootstrappers/mysql" }
+mysql_async = "0.34"
