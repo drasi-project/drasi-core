@@ -181,10 +181,20 @@ async fn bootstrap_nodes(
         return Ok(count);
     }
 
-    for label in labels {
+    if labels.len() == 1 {
         let cypher = format!(
             "MATCH (n:{}) RETURN elementId(n) AS element_id, labels(n) AS labels, properties(n) AS props",
-            quote_ident(label)
+            quote_ident(&labels[0])
+        );
+        count += stream_nodes_query(graph, &cypher, source_id, context, event_tx).await?;
+    } else {
+        let where_clause = labels
+            .iter()
+            .map(|l| format!("n:{}", quote_ident(l)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let cypher = format!(
+            "MATCH (n) WHERE {where_clause} RETURN DISTINCT elementId(n) AS element_id, labels(n) AS labels, properties(n) AS props"
         );
         count += stream_nodes_query(graph, &cypher, source_id, context, event_tx).await?;
     }
@@ -200,41 +210,47 @@ async fn stream_nodes_query(
 ) -> Result<usize> {
     let mut count = 0usize;
     let mut stream = graph.execute(query(cypher)).await?;
-    while let Ok(Some(row)) = stream.next().await {
-        let element_id: String = row.get("element_id")?;
-        let labels: Vec<String> = row.get("labels")?;
-        let props = row.get::<BoltType>("props")?;
+    loop {
+        match stream.next().await {
+            Ok(Some(row)) => {
+                let element_id: String = row.get("element_id")?;
+                let labels: Vec<String> = row.get("labels")?;
+                let props = row.get::<BoltType>("props")?;
 
-        let properties = match props {
-            BoltType::Map(map) => bolt_map_to_properties(&map)?,
-            _ => ElementPropertyMap::new(),
-        };
+                let properties = match props {
+                    BoltType::Map(map) => bolt_map_to_properties(&map)?,
+                    _ => ElementPropertyMap::new(),
+                };
 
-        let metadata = ElementMetadata {
-            reference: ElementReference::new(source_id, &element_id),
-            labels: labels
-                .iter()
-                .map(|label| Arc::from(label.as_str()))
-                .collect::<Vec<_>>()
-                .into(),
-            effective_from: now_ms(),
-        };
-        let change = SourceChange::Insert {
-            element: Element::Node {
-                metadata,
-                properties,
-            },
-        };
+                let metadata = ElementMetadata {
+                    reference: ElementReference::new(source_id, &element_id),
+                    labels: labels
+                        .iter()
+                        .map(|label| Arc::from(label.as_str()))
+                        .collect::<Vec<_>>()
+                        .into(),
+                    effective_from: now_ms(),
+                };
+                let change = SourceChange::Insert {
+                    element: Element::Node {
+                        metadata,
+                        properties,
+                    },
+                };
 
-        event_tx
-            .send(BootstrapEvent {
-                source_id: source_id.to_string(),
-                change,
-                timestamp: Utc::now(),
-                sequence: context.next_sequence(),
-            })
-            .await?;
-        count += 1;
+                event_tx
+                    .send(BootstrapEvent {
+                        source_id: source_id.to_string(),
+                        change,
+                        timestamp: Utc::now(),
+                        sequence: context.next_sequence(),
+                    })
+                    .await?;
+                count += 1;
+            }
+            Ok(None) => break,
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(count)
 }
@@ -262,13 +278,26 @@ async fn bootstrap_relationships(
         return Ok(count);
     }
 
-    for rel_type in rel_types {
+    if rel_types.len() == 1 {
         let cypher = format!(
             "MATCH (a)-[r:{}]->(b) \
              RETURN elementId(r) AS element_id, type(r) AS rel_type, \
                     elementId(a) AS start_element_id, elementId(b) AS end_element_id, \
                     properties(r) AS props",
-            quote_ident(rel_type)
+            quote_ident(&rel_types[0])
+        );
+        count += stream_relationship_query(graph, &cypher, source_id, context, event_tx).await?;
+    } else {
+        let type_list = rel_types
+            .iter()
+            .map(|t| quote_ident(t))
+            .collect::<Vec<_>>()
+            .join("|");
+        let cypher = format!(
+            "MATCH (a)-[r:{type_list}]->(b) \
+             RETURN elementId(r) AS element_id, type(r) AS rel_type, \
+                    elementId(a) AS start_element_id, elementId(b) AS end_element_id, \
+                    properties(r) AS props"
         );
         count += stream_relationship_query(graph, &cypher, source_id, context, event_tx).await?;
     }
@@ -284,41 +313,47 @@ async fn stream_relationship_query(
 ) -> Result<usize> {
     let mut count = 0usize;
     let mut stream = graph.execute(query(cypher)).await?;
-    while let Ok(Some(row)) = stream.next().await {
-        let element_id: String = row.get("element_id")?;
-        let rel_type: String = row.get("rel_type")?;
-        let start_element_id: String = row.get("start_element_id")?;
-        let end_element_id: String = row.get("end_element_id")?;
-        let props = row.get::<BoltType>("props")?;
+    loop {
+        match stream.next().await {
+            Ok(Some(row)) => {
+                let element_id: String = row.get("element_id")?;
+                let rel_type: String = row.get("rel_type")?;
+                let start_element_id: String = row.get("start_element_id")?;
+                let end_element_id: String = row.get("end_element_id")?;
+                let props = row.get::<BoltType>("props")?;
 
-        let properties = match props {
-            BoltType::Map(map) => bolt_map_to_properties(&map)?,
-            _ => ElementPropertyMap::new(),
-        };
+                let properties = match props {
+                    BoltType::Map(map) => bolt_map_to_properties(&map)?,
+                    _ => ElementPropertyMap::new(),
+                };
 
-        let metadata = ElementMetadata {
-            reference: ElementReference::new(source_id, &element_id),
-            labels: vec![Arc::from(rel_type.as_str())].into(),
-            effective_from: now_ms(),
-        };
-        let change = SourceChange::Insert {
-            element: Element::Relation {
-                metadata,
-                properties,
-                in_node: ElementReference::new(source_id, &start_element_id),
-                out_node: ElementReference::new(source_id, &end_element_id),
-            },
-        };
+                let metadata = ElementMetadata {
+                    reference: ElementReference::new(source_id, &element_id),
+                    labels: vec![Arc::from(rel_type.as_str())].into(),
+                    effective_from: now_ms(),
+                };
+                let change = SourceChange::Insert {
+                    element: Element::Relation {
+                        metadata,
+                        properties,
+                        in_node: ElementReference::new(source_id, &start_element_id),
+                        out_node: ElementReference::new(source_id, &end_element_id),
+                    },
+                };
 
-        event_tx
-            .send(BootstrapEvent {
-                source_id: source_id.to_string(),
-                change,
-                timestamp: Utc::now(),
-                sequence: context.next_sequence(),
-            })
-            .await?;
-        count += 1;
+                event_tx
+                    .send(BootstrapEvent {
+                        source_id: source_id.to_string(),
+                        change,
+                        timestamp: Utc::now(),
+                        sequence: context.next_sequence(),
+                    })
+                    .await?;
+                count += 1;
+            }
+            Ok(None) => break,
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(count)
 }
@@ -329,6 +364,10 @@ fn quote_ident(input: &str) -> String {
 
 fn normalize_uri(uri: &str) -> String {
     uri.trim()
+        .trim_start_matches("bolt+ssc://")
+        .trim_start_matches("bolt+s://")
+        .trim_start_matches("neo4j+ssc://")
+        .trim_start_matches("neo4j+s://")
         .trim_start_matches("bolt://")
         .trim_start_matches("neo4j://")
         .to_string()

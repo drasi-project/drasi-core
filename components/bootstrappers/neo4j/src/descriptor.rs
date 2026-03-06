@@ -117,6 +117,7 @@ impl BootstrapPluginDescriptor for Neo4jBootstrapDescriptor {
             rel_types: dto.rel_types,
         };
 
+        config.validate()?;
         Ok(Box::new(Neo4jBootstrapProvider::new(config)))
     }
 }
