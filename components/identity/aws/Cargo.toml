@@ -1,0 +1,33 @@
+[package]
+name = "drasi-identity-aws"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "AWS identity provider plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "identity", "aws"]
+categories = ["authentication"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+aws-config = "1.5"
+aws-sdk-rds = "1.77"
+aws-sdk-sts = "1.50"
+
+[features]
+dynamic-plugin = []

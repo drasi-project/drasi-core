@@ -25,6 +25,7 @@ use drasi_plugin_sdk::ffi::{
 };
 
 use crate::proxies::bootstrap_provider::BootstrapPluginProxy;
+use crate::proxies::identity_provider::IdentityProviderPluginProxy;
 use crate::proxies::reaction::ReactionPluginProxy;
 use crate::proxies::source::SourcePluginProxy;
 
@@ -45,6 +46,8 @@ pub struct LoadedPlugin {
     pub reaction_plugins: Vec<ReactionPluginProxy>,
     /// Bootstrap plugin factories (descriptor proxies).
     pub bootstrap_plugins: Vec<BootstrapPluginProxy>,
+    /// Identity provider plugin factories (descriptor proxies).
+    pub identity_provider_plugins: Vec<IdentityProviderPluginProxy>,
     /// Plugin metadata string for diagnostics.
     pub metadata_info: Option<String>,
     /// Keep the library loaded.
@@ -229,6 +232,20 @@ pub fn load_plugin_from_path(
             None
         };
 
+    let identity_provider_vtables = if !registration.identity_provider_plugins.is_null()
+        && registration.identity_provider_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.identity_provider_plugins,
+                registration.identity_provider_plugin_count,
+                registration.identity_provider_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
+
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
 
@@ -236,6 +253,7 @@ pub fn load_plugin_from_path(
     let mut source_plugins = Vec::new();
     let mut reaction_plugins = Vec::new();
     let mut bootstrap_plugins = Vec::new();
+    let mut identity_provider_plugins = Vec::new();
 
     for v in source_vtables.into_iter().flatten() {
         source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
@@ -249,10 +267,15 @@ pub fn load_plugin_from_path(
         bootstrap_plugins.push(BootstrapPluginProxy::new(v, lib.clone()));
     }
 
+    for v in identity_provider_vtables.into_iter().flatten() {
+        identity_provider_plugins.push(IdentityProviderPluginProxy::new(v, lib.clone()));
+    }
+
     Ok(LoadedPlugin {
         source_plugins,
         reaction_plugins,
         bootstrap_plugins,
+        identity_provider_plugins,
         metadata_info,
         _library: lib,
     })
