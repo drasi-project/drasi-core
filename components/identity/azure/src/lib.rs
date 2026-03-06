@@ -25,6 +25,26 @@ use async_trait::async_trait;
 use drasi_lib::identity::IdentityProvider;
 use drasi_plugin_sdk::prelude::*;
 
+/// Authentication method for the Azure identity provider.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureAuthMethod {
+    /// System-assigned managed identity.
+    ManagedIdentity,
+    /// User-assigned managed identity (requires `client_id`).
+    ManagedIdentityUserAssigned,
+    /// Workload identity for AKS.
+    WorkloadIdentity,
+    /// Developer tools credential chain (e.g., `az login`).
+    DeveloperTools,
+}
+
+impl Default for AzureAuthMethod {
+    fn default() -> Self {
+        Self::ManagedIdentity
+    }
+}
+
 /// Configuration DTO for the Azure identity provider plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -33,23 +53,17 @@ pub struct AzureIdentityProviderConfigDto {
     pub identity_name: String,
 
     /// Authentication method to use.
-    /// One of: `"managed_identity"`, `"workload_identity"`, `"developer_tools"`,
-    /// or `"managed_identity_user_assigned"`.
-    #[serde(default = "default_auth_method")]
-    pub auth_method: String,
+    #[serde(default)]
+    pub auth_method: AzureAuthMethod,
 
     /// Client ID for user-assigned managed identity (only used when
-    /// `auth_method` is `"managed_identity_user_assigned"`).
+    /// `auth_method` is `managed_identity_user_assigned`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
 
     /// Custom scope for token acquisition. Defaults to the Azure OSSRDBMS scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-}
-
-fn default_auth_method() -> String {
-    "managed_identity".to_string()
 }
 
 /// Descriptor for the Azure identity provider plugin.
@@ -80,9 +94,11 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
     ) -> anyhow::Result<Box<dyn IdentityProvider>> {
         let dto: AzureIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
 
-        let mut provider = match dto.auth_method.as_str() {
-            "managed_identity" => AzureIdentityProvider::new(&dto.identity_name)?,
-            "managed_identity_user_assigned" => {
+        let mut provider = match dto.auth_method {
+            AzureAuthMethod::ManagedIdentity => {
+                AzureIdentityProvider::new(&dto.identity_name)?
+            }
+            AzureAuthMethod::ManagedIdentityUserAssigned => {
                 let client_id = dto.client_id.ok_or_else(|| {
                     anyhow::anyhow!(
                         "client_id is required for managed_identity_user_assigned auth method"
@@ -90,19 +106,11 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
                 })?;
                 AzureIdentityProvider::with_managed_identity(&dto.identity_name, client_id)?
             }
-            "workload_identity" => {
+            AzureAuthMethod::WorkloadIdentity => {
                 AzureIdentityProvider::with_workload_identity(&dto.identity_name)?
             }
-            "developer_tools" => {
+            AzureAuthMethod::DeveloperTools => {
                 AzureIdentityProvider::with_default_credentials(&dto.identity_name)?
-            }
-            other => {
-                return Err(anyhow::anyhow!(
-                    "Unknown Azure auth method: '{}'. \
-                     Valid methods: managed_identity, managed_identity_user_assigned, \
-                     workload_identity, developer_tools",
-                    other
-                ))
             }
         };
 
