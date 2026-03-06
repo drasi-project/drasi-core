@@ -353,6 +353,19 @@ All publish targets accept optional variables: `REGISTRY`, `PRE_RELEASE`, `ARCH_
 make test-host-sdk
 ```
 
+## Identity Providers
+
+Drasi-core includes a pluggable identity provider system for authenticating with databases and external services. The core `IdentityProvider` trait and a built-in `PasswordIdentityProvider` are in `drasi-lib`. Cloud-specific providers are available as separate crates:
+
+| Crate | Authentication Method |
+|-------|----------------------|
+| `drasi-lib` (built-in) | Username/password via `PasswordIdentityProvider` |
+| `drasi-identity-azure` | Azure AD (managed identity, workload identity, developer tools) |
+| `drasi-identity-aws` | AWS IAM (RDS auth tokens, assumed roles) |
+
+See [IDENTITY_PROVIDER_DESIGN.md](IDENTITY_PROVIDER_DESIGN.md) for the full design document, and the [DrasiLib README](lib/README.md#identity-providers) for usage examples.
+
+
 ## Storage implementations
 
 Drasi maintains internal indexes that are used to compute the effect of a data change on the query result. By default these indexes are in-memory, but a continuous query can be configured to use persistent storage.  Currently there are storage implementations for Redis, Garnet and RocksDB.
