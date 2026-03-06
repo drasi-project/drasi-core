@@ -26,6 +26,7 @@ pub use provider::AwsIdentityProvider;
 use async_trait::async_trait;
 use drasi_lib::identity::IdentityProvider;
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 
 /// Configuration DTO for the AWS identity provider plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -48,6 +49,10 @@ pub struct AwsIdentityProviderConfigDto {
     pub session_name: Option<String>,
 }
 
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(AwsIdentityProviderConfigDto)))]
+struct AwsIdentityProviderSchemas;
+
 /// Descriptor for the AWS identity provider plugin.
 pub struct AwsIdentityProviderDescriptor;
 
@@ -62,8 +67,14 @@ impl IdentityProviderPluginDescriptor for AwsIdentityProviderDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
-        let schema = <AwsIdentityProviderConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap_or_default()
+        let api = AwsIdentityProviderSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
     }
 
     fn config_schema_name(&self) -> &str {

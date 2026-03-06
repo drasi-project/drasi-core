@@ -24,6 +24,7 @@ pub use provider::AzureIdentityProvider;
 use async_trait::async_trait;
 use drasi_lib::identity::IdentityProvider;
 use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
 
 /// Authentication method for the Azure identity provider.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -66,6 +67,10 @@ pub struct AzureIdentityProviderConfigDto {
     pub scope: Option<String>,
 }
 
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(AzureIdentityProviderConfigDto, AzureAuthMethod)))]
+struct AzureIdentityProviderSchemas;
+
 /// Descriptor for the Azure identity provider plugin.
 pub struct AzureIdentityProviderDescriptor;
 
@@ -80,8 +85,14 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
-        let schema = <AzureIdentityProviderConfigDto as utoipa::ToSchema>::schema();
-        serde_json::to_string(&schema).unwrap_or_default()
+        let api = AzureIdentityProviderSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
     }
 
     fn config_schema_name(&self) -> &str {
