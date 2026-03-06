@@ -54,10 +54,22 @@ async fn wait_for_query_results(
     let start = Instant::now();
     let timeout = Duration::from_secs(20);
     loop {
-        let results = core.get_query_results(query_id).await?;
-        if predicate(&results) {
-            return Ok(());
+        // Try to get results, but handle "not running" error by retrying
+        match core.get_query_results(query_id).await {
+            Ok(results) => {
+                if predicate(&results) {
+                    return Ok(());
+                }
+            }
+            Err(e) if e.to_string().contains("not running") => {
+                // Query not running yet, keep waiting
+            }
+            Err(e) => {
+                // Other error, propagate it
+                return Err(e.into());
+            }
         }
+
         if start.elapsed() > timeout {
             anyhow::bail!("Timed out waiting for query results for query_id `{query_id}`")
         }
@@ -137,7 +149,7 @@ async fn build_core(
     Ok(core)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_source_connects_and_starts() -> Result<()> {
@@ -167,7 +179,7 @@ async fn test_source_connects_and_starts() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_insert_detection() -> Result<()> {
@@ -202,7 +214,7 @@ async fn test_insert_detection() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_update_detection() -> Result<()> {
@@ -244,7 +256,7 @@ async fn test_update_detection() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_update_without_old_tuple_stays_update() -> Result<()> {
@@ -263,6 +275,10 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
 
     let core = build_core(pg.config(), slot_name).await?;
     core.start().await?;
+
+    // Wait for query to be running with empty results (no pre-existing data)
+    // This ensures bootstrap has completed before we start test data operations
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
@@ -287,7 +303,7 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_delete_detection() -> Result<()> {
@@ -324,7 +340,7 @@ async fn test_delete_detection() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
 #[ignore]
 async fn test_full_crud_cycle() -> Result<()> {
@@ -343,6 +359,10 @@ async fn test_full_crud_cycle() -> Result<()> {
 
     let core = build_core(pg.config(), slot_name).await?;
     core.start().await?;
+
+    // Wait for query to be running with empty results (no pre-existing data)
+    // This ensures bootstrap has completed before we start test data operations
+    wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
 
     insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
     wait_for_query_results(&core, "test-query", |results| {
