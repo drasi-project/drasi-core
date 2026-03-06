@@ -24,3 +24,28 @@ pub struct Neo4jBootstrapConfig {
     pub labels: Vec<String>,
     pub rel_types: Vec<String>,
 }
+
+impl Neo4jBootstrapConfig {
+    /// Validate the configuration and return an error if invalid.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.uri.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: uri cannot be empty. \
+                 Please specify a Bolt URI (for example, bolt://localhost:7687)"
+            ));
+        }
+        if self.user.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: user cannot be empty. \
+                 Please specify the Neo4j user"
+            ));
+        }
+        if self.database.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: database cannot be empty. \
+                 Please specify a Neo4j database name"
+            ));
+        }
+        Ok(())
+    }
+}

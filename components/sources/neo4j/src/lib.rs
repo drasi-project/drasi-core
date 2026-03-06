@@ -76,6 +76,7 @@ impl Source for Neo4jSource {
             "user".to_string(),
             serde_json::Value::String(self.config.user.clone()),
         );
+        // Don't expose password in properties
         props.insert(
             "database".to_string(),
             serde_json::Value::String(self.config.database.clone()),
@@ -269,34 +270,43 @@ async fn poll_once(
         .await?;
 
     let mut latest_cursor: Option<String> = None;
-    while let Ok(Some(row)) = stream.next().await {
-        let change_id: String = row.get("id")?;
-        let metadata = row.get::<BoltType>("metadata").ok();
-        let event = row.get::<BoltType>("event")?;
+    loop {
+        match stream.next().await {
+            Ok(Some(row)) => {
+                let change_id: String = row.get("id")?;
+                let metadata = row.get::<BoltType>("metadata").ok();
+                let event = row.get::<BoltType>("event")?;
 
-        let event_map = match event {
-            BoltType::Map(map) => map,
-            _ => continue,
-        };
+                let event_map = match event {
+                    BoltType::Map(map) => map,
+                    _ => {
+                        latest_cursor = Some(change_id);
+                        continue;
+                    }
+                };
 
-        let event_time_ms = extract_event_time_ms(metadata.as_ref()).unwrap_or_else(now_ms);
-        if let StartCursor::Timestamp(ts) = start_cursor_mode {
-            if event_time_ms < *ts as u64 {
+                let event_time_ms = extract_event_time_ms(metadata.as_ref()).unwrap_or_else(now_ms);
+                if let StartCursor::Timestamp(ts) = start_cursor_mode {
+                    if *ts >= 0 && event_time_ms < *ts as u64 {
+                        latest_cursor = Some(change_id);
+                        continue;
+                    }
+                }
+
+                match parse_source_change(source_id, &event_map, event_time_ms) {
+                    Ok(Some(change)) => {
+                        base.dispatch_source_change(change).await?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("Skipping malformed Neo4j CDC event '{change_id}': {e}");
+                    }
+                }
                 latest_cursor = Some(change_id);
-                continue;
             }
+            Ok(None) => break,
+            Err(e) => return Err(e.into()),
         }
-
-        match parse_source_change(source_id, &event_map, event_time_ms) {
-            Ok(Some(change)) => {
-                base.dispatch_source_change(change).await?;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!("Skipping malformed Neo4j CDC event '{change_id}': {e}");
-            }
-        }
-        latest_cursor = Some(change_id);
     }
 
     Ok(latest_cursor)
@@ -314,6 +324,10 @@ fn extract_event_time_ms(metadata: Option<&BoltType>) -> Option<u64> {
 
 fn normalize_uri(uri: &str) -> String {
     uri.trim()
+        .trim_start_matches("bolt+ssc://")
+        .trim_start_matches("bolt+s://")
+        .trim_start_matches("neo4j+ssc://")
+        .trim_start_matches("neo4j+s://")
         .trim_start_matches("bolt://")
         .trim_start_matches("neo4j://")
         .to_string()
