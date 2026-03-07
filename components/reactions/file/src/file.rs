@@ -17,8 +17,10 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
 use log::{debug, error};
+use lru::LruCache;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
@@ -32,14 +34,22 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::{OperationType, TemplateRouting};
 use drasi_lib::Reaction;
 
+const FILE_LOCK_CACHE_SIZE: usize = 1024;
+
 pub struct FileReaction {
     base: ReactionBase,
     config: FileReactionConfig,
     handlebars: Arc<Handlebars<'static>>,
-    file_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    file_locks: Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
 }
 
 impl FileReaction {
+    fn new_file_locks() -> Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>> {
+        Arc::new(Mutex::new(LruCache::new(
+            NonZeroUsize::new(FILE_LOCK_CACHE_SIZE).expect("FILE_LOCK_CACHE_SIZE must be > 0"),
+        )))
+    }
+
     /// Create a builder for FileReaction.
     pub fn builder(id: impl Into<String>) -> FileReactionBuilder {
         FileReactionBuilder::new(id)
@@ -59,7 +69,7 @@ impl FileReaction {
             base: ReactionBase::new(params),
             config,
             handlebars: Arc::new(Self::build_handlebars()),
-            file_locks: Arc::new(Mutex::new(HashMap::new())),
+            file_locks: Self::new_file_locks(),
         })
     }
 
@@ -79,7 +89,7 @@ impl FileReaction {
             base: ReactionBase::new(params),
             config,
             handlebars: Arc::new(Self::build_handlebars()),
-            file_locks: Arc::new(Mutex::new(HashMap::new())),
+            file_locks: Self::new_file_locks(),
         })
     }
 
@@ -101,7 +111,7 @@ impl FileReaction {
             base: ReactionBase::new(params),
             config,
             handlebars: Arc::new(Self::build_handlebars()),
-            file_locks: Arc::new(Mutex::new(HashMap::new())),
+            file_locks: Self::new_file_locks(),
         })
     }
 
@@ -199,19 +209,18 @@ impl FileReaction {
     }
 
     async fn get_file_lock(
-        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
         path: &Path,
     ) -> Arc<Mutex<()>> {
         let key = path.to_string_lossy().to_string();
         let mut locks = file_locks.lock().await;
         locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .get_or_insert(key, || Arc::new(Mutex::new(())))
             .clone()
     }
 
     async fn write_to_file(
-        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
         mode: &WriteMode,
         output_file: &Path,
         content: &str,
@@ -236,15 +245,32 @@ impl FileReaction {
             WriteMode::Overwrite => {
                 let lock = Self::get_file_lock(file_locks, output_file).await;
                 let _guard = lock.lock().await;
-                tokio::fs::write(output_file, content.as_bytes()).await?;
+                // Write to a temporary file then atomically rename to avoid
+                // exposing partially-written files to readers.
+                let tmp_path = Self::tmp_path_for(output_file)?;
+                tokio::fs::write(&tmp_path, content.as_bytes()).await?;
+                tokio::fs::rename(&tmp_path, output_file).await?;
             }
             WriteMode::PerChange => {
-                // No lock needed — each file is unique (UUID-based filenames).
-                tokio::fs::write(output_file, content.as_bytes()).await?;
+                // No lock needed — each file is unique.
+                // Still write atomically to avoid truncated files on crash.
+                let tmp_path = Self::tmp_path_for(output_file)?;
+                tokio::fs::write(&tmp_path, content.as_bytes()).await?;
+                tokio::fs::rename(&tmp_path, output_file).await?;
             }
         }
 
         Ok(())
+    }
+
+    fn tmp_path_for(output_file: &Path) -> Result<PathBuf> {
+        let file_name = output_file
+            .file_name()
+            .ok_or_else(|| anyhow!("output_file has no file name"))?;
+        let tmp_file_name = format!("{}.tmp", file_name.to_string_lossy());
+        let mut tmp_path = output_file.to_path_buf();
+        tmp_path.set_file_name(tmp_file_name);
+        Ok(tmp_path)
     }
 
     fn render_output(
@@ -331,7 +357,7 @@ impl FileReaction {
     async fn process_result(
         config: &FileReactionConfig,
         handlebars: &Handlebars<'static>,
-        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
         query_result: &QueryResult,
         reaction_name: &str,
     ) {
@@ -648,7 +674,7 @@ mod tests {
         };
 
         let handlebars = FileReaction::build_handlebars();
-        let file_locks = Arc::new(Mutex::new(HashMap::new()));
+        let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
             chrono::Utc::now(),
@@ -673,7 +699,7 @@ mod tests {
         config.default_template = None;
 
         let handlebars = FileReaction::build_handlebars();
-        let file_locks = Arc::new(Mutex::new(HashMap::new()));
+        let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
             chrono::Utc::now(),
@@ -710,7 +736,7 @@ mod tests {
         };
 
         let handlebars = FileReaction::build_handlebars();
-        let file_locks = Arc::new(Mutex::new(HashMap::new()));
+        let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "unknown-query".to_string(),
             chrono::Utc::now(),
@@ -753,7 +779,7 @@ mod tests {
         };
 
         let handlebars = FileReaction::build_handlebars();
-        let file_locks = Arc::new(Mutex::new(HashMap::new()));
+        let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
             chrono::Utc::now(),
