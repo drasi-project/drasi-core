@@ -95,12 +95,12 @@ User-defined attributes from `TemplateSpec.message_attributes` are rendered and 
 
 Unit tests:
 ```bash
-cargo test -p drasi-reaction-sqs
+cargo test -p drasi-reaction-aws-sqs
 ```
 
 Integration test (ElasticMQ container):
 ```bash
-cargo test -p drasi-reaction-sqs -- --ignored --nocapture
+cargo test -p drasi-reaction-aws-sqs -- --ignored --nocapture
 ```
 
 ## Limitations
