@@ -455,7 +455,17 @@ impl Reaction for SqsReaction {
                         match &message_group_id_template {
                             Some(template) => {
                                 match handlebars.render_template(template, &context) {
-                                    Ok(rendered) => Some(rendered),
+                                    Ok(rendered) => {
+                                        let trimmed = rendered.trim().to_string();
+                                        if trimmed.is_empty() {
+                                            warn!(
+                                                "[{reaction_id}] message_group_id_template rendered empty, falling back to query_id"
+                                            );
+                                            Some(query_id.clone())
+                                        } else {
+                                            Some(trimmed)
+                                        }
+                                    }
                                     Err(e) => {
                                         error!(
                                         "[{reaction_id}] Failed rendering message group id template '{template}': {e}"
