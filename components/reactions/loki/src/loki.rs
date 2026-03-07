@@ -180,9 +180,9 @@ impl LokiReaction {
     fn operation_name(result: &ResultDiff) -> Option<&'static str> {
         match result {
             ResultDiff::Add { .. } => Some("ADD"),
-            ResultDiff::Update { .. } => Some("UPDATE"),
+            ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => Some("UPDATE"),
             ResultDiff::Delete { .. } => Some("DELETE"),
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => None,
+            ResultDiff::Noop => None,
         }
     }
 
@@ -282,7 +282,7 @@ impl LokiReaction {
                 .added
                 .as_ref()
                 .map(|spec| spec.template.as_str()),
-            ResultDiff::Update { .. } => query_template
+            ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => query_template
                 .updated
                 .as_ref()
                 .map(|spec| spec.template.as_str()),
@@ -290,7 +290,7 @@ impl LokiReaction {
                 .deleted
                 .as_ref()
                 .map(|spec| spec.template.as_str()),
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => None,
+            ResultDiff::Noop => None,
         });
 
         if let Some(template) = template {
@@ -309,7 +309,8 @@ impl LokiReaction {
             ResultDiff::Add { data } => data,
             ResultDiff::Delete { data } => data,
             ResultDiff::Update { data, .. } => data,
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => return None,
+            ResultDiff::Aggregation { after, .. } => after,
+            ResultDiff::Noop => return None,
         };
 
         serde_json::to_string(value).ok()
