@@ -20,7 +20,7 @@ Key capabilities:
 ### Builder usage
 
 ```rust
-use drasi_reaction_sqs::{SqsReaction, QueryConfig, TemplateSpec};
+use drasi_reaction_aws_sqs::{SqsReaction, QueryConfig, TemplateSpec};
 
 let reaction = SqsReaction::builder("sqs-reaction")
     .with_queue_url("https://sqs.us-east-1.amazonaws.com/123456789012/products")
@@ -50,10 +50,14 @@ let reaction = SqsReaction::builder("sqs-reaction")
 | `queue_url` | `String` | Yes | - | Full SQS queue URL |
 | `region` | `Option<String>` | No | `None` | AWS region override |
 | `endpoint_url` | `Option<String>` | No | `None` | Custom SQS endpoint (ElasticMQ/LocalStack) |
+| `access_key_id` | `Option<String>` | No | `None` | Explicit AWS access key ID (primarily for local testing) |
+| `secret_access_key` | `Option<String>` | No | `None` | Explicit AWS secret access key (primarily for local testing) |
 | `fifo_queue` | `bool` | No | `false` | Enables FIFO send options (`message_group_id`, dedup id) |
 | `message_group_id_template` | `Option<String>` | No | `None` | Handlebars template for FIFO group id; falls back to query id |
 | `routes` | `HashMap<String, QueryConfig>` | No | `{}` | Query-specific templates |
 | `default_template` | `Option<QueryConfig>` | No | `None` | Fallback templates when a query route is missing |
+
+**Note:** In production, prefer using IAM roles or environment-based AWS credentials instead of embedding `access_key_id` and `secret_access_key` directly in configuration.
 
 ### `QueryConfig`
 
@@ -107,4 +111,4 @@ cargo test -p drasi-reaction-aws-sqs -- --ignored --nocapture
 
 - Uses one `SendMessage` call per diff (no `SendMessageBatch` optimization yet)
 - SQS message size limit applies (256KB)
-- Aggregation/Noop diffs are ignored
+- Aggregation diffs are sent as `UPDATE` messages; Noop diffs are ignored
