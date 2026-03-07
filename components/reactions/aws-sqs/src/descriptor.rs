@@ -116,7 +116,7 @@ pub struct SqsReactionDescriptor;
 #[async_trait]
 impl ReactionPluginDescriptor for SqsReactionDescriptor {
     fn kind(&self) -> &str {
-        "sqs"
+        "aws-sqs"
     }
 
     fn config_version(&self) -> &str {

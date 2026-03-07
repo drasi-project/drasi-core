@@ -288,7 +288,7 @@ impl Reaction for SqsReaction {
     }
 
     fn type_name(&self) -> &str {
-        "sqs"
+        "aws-sqs"
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {

@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use aws_sdk_sqs::{types::QueueAttributeName, Client};
 use aws_types::region::Region;
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_sqs::{QueryConfig, SqsReaction, SqsReactionConfig, TemplateSpec};
+use drasi_reaction_aws_sqs::{QueryConfig, SqsReaction, SqsReactionConfig, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::elasticmq::ElasticMq;

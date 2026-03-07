@@ -306,7 +306,7 @@ mod tests {
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
-    plugin_id = "sqs-reaction",
+    plugin_id = "aws-sqs-reaction",
     core_version = env!("CARGO_PKG_VERSION"),
     lib_version = env!("CARGO_PKG_VERSION"),
     plugin_version = env!("CARGO_PKG_VERSION"),

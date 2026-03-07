@@ -44,7 +44,7 @@ members = [
   "components/reactions/http-adaptive",
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
-  "components/reactions/sqs",
+  "components/reactions/aws-sqs",
   "components/reactions/sse",
   "components/reactions/dashboard",
   "components/reactions/mcp",
@@ -145,7 +145,7 @@ drasi-source-hyperliquid = { version = "0.1.0", path = "components/sources/hyper
 drasi-bootstrap-application = { version = "0.2.1", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.1", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.3.1", path = "components/reactions/grpc" }
-drasi-reaction-sqs = { version = "0.1.0", path = "components/reactions/sqs" }
+drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.2.1", path = "components/mssql-common" }
 drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
 drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
