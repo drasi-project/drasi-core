@@ -420,7 +420,13 @@ impl Reaction for AzureStorageReaction {
                         ResultDiff::Delete { data } => {
                             Ok(Some((OperationType::Delete, "DELETE", data.clone())))
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => Ok(None),
+                        ResultDiff::Aggregation { .. } => match serde_json::to_value(result) {
+                            Ok(payload) => Ok(Some((OperationType::Update, "UPDATE", payload))),
+                            Err(err) => Err(anyhow::anyhow!(
+                                "failed to serialize Aggregation ResultDiff into JSON payload: {err}"
+                            )),
+                        },
+                        ResultDiff::Noop => Ok(None),
                     };
 
                     let Some((operation, operation_name, data)) = (match op_and_data {
