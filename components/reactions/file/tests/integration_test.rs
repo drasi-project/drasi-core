@@ -291,3 +291,99 @@ async fn test_file_reaction_fallback_raw_json() -> Result<()> {
     drasi.stop().await?;
     Ok(())
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
+    let temp = TempDir::new()?;
+    let output_dir = temp.path().to_string_lossy().to_string();
+
+    let (app_source, app_handle) = ApplicationSource::new(
+        "test-source",
+        ApplicationSourceConfig {
+            properties: HashMap::new(),
+        },
+    )?;
+
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"op":"add","count":{{after.item_count}}}"#,
+        )),
+        updated: Some(TemplateSpec::new(
+            r#"{"op":"update","before_count":{{before.item_count}},"after_count":{{after.item_count}}}"#,
+        )),
+        deleted: Some(TemplateSpec::new(
+            r#"{"op":"delete","count":{{before.item_count}}}"#,
+        )),
+    };
+
+    let file_reaction = FileReaction::builder("file-reaction")
+        .with_query("agg-query")
+        .with_output_path(&output_dir)
+        .with_write_mode(WriteMode::Append)
+        .with_filename_template("{{query_name}}.ndjson")
+        .with_default_template(default_template)
+        .build()?;
+
+    let query = Query::cypher("agg-query")
+        .query("MATCH (n:Item) RETURN n.category AS category, count(n) AS item_count")
+        .from_source("test-source")
+        .auto_start(true)
+        .enable_bootstrap(false)
+        .build();
+
+    let drasi = DrasiLib::builder()
+        .with_id("file-reaction-agg-test")
+        .with_source(app_source)
+        .with_query(query)
+        .with_reaction(file_reaction)
+        .build()
+        .await?;
+
+    drasi.start().await?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // First insert produces an aggregation diff (before=None, after={category:"A", item_count:1})
+    app_handle
+        .send_node_insert(
+            "item-1",
+            vec!["Item"],
+            PropertyMapBuilder::new()
+                .with_string("id", "item-1")
+                .with_string("category", "A")
+                .build(),
+        )
+        .await?;
+
+    let output_file = temp.path().join("agg-query.ndjson");
+    let content = wait_for_file(&output_file, Duration::from_secs(10)).await?;
+    // The first aggregation has no before, so the updated template renders before.item_count as empty.
+    // But the after count should be present.
+    assert!(
+        content.contains("after_count") || content.contains("\"count\""),
+        "Expected aggregation output with count, got: {content}"
+    );
+
+    // Second insert to same category changes count from 1 to 2
+    app_handle
+        .send_node_insert(
+            "item-2",
+            vec!["Item"],
+            PropertyMapBuilder::new()
+                .with_string("id", "item-2")
+                .with_string("category", "A")
+                .build(),
+        )
+        .await?;
+
+    let content = wait_for_line_count(&output_file, 2, Duration::from_secs(10)).await?;
+    let lines: Vec<&str> = content.lines().collect();
+    let last_line = lines.last().expect("should have at least 2 lines");
+    assert!(
+        last_line.contains("after_count"),
+        "Expected aggregation with updated template, got: {last_line}"
+    );
+
+    drasi.stop().await?;
+    Ok(())
+}
