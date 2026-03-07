@@ -463,7 +463,6 @@ async fn run_source_stream(
     }
 
     let mut seen_uids = load_seen_uids(source_id, &state_store).await?;
-    let _initialized = load_initialized(source_id, &state_store).await?;
 
     loop {
         tokio::select! {
@@ -509,13 +508,14 @@ async fn run_source_stream(
                                     &target,
                                     obj,
                                     &dispatchers,
-                                    &state_store,
                                     &mut seen_uids,
                                 ).await?;
                             }
                             Event::InitDone => {
                                 debug!("{target_key} INIT_DONE");
                                 init_done.insert(target_key, true);
+                                // Checkpoint: persist seen_uids after full init list
+                                save_seen_uids(source_id, &state_store, &seen_uids).await?;
                                 save_initialized(source_id, &state_store, true).await?;
                             }
                             Event::Apply(obj) => {
@@ -528,7 +528,6 @@ async fn run_source_stream(
                                     &target,
                                     obj,
                                     &dispatchers,
-                                    &state_store,
                                     &mut seen_uids,
                                 ).await?;
                             }
@@ -536,10 +535,8 @@ async fn run_source_stream(
                                 if matches!(config.start_from, StartFrom::Now) && !init_done.get(&target_key).copied().unwrap_or(false) {
                                     continue;
                                 }
-                                // Remove from seen_uids so re-created objects with same UID are treated as inserts
                                 if let Some(uid) = extract_uid(&obj) {
                                     seen_uids.remove(&uid);
-                                    save_seen_uids(source_id, &state_store, &seen_uids).await?;
                                 }
                                 let changes = build_delete_changes(source_id, &target.kind, &obj, &config)?;
                                 dispatch_changes(source_id, dispatchers.clone(), changes).await?;
@@ -557,6 +554,9 @@ async fn run_source_stream(
         }
     }
 
+    // Checkpoint: persist seen_uids on graceful shutdown
+    save_seen_uids(source_id, &state_store, &seen_uids).await?;
+
     Ok(())
 }
 
@@ -570,25 +570,18 @@ async fn process_apply_object(
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
     seen_uids: &mut HashSet<String>,
 ) -> Result<()> {
-    let target_key = target.key();
     let uid = extract_uid(&obj).ok_or_else(|| anyhow!("Apply event missing metadata.uid"))?;
     let is_insert = !seen_uids.contains(&uid);
     let changes = if is_insert {
         seen_uids.insert(uid.clone());
-        save_seen_uids(source_id, state_store, seen_uids).await?;
         build_insert_changes(source_id, &target.kind, &obj, config)?
     } else {
         build_update_changes(source_id, &target.kind, &obj, config)?
     };
 
     dispatch_changes(source_id, dispatchers.clone(), changes).await?;
-
-    if let Some(rv) = extract_resource_version(&obj) {
-        save_resource_version(source_id, &target_key, &rv, state_store).await?;
-    }
     Ok(())
 }
 
@@ -650,25 +643,6 @@ async fn save_seen_uids(
         .await
         .map_err(|e| anyhow!("StateStore set '{SEEN_UIDS_KEY}' failed: {e}"))?;
     Ok(())
-}
-
-async fn load_initialized(
-    source_id: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-) -> Result<bool> {
-    let Some(store) = state_store else {
-        return Ok(false);
-    };
-    let raw = store
-        .get(source_id, INITIALIZED_KEY)
-        .await
-        .map_err(|e| anyhow!("StateStore get '{INITIALIZED_KEY}' failed: {e}"))?;
-    let Some(bytes) = raw else {
-        return Ok(false);
-    };
-    let parsed = serde_json::from_slice::<bool>(&bytes)
-        .map_err(|e| anyhow!("Failed to parse initialized state: {e}"))?;
-    Ok(parsed)
 }
 
 async fn save_initialized(
