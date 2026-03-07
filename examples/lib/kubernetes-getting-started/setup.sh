@@ -45,15 +45,15 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-mkdir -p "$HOME/.kube"
-docker cp "$K3S_CONTAINER:/etc/rancher/k3s/k3s.yaml" "$HOME/.kube/config"
-sed -i 's/127.0.0.1/localhost/g' "$HOME/.kube/config"
-export KUBECONFIG="$HOME/.kube/config"
+K3S_KUBECONFIG="$SCRIPT_DIR/k3s-kubeconfig"
+docker cp "$K3S_CONTAINER:/etc/rancher/k3s/k3s.yaml" "$K3S_KUBECONFIG"
+sed -i 's/127.0.0.1/localhost/g' "$K3S_KUBECONFIG"
+export KUBECONFIG="$K3S_KUBECONFIG"
 
 echo "Waiting for node readiness..."
 kubectl wait --for=condition=Ready node --all --timeout=120s
 kubectl get nodes -o wide
 
 echo "Setup complete."
-echo "If needed, export: KUBECONFIG=$HOME/.kube/config"
+echo "If needed, export: KUBECONFIG=$K3S_KUBECONFIG"
 echo "Run: cd \"$SCRIPT_DIR\" && cargo run"
