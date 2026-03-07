@@ -41,6 +41,8 @@ fn test_config_round_trip_serialization() {
         endpoint_url: Some("http://localhost:9324".to_string()),
         fifo_queue: true,
         message_group_id_template: Some("{{query_id}}".to_string()),
+        access_key_id: None,
+        secret_access_key: None,
         default_template: Some(QueryConfig {
             added: Some(TemplateSpec {
                 body: "{\"id\":\"{{after.id}}\"}".to_string(),
@@ -75,12 +77,11 @@ fn test_template_spec_message_attribute_builder() {
 }
 
 async fn make_sqs_client(endpoint: &str) -> Client {
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-    std::env::set_var("AWS_REGION", "us-east-1");
+    let creds = aws_credential_types::Credentials::new("test", "test", None, None, "test");
     let config = aws_config::from_env()
         .region(Region::new("us-east-1"))
         .endpoint_url(endpoint.to_string())
+        .credentials_provider(creds)
         .load()
         .await;
     Client::new(&config)
@@ -164,6 +165,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         .with_queue_url(queue_url.clone())
         .with_endpoint_url(endpoint.clone())
         .with_region("us-east-1")
+        .with_credentials("test", "test")
         .with_default_template(QueryConfig {
             added: Some(
                 TemplateSpec::new(
@@ -268,6 +270,143 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         Some(&"DELETE".to_string())
     );
     assert_eq!(delete_attrs.get("sensor-id"), Some(&"sensor-1".to_string()));
+
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_sqs_reaction_aggregation_query() -> Result<()> {
+    setup_logger();
+
+    let container = ElasticMq::default().start().await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(9324).await?;
+    let endpoint = format!("http://{host}:{port}");
+
+    let client = make_sqs_client(&endpoint).await;
+    let queue_name = format!("drasi-sqs-agg-test-{}", Uuid::new_v4());
+    let queue_url = client
+        .create_queue()
+        .queue_name(queue_name)
+        .attributes(QueueAttributeName::VisibilityTimeout, "1")
+        .send()
+        .await?
+        .queue_url()
+        .ok_or_else(|| anyhow!("queue url missing"))?
+        .to_string();
+
+    let reaction = SqsReaction::builder("sqs-agg-reaction")
+        .with_query("agg-query")
+        .with_queue_url(queue_url.clone())
+        .with_endpoint_url(endpoint.clone())
+        .with_region("us-east-1")
+        .with_credentials("test", "test")
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new(
+                "{\"event\":\"add\",\"total\":{{after.total}},\"total_value\":{{after.total_value}}}",
+            )),
+            updated: Some(TemplateSpec::new(
+                "{\"event\":\"update\",\"total\":{{after.total}},\"total_value\":{{after.total_value}}}",
+            )),
+            deleted: None,
+        })
+        .build()?;
+
+    let (source, source_handle) = ApplicationSource::new(
+        "app-source",
+        ApplicationSourceConfig {
+            properties: HashMap::new(),
+        },
+    )?;
+    let query = Query::cypher("agg-query")
+        .query("MATCH (s:Sensor) RETURN count(s) AS total, sum(s.value) AS total_value")
+        .from_source("app-source")
+        .auto_start(true)
+        .build();
+
+    let core = DrasiLib::builder()
+        .with_id("sqs-agg-test-core")
+        .with_source(source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .build()
+        .await?;
+    core.start().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Insert first sensor — aggregation should fire with total=1, total_value=10
+    source_handle
+        .send_node_insert(
+            "sensor-1",
+            vec!["Sensor"],
+            PropertyMapBuilder::new()
+                .with_string("id", "sensor-1")
+                .with_integer("value", 10)
+                .build(),
+        )
+        .await?;
+
+    let (body1, attrs1) =
+        receive_single_message(&client, &queue_url, Duration::from_secs(10)).await?;
+    assert_eq!(body1["total"], 1, "first insert: total should be 1");
+    assert_eq!(
+        body1["total_value"], 10.0,
+        "first insert: total_value should be 10"
+    );
+    assert_eq!(attrs1.get("drasi-query-id"), Some(&"agg-query".to_string()));
+
+    // Insert second sensor — aggregation should update to total=2, total_value=30
+    source_handle
+        .send_node_insert(
+            "sensor-2",
+            vec!["Sensor"],
+            PropertyMapBuilder::new()
+                .with_string("id", "sensor-2")
+                .with_integer("value", 20)
+                .build(),
+        )
+        .await?;
+
+    let (body2, attrs2) =
+        receive_single_message(&client, &queue_url, Duration::from_secs(10)).await?;
+    assert_eq!(
+        body2["event"], "update",
+        "second insert should be an aggregation update"
+    );
+    assert_eq!(body2["total"], 2, "second insert: total should be 2");
+    assert_eq!(
+        body2["total_value"], 30.0,
+        "second insert: total_value should be 30"
+    );
+    assert_eq!(
+        attrs2.get("drasi-operation"),
+        Some(&"UPDATE".to_string()),
+        "aggregation should route as UPDATE operation"
+    );
+
+    // Delete a sensor — aggregation should update to total=1, total_value=20
+    source_handle
+        .send_delete("sensor-1", vec!["Sensor"])
+        .await?;
+
+    let (body3, attrs3) =
+        receive_single_message(&client, &queue_url, Duration::from_secs(10)).await?;
+    assert_eq!(
+        body3["event"], "update",
+        "delete should trigger aggregation update"
+    );
+    assert_eq!(body3["total"], 1, "after delete: total should be 1");
+    assert_eq!(
+        body3["total_value"], 20.0,
+        "after delete: total_value should be 20"
+    );
+    assert_eq!(
+        attrs3.get("drasi-operation"),
+        Some(&"UPDATE".to_string()),
+        "aggregation after delete should route as UPDATE"
+    );
 
     core.stop().await?;
     Ok(())
