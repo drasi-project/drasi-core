@@ -68,11 +68,15 @@ and `DELETE` result diffs in timestamp order.
 |---|---|---|---|
 | `after` | ✅ | ✅ | ❌ |
 | `before` | ❌ | ✅ | ✅ |
-| `data` | ❌ | ✅ | ❌ |
+| `data` | ✅ | ✅ | ✅ |
 | `operation` | ✅ | ✅ | ✅ |
 | `query_name` | ✅ | ✅ | ✅ |
 | `timestamp` | ✅ | ✅ | ✅ |
 | `uuid` | ✅ | ✅ | ✅ |
+
+For ADD, `data` is equivalent to `after`; for DELETE, `data` is equivalent to `before`.
+
+Aggregation diffs use the `updated` template and populate `before`, `after`, and `data` (equivalent to `after`). The `operation` variable is set to `"AGGREGATION"`.
 
 `{{json value}}` helper serializes any value as JSON.
 
@@ -103,9 +107,10 @@ Integration tests use:
 - `ApplicationSource` for deterministic change injection
 - `TempDir` for isolated filesystem assertions
 
-The ignored integration suite verifies:
+The integration suite verifies:
 
 1. INSERT/UPDATE/DELETE written in append mode
 2. overwrite mode keeps latest state
 3. per_change mode creates payload-derived filenames
 4. raw JSON fallback when no templates are configured
+5. aggregation diffs use the `updated` template
