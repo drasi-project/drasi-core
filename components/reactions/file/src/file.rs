@@ -258,7 +258,7 @@ impl FileReaction {
             ResultDiff::Add { .. } => ("ADD", Some(OperationType::Add)),
             ResultDiff::Update { .. } => ("UPDATE", Some(OperationType::Update)),
             ResultDiff::Delete { .. } => ("DELETE", Some(OperationType::Delete)),
-            ResultDiff::Aggregation { .. } => ("AGGREGATION", None),
+            ResultDiff::Aggregation { .. } => ("AGGREGATION", Some(OperationType::Update)),
             ResultDiff::Noop => ("NOOP", None),
         };
 
