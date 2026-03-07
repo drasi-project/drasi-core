@@ -37,6 +37,7 @@ utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 aws-config = "0.56.1"
+aws-credential-types = "0.56.1"
 aws-sdk-sqs = "0.34.0"
 aws-types = "0.56.1"
 chrono = "0.4"

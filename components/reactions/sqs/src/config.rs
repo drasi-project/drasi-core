@@ -93,6 +93,14 @@ pub struct SqsReactionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_group_id_template: Option<String>,
 
+    /// Optional static AWS access key ID (useful for non-IAM environments and testing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key_id: Option<String>,
+
+    /// Optional static AWS secret access key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_access_key: Option<String>,
+
     /// Default template configuration used when query-specific route is not present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_template: Option<QueryConfig>,
