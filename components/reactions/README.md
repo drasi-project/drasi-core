@@ -35,6 +35,7 @@ Reactions are responsible for:
 |--------|-------------|-----------|
 | `drasi-reaction-log` | Console logging with template support | `log/` |
 | `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
+| `drasi-reaction-rabbitmq` | RabbitMQ exchange publisher | `rabbitmq/` |
 | `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
