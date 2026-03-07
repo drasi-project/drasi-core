@@ -614,8 +614,31 @@ impl Reaction for RabbitMQReaction {
                                 }
                             }
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            debug!("[{reaction_name}] Ignoring aggregation/noop result");
+                        ResultDiff::Aggregation { before, after } => {
+                            if let Some(spec) = query_config.updated.as_ref() {
+                                if let Err(e) = Self::publish_result(
+                                    &channel,
+                                    &handlebars,
+                                    &exchange_name,
+                                    message_persistent,
+                                    spec,
+                                    "UPDATE",
+                                    before.as_ref(),
+                                    Some(after),
+                                    after,
+                                    query_name,
+                                    &query_result.timestamp,
+                                    &query_result.metadata,
+                                    &reaction_name,
+                                )
+                                .await
+                                {
+                                    error!("[{reaction_name}] Failed to publish result: {e}");
+                                }
+                            }
+                        }
+                        ResultDiff::Noop => {
+                            debug!("[{reaction_name}] Ignoring noop result");
                         }
                     }
                 }
