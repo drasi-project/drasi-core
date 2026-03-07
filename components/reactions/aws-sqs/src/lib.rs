@@ -200,6 +200,11 @@ impl SqsReactionBuilder {
         if self.queue_url.trim().is_empty() {
             return Err(anyhow::anyhow!("queue_url must be provided"));
         }
+        if self.access_key_id.is_some() != self.secret_access_key.is_some() {
+            return Err(anyhow::anyhow!(
+                "access_key_id and secret_access_key must both be provided or both omitted"
+            ));
+        }
         self.validate_templates()?;
 
         let config = SqsReactionConfig {

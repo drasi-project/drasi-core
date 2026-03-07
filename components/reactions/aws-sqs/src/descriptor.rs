@@ -22,7 +22,7 @@ use utoipa::OpenApi;
 use crate::{QueryConfig, SqsReactionBuilder, TemplateSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = reaction::sqs::TemplateSpec)]
+#[schema(as = reaction::aws_sqs::TemplateSpec)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TemplateSpecDto {
     /// SQS message body template.
@@ -34,7 +34,7 @@ pub struct TemplateSpecDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = reaction::sqs::SqsQueryConfig)]
+#[schema(as = reaction::aws_sqs::SqsQueryConfig)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SqsQueryConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,7 +46,7 @@ pub struct SqsQueryConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = reaction::sqs::SqsReactionConfig)]
+#[schema(as = reaction::aws_sqs::SqsReactionConfig)]
 #[serde(rename_all = "camelCase")]
 pub struct SqsReactionConfigDto {
     /// SQS queue URL.
@@ -124,7 +124,7 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
     }
 
     fn config_schema_name(&self) -> &str {
-        "reaction.sqs.SqsReactionConfig"
+        "reaction.aws_sqs.SqsReactionConfig"
     }
 
     fn config_schema_json(&self) -> String {
