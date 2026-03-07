@@ -315,6 +315,163 @@ async fn test_queue_reaction_insert_update_delete() {
 #[tokio::test]
 #[ignore]
 #[serial]
+async fn test_queue_reaction_aggregation() {
+    let azurite = AzuriteRuntime::start().await;
+    let queue_name = "drasiaggregationqueue";
+    azurite
+        .queue_client()
+        .queue_client(queue_name)
+        .create()
+        .await
+        .expect("queue should be created");
+
+    let reaction = AzureStorageReaction::builder("agg-queue-reaction")
+        .with_query("agg-query")
+        .with_account_name(AZURITE_ACCOUNT)
+        .with_access_key(AZURITE_KEY)
+        .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port))
+        .with_target(StorageTarget::Queue {
+            queue_name: queue_name.to_string(),
+        })
+        .with_default_template(QueryConfig {
+            added: Some(TemplateSpec::new(
+                r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
+            )),
+            updated: Some(TemplateSpec::new(
+                r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
+            )),
+            deleted: Some(TemplateSpec::new(
+                r#"{"op":"{{operation}}"}"#,
+            )),
+        })
+        .build()
+        .expect("reaction should build");
+
+    let (source, handle) = ApplicationSource::new(
+        "app-source",
+        ApplicationSourceConfig {
+            properties: HashMap::new(),
+        },
+    )
+    .expect("source should build");
+
+    let query = Query::cypher("agg-query")
+        .query("MATCH (n:Sensor) RETURN sum(n.value) AS total_value")
+        .from_source("app-source")
+        .auto_start(true)
+        .build();
+
+    let drasi = DrasiLib::builder()
+        .with_source(source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .build()
+        .await
+        .expect("drasi should build");
+
+    drasi.start().await.expect("drasi should start");
+    sleep(Duration::from_millis(500)).await;
+
+    // First insert produces an aggregation result (sum goes from nothing to 10)
+    handle
+        .send_node_insert(
+            "sensor-1",
+            vec!["Sensor"],
+            PropertyMapBuilder::new()
+                .with_string("id", "sensor-1")
+                .with_float("value", 10.0)
+                .build(),
+        )
+        .await
+        .expect("insert 1 should succeed");
+
+    // Second insert changes the aggregation (sum goes from 10 to 30)
+    handle
+        .send_node_insert(
+            "sensor-2",
+            vec!["Sensor"],
+            PropertyMapBuilder::new()
+                .with_string("id", "sensor-2")
+                .with_float("value", 20.0)
+                .build(),
+        )
+        .await
+        .expect("insert 2 should succeed");
+
+    // Update a value (sum goes from 30 to 35)
+    handle
+        .send_node_update(
+            "sensor-2",
+            vec!["Sensor"],
+            PropertyMapBuilder::new()
+                .with_string("id", "sensor-2")
+                .with_float("value", 25.0)
+                .build(),
+        )
+        .await
+        .expect("update should succeed");
+
+    let queue_client = azurite.queue_client().queue_client(queue_name);
+    let collected: std::sync::Arc<tokio::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let found = poll_until(|| {
+        let qc = queue_client.clone();
+        let collected = collected.clone();
+        async move {
+            if let Ok(response) = qc.get_messages().await {
+                let mut c = collected.lock().await;
+                for message in response.messages {
+                    let text = message.message_text.clone();
+                    c.push(text);
+                    let _ = qc.pop_receipt_client(message).delete().await;
+                }
+                c.len() >= 3
+            } else {
+                false
+            }
+        }
+    })
+    .await;
+
+    let collected = collected.lock().await;
+    assert!(
+        found,
+        "expected at least 3 aggregation messages within timeout, got {}",
+        collected.len()
+    );
+
+    // All messages should be UPDATE operations (aggregation is treated as update)
+    let operations: Vec<String> = collected
+        .iter()
+        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+        .filter_map(|v| v.get("op").and_then(Value::as_str).map(str::to_string))
+        .collect();
+
+    assert!(
+        operations.iter().all(|op| op == "UPDATE"),
+        "all aggregation messages should be UPDATE operations: {operations:?}"
+    );
+
+    // Verify the last message has the correct aggregated total (10 + 25 = 35)
+    let last_total: Option<f64> = collected
+        .last()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.get("total_value").and_then(Value::as_f64));
+
+    assert_eq!(
+        last_total,
+        Some(35.0),
+        "final aggregation total should be 35.0, got {:?}",
+        last_total
+    );
+
+    drasi.stop().await.expect("drasi should stop");
+}
+
+#[tokio::test]
+#[ignore]
+#[serial]
 async fn test_blob_reaction_insert_update_delete() {
     let azurite = AzuriteRuntime::start().await;
     let container_name = "drasi-blob-test";
