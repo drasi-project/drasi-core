@@ -99,7 +99,6 @@ async fn setup_drasi_for_mode(
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_file_reaction_append_insert_update_delete() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
@@ -125,7 +124,6 @@ async fn test_file_reaction_append_insert_update_delete() -> Result<()> {
     .await?;
 
     drasi.start().await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     app_handle
         .send_node_insert(
@@ -163,7 +161,6 @@ async fn test_file_reaction_append_insert_update_delete() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_file_reaction_overwrite_mode_keeps_latest() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
@@ -187,7 +184,6 @@ async fn test_file_reaction_overwrite_mode_keeps_latest() -> Result<()> {
     .await?;
 
     drasi.start().await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     app_handle
         .send_node_insert(
@@ -220,7 +216,6 @@ async fn test_file_reaction_overwrite_mode_keeps_latest() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_file_reaction_per_change_and_payload_filename() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
@@ -240,7 +235,6 @@ async fn test_file_reaction_per_change_and_payload_filename() -> Result<()> {
     .await?;
 
     drasi.start().await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     app_handle
         .send_node_insert(
@@ -262,7 +256,6 @@ async fn test_file_reaction_per_change_and_payload_filename() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_file_reaction_fallback_raw_json() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
@@ -271,7 +264,6 @@ async fn test_file_reaction_fallback_raw_json() -> Result<()> {
         setup_drasi_for_mode(&output_dir, WriteMode::Append, "{{query_name}}.log", None).await?;
 
     drasi.start().await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     app_handle
         .send_node_insert(
@@ -293,7 +285,6 @@ async fn test_file_reaction_fallback_raw_json() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
     let temp = TempDir::new()?;
     let output_dir = temp.path().to_string_lossy().to_string();
@@ -341,7 +332,6 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
         .await?;
 
     drasi.start().await?;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // First insert produces an aggregation diff (before=None, after={category:"A", item_count:1})
     app_handle
