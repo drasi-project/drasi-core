@@ -17,8 +17,7 @@ use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use drasi_kubernetes_common::mapping::build_insert_changes;
 use drasi_kubernetes_common::{
-    build_client, is_cluster_scoped_kind, parse_api_version, AuthMode, KubernetesSourceConfig,
-    ResourceSpec,
+    build_client, is_cluster_scoped_kind, parse_api_version, KubernetesSourceConfig, ResourceSpec,
 };
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};

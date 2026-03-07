@@ -18,8 +18,8 @@ use drasi_kubernetes_common::config::{
     is_cluster_scoped_kind, AuthMode, KubernetesSourceConfig, ResourceSpec, StartFrom,
 };
 use drasi_kubernetes_common::mapping::{
-    build_delete_changes, build_insert_changes, build_update_changes, extract_resource_version,
-    extract_uid, object_created_at_millis,
+    build_delete_changes, build_insert_changes, build_update_changes, extract_uid,
+    object_created_at_millis,
 };
 use drasi_kubernetes_common::{build_client, parse_api_version};
 use drasi_lib::channels::{
@@ -35,7 +35,6 @@ use futures::StreamExt;
 use kube::api::{Api, DynamicObject};
 use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::watcher::{self, Event};
-use kube::Client;
 use log::{debug, error, info, warn};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -44,7 +43,6 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 
 const SEEN_UIDS_KEY: &str = "seen_uids";
-const INITIALIZED_KEY: &str = "initialized";
 
 pub struct KubernetesSource {
     base: SourceBase,
@@ -487,21 +485,25 @@ async fn run_source_stream(
                                 }
                             }
                             Event::InitApply(obj) => {
-                                // Always track UIDs for insert-vs-update classification,
-                                // even when not dispatching events
-                                if let Some(uid) = extract_uid(&obj) {
-                                    seen_uids.insert(uid);
-                                }
                                 if matches!(config.start_from, StartFrom::Now) {
+                                    // Track UID so post-init Apply events are classified as updates
+                                    if let Some(uid) = extract_uid(&obj) {
+                                        seen_uids.insert(uid);
+                                    }
                                     continue;
                                 }
                                 if let StartFrom::Timestamp(ts) = config.start_from {
                                     if let Some(created_at) = object_created_at_millis(&obj) {
                                         if created_at < ts {
+                                            // Track UID so post-init Apply events are classified as updates
+                                            if let Some(uid) = extract_uid(&obj) {
+                                                seen_uids.insert(uid);
+                                            }
                                             continue;
                                         }
                                     }
                                 }
+                                // Dispatched InitApply: let process_apply_object decide insert vs update
                                 process_apply_object(
                                     source_id,
                                     &config,
@@ -516,7 +518,6 @@ async fn run_source_stream(
                                 init_done.insert(target_key, true);
                                 // Checkpoint: persist seen_uids after full init list
                                 save_seen_uids(source_id, &state_store, &seen_uids).await?;
-                                save_initialized(source_id, &state_store, true).await?;
                             }
                             Event::Apply(obj) => {
                                 if matches!(config.start_from, StartFrom::Now) && !init_done.get(&target_key).copied().unwrap_or(false) {
@@ -540,9 +541,6 @@ async fn run_source_stream(
                                 }
                                 let changes = build_delete_changes(source_id, &target.kind, &obj, &config)?;
                                 dispatch_changes(source_id, dispatchers.clone(), changes).await?;
-                                if let Some(rv) = extract_resource_version(&obj) {
-                                    save_resource_version(source_id, &target_key, &rv, &state_store).await?;
-                                }
                             }
                         }
                     }
@@ -642,38 +640,5 @@ async fn save_seen_uids(
         .set(source_id, SEEN_UIDS_KEY, bytes)
         .await
         .map_err(|e| anyhow!("StateStore set '{SEEN_UIDS_KEY}' failed: {e}"))?;
-    Ok(())
-}
-
-async fn save_initialized(
-    source_id: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-    initialized: bool,
-) -> Result<()> {
-    let Some(store) = state_store else {
-        return Ok(());
-    };
-    let bytes = serde_json::to_vec(&initialized)?;
-    store
-        .set(source_id, INITIALIZED_KEY, bytes)
-        .await
-        .map_err(|e| anyhow!("StateStore set '{INITIALIZED_KEY}' failed: {e}"))?;
-    Ok(())
-}
-
-async fn save_resource_version(
-    source_id: &str,
-    target_key: &str,
-    rv: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-) -> Result<()> {
-    let Some(store) = state_store else {
-        return Ok(());
-    };
-    let key = format!("rv:{target_key}");
-    store
-        .set(source_id, &key, rv.as_bytes().to_vec())
-        .await
-        .map_err(|e| anyhow!("StateStore set '{key}' failed: {e}"))?;
     Ok(())
 }

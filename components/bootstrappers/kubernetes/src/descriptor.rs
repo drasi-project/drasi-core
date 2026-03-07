@@ -22,6 +22,7 @@ use crate::provider::KubernetesBootstrapProvider;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::kubernetes::KubernetesBootstrapConfig)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesBootstrapConfigDto {}
 
 #[derive(OpenApi)]
@@ -61,7 +62,7 @@ impl BootstrapPluginDescriptor for KubernetesBootstrapDescriptor {
         source_config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn BootstrapProvider>> {
         let bootstrap_config: KubernetesBootstrapConfig =
-            serde_json::from_value(config_json.clone()).unwrap_or_default();
+            serde_json::from_value(config_json.clone())?;
         let source_config: KubernetesSourceConfig =
             serde_json::from_value(source_config_json.clone())?;
         source_config.validate()?;
