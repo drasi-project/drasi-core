@@ -31,6 +31,20 @@ docker run -d \
   rancher/k3s:v1.32.2-k3s1 \
   server --disable=traefik >/dev/null
 
+echo "Waiting for k3s to generate kubeconfig..."
+for i in $(seq 1 30); do
+  if docker exec "$K3S_CONTAINER" test -f /etc/rancher/k3s/k3s.yaml 2>/dev/null; then
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "✗ k3s did not generate kubeconfig within 60s"
+    docker logs "$K3S_CONTAINER" --tail 20
+    exit 1
+  fi
+  [ $((i % 5)) -eq 0 ] && echo "  Still waiting... ($i/30)"
+  sleep 2
+done
+
 mkdir -p "$HOME/.kube"
 docker cp "$K3S_CONTAINER:/etc/rancher/k3s/k3s.yaml" "$HOME/.kube/config"
 sed -i 's/127.0.0.1/localhost/g' "$HOME/.kube/config"
