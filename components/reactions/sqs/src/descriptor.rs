@@ -73,6 +73,16 @@ pub struct SqsReactionConfigDto {
     #[schema(value_type = Option<ConfigValueString>)]
     pub message_group_id_template: Option<ConfigValue<String>>,
 
+    /// Optional static AWS access key ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub access_key_id: Option<ConfigValue<String>>,
+
+    /// Optional static AWS secret access key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub secret_access_key: Option<ConfigValue<String>>,
+
     /// Query-specific operation templates.
     #[serde(default)]
     pub routes: HashMap<String, SqsQueryConfigDto>,
@@ -155,6 +165,14 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
         if let Some(group_id_template) = &dto.message_group_id_template {
             builder =
                 builder.with_message_group_id_template(mapper.resolve_string(group_id_template)?);
+        }
+        if let Some(access_key_id) = &dto.access_key_id {
+            if let Some(secret_access_key) = &dto.secret_access_key {
+                builder = builder.with_credentials(
+                    mapper.resolve_string(access_key_id)?,
+                    mapper.resolve_string(secret_access_key)?,
+                );
+            }
         }
         if let Some(default_template) = &dto.default_template {
             builder = builder.with_default_template(map_query_config(default_template));

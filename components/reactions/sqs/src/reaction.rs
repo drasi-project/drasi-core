@@ -14,6 +14,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use aws_credential_types::Credentials;
 use aws_sdk_sqs::{types::MessageAttributeValue, Client};
 use aws_types::region::Region;
 use handlebars::Handlebars;
@@ -142,7 +143,13 @@ impl SqsReaction {
             ResultDiff::Delete { data } => {
                 context.insert("before".to_string(), data.clone());
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+            ResultDiff::Aggregation { before, after } => {
+                if let Some(before) = before {
+                    context.insert("before".to_string(), before.clone());
+                }
+                context.insert("after".to_string(), after.clone());
+            }
+            ResultDiff::Noop => {}
         }
         context.insert("query_id".to_string(), Value::String(query_id.to_string()));
         context.insert(
@@ -165,7 +172,8 @@ impl SqsReaction {
             ResultDiff::Add { .. } => config.added.as_ref().map(|spec| (spec, "ADD")),
             ResultDiff::Update { .. } => config.updated.as_ref().map(|spec| (spec, "UPDATE")),
             ResultDiff::Delete { .. } => config.deleted.as_ref().map(|spec| (spec, "DELETE")),
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => None,
+            ResultDiff::Aggregation { .. } => config.updated.as_ref().map(|spec| (spec, "UPDATE")),
+            ResultDiff::Noop => None,
         }
     }
 
@@ -182,8 +190,27 @@ impl SqsReaction {
         let fallback_json = match result {
             ResultDiff::Add { data } => data.clone(),
             ResultDiff::Delete { data } => data.clone(),
-            ResultDiff::Update { .. } => serde_json::to_value(result)?,
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => Value::Null,
+            ResultDiff::Update {
+                before,
+                after,
+                data,
+                ..
+            } => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("data".to_string(), data.clone());
+                obj.insert("before".to_string(), before.clone());
+                obj.insert("after".to_string(), after.clone());
+                Value::Object(obj)
+            }
+            ResultDiff::Aggregation { before, after } => {
+                let mut obj = serde_json::Map::new();
+                if let Some(before) = before {
+                    obj.insert("before".to_string(), before.clone());
+                }
+                obj.insert("after".to_string(), after.clone());
+                Value::Object(obj)
+            }
+            ResultDiff::Noop => Value::Null,
         };
 
         Ok(serde_json::to_string(&fallback_json)?)
@@ -338,6 +365,8 @@ impl Reaction for SqsReaction {
         let endpoint_url = self.config.endpoint_url.clone();
         let fifo_queue = self.config.fifo_queue;
         let message_group_id_template = self.config.message_group_id_template.clone();
+        let access_key_id = self.config.access_key_id.clone();
+        let secret_access_key = self.config.secret_access_key.clone();
         let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
@@ -349,6 +378,12 @@ impl Reaction for SqsReaction {
             if let Some(region_name) = region {
                 loader = loader.region(Region::new(region_name));
             }
+            if let Some(key_id) = access_key_id {
+                if let Some(secret) = secret_access_key {
+                    let creds = Credentials::new(key_id, secret, None, None, "drasi-sqs-reaction");
+                    loader = loader.credentials_provider(creds);
+                }
+            }
             let shared_config = loader.load().await;
             let client = Client::new(&shared_config);
 
@@ -356,6 +391,11 @@ impl Reaction for SqsReaction {
             Self::register_json_helper(&mut handlebars);
 
             loop {
+                if !matches!(*status.read().await, ComponentStatus::Running) {
+                    info!("[{reaction_id}] SQS reaction not running, breaking loop");
+                    break;
+                }
+
                 let query_result_arc = tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
@@ -365,10 +405,6 @@ impl Reaction for SqsReaction {
                     result = priority_queue.dequeue() => result,
                 };
                 let query_result = query_result_arc.as_ref();
-
-                if !matches!(*status.read().await, ComponentStatus::Running) {
-                    break;
-                }
                 if query_result.results.is_empty() {
                     continue;
                 }
@@ -453,8 +489,7 @@ impl Reaction for SqsReaction {
                 }
             }
 
-            *status.write().await = ComponentStatus::Stopped;
-            info!("[{reaction_id}] SQS reaction stopped");
+            info!("[{reaction_id}] SQS processing loop exited");
         });
         self.base.set_processing_task(processing_task).await;
         Ok(())
@@ -462,8 +497,6 @@ impl Reaction for SqsReaction {
 
     async fn stop(&self) -> Result<()> {
         self.base.stop_common().await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.base
             .set_status_with_event(

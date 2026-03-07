@@ -33,6 +33,8 @@ pub struct SqsReactionBuilder {
     endpoint_url: Option<String>,
     fifo_queue: bool,
     message_group_id_template: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
     routes: HashMap<String, QueryConfig>,
     default_template: Option<QueryConfig>,
     priority_queue_capacity: Option<usize>,
@@ -49,6 +51,8 @@ impl SqsReactionBuilder {
             endpoint_url: None,
             fifo_queue: false,
             message_group_id_template: None,
+            access_key_id: None,
+            secret_access_key: None,
             routes: HashMap::new(),
             default_template: None,
             priority_queue_capacity: None,
@@ -91,6 +95,16 @@ impl SqsReactionBuilder {
         self
     }
 
+    pub fn with_credentials(
+        mut self,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+    ) -> Self {
+        self.access_key_id = Some(access_key_id.into());
+        self.secret_access_key = Some(secret_access_key.into());
+        self
+    }
+
     pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig) -> Self {
         self.routes.insert(query_id.into(), config);
         self
@@ -117,6 +131,8 @@ impl SqsReactionBuilder {
         self.endpoint_url = config.endpoint_url;
         self.fifo_queue = config.fifo_queue;
         self.message_group_id_template = config.message_group_id_template;
+        self.access_key_id = config.access_key_id;
+        self.secret_access_key = config.secret_access_key;
         self.routes = config.routes;
         self.default_template = config.default_template;
         self
@@ -192,6 +208,8 @@ impl SqsReactionBuilder {
             endpoint_url: self.endpoint_url,
             fifo_queue: self.fifo_queue,
             message_group_id_template: self.message_group_id_template,
+            access_key_id: self.access_key_id,
+            secret_access_key: self.secret_access_key,
             routes: self.routes,
             default_template: self.default_template,
         };
