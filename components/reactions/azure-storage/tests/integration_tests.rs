@@ -340,9 +340,7 @@ async fn test_queue_reaction_aggregation() {
             updated: Some(TemplateSpec::new(
                 r#"{"op":"{{operation}}","total_value":{{after.total_value}}}"#,
             )),
-            deleted: Some(TemplateSpec::new(
-                r#"{"op":"{{operation}}"}"#,
-            )),
+            deleted: Some(TemplateSpec::new(r#"{"op":"{{operation}}"}"#)),
         })
         .build()
         .expect("reaction should build");
