@@ -217,6 +217,11 @@ impl SourceBase {
         self.auto_start
     }
 
+    /// Get this source's dispatch mode.
+    pub fn get_dispatch_mode(&self) -> DispatchMode {
+        self.dispatch_mode
+    }
+
     /// Initialize the source with runtime context.
     ///
     /// This method is called automatically by DrasiLib's `add_source()` method.
