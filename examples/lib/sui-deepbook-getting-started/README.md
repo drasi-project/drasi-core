@@ -1,12 +1,12 @@
 # Sui DeepBook Getting Started
 
-This example connects to the Sui mainnet JSON-RPC and streams live DeepBook V3 events through a Drasi continuous query. Every event is logged to the console via a `LogReaction` showing the entity ID, event type, and operation.
+This example connects to the Sui mainnet JSON-RPC and streams live DeepBook V3 events through a Drasi continuous query. Every event is displayed in a color-coded terminal UI via an `ApplicationReaction` with custom formatting.
 
 ## Prerequisites
 
 - Rust toolchain (workspace default)
 - Internet access to a Sui RPC endpoint
-- `curl` and `jq` (for helper scripts)
+- `curl` (for helper scripts)
 
 ## Quick Start
 
@@ -155,16 +155,10 @@ RETURN e.order_id, e.event_name, e.change_type, e.sender_short
 
 Output:
 ```
---- Chain Info ---
-{"jsonrpc":"2.0","result":"35834a8a"}
---- Scanning events (up to 100 pages) ---
-  Page 1: 50 events returned
-  Page 2: 50 events returned
-  ...
-  Page 47: 50 events returned — FOUND 3 matching events!
-    Type: 0x337…::deep_price::PriceAdded
-    Type: 0x337…::balance_manager::BalanceEvent
-    Type: 0x337…::balance_manager::BalanceEvent
+Scanned 12 page(s), 600 event(s); found 3 match(es).
+- 0x337…::deep_price::PriceAdded @ 2024-01-15T12:34:56Z (tx=ABCDEFG123, seq=456789)
+- 0x337…::balance_manager::BalanceEvent @ 2024-01-15T12:35:10Z (tx=HIJKLMN456, seq=456790)
+- 0x337…::balance_manager::BalanceEvent @ 2024-01-15T12:36:03Z (tx=OPQRSTU789, seq=456791)
 ```
 
 ## How It Works
@@ -173,7 +167,7 @@ Output:
 2. Raw events are filtered to only those from the DeepBook package
 3. Each matching event becomes a `DeepBookEvent` node in the Drasi graph
 4. The Cypher query runs continuously and emits diffs (ADD/UPDATE/DELETE)
-5. The `LogReaction` formats each diff using Handlebars templates and prints to stdout
+5. The `ApplicationReaction` receives each diff and renders it as a color-coded event card in the terminal
 
 ## Troubleshooting
 
