@@ -220,11 +220,11 @@ fn test_funding_mapping() {
         open_interest: "100".to_string(),
         prev_day_px: "0".to_string(),
         day_ntl_vlm: "1000".to_string(),
-        premium: "0.01".to_string(),
+        premium: Some("0.01".to_string()),
         oracle_px: "1".to_string(),
         mark_px: "2".to_string(),
-        mid_px: "2".to_string(),
-        impact_pxs: vec!["1".to_string(), "2".to_string()],
+        mid_px: Some("2".to_string()),
+        impact_pxs: Some(vec!["1".to_string(), "2".to_string()]),
         day_base_vlm: "0".to_string(),
     };
 
