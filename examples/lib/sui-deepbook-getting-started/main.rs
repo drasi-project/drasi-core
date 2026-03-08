@@ -46,6 +46,9 @@ async fn main() -> Result<()> {
         .with_deepbook_package_id(package_id.clone())
         .with_poll_interval_ms(2_000)
         .with_start_position(StartPosition::Now)
+        .with_enable_pool_nodes(true)
+        .with_enable_trader_nodes(true)
+        .with_enable_order_nodes(true)
         .build()?;
 
     let query = Query::cypher("deepbook-events")
@@ -122,6 +125,7 @@ fn print_banner(rpc_endpoint: &str, package_id: &str) {
     println!("{BOLD}{CYAN}║{RESET}  RPC:     {WHITE}{rpc_endpoint}{RESET}");
     println!("{BOLD}{CYAN}║{RESET}  Package: {WHITE}{pkg_short}{RESET}");
     println!("{BOLD}{CYAN}║{RESET}  Mode:    {GREEN}Live streaming (start from now){RESET}");
+    println!("{BOLD}{CYAN}║{RESET}  Graph:   {GREEN}Pool + Trader + Order enrichment enabled{RESET}");
     println!("{BOLD}{CYAN}╠══════════════════════════════════════════════════════════════╣{RESET}");
     println!("{BOLD}{CYAN}║{RESET}  {DIM}Waiting for DeepBook events… (Ctrl+C to stop){RESET}");
     println!("{BOLD}{CYAN}╚══════════════════════════════════════════════════════════════╝{RESET}");
