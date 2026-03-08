@@ -30,9 +30,14 @@ use async_trait::async_trait;
 use drasi_core::models::SourceChange;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_sui_deepbook::mapping::{map_event_to_insert_change, should_include_event};
+use drasi_source_sui_deepbook::mapping::{
+    build_order_node, build_pool_node, build_relationship, build_trader_node, derive_entity_id_pub,
+    event_order_id, event_pool_id, map_event_to_insert_change, should_include_event,
+    EnrichmentConfig,
+};
 use drasi_source_sui_deepbook::rpc::SuiRpcClient;
 use log::info;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct SuiDeepBookBootstrapProvider {
@@ -86,6 +91,15 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
             _ => None,
         };
 
+        let enrichment = EnrichmentConfig {
+            enable_pool_nodes: self.config.enable_pool_nodes,
+            enable_trader_nodes: self.config.enable_trader_nodes,
+            enable_order_nodes: self.config.enable_order_nodes,
+        };
+        let mut seen_pools = HashSet::new();
+        let mut seen_traders = HashSet::new();
+        let mut seen_orders = HashSet::new();
+
         let mut cursor = None;
         let mut page_count = 0u32;
         let mut sent_events = 0usize;
@@ -120,6 +134,74 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                     continue;
                 }
 
+                let effective_from = event
+                    .timestamp_ms
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+                let event_entity_id = derive_entity_id_pub(&event);
+
+                // Emit enrichment nodes before the event
+                let mut enrichment_changes: Vec<SourceChange> = Vec::new();
+
+                if enrichment.enable_pool_nodes {
+                    if let Some(ref pool_id) = event_pool_id(&event) {
+                        if seen_pools.insert(pool_id.clone()) {
+                            let object_data = match rpc_client.get_object(pool_id).await {
+                                Ok(data) => Some(data),
+                                Err(err) => {
+                                    log::warn!("Failed to fetch pool object for {pool_id}: {err}");
+                                    None
+                                }
+                            };
+                            enrichment_changes.push(build_pool_node(
+                                source_id,
+                                pool_id,
+                                object_data.as_ref(),
+                                effective_from,
+                            ));
+                        }
+                    }
+                }
+
+                if enrichment.enable_trader_nodes
+                    && !event.sender.is_empty()
+                    && seen_traders.insert(event.sender.clone())
+                {
+                    enrichment_changes.push(build_trader_node(
+                        source_id,
+                        &event.sender,
+                        effective_from,
+                    ));
+                }
+
+                if enrichment.enable_order_nodes {
+                    if let Some(ref order_id) = event_order_id(&event) {
+                        if seen_orders.insert(order_id.clone()) {
+                            let pool_id = event_pool_id(&event);
+                            enrichment_changes.push(build_order_node(
+                                source_id,
+                                order_id,
+                                pool_id.as_deref(),
+                                effective_from,
+                            ));
+                        }
+                    }
+                }
+
+                // Send enrichment nodes first
+                for ec in enrichment_changes {
+                    event_tx
+                        .send(BootstrapEvent {
+                            source_id: source_id.to_string(),
+                            change: ec,
+                            timestamp: chrono::Utc::now(),
+                            sequence: context.next_sequence(),
+                        })
+                        .await
+                        .map_err(|e| anyhow!("Failed to send enrichment bootstrap event: {e}"))?;
+                    sent_events += 1;
+                }
+
+                // Send the event node
                 let change = map_event_to_insert_change(source_id, &event);
                 event_tx
                     .send(BootstrapEvent {
@@ -131,6 +213,74 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
                     .await
                     .map_err(|e| anyhow!("Failed to send Sui DeepBook bootstrap event: {e}"))?;
                 sent_events += 1;
+
+                // Send relationships after both nodes exist
+                if enrichment.enable_pool_nodes {
+                    if let Some(pool_id) = event_pool_id(&event) {
+                        let rel = build_relationship(
+                            source_id,
+                            "IN_POOL",
+                            &format!("rel:in_pool:{event_entity_id}"),
+                            &event_entity_id,
+                            &format!("pool_meta:{pool_id}"),
+                            effective_from,
+                        );
+                        event_tx
+                            .send(BootstrapEvent {
+                                source_id: source_id.to_string(),
+                                change: rel,
+                                timestamp: chrono::Utc::now(),
+                                sequence: context.next_sequence(),
+                            })
+                            .await
+                            .map_err(|e| anyhow!("Failed to send relationship event: {e}"))?;
+                        sent_events += 1;
+                    }
+                }
+
+                if enrichment.enable_trader_nodes && !event.sender.is_empty() {
+                    let rel = build_relationship(
+                        source_id,
+                        "SENT_BY",
+                        &format!("rel:sent_by:{event_entity_id}"),
+                        &event_entity_id,
+                        &format!("trader:{}", event.sender),
+                        effective_from,
+                    );
+                    event_tx
+                        .send(BootstrapEvent {
+                            source_id: source_id.to_string(),
+                            change: rel,
+                            timestamp: chrono::Utc::now(),
+                            sequence: context.next_sequence(),
+                        })
+                        .await
+                        .map_err(|e| anyhow!("Failed to send relationship event: {e}"))?;
+                    sent_events += 1;
+                }
+
+                if enrichment.enable_order_nodes {
+                    if let Some(order_id) = event_order_id(&event) {
+                        let rel = build_relationship(
+                            source_id,
+                            "FOR_ORDER",
+                            &format!("rel:for_order:{event_entity_id}"),
+                            &event_entity_id,
+                            &format!("order_meta:{order_id}"),
+                            effective_from,
+                        );
+                        event_tx
+                            .send(BootstrapEvent {
+                                source_id: source_id.to_string(),
+                                change: rel,
+                                timestamp: chrono::Utc::now(),
+                                sequence: context.next_sequence(),
+                            })
+                            .await
+                            .map_err(|e| anyhow!("Failed to send relationship event: {e}"))?;
+                        sent_events += 1;
+                    }
+                }
             }
 
             // Always advance cursor from next_cursor when present, even if all
@@ -221,6 +371,21 @@ impl SuiDeepBookBootstrapProviderBuilder {
 
     pub fn with_config(mut self, config: SuiDeepBookBootstrapConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_enable_pool_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_pool_nodes = enable;
+        self
+    }
+
+    pub fn with_enable_trader_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_trader_nodes = enable;
+        self
+    }
+
+    pub fn with_enable_order_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_order_nodes = enable;
         self
     }
 
