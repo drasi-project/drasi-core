@@ -3,7 +3,7 @@
 This example shows how to consume Open511 road event feeds (such as DriveBC) with Drasi using:
 - `drasi-source-open511`
 - `drasi-bootstrap-open511`
-- a Cypher query that tracks active major incidents on roads
+- a Cypher query that tracks active road events
 
 ## Prerequisites
 
