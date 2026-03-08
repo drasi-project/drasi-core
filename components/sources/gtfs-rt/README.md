@@ -7,7 +7,7 @@ A Drasi source that polls [GTFS-Realtime](https://gtfs.org/documentation/realtim
 ## Features
 
 - Polls **TripUpdates**, **VehiclePositions**, and **Alerts** feeds at a configurable interval
-- Two-level hash-based snapshot diffing (`xxhash64`) — only changed entities are decoded, and only changed graph nodes/relations are emitted
+- Two-level hash-based snapshot diffing (`xxhash64`) — detects changed entities and emits only changed graph nodes/relations
 - Shared graph nodes across feeds (**Route**, **Trip**, **Vehicle**, **Stop**, **Agency**) — enabling powerful cross-feed queries
 - Fine-grained insert/update/delete semantics with dependency-ordered emission
 - Resilient per-feed fetching — a single feed failure doesn't disrupt the others
@@ -143,7 +143,7 @@ The source builds a rich graph with shared nodes that are deduplicated across al
 
 The source uses a two-level hash-based diff on each poll:
 
-1. **Entity level** — each `FeedEntity` is hashed with xxhash64. Only entities whose hash changed since the last poll are decoded. Unchanged entities are skipped at zero cost.
+1. **Entity level** — each `FeedEntity` is hashed with xxhash64. Only entities whose hash changed since the last poll are processed further. Unchanged entities are skipped.
 2. **Graph level** — for changed entities, the full subgraph (nodes + relations) is rebuilt and compared against the previous snapshot. Only the specific nodes/relations that actually changed produce `SourceChange` events.
 
 Shared nodes (Route, Trip, Vehicle, Stop, Agency) are reference-counted across feed entities. A shared node is only deleted when no remaining entity references it.

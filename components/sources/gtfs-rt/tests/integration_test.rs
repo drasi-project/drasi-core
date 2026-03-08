@@ -132,7 +132,6 @@ fn has_exact_entity_ids(rows: &[Value], expected: &[&str]) -> bool {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_gtfs_rt_source_detects_insert_update_delete() -> Result<()> {
     init_logging();
     let run_suffix = std::time::SystemTime::now()

@@ -106,6 +106,13 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
         let dto: GtfsRtSourceConfigDto = serde_json::from_value(config_json.clone())?;
+
+        if dto.start_from_now && dto.start_from_timestamp_ms.is_some() {
+            anyhow::bail!(
+                "Configuration error: 'start_from_now' and 'start_from_timestamp_ms' are mutually exclusive"
+            );
+        }
+
         let mapper = DtoMapper::new();
 
         let initial_cursor_mode = if let Some(ts) = dto.start_from_timestamp_ms {
