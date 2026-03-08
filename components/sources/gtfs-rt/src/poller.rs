@@ -198,8 +198,10 @@ impl GtfsRtPoller {
             }
         }
 
-        if successes == 0 {
-            anyhow::bail!("All configured GTFS-RT feeds failed to fetch");
+        if successes == 0 && self.state.cached_feeds.is_empty() {
+            anyhow::bail!(
+                "All configured GTFS-RT feeds failed to fetch and no cached feeds are available"
+            );
         }
 
         Ok(FetchResult {

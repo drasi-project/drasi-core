@@ -83,12 +83,22 @@ function updateLeaderboard(entries) {
       row.classList.add('high-delay');
     }
 
-    row.innerHTML = `
-      <td>${entry.tripId || entry.entityId}</td>
-      <td>${entry.routeId || 'N/A'}</td>
-      <td>${entry.vehicleLabel || 'Unknown'}</td>
-      <td>${entry.delayMinutes.toFixed(1)} min</td>
-    `;
+    const tripCell = document.createElement('td');
+    tripCell.textContent = entry.tripId || entry.entityId;
+
+    const routeCell = document.createElement('td');
+    routeCell.textContent = entry.routeId || 'N/A';
+
+    const vehicleCell = document.createElement('td');
+    vehicleCell.textContent = entry.vehicleLabel || 'Unknown';
+
+    const delayCell = document.createElement('td');
+    delayCell.textContent = `${entry.delayMinutes.toFixed(1)} min`;
+
+    row.appendChild(tripCell);
+    row.appendChild(routeCell);
+    row.appendChild(vehicleCell);
+    row.appendChild(delayCell);
     tbody.appendChild(row);
   });
 }
@@ -118,17 +128,61 @@ function updateAlerts(alerts) {
     const card = document.createElement('article');
     card.className = `alert-card ${severityClass(alert.severityLevel)} ${isNew ? 'alert-new' : ''}`;
 
-    const routes = (alert.routeIds || []).map((route) => `<span class="badge">Route ${route}</span>`).join('');
-    const stops = (alert.stopIds || []).map((stop) => `<span class="badge">Stop ${stop}</span>`).join('');
+    const severityBadge = document.createElement('span');
+    severityBadge.className = 'alert-badge';
+    severityBadge.textContent = alert.severityLevel || 'UNKNOWN';
 
-    card.innerHTML = `
-      <span class="alert-badge">${alert.severityLevel || 'UNKNOWN'}</span>
-      <strong>${alert.headerText || 'Service alert'}</strong>
-      <p class="alert-text">${alert.descriptionText || 'No description provided.'}</p>
-      <div class="alert-meta">Cause: ${alert.cause || 'N/A'} · Effect: ${alert.effect || 'N/A'}</div>
-      <div class="badge-list">${routes || '<span class="badge">No route scope</span>'}</div>
-      <div class="badge-list">${stops || '<span class="badge">No stop scope</span>'}</div>
-    `;
+    const header = document.createElement('strong');
+    header.textContent = alert.headerText || 'Service alert';
+
+    const description = document.createElement('p');
+    description.className = 'alert-text';
+    description.textContent = alert.descriptionText || 'No description provided.';
+
+    const meta = document.createElement('div');
+    meta.className = 'alert-meta';
+    meta.textContent = `Cause: ${alert.cause || 'N/A'} · Effect: ${alert.effect || 'N/A'}`;
+
+    const routesContainer = document.createElement('div');
+    routesContainer.className = 'badge-list';
+    const routeIds = alert.routeIds || [];
+    if (routeIds.length) {
+      routeIds.forEach((route) => {
+        const routeBadge = document.createElement('span');
+        routeBadge.className = 'badge';
+        routeBadge.textContent = `Route ${route}`;
+        routesContainer.appendChild(routeBadge);
+      });
+    } else {
+      const noRouteBadge = document.createElement('span');
+      noRouteBadge.className = 'badge';
+      noRouteBadge.textContent = 'No route scope';
+      routesContainer.appendChild(noRouteBadge);
+    }
+
+    const stopsContainer = document.createElement('div');
+    stopsContainer.className = 'badge-list';
+    const stopIds = alert.stopIds || [];
+    if (stopIds.length) {
+      stopIds.forEach((stop) => {
+        const stopBadge = document.createElement('span');
+        stopBadge.className = 'badge';
+        stopBadge.textContent = `Stop ${stop}`;
+        stopsContainer.appendChild(stopBadge);
+      });
+    } else {
+      const noStopBadge = document.createElement('span');
+      noStopBadge.className = 'badge';
+      noStopBadge.textContent = 'No stop scope';
+      stopsContainer.appendChild(noStopBadge);
+    }
+
+    card.appendChild(severityBadge);
+    card.appendChild(header);
+    card.appendChild(description);
+    card.appendChild(meta);
+    card.appendChild(routesContainer);
+    card.appendChild(stopsContainer);
 
     container.appendChild(card);
   });
