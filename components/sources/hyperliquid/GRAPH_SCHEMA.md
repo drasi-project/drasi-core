@@ -115,7 +115,9 @@ A liquidation event. A new node is inserted for each liquidation; liquidations a
 | `timestamp` | Integer | ✅ | Liquidation time (milliseconds since epoch) | `1719500000000` |
 | `hash` | String | ❌ | Transaction hash (may be absent) | `"0xdef..."` |
 
-- **ID format:** `liquidation:{coin}:{timestamp}` — e.g., `liquidation:SOL:1719500000000`
+- **ID format:**
+  - If `hash` is present: `liquidation:{coin}:{hash}` — e.g., `liquidation:SOL:0xdef...`
+  - If `hash` is absent: `liquidation:{coin}:{timestamp}` — e.g., `liquidation:SOL:1719500000000`
 - **Lifecycle:** Insert-only. Each liquidation event creates a new node.
 - **Source API:** WebSocket channel `liquidations` (streaming only; not bootstrapped).
 
@@ -197,8 +199,8 @@ All relationships are property-less edges that connect data nodes to their paren
 | Attribute | Value |
 |---|---|
 | **Pattern** | `(Liquidation)-[:LIQUIDATED_ON]->(Coin)` |
-| **ID format** | `liquidated_on:liquidation:{coin}:{timestamp}` |
-| **Example ID** | `liquidated_on:liquidation:SOL:1719500000000` |
+| **ID format** | `liquidated_on:{liquidation_node_id}` |
+| **Example ID** | `liquidated_on:liquidation:SOL:1719500000000` or `liquidated_on:liquidation:SOL:0xdef...` |
 | **Created** | Streaming – inserted alongside each new `Liquidation` node |
 | **Cardinality** | Many-to-one (many liquidations per coin) |
 
@@ -297,13 +299,13 @@ This means if a `MidPrice` was bootstrapped, the first streaming update for that
 | Trade | `trade:{coin}:{tid}` | `trade:BTC:123456789` | Coin + trade ID |
 | MidPrice | `midprice:{coin}` | `midprice:ETH` | Coin (singleton) |
 | OrderBook | `orderbook:{coin}` | `orderbook:BTC` | Coin (singleton) |
-| Liquidation | `liquidation:{coin}:{timestamp}` | `liquidation:SOL:1719500000000` | Coin + timestamp |
+| Liquidation | `liquidation:{coin}:{hash\|timestamp}` | `liquidation:SOL:0xdef...` | Coin + hash (or timestamp) |
 | FundingRate | `funding:{coin}` | `funding:BTC` | Coin (singleton) |
 | SpotPair | `spotpair:{name}` | `spotpair:PURR/USDC` | Pair name |
 | TRADED_ON | `traded_on:trade:{coin}:{tid}` | `traded_on:trade:BTC:123456789` | Source trade ID |
 | PRICE_OF | `price_of:midprice:{coin}` | `price_of:midprice:BTC` | Source mid-price ID |
 | BOOK_OF | `book_of:orderbook:{coin}` | `book_of:orderbook:ETH` | Source order book ID |
-| LIQUIDATED_ON | `liquidated_on:liquidation:{coin}:{ts}` | `liquidated_on:liquidation:SOL:1719500000000` | Source liquidation ID |
+| LIQUIDATED_ON | `liquidated_on:{liquidation_node_id}` | `liquidated_on:liquidation:SOL:0xdef...` | Source liquidation ID |
 | FUNDING_OF | `funding_of:funding:{coin}` | `funding_of:funding:BTC` | Source funding ID |
 
 **Pattern:** Relationship IDs are formed as `{relation_prefix}:{source_node_id}`, where the relation prefix is the lowercase/underscore form of the relationship type (e.g., `traded_on`, `price_of`, `book_of`, `liquidated_on`, `funding_of`).
