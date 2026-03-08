@@ -1,11 +1,30 @@
 # Sui DeepBook Getting Started
 
-This example connects to the Sui mainnet JSON-RPC and streams live DeepBook V3 events through a Drasi continuous query. Every event is displayed in a color-coded terminal UI via an `ApplicationReaction` with custom formatting.
+This example runs a real-time **DeFi dashboard** for Sui DeepBook V3, powered by Drasi continuous queries and delivered to the browser via Server-Sent Events (SSE).
+
+Three categories of Drasi queries feed the dashboard:
+
+**Core queries** — simple projections:
+
+| Query | Purpose |
+|-------|---------|
+| `event-feed` | Every DeepBook event with full payload |
+| `pool-tracker` | Enrichment `Pool` nodes with base/quote assets |
+| `trader-tracker` | Enrichment `Trader` nodes from event senders |
+
+**Aggregation queries** — server-side continuous aggregations:
+
+| Query | Purpose | Drasi features used |
+|-------|---------|---------------------|
+| `event-breakdown` | Event count by type | `count()` aggregation with grouping |
+| `bid-ask-ratio` | Bids vs asks per pool | `CASE WHEN` + `sum()` |
+| `fill-tracker` | Fill count per pool | Filtered `count()` with `WHERE` |
 
 ## Prerequisites
 
 - Rust toolchain (workspace default)
 - Internet access to a Sui RPC endpoint
+- A modern web browser
 - `curl` (for helper scripts)
 
 ## Quick Start
@@ -25,79 +44,61 @@ Or step-by-step:
 cargo run
 ```
 
+Then open **http://localhost:3000** in your browser.
+
 ## What You'll See
 
-Once running, the console shows a styled live feed of DeepBook events with colour-coded actions and extracted trading data:
+The terminal shows the server endpoints:
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║  Sui DeepBook Live Event Monitor                             ║
+║  DeepBook DeFi Dashboard                                   ║
 ╠══════════════════════════════════════════════════════════════╣
-║  RPC:     https://fullnode.mainnet.sui.io:443
-║  Package: 0x337f4f…ef497
-║  Mode:    Live streaming (start from now)
+║  RPC:       https://fullnode.mainnet.sui.io:443
+║  Package:   0x337f4f…ef497
+║  SSE:       http://localhost:8080/events
+║  Dashboard: http://localhost:3000
+║  Enrichment: Pool + Trader + Order nodes enabled
 ╠══════════════════════════════════════════════════════════════╣
-║  Waiting for DeepBook events… (Ctrl+C to stop)
+║  Open the dashboard URL in your browser.                   ║
+║  Press Ctrl+C to stop.                                     ║
 ╚══════════════════════════════════════════════════════════════╝
-
-  ▶ ADD  PriceAdded (deep_price)
-        entity: pool:0xab…abcd  sender: 0x1a…2b3c  time: 14:32:08
-        pool: 0xab…abcd  price=2850000000  size=1500000
-
-  ▶ ADD  BalanceEvent (balance_manager)
-        entity: event:0x7fa…:0  sender: 0x9d…ef01  time: 14:32:08
-        amount=500000000  balance=12000000000
-
-  ▶ ADD  OrderPlaced (events)
-        entity: order:42  sender: 0x1a…2b3c  time: 14:32:09
-        pool: 0xab…abcd  price=2340  size=1000  side=BID
-
-  ⟳ UPD  OrderFilled (events)
-        entity: order:42  sender: 0x1a…2b3c  time: 14:32:11
-        pool: 0xab…abcd  price=2340  size=800  fee=120
-        transition: insert → update
-
-  ✕ DEL  OrderCancelled (events)
-        entity: order:42  sender: 0x1a…2b3c  time: 14:32:15
 ```
 
-### Reading the Output
+The browser dashboard shows:
 
-**Action icons** indicate what happened:
+- **Stats bar** — total events, active pools, unique traders, total fills, throughput
+- **Price ticker** — scrolling tape of latest fill prices per pool
+- **Live Event Feed** — scrolling table of every DeepBook event with type, side (BID/ASK), pool, sender, price, and quantity
+- **Pool Overview** — cards showing base/quote pair, event count, fill count, last fill price, and bid/ask ratio bar
+- **Event Distribution** — donut chart breaking down events by type, powered by a server-side `count()` aggregation query
+- **Top Traders** — leaderboard of most active traders by event count
+- **Whale Alerts** — highlighted large trades above the quantity threshold
 
-| Icon | Colour | Meaning |
-|------|--------|---------|
-| `▶ ADD` | Green | New event appeared (order placed, price update, balance change) |
-| `⟳ UPD` | Yellow | An existing entity was modified (order filled, amended) |
-| `✕ DEL` | Red | An entity was removed (order cancelled, position closed) |
+All data updates in real time via SSE — no page reloads needed.
 
-**Event details** are broken into lines:
+## Architecture
 
-| Line | Content |
-|------|---------|
-| 1st | **Event name** and Move module (e.g. `PriceAdded (deep_price)`) |
-| 2nd | Entity ID, sender (truncated), and on-chain timestamp |
-| 3rd | Pool (truncated) + payload highlights (price, size, amount, side, fees) |
+```
+Sui RPC ──► DeepBook Source ──► Drasi Queries ──► SSE Reaction ──► Browser Dashboard
+              (poll 2s)          (continuous)       (port 8080)      (port 3000)
+```
 
-**Payload highlights** are automatically extracted from common DeepBook fields:
-
-| Field | Display | Example |
-|-------|---------|---------|
-| `price` | `price=…` | `price=2340` |
-| `size` / `quantity` | `size=…` / `qty=…` | `size=1000` |
-| `amount` / `balance` | `amount=…` / `balance=…` | `amount=500000000` |
-| `fee` / `maker_fee` / `taker_fee` | `fee=…` | `fee=120` |
-| `is_bid` / `side` | `side=BID` or `side=ASK` | `side=BID` |
+1. **Source** polls `suix_queryEvents` every 2 seconds and emits graph nodes
+2. **Enrichment** adds `Pool`, `Trader`, and `Order` nodes linked to events
+3. **Three Cypher queries** run continuously, emitting diffs (ADD/UPDATE/DELETE)
+4. **SSE Reaction** streams query results to connected browsers at `/events`
+5. **Dashboard server** serves the HTML dashboard at port 3000
+6. **Browser JS** connects to SSE, dispatches by `queryId`, updates the UI
 
 ## Configuration
-
-Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SUI_RPC_URL` | `https://fullnode.mainnet.sui.io:443` | Sui JSON-RPC endpoint |
 | `DEEPBOOK_PACKAGE_ID` | Mainnet DeepBook V3 address | Package ID for filtering |
-| `MAX_PAGES` | `100` | Pages to scan in `diagnose.sh` / `test-updates.sh` |
+| `SSE_PORT` | `8080` | Port for the SSE event stream |
+| `DASHBOARD_PORT` | `3000` | Port for the HTML dashboard |
 
 ### Using a Different Network
 
@@ -108,34 +109,71 @@ DEEPBOOK_PACKAGE_ID=0x<testnet-package-id> \
 cargo run
 
 # Custom provider (higher rate limits)
-SUI_RPC_URL=https://sui-mainnet.rpc.example.com \
-cargo run
+SUI_RPC_URL=https://sui-mainnet.rpc.example.com cargo run
 ```
 
-## The Cypher Query
+## The Cypher Queries
 
-The example runs this continuous query:
+### Event Feed — all events in real time
 
 ```cypher
 MATCH (e:DeepBookEvent)
 RETURN
-  e.entity_id     AS entity_id,
-  e.event_name    AS event_name,
-  e.module        AS module,
-  e.change_type   AS change_type,
-  e.pool_id_short AS pool,
-  e.sender_short  AS sender,
-  e.timestamp_ms  AS timestamp_ms,
-  e.order_id      AS order_id,
-  e.payload       AS payload
+  e.entity_id    AS id,
+  e.event_name   AS event_name,
+  e.pool_id      AS pool_id,
+  e.timestamp_ms AS timestamp,
+  e.sender       AS sender,
+  e.payload      AS payload
 ```
 
-The example uses `ApplicationReaction` with a custom formatting loop (not `LogReaction`) to render structured, colour-coded output. You can modify `main.rs` to try more targeted queries. For example, to only track orders in a specific pool:
+### Pool Tracker — discovered pools with asset info
+
+```cypher
+MATCH (p:Pool)
+RETURN
+  p.pool_id     AS pool_id,
+  p.base_asset  AS base_asset,
+  p.quote_asset AS quote_asset
+```
+
+### Trader Tracker — unique trader addresses
+
+```cypher
+MATCH (t:Trader)
+RETURN t.address AS address
+```
+
+### Event Breakdown — server-side count by event type
 
 ```cypher
 MATCH (e:DeepBookEvent)
-WHERE e.pool_id = '0xabc123…' AND e.order_id IS NOT NULL
-RETURN e.order_id, e.event_name, e.change_type, e.sender_short
+RETURN e.event_name AS event_name, count(e) AS cnt
+```
+
+This aggregation query groups events by type and emits real-time count updates.
+Each time a new event arrives, the count for that type increments and the dashboard
+donut chart updates automatically.
+
+### Bid/Ask Ratio — CASE WHEN aggregation per pool
+
+```cypher
+MATCH (e:DeepBookEvent)
+WHERE e.payload.is_bid IS NOT NULL
+RETURN e.pool_id AS pool_id,
+  sum(CASE WHEN e.payload.is_bid = true THEN 1 ELSE 0 END) AS bids,
+  sum(CASE WHEN e.payload.is_bid = false THEN 1 ELSE 0 END) AS asks
+```
+
+Showcases Drasi's support for `CASE WHEN` expressions inside aggregations.
+The dashboard renders this as a bid/ask ratio bar on each pool card.
+
+### Fill Tracker — filtered fill count per pool
+
+```cypher
+MATCH (e:DeepBookEvent)
+WHERE e.event_name = 'OrderFilled'
+RETURN e.pool_id AS pool_id, count(e) AS fill_count
 ```
 
 ## Helper Scripts
@@ -144,46 +182,26 @@ RETURN e.order_id, e.event_name, e.change_type, e.sender_short
 |--------|---------|
 | `setup.sh` | Validates RPC endpoint health with a 60-second timeout |
 | `quickstart.sh` | Runs setup → build → start in one command |
-| `diagnose.sh` | Prints chain ID and scans recent events paginated by package ID |
-| `test-updates.sh` | Scans recent events and prints matching DeepBook events as JSON |
-
-### Diagnosing Connectivity
-
-```bash
-./diagnose.sh
-```
-
-Output:
-```
-Scanned 12 page(s), 600 event(s); found 3 match(es).
-- 0x337…::deep_price::PriceAdded @ 2024-01-15T12:34:56Z (tx=ABCDEFG123, seq=456789)
-- 0x337…::balance_manager::BalanceEvent @ 2024-01-15T12:35:10Z (tx=HIJKLMN456, seq=456790)
-- 0x337…::balance_manager::BalanceEvent @ 2024-01-15T12:36:03Z (tx=OPQRSTU789, seq=456791)
-```
-
-## How It Works
-
-1. **Source** polls `suix_queryEvents` every 2 seconds
-2. Raw events are filtered to only those from the DeepBook package
-3. Each matching event becomes a `DeepBookEvent` node in the Drasi graph
-4. The Cypher query runs continuously and emits diffs (ADD/UPDATE/DELETE)
-5. The `ApplicationReaction` receives each diff and renders it as a color-coded event card in the terminal
+| `diagnose.sh` | Prints chain ID and scans recent events by package ID |
+| `test-updates.sh` | Scans recent events and prints matching DeepBook events |
 
 ## Troubleshooting
 
-### No output / "No events found"
+### Dashboard shows "Connecting…" / "Reconnecting…"
 
-DeepBook events are relatively infrequent. The `StartPosition::Now` setting (default in this example) means the source only captures events emitted **after** it starts. Wait a few minutes, or switch to `StartPosition::Beginning` to replay historical events:
+- Verify the Rust process is running and printed the SSE endpoint URL
+- Check that port 8080 is not blocked or in use
+- Try opening `http://localhost:8080/events` directly — you should see SSE heartbeats
 
-```rust
-.with_start_from_beginning()
-```
+### No events appearing
+
+DeepBook events are relatively infrequent. With `StartPosition::Now` (default), only events emitted **after** startup are captured. Wait a few minutes for market activity, or switch to `StartPosition::Beginning` in the code to replay history.
 
 ### RPC errors / timeouts
 
-- Verify the endpoint is reachable: `curl -s https://fullnode.mainnet.sui.io:443 -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"sui_getChainIdentifier","id":1,"params":[]}'`
-- The public mainnet endpoint has rate limits. Switch to a dedicated provider via `SUI_RPC_URL`.
-- Run `./diagnose.sh` for a full connectivity check.
+- Verify: `curl -s https://fullnode.mainnet.sui.io:443 -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"sui_getChainIdentifier","id":1,"params":[]}'`
+- The public endpoint has rate limits — use a dedicated provider via `SUI_RPC_URL`
+- Run `./diagnose.sh` for full diagnostics
 
 ### "DeepBook package changed"
 

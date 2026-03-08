@@ -501,7 +501,28 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                        ResultDiff::Aggregation { .. } => {
+                            if let Some(spec) = query_config.updated.as_ref() {
+                                let data_to_process = serde_json::to_value(result)
+                                    .expect("ResultDiff serialization should succeed");
+                                if let Err(e) = Self::process_result(
+                                    &client,
+                                    &handlebars,
+                                    &base_url,
+                                    &token,
+                                    spec,
+                                    "UPDATE",
+                                    &data_to_process,
+                                    query_name,
+                                    &reaction_name,
+                                )
+                                .await
+                                {
+                                    error!("[{reaction_name}] Failed to process result: {e}");
+                                }
+                            }
+                        }
+                        ResultDiff::Noop => {}
                     }
                 }
             }

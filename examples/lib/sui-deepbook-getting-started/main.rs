@@ -13,24 +13,13 @@
 // limitations under the License.
 
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
-use drasi_lib::channels::ResultDiff;
+use axum::{response::Html, Router};
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_application::subscription::SubscriptionOptions;
-use drasi_reaction_application::ApplicationReaction;
-use drasi_source_sui_deepbook::{StartPosition, SuiDeepBookSource, DEFAULT_DEEPBOOK_PACKAGE_ID};
-use std::time::Duration;
+use drasi_reaction_sse::SseReaction;
+use drasi_source_sui_deepbook::{SuiDeepBookSource, DEFAULT_DEEPBOOK_PACKAGE_ID};
+use log::info;
 
-// ANSI colour helpers
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const CYAN: &str = "\x1b[36m";
-const MAGENTA: &str = "\x1b[35m";
-const WHITE: &str = "\x1b[37m";
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,246 +29,180 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "https://fullnode.mainnet.sui.io:443".to_string());
     let package_id = std::env::var("DEEPBOOK_PACKAGE_ID")
         .unwrap_or_else(|_| DEFAULT_DEEPBOOK_PACKAGE_ID.to_string());
+    let sse_port: u16 = std::env::var("SSE_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8080);
+    let dashboard_port: u16 = std::env::var("DASHBOARD_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3000);
 
+    // ── Source ──
+    // MoveModule filter ensures fast event retrieval from Sui RPC
     let source = SuiDeepBookSource::builder("deepbook-mainnet")
         .with_rpc_endpoint(rpc_endpoint.clone())
         .with_deepbook_package_id(package_id.clone())
         .with_poll_interval_ms(2_000)
-        .with_start_position(StartPosition::Now)
+        .with_start_from_now()
         .with_enable_pool_nodes(true)
         .with_enable_trader_nodes(true)
         .with_enable_order_nodes(true)
         .build()?;
 
-    let query = Query::cypher("deepbook-events")
+    // ── Queries ──
+    // 1. Live event feed – every DeepBook event as it arrives
+    let event_feed = Query::cypher("event-feed")
         .query(
             r#"
             MATCH (e:DeepBookEvent)
             RETURN
-              e.entity_id     AS entity_id,
-              e.event_name    AS event_name,
-              e.module        AS module,
-              e.change_type   AS change_type,
-              e.pool_id_short AS pool,
-              e.sender_short  AS sender,
-              e.timestamp_ms  AS timestamp_ms,
-              e.order_id      AS order_id,
-              e.payload       AS payload
-        "#,
+              e.entity_id    AS id,
+              e.event_name   AS event_name,
+              e.pool_id      AS pool_id,
+              e.timestamp_ms AS timestamp,
+              e.sender       AS sender,
+              e.payload      AS payload
+            "#,
         )
         .from_source("deepbook-mainnet")
         .auto_start(true)
         .build();
 
-    let (reaction, handle) = ApplicationReaction::builder("deepbook-app")
-        .with_query("deepbook-events")
+    // 2. Pool tracker – enrichment Pool nodes discovered from events
+    let pool_tracker = Query::cypher("pool-tracker")
+        .query(
+            r#"
+            MATCH (p:Pool)
+            RETURN
+              p.pool_id     AS pool_id,
+              p.base_asset  AS base_asset,
+              p.quote_asset AS quote_asset
+            "#,
+        )
+        .from_source("deepbook-mainnet")
+        .auto_start(true)
         .build();
 
+    // 3. Trader tracker – enrichment Trader nodes discovered from events
+    let trader_tracker = Query::cypher("trader-tracker")
+        .query(
+            r#"
+            MATCH (t:Trader)
+            RETURN t.address AS address
+            "#,
+        )
+        .from_source("deepbook-mainnet")
+        .auto_start(true)
+        .build();
+
+    // 4. Event type breakdown – aggregation by event name
+    let event_breakdown = Query::cypher("event-breakdown")
+        .query(
+            r#"
+            MATCH (e:DeepBookEvent)
+            RETURN e.event_name AS event_name, count(e) AS cnt
+            "#,
+        )
+        .from_source("deepbook-mainnet")
+        .auto_start(true)
+        .build();
+
+    // 5. Flash loan tracker – individual flash loan events
+    let flash_loan_tracker = Query::cypher("flash-loan-tracker")
+        .query(
+            r#"
+            MATCH (e:DeepBookEvent)
+            WHERE e.event_name = 'FlashLoanBorrowed'
+            RETURN e.entity_id AS id,
+              e.pool_id        AS pool_id,
+              e.sender         AS sender,
+              e.timestamp_ms   AS timestamp,
+              e.payload        AS payload
+            "#,
+        )
+        .from_source("deepbook-mainnet")
+        .auto_start(true)
+        .build();
+
+    // 6. Price oracle – conversion rate updates from PriceAdded events
+    let price_oracle = Query::cypher("price-oracle")
+        .query(
+            r#"
+            MATCH (e:DeepBookEvent)
+            WHERE e.event_name = 'PriceAdded'
+            RETURN e.entity_id AS id,
+              e.pool_id        AS pool_id,
+              e.timestamp_ms   AS timestamp,
+              e.payload        AS payload
+            "#,
+        )
+        .from_source("deepbook-mainnet")
+        .auto_start(true)
+        .build();
+
+    // ── SSE Reaction ──
+    let sse = SseReaction::builder("dashboard-sse")
+        .with_port(sse_port)
+        .with_query("event-feed")
+        .with_query("pool-tracker")
+        .with_query("trader-tracker")
+        .with_query("event-breakdown")
+        .with_query("flash-loan-tracker")
+        .with_query("price-oracle")
+        .build()?;
+
+    // ── Drasi Core ──
     let core = DrasiLib::builder()
-        .with_id("sui-deepbook-example")
+        .with_id("sui-deepbook-dashboard")
         .with_source(source)
-        .with_query(query)
-        .with_reaction(reaction)
+        .with_query(event_feed)
+        .with_query(pool_tracker)
+        .with_query(trader_tracker)
+        .with_query(event_breakdown)
+        .with_query(flash_loan_tracker)
+        .with_query(price_oracle)
+        .with_reaction(sse)
         .build()
         .await?;
 
     core.start().await?;
+    info!("Drasi core started");
 
-    print_banner(&rpc_endpoint, &package_id);
+    // ── Dashboard HTTP Server ──
+    let app = Router::new().route("/", axum::routing::get(|| async { Html(DASHBOARD_HTML) }));
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{dashboard_port}")).await?;
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
 
-    let mut subscription = handle
-        .subscribe_with_options(
-            SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
-        )
-        .await?;
+    print_banner(&rpc_endpoint, &package_id, sse_port, dashboard_port);
 
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
-
-    loop {
-        tokio::select! {
-            _ = &mut ctrl_c => {
-                println!("\n{DIM}Shutting down…{RESET}");
-                break;
-            }
-            result = subscription.recv() => {
-                if let Some(query_result) = result {
-                    for diff in &query_result.results {
-                        print_diff(diff);
-                    }
-                }
-            }
-        }
-    }
-
+    // ── Wait for Ctrl+C ──
+    tokio::signal::ctrl_c().await?;
+    println!("\nShutting down…");
     core.stop().await?;
     Ok(())
 }
 
-fn print_banner(rpc_endpoint: &str, package_id: &str) {
-    let pkg_short = truncate_hex(package_id);
+fn print_banner(rpc: &str, pkg: &str, sse_port: u16, dash_port: u16) {
+    let pkg_short = if pkg.len() > 14 {
+        format!("{}…{}", &pkg[..8], &pkg[pkg.len() - 6..])
+    } else {
+        pkg.to_string()
+    };
     println!();
-    println!("{BOLD}{CYAN}╔══════════════════════════════════════════════════════════════╗{RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  {BOLD}Sui DeepBook Live Event Monitor{RESET}                             {BOLD}{CYAN}║{RESET}");
-    println!("{BOLD}{CYAN}╠══════════════════════════════════════════════════════════════╣{RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  RPC:     {WHITE}{rpc_endpoint}{RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  Package: {WHITE}{pkg_short}{RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  Mode:    {GREEN}Live streaming (start from now){RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  Graph:   {GREEN}Pool + Trader + Order enrichment enabled{RESET}");
-    println!("{BOLD}{CYAN}╠══════════════════════════════════════════════════════════════╣{RESET}");
-    println!("{BOLD}{CYAN}║{RESET}  {DIM}Waiting for DeepBook events… (Ctrl+C to stop){RESET}");
-    println!("{BOLD}{CYAN}╚══════════════════════════════════════════════════════════════╝{RESET}");
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║  DeepBook DeFi Dashboard                                   ║");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  RPC:       {rpc}");
+    println!("║  Package:   {pkg_short}");
+    println!("║  SSE:       http://localhost:{sse_port}/events");
+    println!("║  Dashboard: http://localhost:{dash_port}");
+    println!("║  Enrichment: Pool + Trader + Order nodes enabled");
+    println!("╠══════════════════════════════════════════════════════════════╣");
+    println!("║  Open the dashboard URL in your browser.                   ║");
+    println!("║  Press Ctrl+C to stop.                                     ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
-}
-
-fn print_diff(diff: &ResultDiff) {
-    match diff {
-        ResultDiff::Add { data } => {
-            let (icon, color) = ("▶ ADD", GREEN);
-            print_event(icon, color, data);
-        }
-        ResultDiff::Update { before, after, .. } => {
-            let (icon, color) = ("⟳ UPD", YELLOW);
-            print_event(icon, color, after);
-            print_update_delta(before, after);
-        }
-        ResultDiff::Delete { data } => {
-            let (icon, color) = ("✕ DEL", RED);
-            print_event(icon, color, data);
-        }
-        _ => {}
-    }
-}
-
-fn print_event(icon: &str, color: &str, data: &serde_json::Value) {
-    let event_name = json_str(data, "event_name");
-    let module = json_str(data, "module");
-    let entity = json_str(data, "entity_id");
-    let sender = json_str(data, "sender");
-    let pool = json_str(data, "pool");
-    let ts = format_timestamp(data);
-
-    println!(
-        "  {color}{BOLD}{icon}{RESET}  {BOLD}{event_name}{RESET} {DIM}({module}){RESET}"
-    );
-    println!(
-        "        {DIM}entity:{RESET} {CYAN}{entity}{RESET}  \
-         {DIM}sender:{RESET} {sender}  \
-         {DIM}time:{RESET} {ts}"
-    );
-
-    if !pool.is_empty() {
-        print!("        {DIM}pool:{RESET} {pool}");
-    }
-
-    let details = extract_payload_highlights(data);
-    if !details.is_empty() {
-        if !pool.is_empty() {
-            print!("  ");
-        } else {
-            print!("        ");
-        }
-        print!("{MAGENTA}");
-        print!("{details}");
-        println!("{RESET}");
-    } else if !pool.is_empty() {
-        println!();
-    }
-
-    // Print the full payload JSON, pretty-printed and dimmed
-    if let Some(payload) = data.get("payload") {
-        if payload.is_object() && !payload.as_object().unwrap().is_empty() {
-            if let Ok(pretty) = serde_json::to_string_pretty(payload) {
-                println!("        {DIM}payload:{RESET}");
-                for line in pretty.lines() {
-                    println!("          {DIM}{line}{RESET}");
-                }
-            }
-        }
-    }
-
-    println!();
-}
-
-fn print_update_delta(before: &serde_json::Value, after: &serde_json::Value) {
-    let before_type = json_str(before, "change_type");
-    let after_type = json_str(after, "change_type");
-    if !before_type.is_empty() && before_type != after_type {
-        println!(
-            "        {DIM}transition:{RESET} {before_type} {YELLOW}→{RESET} {after_type}"
-        );
-        println!();
-    }
-}
-
-fn extract_payload_highlights(data: &serde_json::Value) -> String {
-    let payload = &data["payload"];
-    if payload.is_null() || !payload.is_object() {
-        return String::new();
-    }
-
-    let interesting: &[(&str, &str)] = &[
-        ("price", "price"),
-        ("size", "size"),
-        ("quantity", "qty"),
-        ("amount", "amount"),
-        ("base_quantity", "base_qty"),
-        ("quote_quantity", "quote_qty"),
-        ("balance", "balance"),
-        ("fee", "fee"),
-        ("maker_fee", "maker_fee"),
-        ("taker_fee", "taker_fee"),
-        ("is_bid", "is_bid"),
-        ("side", "side"),
-        ("expire_timestamp", "expires"),
-    ];
-
-    let mut parts = Vec::new();
-    for (key, label) in interesting {
-        if let Some(val) = payload.get(key) {
-            let display = match val {
-                serde_json::Value::String(s) => {
-                    if *key == "is_bid" {
-                        if s == "true" { "BID".to_string() } else { "ASK".to_string() }
-                    } else {
-                        s.clone()
-                    }
-                }
-                serde_json::Value::Bool(b) => {
-                    if *key == "is_bid" {
-                        if *b { "BID".to_string() } else { "ASK".to_string() }
-                    } else {
-                        b.to_string()
-                    }
-                }
-                other => other.to_string(),
-            };
-            parts.push(format!("{label}={display}"));
-        }
-    }
-    parts.join("  ")
-}
-
-fn format_timestamp(data: &serde_json::Value) -> String {
-    data.get("timestamp_ms")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-        .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
-        .map(|dt| dt.format("%H:%M:%S").to_string())
-        .unwrap_or_else(|| "—".to_string())
-}
-
-fn json_str(data: &serde_json::Value, key: &str) -> String {
-    data.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn truncate_hex(hex: &str) -> String {
-    if hex.len() <= 14 {
-        return hex.to_string();
-    }
-    let prefix = &hex[..8];
-    let suffix = &hex[hex.len() - 6..];
-    format!("{prefix}…{suffix}")
 }
