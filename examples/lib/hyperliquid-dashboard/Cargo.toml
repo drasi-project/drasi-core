@@ -1,0 +1,17 @@
+[package]
+name = "hyperliquid-dashboard"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-hyperliquid = { path = "../../../components/sources/hyperliquid" }
+drasi-reaction-sse = { path = "../../../components/reactions/sse" }
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
