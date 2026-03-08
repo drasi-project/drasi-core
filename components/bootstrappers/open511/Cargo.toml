@@ -1,0 +1,32 @@
+[package]
+name = "drasi-bootstrap-open511"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Open511 bootstrap provider plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "bootstrap", "open511", "traffic"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+drasi-source-open511 = { path = "../../sources/open511" }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+dynamic-plugin = []

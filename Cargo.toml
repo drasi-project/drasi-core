@@ -22,6 +22,7 @@ members = [
   "components/bootstrappers/mssql",
   "components/bootstrappers/dataverse",
   "components/bootstrappers/http",
+  "components/bootstrappers/open511",
 
   # Source Plugins
   "components/sources/postgres",
@@ -32,6 +33,7 @@ members = [
   "components/sources/mock",
   "components/sources/mssql",
   "components/sources/dataverse",
+  "components/sources/open511",
 
   # Reaction Plugins
   "components/reactions/http",
