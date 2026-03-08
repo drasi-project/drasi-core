@@ -576,7 +576,10 @@ fn map_stop_time_update(
             props.insert("arrival_delay".to_string(), Value::Number(delay.into()));
         }
         if let Some(time) = arrival.time {
-            props.insert("arrival_time".to_string(), Value::Number(time.into()));
+            props.insert(
+                "arrival_time".to_string(),
+                Value::Number((time * 1000).into()),
+            );
         }
         if let Some(uncertainty) = arrival.uncertainty {
             props.insert(
@@ -591,7 +594,10 @@ fn map_stop_time_update(
             props.insert("departure_delay".to_string(), Value::Number(delay.into()));
         }
         if let Some(time) = departure.time {
-            props.insert("departure_time".to_string(), Value::Number(time.into()));
+            props.insert(
+                "departure_time".to_string(),
+                Value::Number((time * 1000).into()),
+            );
         }
         if let Some(uncertainty) = departure.uncertainty {
             props.insert(

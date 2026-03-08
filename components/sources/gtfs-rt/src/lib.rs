@@ -332,7 +332,7 @@ async fn persist_feed_cursors(
 }
 
 fn cursor_key(feed_type: GtfsRtFeedType) -> String {
-    format!("last_feed_timestamp:{}", feed_type.key())
+    format!("feed_poll_marker:{}", feed_type.key())
 }
 
 /// Fluent builder for `GtfsRtSource`.
