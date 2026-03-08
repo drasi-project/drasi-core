@@ -50,6 +50,11 @@ pub struct SuiDeepBookSourceConfig {
     pub enable_trader_nodes: bool,
     #[serde(default = "default_true")]
     pub enable_order_nodes: bool,
+    /// Number of recent historical events to fetch on startup (descending).
+    /// When > 0, the source fetches the most recent N events before entering
+    /// the forward-polling loop, giving dashboards immediate data.
+    #[serde(default)]
+    pub lookback_events: u16,
 }
 
 impl Default for SuiDeepBookSourceConfig {
@@ -65,6 +70,7 @@ impl Default for SuiDeepBookSourceConfig {
             enable_pool_nodes: true,
             enable_trader_nodes: true,
             enable_order_nodes: true,
+            lookback_events: 0,
         }
     }
 }
