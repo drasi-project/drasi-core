@@ -1,0 +1,60 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-source-sui-deepbook"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Sui DeepBook V3 source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "sui", "deepbook"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+ordered-float = "3.0"
+sui-rpc = "0.1"
+sui-sdk-types = "0.1"
+tonic = { version = "0.14", default-features = false }
+hex = "0.4"
+bcs = "0.1"
+prost-types = "0.14"
+
+[dev-dependencies]
+axum = "0.7"
+drasi-reaction-application.workspace = true
+tokio-test = "0.4"
+env_logger = "0.11"
+
+[features]
+dynamic-plugin = []

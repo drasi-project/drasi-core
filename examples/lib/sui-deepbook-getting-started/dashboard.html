@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeepBook Order Book — Drasi</title>
+  <style>
+    :root {
+      --bg: #0c0f1a;
+      --bg-card: #131726;
+      --bg-alt: #171c30;
+      --bg-hover: #1a2040;
+      --border: #232946;
+      --glow: #00e5a033;
+      --text: #e2e8f0;
+      --text2: #94a3b8;
+      --muted: #64748b;
+      --accent: #00e5a0;
+      --accent-d: #00e5a044;
+      --blue: #3b82f6;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --red-d: #ef444433;
+      --purple: #a78bfa;
+      --mono: 'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;
+      --sans: 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+    .dash{max-width:1480px;margin:0 auto;padding:16px 24px}
+
+    /* Header */
+    .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 0 14px;border-bottom:1px solid var(--border);margin-bottom:14px}
+    .hdr-left{display:flex;align-items:center;gap:14px}
+    .logo{width:34px;height:34px;background:linear-gradient(135deg,var(--accent),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;color:var(--bg)}
+    .hdr-title{font-size:20px;font-weight:700;letter-spacing:-.5px}
+    .hdr-sub{font-size:11px;color:var(--muted);margin-top:1px}
+    .hdr-right{display:flex;align-items:center;gap:12px}
+    .pool-select{background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:8px;font-size:13px;font-family:var(--sans);cursor:pointer;min-width:180px;outline:none;transition:border-color .2s}
+    .pool-select:hover,.pool-select:focus{border-color:var(--accent)}
+    .pool-select option{background:var(--bg-card);color:var(--text)}
+    .badge{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid var(--border);background:var(--bg-card)}
+    .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);transition:background .3s}
+    .badge.on .dot{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+    .badge.on{border-color:var(--accent-d);color:var(--accent)}
+
+    /* Stats */
+    .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:14px}
+    .stat{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+    .stat-lbl{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin-bottom:4px}
+    .stat-val{font-family:var(--mono);font-size:18px;font-weight:700;line-height:1}
+    .stat-val.bid{color:var(--accent)}
+    .stat-val.ask{color:var(--red)}
+    .stat-val .u{font-size:11px;font-weight:400;color:var(--text2);margin-left:2px}
+
+    /* Main grid */
+    .grid{display:grid;grid-template-columns:1fr 340px;gap:14px;min-height:600px}
+
+    /* Panels */
+    .panel{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+    .panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
+    .panel-hdr .tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;background:var(--accent-d);color:var(--accent)}
+
+    /* Order Book */
+    .book-content{flex:1;display:flex;flex-direction:column;overflow:hidden}
+    .book-header{display:grid;grid-template-columns:1fr 1fr 1fr;padding:6px 16px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);border-bottom:1px solid var(--border)}
+    .book-header span:last-child{text-align:right}
+    .book-asks{flex:1;display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden;min-height:0}
+    .book-spread{padding:8px 16px;text-align:center;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--yellow);border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg-alt)}
+    .book-bids{flex:1;overflow:hidden;min-height:0}
+    .book-row{display:grid;grid-template-columns:1fr 1fr 1fr;padding:3px 16px;font-family:var(--mono);font-size:12px;position:relative;transition:background .15s;cursor:default}
+    .book-row:hover{background:var(--bg-hover)}
+    .book-row span{position:relative;z-index:1}
+    .book-row span:last-child{text-align:right}
+    .book-row::before{content:'';position:absolute;top:0;bottom:0;width:var(--depth,0%);z-index:0;opacity:.15;transition:width .3s ease}
+    .book-row.bid{color:var(--accent)}
+    .book-row.bid::before{right:0;background:var(--accent)}
+    .book-row.ask{color:var(--red)}
+    .book-row.ask::before{right:0;background:var(--red)}
+    .book-row.bid .r-price{color:var(--accent)}
+    .book-row.ask .r-price{color:var(--red)}
+    .book-row .r-size{color:var(--text)}
+    .book-row .r-total{color:var(--text2)}
+    @keyframes bookFlash{from{background:rgba(255,255,255,.06)}to{background:transparent}}
+    .book-row.flash{animation:bookFlash .6s ease-out}
+
+    /* Empty / spinner */
+    .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--muted);font-size:12px;gap:8px;flex:1}
+    .spin{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite}
+    @keyframes sp{to{transform:rotate(360deg)}}
+
+    /* Sidebar */
+    .side{display:flex;flex-direction:column;gap:14px}
+
+    /* Recent Trades */
+    .trades-wrap{flex:1;overflow-y:auto}
+    .ttbl{width:100%;border-collapse:collapse;font-size:11px}
+    .ttbl thead th{position:sticky;top:0;background:var(--bg-card);padding:6px 10px;text-align:left;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--border);z-index:1}
+    .ttbl thead th:last-child{text-align:right}
+    .ttbl tbody tr{border-bottom:1px solid #1a1f35}
+    .ttbl td{padding:5px 10px;font-family:var(--mono);white-space:nowrap}
+    .ttbl td:last-child{text-align:right;color:var(--muted);font-size:10px}
+    .ttbl .t-buy{color:var(--accent)}
+    .ttbl .t-sell{color:var(--red)}
+    @keyframes tradeFlash{from{background:rgba(255,255,255,.04)}to{background:transparent}}
+    .ttbl tbody tr.flash{animation:tradeFlash .5s ease-out}
+
+    /* Event Feed */
+    .feed-wrap{flex:1;overflow-y:auto}
+    .etbl{width:100%;border-collapse:collapse;font-size:11px}
+    .etbl thead th{position:sticky;top:0;background:var(--bg-card);padding:6px 10px;text-align:left;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--border);z-index:1}
+    .etbl tbody tr{border-bottom:1px solid #1a1f35}
+    .etbl td{padding:4px 10px;font-size:11px;white-space:nowrap}
+    .evbadge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:.2px}
+    .ev-placed{background:#3b82f620;color:var(--blue)}
+    .ev-filled{background:#00e5a020;color:var(--accent)}
+    .ev-cancel{background:#ef444420;color:var(--red)}
+    .ev-modify{background:#f59e0b20;color:var(--yellow)}
+    .ev-other{background:#a78bfa20;color:var(--purple)}
+    .addr{font-family:var(--mono);font-size:10px;color:var(--text2)}
+    .time{font-family:var(--mono);font-size:10px;color:var(--muted)}
+
+    /* Scrollbar */
+    ::-webkit-scrollbar{width:4px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+    @media(max-width:960px){
+      .grid{grid-template-columns:1fr}
+      .stats{grid-template-columns:repeat(3,1fr)}
+    }
+  </style>
+</head>
+<body>
+<div class="dash">
+
+  <!-- Header -->
+  <header class="hdr">
+    <div class="hdr-left">
+      <div class="logo">D</div>
+      <div>
+        <div class="hdr-title">DeepBook Order Book</div>
+        <div class="hdr-sub">Powered by Drasi Continuous Queries &middot; Sui Blockchain</div>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <select id="poolSelect" class="pool-select">
+        <option value="">All Pools</option>
+      </select>
+      <div id="status" class="badge">
+        <span class="dot"></span>
+        <span id="statusTxt">Connecting&hellip;</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat"><div class="stat-lbl">Events</div><div class="stat-val" id="sEvents">0</div></div>
+    <div class="stat"><div class="stat-lbl">Book Depth</div><div class="stat-val" id="sDepth">0<span class="u">levels</span></div></div>
+    <div class="stat"><div class="stat-lbl">Best Bid</div><div class="stat-val bid" id="sBid">&mdash;</div></div>
+    <div class="stat"><div class="stat-lbl">Spread</div><div class="stat-val" id="sSpread">&mdash;</div></div>
+    <div class="stat"><div class="stat-lbl">Best Ask</div><div class="stat-val ask" id="sAsk">&mdash;</div></div>
+    <div class="stat"><div class="stat-lbl">Trades</div><div class="stat-val" id="sTrades">0</div></div>
+  </div>
+
+  <!-- Main Grid -->
+  <div class="grid">
+
+    <!-- Order Book -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span>Order Book</span>
+        <span class="tag" id="bookTag">0 orders</span>
+      </div>
+      <div class="book-content">
+        <div class="book-header"><span>Price</span><span>Size</span><span>Total</span></div>
+        <div class="book-asks" id="askSide"></div>
+        <div class="book-spread" id="spreadBar">Spread: &mdash;</div>
+        <div class="book-bids" id="bidSide"></div>
+        <div class="empty" id="bookEmpty"><div class="spin"></div><span>Building order book&hellip;</span></div>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="side">
+
+      <!-- Recent Trades -->
+      <div class="panel" style="flex:1">
+        <div class="panel-hdr"><span>Recent Trades</span><span class="tag" id="tradeTag">0</span></div>
+        <div class="trades-wrap" id="tradesWrap">
+          <div class="empty" id="tradeEmpty"><span>Waiting for trades&hellip;</span></div>
+          <table class="ttbl" id="tradeTbl" style="display:none">
+            <thead><tr><th>Price</th><th>Size</th><th>Time</th></tr></thead>
+            <tbody id="tradeBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Event Feed -->
+      <div class="panel" style="flex:1">
+        <div class="panel-hdr"><span>Event Feed</span><span class="tag" id="feedTag">0</span></div>
+        <div class="feed-wrap" id="feedWrap">
+          <div class="empty" id="feedEmpty"><div class="spin"></div><span>Waiting for events&hellip;</span></div>
+          <table class="etbl" id="feedTbl" style="display:none">
+            <thead><tr><th>Time</th><th>Event</th><th>Pool</th></tr></thead>
+            <tbody id="feedBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  const params = new URLSearchParams(location.search);
+  const SSE = params.get('sse') || `http://${location.hostname}:8080/events`;
+  const MAX_ROWS = 100;
+  const MAX_LEVELS = 15;
+
+  // DeepBook V3 scaling factors
+  const PRICE_SCALE = 1e9;
+  const QTY_SCALE = 1e9;
+
+  // ── State ──
+  const S = {
+    total: 0,
+    tradeCount: 0,
+    pools: {},           // pool_id -> {base, quote}
+    selectedPool: '',    // '' = all pools
+    orders: {},          // order_id_str -> {pool_id, price, quantity, is_bid}
+    rateTs: [],
+  };
+
+  // ── DOM ──
+  const $ = id => document.getElementById(id);
+  const D = {
+    status:$('status'), statusTxt:$('statusTxt'),
+    sEvents:$('sEvents'), sDepth:$('sDepth'), sBid:$('sBid'), sAsk:$('sAsk'), sSpread:$('sSpread'), sTrades:$('sTrades'),
+    poolSelect:$('poolSelect'),
+    askSide:$('askSide'), bidSide:$('bidSide'), spreadBar:$('spreadBar'), bookEmpty:$('bookEmpty'), bookTag:$('bookTag'),
+    tradeTbl:$('tradeTbl'), tradeBody:$('tradeBody'), tradeEmpty:$('tradeEmpty'), tradeTag:$('tradeTag'),
+    feedTbl:$('feedTbl'), feedBody:$('feedBody'), feedEmpty:$('feedEmpty'), feedTag:$('feedTag'),
+  };
+
+  D.poolSelect.addEventListener('change', () => { S.selectedPool = D.poolSelect.value; renderBook() });
+
+  // ── SSE ──
+  let es = null, reconn = null;
+  function connect(){
+    if(es) es.close();
+    es = new EventSource(SSE);
+    es.onopen = () => { D.status.className='badge on'; D.statusTxt.textContent='Live'; if(reconn){clearTimeout(reconn);reconn=null} };
+    es.onmessage = e => { try{ const d=JSON.parse(e.data); if(d.type==='heartbeat') return; dispatch(d) }catch(x){} };
+    es.onerror = () => { D.status.className='badge'; D.statusTxt.textContent='Reconnecting…'; es.close(); reconn=setTimeout(connect,3000) };
+  }
+
+  // ── Dispatch ──
+  function dispatch(d){
+    const q = d.queryId, rs = d.results || [];
+    for(const r of rs){
+      const t = r.type;
+      if(q === 'event-feed') onEvent(t, r);
+      else if(q === 'pool-tracker') onPool(t, r);
+    }
+  }
+
+  // ── Event Handler ──
+  function onEvent(t, r){
+    if(t === 'DELETE') return;
+    const ev = (t === 'UPDATE') ? (r.after || {}) : (r.data || {});
+    const pl = safePl(ev.payload);
+    const eName = ev.event_name || '';
+    S.total++;
+
+    // Order book state management
+    if(eName === 'OrderPlaced'){
+      const oid = String(pl.order_id);
+      S.orders[oid] = {
+        pool_id: pl.pool_id || ev.pool_id,
+        price: Number(pl.price) || 0,
+        quantity: Number(pl.quantity) || 0,
+        is_bid: pl.is_bid === true || pl.is_bid === 'true',
+      };
+    } else if(eName === 'OrderCanceled'){
+      delete S.orders[String(pl.order_id)];
+    } else if(eName === 'OrderModified'){
+      const oid = String(pl.order_id);
+      if(S.orders[oid]){
+        S.orders[oid].price = Number(pl.price) || S.orders[oid].price;
+        S.orders[oid].quantity = Number(pl.quantity) || S.orders[oid].quantity;
+      } else {
+        S.orders[oid] = {
+          pool_id: pl.pool_id || ev.pool_id,
+          price: Number(pl.price) || 0,
+          quantity: Number(pl.quantity) || 0,
+          is_bid: pl.is_bid === true || pl.is_bid === 'true',
+        };
+      }
+    } else if(eName === 'OrderFilled'){
+      S.tradeCount++;
+      const moid = String(pl.maker_order_id);
+      if(S.orders[moid]){
+        S.orders[moid].quantity -= Number(pl.base_quantity) || 0;
+        if(S.orders[moid].quantity <= 0) delete S.orders[moid];
+      }
+      addTradeRow(ev, pl);
+    }
+
+    addFeedRow(ev, eName);
+    renderBook();
+    updateStats();
+  }
+
+  // ── Pool Tracker ──
+  function onPool(t, r){
+    if(t === 'DELETE'){
+      const p = r.data || r.before || {};
+      delete S.pools[p.pool_id];
+      renderPoolSelect();
+      return;
+    }
+    const p = (t === 'UPDATE') ? (r.after || {}) : (r.data || {});
+    const id = p.pool_id; if(!id) return;
+    S.pools[id] = { base: assetName(p.base_asset), quote: assetName(p.quote_asset) };
+    renderPoolSelect();
+  }
+
+  // ── Render Order Book ──
+  function renderBook(){
+    const pool = S.selectedPool;
+    const bids = [], asks = [];
+
+    // Group orders by price level
+    const bidLevels = {}, askLevels = {};
+    for(const oid in S.orders){
+      const o = S.orders[oid];
+      if(pool && o.pool_id !== pool) continue;
+      const key = o.price;
+      if(o.is_bid){
+        if(!bidLevels[key]) bidLevels[key] = 0;
+        bidLevels[key] += o.quantity;
+      } else {
+        if(!askLevels[key]) askLevels[key] = 0;
+        askLevels[key] += o.quantity;
+      }
+    }
+
+    // Sort: bids high→low, asks low→high
+    const bidPrices = Object.keys(bidLevels).map(Number).sort((a,b) => b - a);
+    const askPrices = Object.keys(askLevels).map(Number).sort((a,b) => a - b);
+
+    // Slice to MAX_LEVELS nearest the spread
+    const topBids = bidPrices.slice(0, MAX_LEVELS);
+    const topAsks = askPrices.slice(0, MAX_LEVELS);
+
+    // Calculate cumulative totals
+    let bidTotal = 0, askTotal = 0;
+    for(const p of topBids) bids.push({ price: p, size: bidLevels[p], total: (bidTotal += bidLevels[p]) });
+    for(const p of topAsks) asks.push({ price: p, size: askLevels[p], total: (askTotal += askLevels[p]) });
+
+    const maxTotal = Math.max(bidTotal, askTotal, 1);
+    const hasData = bids.length > 0 || asks.length > 0;
+
+    D.bookEmpty.style.display = hasData ? 'none' : '';
+    D.askSide.style.display = hasData ? '' : 'none';
+    D.bidSide.style.display = hasData ? '' : 'none';
+
+    if(!hasData) return;
+
+    // Render asks (reversed so lowest ask is at bottom, near spread)
+    const askRows = asks.slice().reverse();
+    D.askSide.innerHTML = askRows.map(a => {
+      const depth = (a.total / maxTotal * 100).toFixed(1);
+      return '<div class="book-row ask" style="--depth:'+depth+'%"><span class="r-price">'+fmtPrice(a.price)+'</span><span class="r-size">'+fmtQty(a.size)+'</span><span class="r-total">'+fmtQty(a.total)+'</span></div>';
+    }).join('');
+
+    // Render bids (highest bid at top, near spread)
+    D.bidSide.innerHTML = bids.map(b => {
+      const depth = (b.total / maxTotal * 100).toFixed(1);
+      return '<div class="book-row bid" style="--depth:'+depth+'%"><span class="r-price">'+fmtPrice(b.price)+'</span><span class="r-size">'+fmtQty(b.size)+'</span><span class="r-total">'+fmtQty(b.total)+'</span></div>';
+    }).join('');
+
+    // Spread
+    const bestBid = topBids.length ? topBids[0] : 0;
+    const bestAsk = topAsks.length ? topAsks[0] : 0;
+    if(bestBid && bestAsk){
+      const spread = bestAsk - bestBid;
+      D.spreadBar.textContent = 'Spread: ' + fmtPrice(spread) + ' (' + (spread / bestAsk * 100).toFixed(2) + '%)';
+      D.sBid.textContent = fmtPrice(bestBid);
+      D.sAsk.textContent = fmtPrice(bestAsk);
+      D.sSpread.textContent = fmtPrice(spread);
+    } else {
+      D.spreadBar.textContent = 'Spread: —';
+      D.sBid.textContent = '—';
+      D.sAsk.textContent = '—';
+      D.sSpread.textContent = '—';
+    }
+
+    const totalOrders = Object.keys(S.orders).length;
+    D.bookTag.textContent = totalOrders + ' order' + (totalOrders !== 1 ? 's' : '');
+    D.sDepth.innerHTML = (topBids.length + topAsks.length) + '<span class="u">levels</span>';
+  }
+
+  // ── Trade Row ──
+  function addTradeRow(ev, pl){
+    D.tradeTbl.style.display = '';
+    D.tradeEmpty.style.display = 'none';
+    D.tradeTag.textContent = S.tradeCount;
+
+    const isBuy = pl.taker_is_bid === true || pl.taker_is_bid === 'true';
+    const tr = document.createElement('tr');
+    tr.className = 'flash';
+    const cls = isBuy ? 't-buy' : 't-sell';
+    tr.innerHTML =
+      '<td class="'+cls+'">'+fmtPrice(Number(pl.price)||0)+'</td>'+
+      '<td>'+fmtQty(Number(pl.base_quantity)||0)+'</td>'+
+      '<td>'+fmtTime(ev.timestamp)+'</td>';
+    D.tradeBody.insertBefore(tr, D.tradeBody.firstChild);
+    while(D.tradeBody.children.length > MAX_ROWS) D.tradeBody.removeChild(D.tradeBody.lastChild);
+  }
+
+  // ── Event Feed Row ──
+  function addFeedRow(ev, eName){
+    D.feedTbl.style.display = '';
+    D.feedEmpty.style.display = 'none';
+    D.feedTag.textContent = S.total;
+
+    const tr = document.createElement('tr');
+    const badge = evClass(eName);
+    tr.innerHTML =
+      '<td class="time">'+fmtTime(ev.timestamp)+'</td>'+
+      '<td><span class="evbadge '+badge+'">'+esc(eName)+'</span></td>'+
+      '<td class="addr">'+trunc(ev.pool_id)+'</td>';
+    D.feedBody.insertBefore(tr, D.feedBody.firstChild);
+    while(D.feedBody.children.length > MAX_ROWS) D.feedBody.removeChild(D.feedBody.lastChild);
+  }
+
+  // ── Pool Selector ──
+  function renderPoolSelect(){
+    const cur = D.poolSelect.value;
+    const ids = Object.keys(S.pools);
+    D.poolSelect.innerHTML = '<option value="">All Pools</option>';
+    for(const id of ids){
+      const p = S.pools[id];
+      const label = p.base && p.quote ? p.base + ' / ' + p.quote : trunc(id);
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = label;
+      if(id === cur) opt.selected = true;
+      D.poolSelect.appendChild(opt);
+    }
+    // Keep "All Pools" as default so the book shows all orders
+  }
+
+  // ── Stats ──
+  function updateStats(){
+    D.sEvents.textContent = S.total.toLocaleString();
+    D.sTrades.textContent = S.tradeCount.toLocaleString();
+  }
+
+  // ── Formatting ──
+  function fmtPrice(raw){ return (raw / PRICE_SCALE).toFixed(4) }
+  function fmtQty(raw){ const v = raw / QTY_SCALE; return v >= 1000 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(4) }
+  function fmtTime(ts){ if(!ts) return '—'; const n = typeof ts==='string' ? parseInt(ts,10) : ts; if(isNaN(n)) return '—'; return new Date(n).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) }
+  function trunc(s){ if(!s) return '—'; if(s.length <= 14) return s; return s.slice(0,8)+'…'+s.slice(-4) }
+  function assetName(t){ if(!t) return '?'; const p = t.split('::'); return p.length >= 3 ? p[p.length-1] : t }
+  function esc(s){ if(!s) return ''; const el = document.createElement('span'); el.textContent = s; return el.innerHTML }
+  function safePl(p){ if(!p) return {}; if(typeof p === 'string'){ try{ return JSON.parse(p) }catch(e){ return {} } } return p }
+  function evClass(n){
+    if(!n) return 'ev-other';
+    if(n === 'OrderPlaced') return 'ev-placed';
+    if(n === 'OrderFilled') return 'ev-filled';
+    if(n === 'OrderCanceled') return 'ev-cancel';
+    if(n === 'OrderModified') return 'ev-modify';
+    return 'ev-other';
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
