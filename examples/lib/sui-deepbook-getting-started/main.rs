@@ -94,84 +94,19 @@ async fn main() -> Result<()> {
         .auto_start(true)
         .build();
 
-    // 3. Trader tracker – enrichment Trader nodes discovered from events
-    let trader_tracker = Query::cypher("trader-tracker")
-        .query(
-            r#"
-            MATCH (t:Trader)
-            RETURN t.address AS address
-            "#,
-        )
-        .from_source("deepbook-mainnet")
-        .auto_start(true)
-        .build();
-
-    // 4. Event type breakdown – aggregation by event name
-    let event_breakdown = Query::cypher("event-breakdown")
-        .query(
-            r#"
-            MATCH (e:DeepBookEvent)
-            RETURN e.event_name AS event_name, count(e) AS cnt
-            "#,
-        )
-        .from_source("deepbook-mainnet")
-        .auto_start(true)
-        .build();
-
-    // 5. Flash loan tracker – individual flash loan events
-    let flash_loan_tracker = Query::cypher("flash-loan-tracker")
-        .query(
-            r#"
-            MATCH (e:DeepBookEvent)
-            WHERE e.event_name = 'FlashLoanBorrowed'
-            RETURN e.entity_id AS id,
-              e.pool_id        AS pool_id,
-              e.sender         AS sender,
-              e.timestamp_ms   AS timestamp,
-              e.payload        AS payload
-            "#,
-        )
-        .from_source("deepbook-mainnet")
-        .auto_start(true)
-        .build();
-
-    // 6. Price oracle – conversion rate updates from PriceAdded events
-    let price_oracle = Query::cypher("price-oracle")
-        .query(
-            r#"
-            MATCH (e:DeepBookEvent)
-            WHERE e.event_name = 'PriceAdded'
-            RETURN e.entity_id AS id,
-              e.pool_id        AS pool_id,
-              e.timestamp_ms   AS timestamp,
-              e.payload        AS payload
-            "#,
-        )
-        .from_source("deepbook-mainnet")
-        .auto_start(true)
-        .build();
-
     // ── SSE Reaction ──
     let sse = SseReaction::builder("dashboard-sse")
         .with_port(sse_port)
         .with_query("event-feed")
         .with_query("pool-tracker")
-        .with_query("trader-tracker")
-        .with_query("event-breakdown")
-        .with_query("flash-loan-tracker")
-        .with_query("price-oracle")
         .build()?;
 
     // ── Drasi Core ──
     let core = DrasiLib::builder()
-        .with_id("sui-deepbook-dashboard")
+        .with_id("sui-deepbook-orderbook")
         .with_source(source)
         .with_query(event_feed)
         .with_query(pool_tracker)
-        .with_query(trader_tracker)
-        .with_query(event_breakdown)
-        .with_query(flash_loan_tracker)
-        .with_query(price_oracle)
         .with_reaction(sse)
         .build()
         .await?;
@@ -203,7 +138,7 @@ fn print_banner(rpc: &str, pkg: &str, sse_port: u16, dash_port: u16) {
     };
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║  DeepBook DeFi Dashboard                                   ║");
+    println!("║  DeepBook Live Order Book                                  ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
     println!("║  RPC:       {rpc}");
     println!("║  Package:   {pkg_short}");
