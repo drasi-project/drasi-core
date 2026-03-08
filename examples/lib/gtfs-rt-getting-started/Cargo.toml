@@ -1,0 +1,30 @@
+[package]
+name = "gtfs-rt-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib GTFS-Realtime dashboard example"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.7", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+drasi-lib = { path = "../../../lib" }
+drasi-source-gtfs-rt = { path = "../../../components/sources/gtfs-rt" }
+drasi-bootstrap-gtfs-rt = { path = "../../../components/bootstrappers/gtfs-rt" }
+drasi-reaction-application = { path = "../../../components/reactions/application" }
+env_logger = "0.11"
+futures-util = "0.3"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.6", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["fs"] }
+
+[[bin]]
+name = "gtfs-rt-getting-started"
+path = "main.rs"
