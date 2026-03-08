@@ -220,24 +220,28 @@ impl Source for HyperliquidSource {
 
                         tokio::select! {
                             result = &mut ws_handle => {
-                                if let Err(e) = result {
-                                    warn!("WebSocket stream task failed: {e}");
+                                match result {
+                                    Ok(Ok(_)) => {}
+                                    Ok(Err(e)) => warn!("WebSocket stream error: {e}"),
+                                    Err(e) => warn!("WebSocket stream task panicked: {e}"),
                                 }
                                 funding_h.abort();
                             }
                             result = &mut funding_h => {
-                                if let Err(e) = result {
-                                    warn!("Funding poll task failed: {e}");
+                                match result {
+                                    Ok(Ok(_)) => {}
+                                    Ok(Err(e)) => warn!("Funding poll error: {e}"),
+                                    Err(e) => warn!("Funding poll task panicked: {e}"),
                                 }
                                 ws_handle.abort();
                             }
                         }
                     }
-                    None => {
-                        if let Err(e) = ws_handle.await {
-                            warn!("WebSocket stream task failed: {e}");
-                        }
-                    }
+                    None => match ws_handle.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => warn!("WebSocket stream error: {e}"),
+                        Err(e) => warn!("WebSocket stream task panicked: {e}"),
+                    },
                 }
             }
             .instrument(tracing::info_span!(
