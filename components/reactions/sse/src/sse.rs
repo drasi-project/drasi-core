@@ -339,9 +339,7 @@ impl Reaction for SseReaction {
                             ResultDiff::Add { .. } => (config.added.as_ref(), "ADD"),
                             ResultDiff::Update { .. } => (config.updated.as_ref(), "UPDATE"),
                             ResultDiff::Delete { .. } => (config.deleted.as_ref(), "DELETE"),
-                            ResultDiff::Aggregation { .. } => {
-                                (config.updated.as_ref(), "UPDATE")
-                            }
+                            ResultDiff::Aggregation { .. } => (config.updated.as_ref(), "UPDATE"),
                             ResultDiff::Noop => (None, "NOOP"),
                         };
 

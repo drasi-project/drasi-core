@@ -263,16 +263,16 @@
   function dispatch(d){
     const q = d.queryId, rs = d.results || [];
     for(const r of rs){
-      const t = r.type, p = r.data || r.after || {};
+      const t = r.type;
       if(q === 'event-feed') onEvent(t, r);
-      else if(q === 'pool-tracker') onPool(t, p);
+      else if(q === 'pool-tracker') onPool(t, r);
     }
   }
 
   // ── Event Handler ──
   function onEvent(t, r){
-    if(t !== 'ADD') return;
-    const ev = r.data || {};
+    if(t === 'DELETE') return;
+    const ev = (t === 'UPDATE') ? (r.after || {}) : (r.data || {});
     const pl = safePl(ev.payload);
     const eName = ev.event_name || '';
     S.total++;
@@ -317,15 +317,17 @@
   }
 
   // ── Pool Tracker ──
-  function onPool(t, p){
-    if(t === 'ADD'){
-      const id = p.pool_id; if(!id) return;
-      S.pools[id] = { base: assetName(p.base_asset), quote: assetName(p.quote_asset) };
-      renderPoolSelect();
-    } else if(t === 'DELETE'){
+  function onPool(t, r){
+    if(t === 'DELETE'){
+      const p = r.data || r.before || {};
       delete S.pools[p.pool_id];
       renderPoolSelect();
+      return;
     }
+    const p = (t === 'UPDATE') ? (r.after || {}) : (r.data || {});
+    const id = p.pool_id; if(!id) return;
+    S.pools[id] = { base: assetName(p.base_asset), quote: assetName(p.quote_asset) };
+    renderPoolSelect();
   }
 
   // ── Render Order Book ──

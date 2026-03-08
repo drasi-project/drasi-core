@@ -153,7 +153,7 @@ impl Source for SuiDeepBookSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting Sui DeepBook source '{}'", self.base.id);
 
         let source_id = self.base.id.clone();
@@ -173,20 +173,19 @@ impl Source for SuiDeepBookSource {
             };
             if let Err(err) = result {
                 error!("Sui DeepBook task failed for '{source_id}': {err}");
-                let _ = base
-                    .set_status_with_event(ComponentStatus::Error, Some(err.to_string()))
+                base.set_status(ComponentStatus::Error, Some(err.to_string()))
                     .await;
             }
         });
 
         *self.task_handle.write().await = Some(task_handle);
-        self.base.set_status(ComponentStatus::Running).await;
+        self.base.set_status(ComponentStatus::Running, None).await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         info!("Stopping Sui DeepBook source '{}'", self.base.id);
-        self.base.set_status(ComponentStatus::Stopping).await;
+        self.base.set_status(ComponentStatus::Stopping, None).await;
 
         if let Err(err) = self.shutdown_tx.send(true) {
             warn!(
@@ -203,7 +202,7 @@ impl Source for SuiDeepBookSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base.set_status(ComponentStatus::Stopped, None).await;
         Ok(())
     }
 
