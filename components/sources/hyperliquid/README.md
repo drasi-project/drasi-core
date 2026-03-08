@@ -215,9 +215,9 @@ let source = HyperliquidSource::builder("my-source")
 
 ## Bootstrap & Streaming
 
-**Bootstrap** (REST): On startup, the source fetches a snapshot of all current data via Hyperliquid's `/info` REST endpoints. Coin and SpotPair nodes are always bootstrapped. MidPrice, FundingRate, and OrderBook are bootstrapped only when their respective streams are enabled.
+**Bootstrap** (REST): When a query subscribes with `enable_bootstrap`, the source fetches a snapshot of the relevant current data via Hyperliquid's `/info` REST endpoints. Coin and SpotPair nodes are always included. MidPrice, FundingRate, and OrderBook are bootstrapped only when their respective streams are enabled.
 
-**Streaming** (WebSocket + REST polling): After bootstrap, the source opens a WebSocket connection and subscribes to enabled channels. Funding rates are polled via REST at the configured interval.
+**Streaming** (WebSocket + REST polling): The source opens a WebSocket connection and subscribes to enabled channels. Funding rates are polled via REST at the configured interval.
 
 | Data | Bootstrap | Streaming | Update Pattern |
 |---|---|---|---|

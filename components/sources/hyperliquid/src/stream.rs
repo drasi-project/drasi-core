@@ -213,6 +213,7 @@ async fn subscribe_to_channels<W>(
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
+    <W as Sink<Message>>::Error: std::fmt::Display,
 {
     if config.enable_trades {
         for coin in coins {
@@ -223,7 +224,7 @@ where
             write
                 .send(Message::Text(msg.to_string()))
                 .await
-                .map_err(|_| anyhow!("WebSocket subscribe failed"))?;
+                .map_err(|e| anyhow!("WebSocket subscribe to trades/{coin} failed: {e}"))?;
         }
     }
 
@@ -236,7 +237,7 @@ where
             write
                 .send(Message::Text(msg.to_string()))
                 .await
-                .map_err(|_| anyhow!("WebSocket subscribe failed"))?;
+                .map_err(|e| anyhow!("WebSocket subscribe to l2Book/{coin} failed: {e}"))?;
         }
     }
 
@@ -248,7 +249,7 @@ where
         write
             .send(Message::Text(msg.to_string()))
             .await
-            .map_err(|_| anyhow!("WebSocket subscribe failed"))?;
+            .map_err(|e| anyhow!("WebSocket subscribe to allMids failed: {e}"))?;
     }
 
     if config.enable_liquidations {
@@ -259,7 +260,7 @@ where
         write
             .send(Message::Text(msg.to_string()))
             .await
-            .map_err(|_| anyhow!("WebSocket subscribe failed"))?;
+            .map_err(|e| anyhow!("WebSocket subscribe to liquidations failed: {e}"))?;
     }
 
     Ok(())
@@ -312,8 +313,10 @@ async fn handle_ws_message(
                 }
             }
 
-            let mut initialized = stream_state.initialized.write().await;
-            let changes = map_order_book_to_changes(source_id, &book, &mut initialized)?;
+            let changes = {
+                let mut initialized = stream_state.initialized.write().await;
+                map_order_book_to_changes(source_id, &book, &mut initialized)?
+            };
             dispatch_changes(source_id, dispatchers, changes).await;
         }
         "allMids" => {
@@ -328,9 +331,10 @@ async fn handle_ws_message(
                 return Ok(());
             }
             let filtered = filter_mids(mids, coin_filter);
-            let mut initialized = stream_state.initialized.write().await;
-            let changes =
-                map_mid_prices_to_changes(source_id, &filtered, &mut initialized, timestamp)?;
+            let changes = {
+                let mut initialized = stream_state.initialized.write().await;
+                map_mid_prices_to_changes(source_id, &filtered, &mut initialized, timestamp)?
+            };
             dispatch_changes(source_id, dispatchers, changes).await;
         }
         "liquidations" => {
@@ -382,31 +386,36 @@ async fn should_emit_trade(
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     source_id: &str,
 ) -> bool {
-    let mut trade_state = stream_state.trade_dedupe.write().await;
-    let last_tid = trade_state.get(&trade.coin).copied().unwrap_or_else(|| {
-        debug!(
-            "No prior trade dedup state for coin '{}' — accepting all trades",
-            trade.coin
-        );
-        0
-    });
-    if trade.tid <= last_tid {
-        return false;
-    }
+    let should_emit = {
+        let mut trade_state = stream_state.trade_dedupe.write().await;
+        let last_tid = trade_state.get(&trade.coin).copied().unwrap_or_else(|| {
+            debug!(
+                "No prior trade dedup state for coin '{}' — accepting all trades",
+                trade.coin
+            );
+            0
+        });
+        if trade.tid <= last_tid {
+            return false;
+        }
+        trade_state.insert(trade.coin.clone(), trade.tid);
+        true
+    };
+    // Lock is dropped — safe to .await on state store persistence.
 
-    trade_state.insert(trade.coin.clone(), trade.tid);
-
-    if let Some(store) = state_store {
-        let key = format!("last_trade_tid:{}", trade.coin);
-        if let Err(e) = store
-            .set(source_id, &key, trade.tid.to_le_bytes().to_vec())
-            .await
-        {
-            warn!("Failed to persist trade tid: {e}");
+    if should_emit {
+        if let Some(store) = state_store {
+            let key = format!("last_trade_tid:{}", trade.coin);
+            if let Err(e) = store
+                .set(source_id, &key, trade.tid.to_le_bytes().to_vec())
+                .await
+            {
+                warn!("Failed to persist trade tid: {e}");
+            }
         }
     }
 
-    true
+    should_emit
 }
 
 async fn dispatch_changes(
@@ -464,32 +473,43 @@ pub async fn run_funding_poll(params: FundingPollParams) -> Result<()> {
                 }
                 match rest_client.fetch_meta_and_asset_ctxs().await {
                     Ok((meta, ctxs)) => {
-                        let mut initialized = stream_state.initialized.write().await;
-                        let mut funding_state = stream_state.funding_state.write().await;
+                        // Collect changes and persistence tasks while holding locks,
+                        // then release before async I/O.
+                        let to_dispatch: Vec<(Vec<drasi_core::models::SourceChange>, String, FundingSnapshot)>;
+                        {
+                            let mut initialized = stream_state.initialized.write().await;
+                            let mut funding_state = stream_state.funding_state.write().await;
+                            let mut pending = Vec::new();
 
-                        for (asset, ctx) in meta.universe.iter().zip(ctxs.iter()) {
-                            if let Some(filter) = &coin_filter {
-                                if !filter.contains(&asset.name) {
-                                    continue;
+                            for (asset, ctx) in meta.universe.iter().zip(ctxs.iter()) {
+                                if let Some(filter) = &coin_filter {
+                                    if !filter.contains(&asset.name) {
+                                        continue;
+                                    }
                                 }
-                            }
 
-                            let (changes, snapshot) = map_funding_rate_to_changes(
-                                &source_id,
-                                &asset.name,
-                                ctx,
-                                &mut initialized,
-                                timestamp,
-                            )?;
+                                let (changes, snapshot) = map_funding_rate_to_changes(
+                                    &source_id,
+                                    &asset.name,
+                                    ctx,
+                                    &mut initialized,
+                                    timestamp,
+                                )?;
 
-                            if let Some(previous) = funding_state.get(&asset.name) {
-                                if previous == &snapshot {
-                                    continue;
+                                if let Some(previous) = funding_state.get(&asset.name) {
+                                    if previous == &snapshot {
+                                        continue;
+                                    }
                                 }
-                            }
 
-                            funding_state.insert(asset.name.clone(), snapshot.clone());
-                            persist_funding_snapshot(&state_store, &source_id, &asset.name, &snapshot).await;
+                                funding_state.insert(asset.name.clone(), snapshot.clone());
+                                pending.push((changes, asset.name.clone(), snapshot));
+                            }
+                            to_dispatch = pending;
+                        }
+                        // Locks dropped — safe to .await on persist and dispatch.
+                        for (changes, coin, snapshot) in to_dispatch {
+                            persist_funding_snapshot(&state_store, &source_id, &coin, &snapshot).await;
                             dispatch_changes(&source_id, &dispatchers, changes).await;
                         }
                     }
