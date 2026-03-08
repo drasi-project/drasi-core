@@ -75,6 +75,7 @@ impl HyperliquidRestClient {
             .clone();
         let ctxs_value = array
             .get(1)
+            .filter(|v| !v.is_null())
             .cloned()
             .unwrap_or(serde_json::Value::Array(vec![]));
 
