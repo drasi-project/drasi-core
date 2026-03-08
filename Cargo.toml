@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/sui-deepbook",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/sui-deepbook",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -111,9 +113,11 @@ drasi-index-garnet = { version = "0.1.5", path = "components/indexes/garnet" }
 # Component plugins
 drasi-source-mssql = { version = "0.1.0", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.1.0", path = "components/bootstrappers/mssql" }
+drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
 drasi-bootstrap-postgres = { version = "0.1.10", path = "components/bootstrappers/postgres" }
 drasi-reaction-application = { version = "0.2.7", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.1.10", path = "components/sources/postgres" }
+drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook" }
 drasi-source-application = { version = "0.1.9", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
