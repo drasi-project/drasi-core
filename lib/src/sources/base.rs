@@ -273,6 +273,11 @@ impl SourceBase {
         self.auto_start
     }
 
+    /// Get this source's dispatch mode.
+    pub fn get_dispatch_mode(&self) -> DispatchMode {
+        self.dispatch_mode
+    }
+
     /// Set the original raw config JSON for lossless persistence roundtrips.
     ///
     /// Called by plugin descriptors to preserve the original config JSON
