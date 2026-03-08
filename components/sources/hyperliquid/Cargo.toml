@@ -1,0 +1,44 @@
+[package]
+name = "drasi-source-hyperliquid"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Hyperliquid market data source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "hyperliquid", "defi"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = "0.4"
+log = "0.4"
+tracing = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+ordered-float = "3.0"
+thiserror = "1.0"
+utoipa = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+drasi-reaction-application = { path = "../../reactions/application" }
+
+[features]
+# default = []
+dynamic-plugin = []

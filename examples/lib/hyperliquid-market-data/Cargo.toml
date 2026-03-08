@@ -1,0 +1,22 @@
+[package]
+name = "hyperliquid-market-data"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example streaming Hyperliquid market data"
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-hyperliquid = { path = "../../../components/sources/hyperliquid" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+
+anyhow = "1.0"
+tokio = { version = "1.6", features = ["full"] }
+env_logger = "0.11"
+log = "0.4"
+
+[[bin]]
+name = "hyperliquid-market-data"
+path = "main.rs"
