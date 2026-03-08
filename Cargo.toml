@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/gtfs-rt",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/gtfs-rt",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -116,9 +118,11 @@ drasi-reaction-application = { version = "0.2.7", path = "components/reactions/a
 drasi-source-postgres = { version = "0.1.10", path = "components/sources/postgres" }
 drasi-source-application = { version = "0.1.9", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
+drasi-bootstrap-gtfs-rt = { version = "0.1.0", path = "components/bootstrappers/gtfs-rt" }
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
+drasi-source-gtfs-rt = { version = "0.1.0", path = "components/sources/gtfs-rt" }
 
 [workspace.lints.rust]
 warnings = "deny"
