@@ -2,14 +2,21 @@
 
 ## Overview
 
-The Sui DeepBook Source is a Change Data Capture (CDC) plugin for Drasi that streams events from [DeepBook V3](https://deepbook.tech/) — the native central-limit order book (CLOB) on the [Sui blockchain](https://sui.io/). It polls the Sui JSON-RPC endpoint (`suix_queryEvents`) for on-chain events emitted by the DeepBook package and transforms them into Drasi `SourceChange` events for continuous query processing.
+The Sui DeepBook Source is a Change Data Capture (CDC) plugin for Drasi that streams events from [DeepBook V3](https://deepbook.tech/) — the native central-limit order book (CLOB) on the [Sui blockchain](https://sui.io/). It supports two transport modes:
+
+- **gRPC checkpoint streaming** (default, recommended): Push-based real-time streaming via the Sui gRPC API with sub-second latency
+- **JSON-RPC polling** (legacy fallback): Pull-based polling via `suix_queryEvents` — **deprecated**, scheduled for deactivation July 2026
+
+Events are transformed into Drasi `SourceChange` events for continuous query processing.
 
 **Key Capabilities**:
-- Real-time event streaming via Sui JSON-RPC polling
+- Real-time event streaming via gRPC checkpoint streaming (push-based, ~300ms latency)
+- Legacy JSON-RPC polling fallback with configurable interval
+- BCS deserialization of known DeepBook V3 event types (PriceAdded, OrderFilled, FlashLoanBorrowed, etc.)
 - Automatic cursor persistence and resume via `StateStoreProvider`
 - Client-side filtering by event type and pool ID
 - Configurable start position (beginning of chain, current tip, or specific timestamp)
-- Automatic retry with configurable back-off on transient RPC errors
+- Automatic reconnection with exponential backoff on transport errors
 - Full event payload projection into queryable properties
 - **Graph enrichment**: Pool, Trader, and Order nodes linked to events via relationships
 
@@ -25,17 +32,29 @@ The Sui DeepBook Source is a Change Data Capture (CDC) plugin for Drasi that str
 
 ### Components
 
-The source consists of four modules:
+The source consists of five modules:
 
-1. **Config** (`config.rs`): Builder-pattern configuration with validation — RPC endpoint, package ID, poll interval, request limits, filters, and start position
-2. **RPC** (`rpc.rs`): HTTP JSON-RPC client wrapping `suix_queryEvents` with cursor-based pagination, timeout, and error handling
-3. **Mapping** (`mapping.rs`): Transforms raw Sui events into Drasi `SourceChange` records with entity ID derivation, operation classification, label assignment, and property projection
-4. **Descriptor** (`descriptor.rs`): Plugin descriptor for dynamic plugin loading via the Drasi plugin SDK
+1. **Config** (`config.rs`): Builder-pattern configuration with validation — transport mode, RPC endpoint, package ID, poll interval, request limits, filters, and start position
+2. **gRPC** (`grpc.rs`): gRPC client wrapping `sui-rpc::Client` for checkpoint streaming, BCS deserialization of known DeepBook event types, and checkpoint-to-events extraction
+3. **RPC** (`rpc.rs`): HTTP JSON-RPC client wrapping `suix_queryEvents` with cursor-based pagination, timeout, and error handling (legacy transport)
+4. **Mapping** (`mapping.rs`): Transforms raw Sui events into Drasi `SourceChange` records with entity ID derivation, operation classification, label assignment, and property projection
+5. **Descriptor** (`descriptor.rs`): Plugin descriptor for dynamic plugin loading via the Drasi plugin SDK
 
 **Note**: Bootstrap functionality is provided by the separate `drasi-bootstrap-sui-deepbook` crate via the pluggable bootstrap provider pattern.
 
 ### Data Flow
 
+**gRPC Transport (default)**:
+```
+Sui gRPC API  →  SuiGrpcClient  →  Package-ID Filter  →  BCS Deserialize  →  Event/Pool Filter  →  Mapping  →  SourceChange
+(subscribe_checkpoints)  ↓                                                                                           ↓
+                     Cursor Mgmt                                                                                Dispatcher → Queries
+                     (checkpoint seq)                                                                                ↓
+                         ↓                                                                                     Enrichment Nodes
+                     StateStore                                                                              (Pool, Trader, Order)
+```
+
+**JSON-RPC Transport (legacy)**:
 ```
 Sui JSON-RPC  →  SuiRpcClient  →  Package-ID Filter  →  Event/Pool Filter  →  Mapping  →  SourceChange
 (suix_queryEvents)    ↓                                                                         ↓
@@ -85,8 +104,8 @@ Events are classified based on keywords in their type name:
 
 ## Prerequisites
 
-- **Sui RPC Access**: A Sui full-node JSON-RPC endpoint. The default Sui mainnet endpoint (`https://fullnode.mainnet.sui.io:443`) works but may have rate limits. For production use, consider a dedicated provider (Shinami, BlastAPI, etc.).
-- **Network Connectivity**: Outbound HTTPS to the RPC endpoint.
+- **Sui RPC Access**: A Sui full-node endpoint with gRPC support (for default transport) or JSON-RPC (for legacy transport). The default Sui mainnet endpoint (`https://fullnode.mainnet.sui.io:443`) supports both protocols but may have rate limits. For production use, consider a dedicated provider (Shinami, BlastAPI, etc.).
+- **Network Connectivity**: Outbound HTTPS/gRPC to the endpoint (port 443).
 - **DeepBook Package ID**: The address of the DeepBook V3 package. The default targets Sui mainnet.
 
 ## Configuration
@@ -94,11 +113,18 @@ Events are classified based on keywords in their type name:
 ### Builder Pattern (Recommended)
 
 ```rust
-use drasi_source_sui_deepbook::SuiDeepBookSource;
+use drasi_source_sui_deepbook::{SuiDeepBookSource, Transport};
 
+// gRPC transport (default, recommended)
 let source = SuiDeepBookSource::builder("deepbook-source")
     .with_rpc_endpoint("https://fullnode.mainnet.sui.io:443")
     .with_deepbook_package_id("0x337f4f4f6567fcd778d5454f27c16c70e2f274cc6377ea6249ddf491482ef497")
+    .with_start_from_now()
+    .build()?;
+
+// JSON-RPC transport (legacy fallback)
+let source = SuiDeepBookSource::builder("deepbook-source")
+    .with_transport(Transport::JsonRpc)
     .with_poll_interval_ms(2_000)
     .with_request_limit(50)
     .with_start_from_now()
@@ -109,16 +135,19 @@ let source = SuiDeepBookSource::builder("deepbook-source")
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `rpc_endpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui JSON-RPC endpoint URL |
+| `transport` | `Transport` | `Grpc` | Transport mode: `Grpc` (recommended) or `JsonRpc` (legacy) |
+| `rpc_endpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui endpoint URL (used for both gRPC and JSON-RPC) |
+| `grpc_endpoint` | `Option<String>` | `None` | Override gRPC endpoint (falls back to `rpc_endpoint`) |
 | `deepbook_package_id` | `String` | Mainnet DeepBook V3 address | Package ID to filter events by |
-| `poll_interval_ms` | `u64` | `2000` | Milliseconds between poll cycles |
-| `request_limit` | `u16` | `100` | Max events per RPC page (1–1000) |
+| `poll_interval_ms` | `u64` | `2000` | Milliseconds between poll cycles (JSON-RPC only) |
+| `request_limit` | `u16` | `100` | Max events per RPC page, 1–1000 (JSON-RPC only) |
 | `event_filters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
 | `pools` | `Vec<String>` | `[]` | Pool IDs to include (empty = all) |
 | `start_position` | `StartPosition` | `Now` | Where to begin consuming events |
 | `enable_pool_nodes` | `bool` | `true` | Emit `:Pool` nodes with metadata from `sui_getObject` |
 | `enable_trader_nodes` | `bool` | `true` | Emit `:Trader` nodes from event senders |
 | `enable_order_nodes` | `bool` | `true` | Emit `:Order` nodes from event order_ids |
+| `lookback_events` | `u16` | `0` | Recent historical events to fetch on startup (JSON-RPC only) |
 
 ### Start Position
 
@@ -246,9 +275,11 @@ let source = SuiDeepBookSource::builder("deepbook-with-history")
 
 ## State Management
 
-When a `StateStoreProvider` is injected (automatically by `DrasiLib`), the source persists the Sui event cursor under the key `cursor` in its state partition. On restart, polling resumes exactly where it left off — no events are lost or duplicated.
+When a `StateStoreProvider` is injected (automatically by `DrasiLib`), the source persists its cursor:
+- **gRPC transport**: Persists the checkpoint sequence number under key `grpc_checkpoint_seq`
+- **JSON-RPC transport**: Persists the Sui event cursor under key `cursor`
 
-Without a state store, the source falls back to the configured `start_position` on each startup.
+On restart, the source resumes exactly where it left off — no events are lost or duplicated. Without a state store, the source falls back to the configured `start_position` on each startup.
 
 ## Event Filtering Pipeline
 
@@ -260,22 +291,25 @@ Filtering happens in three stages — broadest first:
 
 ## Error Handling
 
-- Transient RPC failures are retried with the configured `poll_interval_ms` as back-off
-- After 10 consecutive failures the source transitions to `Error` status
-- Corrupted persisted cursors are automatically cleared and the source restarts from the configured `start_position`
+- **gRPC transport**: On stream disconnection or errors, reconnects with exponential backoff (1s → 2s → 4s → … up to 30s). After 20 consecutive failures, transitions to `Error` status.
+- **JSON-RPC transport**: Transient RPC failures are retried with the configured `poll_interval_ms` as back-off. After 10 consecutive failures, transitions to `Error` status.
+- Corrupted persisted cursors are automatically cleared and the source restarts from the configured `start_position`.
 
 ## Testing
 
 ```bash
-# Unit tests
+# Unit tests (22 tests including gRPC event extraction)
 cargo test -p drasi-source-sui-deepbook
 
-# Integration test (mock RPC, verifies INSERT/UPDATE/DELETE + package-ID filtering)
-cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --nocapture
+# Integration test — JSON-RPC transport (requires mainnet connectivity)
+cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --nocapture test_sui_deepbook_change_detection_end_to_end
+
+# Integration test — gRPC transport (requires mainnet connectivity)
+cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --nocapture test_grpc_transport_receives_events
 ```
 
 ## Limitations
 
-- **Polling, not push**: The Sui JSON-RPC does not support server-push subscriptions for `suix_queryEvents`. The source polls at the configured interval.
-- **All-events query**: Sui full-nodes do not support the `{"Package": "0x…"}` event query filter. The source queries `{"All": []}` and filters client-side by package ID. This is bandwidth-inefficient on very busy networks; using a dedicated RPC provider helps.
-- **Pool metadata via RPC**: When `enable_pool_nodes` is true, the source calls `sui_getObject` once per unique pool_id to fetch metadata (base_asset, quote_asset, etc.). This adds ~20-50 RPC calls on startup for DeepBook's active pools, then results are cached.
+- **BCS deserialization**: The gRPC transport uses BCS-encoded event data. Known DeepBook V3 event types (PriceAdded, OrderFilled, FlashLoanBorrowed, ReferralClaimed, OrderPlaced/Canceled/Modified, PoolCreated) are fully deserialized. Unknown event types are emitted with metadata but an empty payload.
+- **JSON-RPC deprecation**: The Sui JSON-RPC API is scheduled for deactivation in July 2026. The `JsonRpc` transport is provided as a legacy fallback only.
+- **Pool metadata via RPC**: When `enable_pool_nodes` is true, the source calls `sui_getObject` via JSON-RPC once per unique pool_id to fetch metadata (base_asset, quote_asset, etc.). This adds ~20-50 RPC calls on startup for DeepBook's active pools, then results are cached.

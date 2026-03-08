@@ -16,7 +16,7 @@ use anyhow::Result;
 use axum::{response::Html, Router};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::SseReaction;
-use drasi_source_sui_deepbook::{SuiDeepBookSource, DEFAULT_DEEPBOOK_PACKAGE_ID};
+use drasi_source_sui_deepbook::{SuiDeepBookSource, Transport, DEFAULT_DEEPBOOK_PACKAGE_ID};
 use log::info;
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
@@ -29,6 +29,14 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "https://fullnode.mainnet.sui.io:443".to_string());
     let package_id = std::env::var("DEEPBOOK_PACKAGE_ID")
         .unwrap_or_else(|_| DEFAULT_DEEPBOOK_PACKAGE_ID.to_string());
+    let transport = match std::env::var("SUI_TRANSPORT")
+        .unwrap_or_else(|_| "grpc".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "json-rpc" | "jsonrpc" | "json_rpc" => Transport::JsonRpc,
+        _ => Transport::Grpc,
+    };
     let sse_port: u16 = std::env::var("SSE_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -38,9 +46,11 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3000);
 
+    info!("Using transport: {:?}", transport);
+
     // ── Source ──
-    // MoveModule filter ensures fast event retrieval from Sui RPC
     let source = SuiDeepBookSource::builder("deepbook-mainnet")
+        .with_transport(transport)
         .with_rpc_endpoint(rpc_endpoint.clone())
         .with_deepbook_package_id(package_id.clone())
         .with_poll_interval_ms(2_000)

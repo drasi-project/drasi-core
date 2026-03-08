@@ -15,16 +15,19 @@
 
 //! Sui DeepBook source plugin for Drasi.
 //!
-//! This source polls the Sui JSON-RPC API (`suix_queryEvents`) for DeepBook package events
+//! This source monitors the Sui blockchain for DeepBook package events using either
+//! gRPC checkpoint streaming (recommended) or JSON-RPC polling (legacy fallback),
 //! and emits them as Drasi source changes.
 
 pub mod config;
 pub mod descriptor;
+pub mod grpc;
 pub mod mapping;
 pub mod rpc;
 
 pub use config::{
-    StartPosition, SuiDeepBookSourceConfig, DEFAULT_DEEPBOOK_PACKAGE_ID, DEFAULT_SUI_MAINNET_RPC,
+    StartPosition, SuiDeepBookSourceConfig, Transport, DEFAULT_DEEPBOOK_PACKAGE_ID,
+    DEFAULT_SUI_MAINNET_GRPC, DEFAULT_SUI_MAINNET_RPC,
 };
 
 use anyhow::Result;
@@ -47,6 +50,7 @@ use crate::mapping::{
 use crate::rpc::{EventCursor, SuiRpcClient};
 
 const CURSOR_STATE_KEY: &str = "cursor";
+const GRPC_CURSOR_STATE_KEY: &str = "grpc_checkpoint_seq";
 
 pub struct SuiDeepBookSource {
     base: SourceBase,
@@ -159,10 +163,16 @@ impl Source for SuiDeepBookSource {
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         let task_handle = tokio::spawn(async move {
-            if let Err(err) =
-                run_poll_loop(&source_id, config, &base, state_store, &mut shutdown_rx).await
-            {
-                error!("Sui DeepBook polling task failed for '{source_id}': {err}");
+            let result = match config.transport {
+                Transport::Grpc => {
+                    run_grpc_stream(&source_id, config, &base, state_store, &mut shutdown_rx).await
+                }
+                Transport::JsonRpc => {
+                    run_poll_loop(&source_id, config, &base, state_store, &mut shutdown_rx).await
+                }
+            };
+            if let Err(err) = result {
+                error!("Sui DeepBook task failed for '{source_id}': {err}");
                 let _ = base
                     .set_status_with_event(ComponentStatus::Error, Some(err.to_string()))
                     .await;
@@ -228,6 +238,238 @@ impl Source for SuiDeepBookSource {
         self.base.set_bootstrap_provider(provider).await;
     }
 }
+
+// ── gRPC Checkpoint Streaming ──
+
+async fn run_grpc_stream(
+    source_id: &str,
+    config: SuiDeepBookSourceConfig,
+    base: &SourceBase,
+    state_store: Option<Arc<dyn StateStoreProvider>>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    let grpc_endpoint = config.effective_grpc_endpoint().to_owned();
+    info!("Starting gRPC checkpoint stream for '{source_id}' from {grpc_endpoint}");
+
+    // We still need the JSON-RPC client for pool metadata enrichment (get_object)
+    let rpc_client = SuiRpcClient::new(config.rpc_endpoint.clone())?;
+
+    let enrichment = EnrichmentConfig {
+        enable_pool_nodes: config.enable_pool_nodes,
+        enable_trader_nodes: config.enable_trader_nodes,
+        enable_order_nodes: config.enable_order_nodes,
+    };
+    let mut enrichment_state = EnrichmentState {
+        seen_pools: HashSet::new(),
+        seen_traders: HashSet::new(),
+        seen_orders: HashSet::new(),
+    };
+
+    let last_checkpoint_seq = load_grpc_cursor(source_id, &state_store).await?;
+    if let Some(seq) = last_checkpoint_seq {
+        info!("Resuming gRPC stream from checkpoint sequence {seq}");
+    }
+
+    let mut consecutive_failures = 0u32;
+    let max_retries = 20u32;
+
+    loop {
+        if *shutdown_rx.borrow() {
+            info!("Received shutdown signal for gRPC stream '{source_id}'");
+            break;
+        }
+
+        // Connect / reconnect (connect_lazy — doesn't actually connect yet)
+        let mut grpc_client = match crate::grpc::SuiGrpcClient::new(&grpc_endpoint) {
+            Ok(c) => c,
+            Err(err) => {
+                consecutive_failures += 1;
+                error!("Failed to create gRPC client (attempt {consecutive_failures}): {err}");
+                if consecutive_failures >= max_retries {
+                    return Err(err);
+                }
+                let backoff_ms = backoff_delay_ms(consecutive_failures);
+                if wait_for_poll_or_shutdown(shutdown_rx, backoff_ms).await {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        let mut stream = match grpc_client.subscribe_checkpoints().await {
+            Ok(s) => {
+                info!("gRPC checkpoint stream established for '{source_id}'");
+                s
+            }
+            Err(err) => {
+                consecutive_failures += 1;
+                error!(
+                    "Failed to subscribe to checkpoints (attempt {consecutive_failures}): {err}"
+                );
+                if consecutive_failures >= max_retries {
+                    return Err(err);
+                }
+                let backoff_ms = backoff_delay_ms(consecutive_failures);
+                if wait_for_poll_or_shutdown(shutdown_rx, backoff_ms).await {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // Stream processing loop
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            let msg = tokio::select! {
+                msg = stream.message() => msg,
+                _ = shutdown_rx.changed() => {
+                    break;
+                }
+            };
+
+            match msg {
+                Ok(Some(response)) => {
+                    consecutive_failures = 0;
+                    let seq = response.cursor.unwrap_or(0);
+
+                    // Skip checkpoints we've already processed
+                    if let Some(last_seq) = last_checkpoint_seq {
+                        if seq <= last_seq {
+                            continue;
+                        }
+                    }
+
+                    if let Some(checkpoint) = response.checkpoint {
+                        let events = crate::grpc::extract_deepbook_events(
+                            &checkpoint,
+                            &config.deepbook_package_id,
+                        );
+
+                        if !events.is_empty() {
+                            info!(
+                                "Checkpoint {seq}: extracted {} DeepBook event(s)",
+                                events.len()
+                            );
+                        }
+
+                        for event in &events {
+                            if !should_include_event(event, &config.event_filters, &config.pools) {
+                                debug!("Skipping event (filtered): {}", event.event_type);
+                                continue;
+                            }
+
+                            let effective_from = event.timestamp_ms.unwrap_or_else(|| {
+                                chrono::Utc::now().timestamp_millis().max(0) as u64
+                            });
+
+                            emit_enrichment_nodes(
+                                source_id,
+                                event,
+                                &enrichment,
+                                &rpc_client,
+                                &mut enrichment_state,
+                                effective_from,
+                                base,
+                            )
+                            .await?;
+
+                            let event_entity_id = crate::mapping::derive_entity_id_pub(event);
+                            let change = map_event_to_change(source_id, event);
+                            debug!(
+                                "Dispatching gRPC event: entity_id={event_entity_id}, type={}",
+                                event.event_type
+                            );
+                            base.dispatch_source_change(change).await?;
+
+                            emit_enrichment_relationships(
+                                source_id,
+                                event,
+                                &enrichment,
+                                &event_entity_id,
+                                effective_from,
+                                base,
+                            )
+                            .await?;
+                        }
+                    } else {
+                        debug!("Checkpoint {seq}: no checkpoint data in response");
+                    }
+
+                    save_grpc_cursor(source_id, seq, &state_store).await?;
+                }
+                Ok(None) => {
+                    warn!("gRPC checkpoint stream ended for '{source_id}', reconnecting...");
+                    break;
+                }
+                Err(err) => {
+                    consecutive_failures += 1;
+                    error!("gRPC stream error (attempt {consecutive_failures}): {err}");
+                    break;
+                }
+            }
+        }
+
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
+        let backoff_ms = backoff_delay_ms(consecutive_failures);
+        warn!("Reconnecting gRPC stream in {backoff_ms}ms...");
+        if wait_for_poll_or_shutdown(shutdown_rx, backoff_ms).await {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn backoff_delay_ms(failures: u32) -> u64 {
+    let base_ms = 1000u64;
+    let max_ms = 30_000u64;
+    let delay = base_ms * 2u64.saturating_pow(failures.min(15));
+    delay.min(max_ms)
+}
+
+async fn load_grpc_cursor(
+    source_id: &str,
+    state_store: &Option<Arc<dyn StateStoreProvider>>,
+) -> Result<Option<u64>> {
+    let Some(store) = state_store else {
+        return Ok(None);
+    };
+
+    let Some(bytes) = store.get(source_id, GRPC_CURSOR_STATE_KEY).await? else {
+        return Ok(None);
+    };
+
+    match serde_json::from_slice::<u64>(&bytes) {
+        Ok(seq) => Ok(Some(seq)),
+        Err(err) => {
+            warn!("Failed to parse gRPC cursor for source '{source_id}': {err}. Clearing state.");
+            let _ = store.delete(source_id, GRPC_CURSOR_STATE_KEY).await;
+            Ok(None)
+        }
+    }
+}
+
+async fn save_grpc_cursor(
+    source_id: &str,
+    seq: u64,
+    state_store: &Option<Arc<dyn StateStoreProvider>>,
+) -> Result<()> {
+    let Some(store) = state_store else {
+        return Ok(());
+    };
+
+    let bytes = serde_json::to_vec(&seq)?;
+    store.set(source_id, GRPC_CURSOR_STATE_KEY, bytes).await?;
+    Ok(())
+}
+
+// ── JSON-RPC Polling (Legacy) ──
 
 async fn run_poll_loop(
     source_id: &str,
@@ -703,6 +945,16 @@ impl SuiDeepBookSourceBuilder {
 
     pub fn with_rpc_endpoint(mut self, rpc_endpoint: impl Into<String>) -> Self {
         self.config.rpc_endpoint = rpc_endpoint.into();
+        self
+    }
+
+    pub fn with_grpc_endpoint(mut self, grpc_endpoint: impl Into<String>) -> Self {
+        self.config.grpc_endpoint = Some(grpc_endpoint.into());
+        self
+    }
+
+    pub fn with_transport(mut self, transport: Transport) -> Self {
+        self.config.transport = transport;
         self
     }
 

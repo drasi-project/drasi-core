@@ -15,8 +15,22 @@
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SUI_MAINNET_RPC: &str = "https://fullnode.mainnet.sui.io:443";
+pub const DEFAULT_SUI_MAINNET_GRPC: &str = "https://fullnode.mainnet.sui.io";
 pub const DEFAULT_DEEPBOOK_PACKAGE_ID: &str =
     "0x337f4f4f6567fcd778d5454f27c16c70e2f274cc6377ea6249ddf491482ef497";
+
+/// Transport mechanism for receiving events from the Sui blockchain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    /// gRPC checkpoint streaming (recommended). Push-based, low latency (~300ms).
+    /// Requires a Sui fullnode with gRPC support.
+    #[default]
+    Grpc,
+    /// JSON-RPC polling (legacy). Pull-based, configurable poll interval.
+    /// **Deprecated**: JSON-RPC will be deactivated July 2026.
+    JsonRpc,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "mode", content = "value", rename_all = "snake_case")]
@@ -30,8 +44,14 @@ pub enum StartPosition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SuiDeepBookSourceConfig {
+    /// Transport to use for event streaming. Default: gRPC.
+    #[serde(default)]
+    pub transport: Transport,
     #[serde(default = "default_rpc_endpoint")]
     pub rpc_endpoint: String,
+    /// gRPC endpoint. Defaults to the same as rpc_endpoint.
+    /// Only used when transport is Grpc.
+    pub grpc_endpoint: Option<String>,
     #[serde(default = "default_deepbook_package_id")]
     pub deepbook_package_id: String,
     #[serde(default = "default_poll_interval_ms")]
@@ -60,7 +80,9 @@ pub struct SuiDeepBookSourceConfig {
 impl Default for SuiDeepBookSourceConfig {
     fn default() -> Self {
         Self {
+            transport: Transport::default(),
             rpc_endpoint: default_rpc_endpoint(),
+            grpc_endpoint: None,
             deepbook_package_id: default_deepbook_package_id(),
             poll_interval_ms: default_poll_interval_ms(),
             request_limit: default_request_limit(),
@@ -76,6 +98,16 @@ impl Default for SuiDeepBookSourceConfig {
 }
 
 impl SuiDeepBookSourceConfig {
+    /// Returns the effective gRPC endpoint.
+    /// If `grpc_endpoint` is set, uses that; otherwise falls back to the default
+    /// gRPC endpoint (without explicit `:443` port, which is required for proper
+    /// HTTP/2 `:authority` header handling with the Sui load balancer).
+    pub fn effective_grpc_endpoint(&self) -> &str {
+        self.grpc_endpoint
+            .as_deref()
+            .unwrap_or(DEFAULT_SUI_MAINNET_GRPC)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.rpc_endpoint.trim().is_empty() {
             return Err(anyhow::anyhow!(
@@ -95,20 +127,22 @@ impl SuiDeepBookSourceConfig {
                 "Validation error: deepbook_package_id must start with 0x"
             ));
         }
-        if self.poll_interval_ms == 0 {
-            return Err(anyhow::anyhow!(
-                "Validation error: poll_interval_ms must be greater than 0"
-            ));
-        }
-        if self.request_limit == 0 {
-            return Err(anyhow::anyhow!(
-                "Validation error: request_limit must be greater than 0"
-            ));
-        }
-        if self.request_limit > 1_000 {
-            return Err(anyhow::anyhow!(
-                "Validation error: request_limit must be <= 1000"
-            ));
+        if self.transport == Transport::JsonRpc {
+            if self.poll_interval_ms == 0 {
+                return Err(anyhow::anyhow!(
+                    "Validation error: poll_interval_ms must be greater than 0"
+                ));
+            }
+            if self.request_limit == 0 {
+                return Err(anyhow::anyhow!(
+                    "Validation error: request_limit must be greater than 0"
+                ));
+            }
+            if self.request_limit > 1_000 {
+                return Err(anyhow::anyhow!(
+                    "Validation error: request_limit must be <= 1000"
+                ));
+            }
         }
 
         Ok(())
