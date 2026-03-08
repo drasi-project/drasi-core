@@ -225,7 +225,7 @@ fn extract_payload_highlights(data: &serde_json::Value) -> String {
         ("fee", "fee"),
         ("maker_fee", "maker_fee"),
         ("taker_fee", "taker_fee"),
-        ("is_bid", "side"),
+        ("is_bid", "is_bid"),
         ("side", "side"),
         ("expire_timestamp", "expires"),
     ];

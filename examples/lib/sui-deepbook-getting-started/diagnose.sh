@@ -34,13 +34,7 @@ total_rows = 0
 matches = []
 
 for page in range(max_pages):
-    params = {
-        "query": {"All": []},
-        "limit": 50,
-        "descending_order": True,
-    }
-    if cursor is not None:
-        params["cursor"] = cursor
+    params = [{"All": []}, cursor, 50, True]
 
     payload = {
         "jsonrpc": "2.0",
