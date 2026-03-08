@@ -116,8 +116,8 @@ pub fn detect_full_sweep(
     // Inserts and updates.
     for (event_id, current_event) in &current_map {
         if auto_delete_archived && current_event.status.eq_ignore_ascii_case("ARCHIVED") {
-            if previous.events_by_id.contains_key(event_id) {
-                changes.extend(map_removed_event(current_event, source_id));
+            if let Some(previous_event) = previous.events_by_id.get(event_id) {
+                changes.extend(map_removed_event(previous_event, source_id));
             }
             continue;
         }

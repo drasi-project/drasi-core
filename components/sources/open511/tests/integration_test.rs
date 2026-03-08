@@ -44,15 +44,16 @@ struct MockServerState {
     events: Arc<RwLock<HashMap<String, Open511Event>>>,
 }
 
-async fn find_available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    sleep(Duration::from_millis(50)).await;
-    port
-}
+/// Bind to an ephemeral port and start the mock server on it, returning the port.
+///
+/// The listener is created once and handed directly to `axum::serve` so the
+/// OS-assigned port remains reserved — no TOCTOU race.
+async fn start_mock_open511_server(initial_events: Vec<Open511Event>) -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock Open511 server")?;
+    let port = listener.local_addr()?.port();
 
-async fn start_mock_open511_server(port: u16, initial_events: Vec<Open511Event>) -> Result<()> {
     let state = MockServerState {
         events: Arc::new(RwLock::new(
             initial_events
@@ -69,16 +70,13 @@ async fn start_mock_open511_server(port: u16, initial_events: Vec<Open511Event>)
         .route("/admin/events/:event_id", delete(admin_delete_event))
         .with_state(state);
 
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .await
-        .context("failed to bind mock Open511 server")?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("mock Open511 server failed: {e}");
         }
     });
 
-    Ok(())
+    Ok(port)
 }
 
 async fn handle_events(
@@ -226,14 +224,10 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
         .try_init();
 
     timeout(Duration::from_secs(30), async {
-        let port = find_available_port().await;
-        start_mock_open511_server(
-            port,
-            vec![
-                make_event("test-EVT-001", "MAJOR", "2026-03-08T01:00:00Z"),
-                make_event("test-EVT-002", "MAJOR", "2026-03-08T01:00:00Z"),
-            ],
-        )
+        let port = start_mock_open511_server(vec![
+            make_event("test-EVT-001", "MAJOR", "2026-03-08T01:00:00Z"),
+            make_event("test-EVT-002", "MAJOR", "2026-03-08T01:00:00Z"),
+        ])
         .await
         .context("failed to start mock open511 server")?;
 
