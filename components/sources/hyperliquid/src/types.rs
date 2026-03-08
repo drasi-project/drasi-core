@@ -70,11 +70,11 @@ pub struct AssetCtx {
     pub open_interest: String,
     pub prev_day_px: String,
     pub day_ntl_vlm: String,
-    pub premium: String,
+    pub premium: Option<String>,
     pub oracle_px: String,
     pub mark_px: String,
-    pub mid_px: String,
-    pub impact_pxs: Vec<String>,
+    pub mid_px: Option<String>,
+    pub impact_pxs: Option<Vec<String>>,
     pub day_base_vlm: String,
 }
 

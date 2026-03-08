@@ -465,7 +465,12 @@ pub fn map_funding_rate_to_changes(
     timestamp: i64,
 ) -> Result<(Vec<SourceChange>, FundingSnapshot)> {
     let rate = parse_f64(&ctx.funding, "funding")?;
-    let premium = parse_f64(&ctx.premium, "premium")?;
+    let premium = ctx
+        .premium
+        .as_deref()
+        .map(|s| parse_f64(s, "premium"))
+        .transpose()?
+        .unwrap_or(0.0);
     let mark_price = parse_f64(&ctx.mark_px, "mark_px")?;
     let open_interest = parse_f64(&ctx.open_interest, "open_interest")?;
     let volume_24h = parse_f64(&ctx.day_ntl_vlm, "day_ntl_vlm")?;
