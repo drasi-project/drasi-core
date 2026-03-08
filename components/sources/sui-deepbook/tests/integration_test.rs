@@ -18,7 +18,7 @@ use drasi_lib::channels::ResultDiff;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::subscription::{Subscription, SubscriptionOptions};
 use drasi_reaction_application::ApplicationReaction;
-use drasi_source_sui_deepbook::SuiDeepBookSource;
+use drasi_source_sui_deepbook::{SuiDeepBookSource, Transport};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -232,6 +232,7 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
     });
 
     let source = SuiDeepBookSource::builder(SOURCE_ID)
+        .with_transport(Transport::JsonRpc)
         .with_rpc_endpoint(format!("http://{address}"))
         .with_deepbook_package_id("0xdeepbook")
         .with_poll_interval_ms(150)
@@ -312,5 +313,102 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
 
     drasi.stop().await.context("Failed to stop DrasiLib")?;
     server_handle.abort();
+    Ok(())
+}
+
+/// Test that the gRPC transport successfully receives DeepBook events from Sui mainnet.
+/// This test requires internet connectivity and connects to the public Sui fullnode.
+#[tokio::test]
+#[ignore]
+async fn test_grpc_transport_receives_events() -> Result<()> {
+    use drasi_reaction_application::subscription::SubscriptionOptions;
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init()
+        .ok();
+
+    let source = SuiDeepBookSource::builder(SOURCE_ID)
+        .with_transport(Transport::Grpc)
+        .with_start_from_now()
+        .with_enable_pool_nodes(true)
+        .with_enable_trader_nodes(true)
+        .with_enable_order_nodes(false)
+        .build()
+        .context("Failed to build gRPC source")?;
+
+    let query = Query::cypher(QUERY_ID)
+        .query(
+            r#"
+            MATCH (e:DeepBookEvent)
+            RETURN
+              e.entity_id    AS entity_id,
+              e.event_type   AS event_type,
+              e.sender       AS sender,
+              e.timestamp_ms AS timestamp_ms
+            "#,
+        )
+        .from_source(SOURCE_ID)
+        .auto_start(true)
+        .build();
+
+    let (reaction, handle) = ApplicationReaction::builder("grpc-test-reaction")
+        .with_query(QUERY_ID)
+        .build();
+
+    let mut drasi = DrasiLib::builder()
+        .with_id("sui-deepbook-grpc-test")
+        .with_source(source)
+        .with_query(query)
+        .with_reaction(reaction)
+        .build()
+        .await
+        .context("Failed to build DrasiLib")?;
+
+    drasi.start().await.context("Failed to start DrasiLib")?;
+
+    let mut subscription = handle
+        .subscribe_with_options(SubscriptionOptions::default().with_timeout(Duration::from_secs(3)))
+        .await
+        .context("Failed to subscribe")?;
+
+    let mut event_count = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    while tokio::time::Instant::now() < deadline {
+        match subscription.recv().await {
+            Some(result) => {
+                for diff in &result.results {
+                    match diff {
+                        ResultDiff::Add { data } | ResultDiff::Update { data, .. } => {
+                            if let Some(entity_id) = data.get("entity_id") {
+                                log::info!(
+                                    "gRPC event #{}: entity_id={entity_id}",
+                                    event_count + 1
+                                );
+                                event_count += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if event_count >= 3 {
+                    break;
+                }
+            }
+            None => {
+                // Timeout, continue waiting
+                continue;
+            }
+        }
+    }
+
+    assert!(
+        event_count >= 1,
+        "Expected at least 1 DeepBook event via gRPC within 30s, got {event_count}"
+    );
+    log::info!("gRPC transport test passed with {event_count} events");
+
+    drasi.stop().await.context("Failed to stop DrasiLib")?;
     Ok(())
 }

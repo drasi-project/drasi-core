@@ -410,7 +410,10 @@ fn derive_secondary_label(event: &SuiEvent) -> String {
 }
 
 fn extract_pool_id(parsed_json: &serde_json::Value) -> Option<String> {
-    extract_string_field(parsed_json, &["pool_id", "poolId", "pool", "reference_pool", "target_pool"])
+    extract_string_field(
+        parsed_json,
+        &["pool_id", "poolId", "pool", "reference_pool", "target_pool"],
+    )
 }
 
 fn extract_string_field(parsed_json: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -754,7 +757,10 @@ mod tests {
 
     #[test]
     fn test_strip_type_params() {
-        assert_eq!(strip_type_params("0x1::mod::Foo<0x2::bar::BAZ>"), "0x1::mod::Foo");
+        assert_eq!(
+            strip_type_params("0x1::mod::Foo<0x2::bar::BAZ>"),
+            "0x1::mod::Foo"
+        );
         assert_eq!(strip_type_params("0x1::mod::Foo"), "0x1::mod::Foo");
         assert_eq!(strip_type_params("Foo<A, B>"), "Foo");
     }
