@@ -18,7 +18,16 @@ use drasi_core::models::{
 use ordered_float::OrderedFloat;
 use std::sync::Arc;
 
-use crate::rpc::SuiEvent;
+use crate::rpc::{SuiEvent, SuiObjectData};
+
+/// Enrichment configuration flags controlling which graph nodes and
+/// relationships are emitted alongside the core event nodes.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrichmentConfig {
+    pub enable_pool_nodes: bool,
+    pub enable_trader_nodes: bool,
+    pub enable_order_nodes: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EventOperation {
@@ -126,6 +135,153 @@ pub fn map_event_to_insert_change(source_id: &str, event: &SuiEvent) -> SourceCh
     }
 }
 
+// ---------------------------------------------------------------------------
+// Enrichment node & relationship builders
+// ---------------------------------------------------------------------------
+
+/// Build a `:Pool` node from `sui_getObject` data.
+pub fn build_pool_node(
+    source_id: &str,
+    pool_id: &str,
+    object_data: Option<&SuiObjectData>,
+    effective_from: u64,
+) -> SourceChange {
+    let entity_id = format!("pool_meta:{pool_id}");
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("pool_id", ElementValue::String(Arc::from(pool_id)));
+    properties.insert(
+        "pool_id_short",
+        ElementValue::String(Arc::from(truncate_hex(pool_id))),
+    );
+
+    if let Some(data) = object_data {
+        let type_params = data.type_params();
+        if let Some(base) = type_params.first() {
+            properties.insert("base_asset", ElementValue::String(Arc::from(base.as_str())));
+        }
+        if let Some(quote) = type_params.get(1) {
+            properties.insert(
+                "quote_asset",
+                ElementValue::String(Arc::from(quote.as_str())),
+            );
+        }
+        if let Some(tick_size) = data.field_str("tick_size") {
+            properties.insert(
+                "tick_size",
+                ElementValue::String(Arc::from(tick_size.as_str())),
+            );
+        }
+        if let Some(lot_size) = data.field_str("lot_size") {
+            properties.insert(
+                "lot_size",
+                ElementValue::String(Arc::from(lot_size.as_str())),
+            );
+        }
+        if let Some(min_size) = data.field_str("min_size") {
+            properties.insert(
+                "min_size",
+                ElementValue::String(Arc::from(min_size.as_str())),
+            );
+        }
+    }
+
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, &entity_id),
+                labels: Arc::new([Arc::from("Pool")]),
+                effective_from,
+            },
+            properties,
+        },
+    }
+}
+
+/// Build a `:Trader` node from a sender address.
+pub fn build_trader_node(source_id: &str, address: &str, effective_from: u64) -> SourceChange {
+    let entity_id = format!("trader:{address}");
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("address", ElementValue::String(Arc::from(address)));
+    properties.insert(
+        "address_short",
+        ElementValue::String(Arc::from(truncate_hex(address))),
+    );
+
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, &entity_id),
+                labels: Arc::new([Arc::from("Trader")]),
+                effective_from,
+            },
+            properties,
+        },
+    }
+}
+
+/// Build an `:Order` node from an order_id.
+pub fn build_order_node(
+    source_id: &str,
+    order_id: &str,
+    pool_id: Option<&str>,
+    effective_from: u64,
+) -> SourceChange {
+    let entity_id = format!("order_meta:{order_id}");
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("order_id", ElementValue::String(Arc::from(order_id)));
+    properties.insert(
+        "order_id_short",
+        ElementValue::String(Arc::from(truncate_hex(order_id))),
+    );
+    if let Some(pool) = pool_id {
+        properties.insert("pool_id", ElementValue::String(Arc::from(pool)));
+    }
+
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, &entity_id),
+                labels: Arc::new([Arc::from("Order")]),
+                effective_from,
+            },
+            properties,
+        },
+    }
+}
+
+/// Build a relationship edge between two nodes.
+pub fn build_relationship(
+    source_id: &str,
+    label: &str,
+    rel_entity_id: &str,
+    in_node_id: &str,
+    out_node_id: &str,
+    effective_from: u64,
+) -> SourceChange {
+    SourceChange::Insert {
+        element: Element::Relation {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, rel_entity_id),
+                labels: Arc::new([Arc::from(label)]),
+                effective_from,
+            },
+            properties: ElementPropertyMap::new(),
+            in_node: ElementReference::new(source_id, in_node_id),
+            out_node: ElementReference::new(source_id, out_node_id),
+        },
+    }
+}
+
+/// Helper to extract `pool_id` from an event (public for use by enrichment logic).
+pub fn event_pool_id(event: &SuiEvent) -> Option<String> {
+    extract_pool_id(&event.parsed_json)
+}
+
+/// Helper to extract `order_id` from an event (public for use by enrichment logic).
+pub fn event_order_id(event: &SuiEvent) -> Option<String> {
+    extract_string_field(&event.parsed_json, &["order_id", "orderId"])
+}
+
 fn build_common_properties(event: &SuiEvent, entity_id: &str) -> ElementPropertyMap {
     let mut properties = ElementPropertyMap::new();
     properties.insert("entity_id", ElementValue::String(Arc::from(entity_id)));
@@ -207,6 +363,11 @@ fn classify_operation(event_type: &str) -> EventOperation {
         return EventOperation::Update;
     }
     EventOperation::Insert
+}
+
+/// Public accessor for the entity ID derivation logic.
+pub fn derive_entity_id_pub(event: &SuiEvent) -> String {
+    derive_entity_id(event)
 }
 
 fn derive_entity_id(event: &SuiEvent) -> String {
@@ -383,5 +544,178 @@ mod tests {
             &[String::from("OrderPlaced")],
             &[String::from("pool-b")]
         ));
+    }
+
+    #[test]
+    fn test_build_pool_node_with_object_data() {
+        use crate::rpc::{SuiObjectContent, SuiObjectData};
+
+        let object_data = SuiObjectData {
+            object_id: "0xpool_abc".to_string(),
+            object_type: Some("0xdee9::pool::Pool<0x2::sui::SUI, 0xabc::usdc::USDC>".to_string()),
+            content: Some(SuiObjectContent {
+                data_type: "moveObject".to_string(),
+                fields: Some(serde_json::json!({
+                    "tick_size": "1000000",
+                    "lot_size": "100000000",
+                    "min_size": "500000000"
+                })),
+            }),
+        };
+
+        let change = build_pool_node("src-1", "0xpool_abc", Some(&object_data), 100);
+        match change {
+            SourceChange::Insert {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } => {
+                assert_eq!(
+                    metadata.reference.element_id.as_ref(),
+                    "pool_meta:0xpool_abc"
+                );
+                assert_eq!(metadata.labels[0].as_ref(), "Pool");
+                assert_eq!(
+                    properties["base_asset"],
+                    ElementValue::String(Arc::from("0x2::sui::SUI"))
+                );
+                assert_eq!(
+                    properties["quote_asset"],
+                    ElementValue::String(Arc::from("0xabc::usdc::USDC"))
+                );
+                assert_eq!(
+                    properties["tick_size"],
+                    ElementValue::String(Arc::from("1000000"))
+                );
+            }
+            _ => panic!("expected insert node"),
+        }
+    }
+
+    #[test]
+    fn test_build_pool_node_without_object_data() {
+        let change = build_pool_node("src-1", "0xpool_abc", None, 100);
+        match change {
+            SourceChange::Insert {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } => {
+                assert_eq!(
+                    metadata.reference.element_id.as_ref(),
+                    "pool_meta:0xpool_abc"
+                );
+                assert_eq!(
+                    properties["pool_id"],
+                    ElementValue::String(Arc::from("0xpool_abc"))
+                );
+                assert!(properties.get("base_asset").is_none());
+            }
+            _ => panic!("expected insert node"),
+        }
+    }
+
+    #[test]
+    fn test_build_trader_node() {
+        let change = build_trader_node("src-1", "0xtrader_123456789abcdef", 200);
+        match change {
+            SourceChange::Insert {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } => {
+                assert_eq!(
+                    metadata.reference.element_id.as_ref(),
+                    "trader:0xtrader_123456789abcdef"
+                );
+                assert_eq!(metadata.labels[0].as_ref(), "Trader");
+                assert_eq!(
+                    properties["address"],
+                    ElementValue::String(Arc::from("0xtrader_123456789abcdef"))
+                );
+            }
+            _ => panic!("expected insert node"),
+        }
+    }
+
+    #[test]
+    fn test_build_order_node() {
+        let change = build_order_node("src-1", "42", Some("0xpool_abc"), 300);
+        match change {
+            SourceChange::Insert {
+                element:
+                    Element::Node {
+                        metadata,
+                        properties,
+                    },
+            } => {
+                assert_eq!(metadata.reference.element_id.as_ref(), "order_meta:42");
+                assert_eq!(metadata.labels[0].as_ref(), "Order");
+                assert_eq!(
+                    properties["order_id"],
+                    ElementValue::String(Arc::from("42"))
+                );
+                assert_eq!(
+                    properties["pool_id"],
+                    ElementValue::String(Arc::from("0xpool_abc"))
+                );
+            }
+            _ => panic!("expected insert node"),
+        }
+    }
+
+    #[test]
+    fn test_build_relationship() {
+        let change = build_relationship(
+            "src-1",
+            "IN_POOL",
+            "rel:in_pool:order:42",
+            "order:42",
+            "pool_meta:0xpool_abc",
+            100,
+        );
+        match change {
+            SourceChange::Insert {
+                element:
+                    Element::Relation {
+                        metadata,
+                        in_node,
+                        out_node,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    metadata.reference.element_id.as_ref(),
+                    "rel:in_pool:order:42"
+                );
+                assert_eq!(metadata.labels[0].as_ref(), "IN_POOL");
+                assert_eq!(in_node.element_id.as_ref(), "order:42");
+                assert_eq!(out_node.element_id.as_ref(), "pool_meta:0xpool_abc");
+            }
+            _ => panic!("expected insert relation"),
+        }
+    }
+
+    #[test]
+    fn test_event_pool_id_and_order_id() {
+        let event = event_with_type(
+            "0x1::events::OrderPlaced",
+            serde_json::json!({"order_id": "42", "pool_id": "0xpool_abc"}),
+        );
+        assert_eq!(event_pool_id(&event), Some("0xpool_abc".to_string()));
+        assert_eq!(event_order_id(&event), Some("42".to_string()));
+
+        let event_no_ids = event_with_type(
+            "0x1::events::BalanceEvent",
+            serde_json::json!({"amount": "100"}),
+        );
+        assert_eq!(event_pool_id(&event_no_ids), None);
+        assert_eq!(event_order_id(&event_no_ids), None);
     }
 }

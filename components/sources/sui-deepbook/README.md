@@ -11,6 +11,7 @@ The Sui DeepBook Source is a Change Data Capture (CDC) plugin for Drasi that str
 - Configurable start position (beginning of chain, current tip, or specific timestamp)
 - Automatic retry with configurable back-off on transient RPC errors
 - Full event payload projection into queryable properties
+- **Graph enrichment**: Pool, Trader, and Order nodes linked to events via relationships
 
 **Use Cases**:
 - Real-time order book monitoring (new orders, fills, cancellations)
@@ -115,6 +116,9 @@ let source = SuiDeepBookSource::builder("deepbook-source")
 | `event_filters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
 | `pools` | `Vec<String>` | `[]` | Pool IDs to include (empty = all) |
 | `start_position` | `StartPosition` | `Now` | Where to begin consuming events |
+| `enable_pool_nodes` | `bool` | `true` | Emit `:Pool` nodes with metadata from `sui_getObject` |
+| `enable_trader_nodes` | `bool` | `true` | Emit `:Trader` nodes from event senders |
+| `enable_order_nodes` | `bool` | `true` | Emit `:Order` nodes from event order_ids |
 
 ### Start Position
 
@@ -198,7 +202,31 @@ MATCH (e:DeepBookEvent)
 RETURN e.pool_id, e.event_type, count(e) AS event_count
 ```
 
-### 7. Using Bootstrap for Historical Replay
+### 7. Graph Traversal: Orders for a Trading Pair (enrichment)
+
+```cypher
+MATCH (e:OrderPlaced)-[:IN_POOL]->(p:Pool)
+WHERE p.base_asset CONTAINS 'SUI' AND p.quote_asset CONTAINS 'USDC'
+RETURN e.payload.price, e.payload.size, p.tick_size
+```
+
+### 8. Events by Trader (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:SENT_BY]->(t:Trader)
+WHERE t.address = '0x1a2b3c…full_address…'
+RETURN e.event_name, e.entity_id, e.timestamp_ms
+```
+
+### 9. Order Lifecycle via Graph Traversal (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:FOR_ORDER]->(o:Order)
+WHERE o.order_id = '42'
+RETURN e.event_name, e.change_type, e.timestamp_ms
+```
+
+### 10. Using Bootstrap for Historical Replay
 
 Load the last 50 pages of historical events before switching to live streaming:
 
@@ -250,4 +278,4 @@ cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --n
 
 - **Polling, not push**: The Sui JSON-RPC does not support server-push subscriptions for `suix_queryEvents`. The source polls at the configured interval.
 - **All-events query**: Sui full-nodes do not support the `{"Package": "0x…"}` event query filter. The source queries `{"All": []}` and filters client-side by package ID. This is bandwidth-inefficient on very busy networks; using a dedicated RPC provider helps.
-- **No relationship edges**: All events are modelled as independent nodes. If you need edges, use a query-time join on shared keys like `order_id` or `pool_id`.
+- **Pool metadata via RPC**: When `enable_pool_nodes` is true, the source calls `sui_getObject` once per unique pool_id to fetch metadata (base_asset, quote_asset, etc.). This adds ~20-50 RPC calls on startup for DeepBook's active pools, then results are cached.

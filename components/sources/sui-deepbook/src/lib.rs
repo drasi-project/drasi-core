@@ -34,13 +34,16 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 
-use crate::mapping::{map_event_to_change, should_include_event};
+use crate::mapping::{
+    build_order_node, build_pool_node, build_relationship, build_trader_node, event_order_id,
+    event_pool_id, map_event_to_change, should_include_event, EnrichmentConfig,
+};
 use crate::rpc::{EventCursor, SuiRpcClient};
 
 const CURSOR_STATE_KEY: &str = "cursor";
@@ -251,6 +254,17 @@ async fn run_poll_loop(
         _ => None,
     };
 
+    let enrichment = EnrichmentConfig {
+        enable_pool_nodes: config.enable_pool_nodes,
+        enable_trader_nodes: config.enable_trader_nodes,
+        enable_order_nodes: config.enable_order_nodes,
+    };
+    let mut enrichment_state = EnrichmentState {
+        seen_pools: HashSet::new(),
+        seen_traders: HashSet::new(),
+        seen_orders: HashSet::new(),
+    };
+
     let mut consecutive_failures = 0usize;
     loop {
         if *shutdown_rx.borrow() {
@@ -305,8 +319,37 @@ async fn run_poll_loop(
                 continue;
             }
 
+            let effective_from = event
+                .timestamp_ms
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+
+            // Emit enrichment nodes before the event node
+            emit_enrichment_nodes(
+                source_id,
+                &event,
+                &enrichment,
+                &rpc_client,
+                &mut enrichment_state,
+                effective_from,
+                base,
+            )
+            .await?;
+
+            // Emit the event node itself
+            let event_entity_id = crate::mapping::derive_entity_id_pub(&event);
             let change = map_event_to_change(source_id, &event);
             base.dispatch_source_change(change).await?;
+
+            // Emit relationships after both nodes exist
+            emit_enrichment_relationships(
+                source_id,
+                &event,
+                &enrichment,
+                &event_entity_id,
+                effective_from,
+                base,
+            )
+            .await?;
         }
 
         // Always advance cursor from next_cursor when present, even if all
@@ -329,6 +372,123 @@ async fn run_poll_loop(
 
         if wait_for_poll_or_shutdown(shutdown_rx, config.poll_interval_ms).await {
             break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Mutable state for the enrichment caches within a polling session.
+struct EnrichmentState {
+    seen_pools: HashSet<String>,
+    seen_traders: HashSet<String>,
+    seen_orders: HashSet<String>,
+}
+
+/// Emit Pool, Trader, and Order nodes if not already seen.
+async fn emit_enrichment_nodes(
+    source_id: &str,
+    event: &crate::rpc::SuiEvent,
+    enrichment: &EnrichmentConfig,
+    rpc_client: &SuiRpcClient,
+    state: &mut EnrichmentState,
+    effective_from: u64,
+    base: &SourceBase,
+) -> Result<()> {
+    // Pool node
+    if enrichment.enable_pool_nodes {
+        if let Some(pool_id) = event_pool_id(event) {
+            if state.seen_pools.insert(pool_id.clone()) {
+                let object_data = match rpc_client.get_object(&pool_id).await {
+                    Ok(data) => {
+                        debug!("Fetched pool metadata for {pool_id}");
+                        Some(data)
+                    }
+                    Err(err) => {
+                        warn!("Failed to fetch pool object for {pool_id}: {err}");
+                        None
+                    }
+                };
+                let pool_change =
+                    build_pool_node(source_id, &pool_id, object_data.as_ref(), effective_from);
+                base.dispatch_source_change(pool_change).await?;
+            }
+        }
+    }
+
+    // Trader node
+    if enrichment.enable_trader_nodes
+        && !event.sender.is_empty()
+        && state.seen_traders.insert(event.sender.clone())
+    {
+        let trader_change = build_trader_node(source_id, &event.sender, effective_from);
+        base.dispatch_source_change(trader_change).await?;
+    }
+
+    // Order node
+    if enrichment.enable_order_nodes {
+        if let Some(order_id) = event_order_id(event) {
+            if state.seen_orders.insert(order_id.clone()) {
+                let pool_id = event_pool_id(event);
+                let order_change =
+                    build_order_node(source_id, &order_id, pool_id.as_deref(), effective_from);
+                base.dispatch_source_change(order_change).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Emit IN_POOL, SENT_BY, FOR_ORDER relationships after both nodes exist.
+async fn emit_enrichment_relationships(
+    source_id: &str,
+    event: &crate::rpc::SuiEvent,
+    enrichment: &EnrichmentConfig,
+    event_entity_id: &str,
+    effective_from: u64,
+    base: &SourceBase,
+) -> Result<()> {
+    // IN_POOL relationship
+    if enrichment.enable_pool_nodes {
+        if let Some(pool_id) = event_pool_id(event) {
+            let rel = build_relationship(
+                source_id,
+                "IN_POOL",
+                &format!("rel:in_pool:{event_entity_id}"),
+                event_entity_id,
+                &format!("pool_meta:{pool_id}"),
+                effective_from,
+            );
+            base.dispatch_source_change(rel).await?;
+        }
+    }
+
+    // SENT_BY relationship
+    if enrichment.enable_trader_nodes && !event.sender.is_empty() {
+        let rel = build_relationship(
+            source_id,
+            "SENT_BY",
+            &format!("rel:sent_by:{event_entity_id}"),
+            event_entity_id,
+            &format!("trader:{}", event.sender),
+            effective_from,
+        );
+        base.dispatch_source_change(rel).await?;
+    }
+
+    // FOR_ORDER relationship
+    if enrichment.enable_order_nodes {
+        if let Some(order_id) = event_order_id(event) {
+            let rel = build_relationship(
+                source_id,
+                "FOR_ORDER",
+                &format!("rel:for_order:{event_entity_id}"),
+                event_entity_id,
+                &format!("order_meta:{order_id}"),
+                effective_from,
+            );
+            base.dispatch_source_change(rel).await?;
         }
     }
 
@@ -503,6 +663,21 @@ impl SuiDeepBookSourceBuilder {
 
     pub fn with_config(mut self, config: SuiDeepBookSourceConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn with_enable_pool_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_pool_nodes = enable;
+        self
+    }
+
+    pub fn with_enable_trader_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_trader_nodes = enable;
+        self
+    }
+
+    pub fn with_enable_order_nodes(mut self, enable: bool) -> Self {
+        self.config.enable_order_nodes = enable;
         self
     }
 

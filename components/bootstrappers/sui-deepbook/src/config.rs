@@ -44,6 +44,12 @@ pub struct SuiDeepBookBootstrapConfig {
     pub pools: Vec<String>,
     #[serde(default)]
     pub start_position: StartPosition,
+    #[serde(default = "default_true")]
+    pub enable_pool_nodes: bool,
+    #[serde(default = "default_true")]
+    pub enable_trader_nodes: bool,
+    #[serde(default = "default_true")]
+    pub enable_order_nodes: bool,
 }
 
 impl Default for SuiDeepBookBootstrapConfig {
@@ -56,6 +62,9 @@ impl Default for SuiDeepBookBootstrapConfig {
             event_filters: Vec::new(),
             pools: Vec::new(),
             start_position: StartPosition::Beginning,
+            enable_pool_nodes: true,
+            enable_trader_nodes: true,
+            enable_order_nodes: true,
         }
     }
 }
@@ -113,4 +122,8 @@ fn default_request_limit() -> u16 {
 
 fn default_max_pages() -> u32 {
     10
+}
+
+fn default_true() -> bool {
+    true
 }

@@ -1,10 +1,18 @@
 # Sui DeepBook Source — Graph Schema Reference
 
-This document describes the graph structure produced by the `drasi-source-sui-deepbook` source. Every on-chain DeepBook V3 event becomes a **node** in the Drasi graph. There are no relationship edges — entities are linked by shared keys (`order_id`, `pool_id`, `sender`).
+This document describes the graph structure produced by the `drasi-source-sui-deepbook` source. Every on-chain DeepBook V3 event becomes a **node** in the Drasi graph. When enrichment is enabled (the default), the source also emits **Pool**, **Trader**, and **Order** nodes linked to events via relationships.
 
 ---
 
-## Node Overview
+## Graph Overview
+
+```
+(:DeepBookEvent:OrderPlaced)-[:IN_POOL]->(:Pool)
+(:DeepBookEvent:OrderPlaced)-[:SENT_BY]->(:Trader)
+(:DeepBookEvent:OrderPlaced)-[:FOR_ORDER]->(:Order)
+```
+
+### Event Nodes
 
 ```
 (:DeepBookEvent:OrderPlaced   { entity_id, event_name, module, … })
@@ -77,6 +85,71 @@ For example, if the on-chain event contains:
 You access these as `e.payload.order_id`, `e.payload.price`, `e.payload.size`, etc.
 
 > **Note**: Numeric strings from Sui (e.g. `"2340"`) remain strings. Use Cypher's `toInteger()` or `toFloat()` for numeric comparisons.
+
+---
+
+## Enrichment Nodes
+
+When enrichment is enabled (the default), the source emits additional graph nodes for pools, traders, and orders, linked to event nodes via relationships. Each enrichment node is created once per unique identifier and cached in-memory.
+
+### Pool Node (`:Pool`)
+
+Created via `sui_getObject` RPC call on first encounter of a `pool_id`.
+
+| Property | Type | Description | Example |
+|----------|------|-------------|---------|
+| `pool_id` | `String` | Full pool object address | `"0xabc…"` |
+| `pool_id_short` | `String` | Truncated pool address | `"0xabc1…ef23"` |
+| `base_asset` | `String` | Base asset Move type (from type params) | `"0x2::sui::SUI"` |
+| `quote_asset` | `String` | Quote asset Move type (from type params) | `"0xabc::usdc::USDC"` |
+| `tick_size` | `String` | Minimum price increment (raw units) | `"1000000"` |
+| `lot_size` | `String` | Minimum order quantity (raw units) | `"100000000"` |
+| `min_size` | `String` | Minimum trade size (raw units) | `"500000000"` |
+
+**Entity ID**: `pool_meta:{pool_id}`
+
+### Trader Node (`:Trader`)
+
+Derived from `event.sender` — no additional RPC calls.
+
+| Property | Type | Description | Example |
+|----------|------|-------------|---------|
+| `address` | `String` | Full sender address | `"0x1a2b…"` |
+| `address_short` | `String` | Truncated address | `"0x1a2b…3c4d"` |
+
+**Entity ID**: `trader:{address}`
+
+### Order Node (`:Order`)
+
+Derived from `order_id` in event payload — no additional RPC calls.
+
+| Property | Type | Description | Example |
+|----------|------|-------------|---------|
+| `order_id` | `String` | Order identifier | `"42"` |
+| `order_id_short` | `String` | Truncated order ID | `"42"` |
+| `pool_id` | `String` | Pool where order was placed (if available) | `"0xabc…"` |
+
+**Entity ID**: `order_meta:{order_id}`
+
+### Relationships
+
+| Relationship | Direction | Present When |
+|-------------|-----------|-------------|
+| `IN_POOL` | `(:DeepBookEvent)-[:IN_POOL]->(:Pool)` | Event has a `pool_id` |
+| `SENT_BY` | `(:DeepBookEvent)-[:SENT_BY]->(:Trader)` | Always (every event has a sender) |
+| `FOR_ORDER` | `(:DeepBookEvent)-[:FOR_ORDER]->(:Order)` | Event has an `order_id` |
+
+**Relationship Entity IDs**: `rel:in_pool:{event_entity_id}`, `rel:sent_by:{event_entity_id}`, `rel:for_order:{event_entity_id}`
+
+### Enrichment Configuration
+
+Enrichment is controlled by three boolean config flags (all default to `true`):
+
+| Config Field | Controls | Default |
+|-------------|----------|---------|
+| `enable_pool_nodes` | `:Pool` nodes + `IN_POOL` relationships | `true` |
+| `enable_trader_nodes` | `:Trader` nodes + `SENT_BY` relationships | `true` |
+| `enable_order_nodes` | `:Order` nodes + `FOR_ORDER` relationships | `true` |
 
 ---
 
@@ -224,6 +297,52 @@ RETURN order.order_id, order.payload.price AS order_price, price.payload.price A
 MATCH (e:DeepBookEvent)
 WHERE e.pool_id IS NOT NULL
 RETURN e.pool_id_short, e.event_name, count(e) AS event_count
+```
+
+### 9. Graph Traversal: Events for a Trading Pair (enrichment)
+
+```cypher
+MATCH (e:OrderPlaced)-[:IN_POOL]->(p:Pool)
+WHERE p.base_asset CONTAINS 'SUI' AND p.quote_asset CONTAINS 'USDC'
+RETURN e.payload.price, e.payload.size, p.tick_size
+```
+
+### 10. All Events by a Specific Trader (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:SENT_BY]->(t:Trader)
+WHERE t.address = '0x1a2b3c…full_address…'
+RETURN e.event_name, e.entity_id, e.timestamp_ms
+```
+
+### 11. Full Order Lifecycle via Graph Traversal (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:FOR_ORDER]->(o:Order)
+WHERE o.order_id = '42'
+RETURN e.event_name, e.change_type, e.timestamp_ms
+```
+
+### 12. Aggregate Events per Pool with Metadata (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:IN_POOL]->(p:Pool)
+RETURN p.base_asset, p.quote_asset, count(e) AS events
+```
+
+### 13. Cross-Entity: Orders in a Specific Market (enrichment)
+
+```cypher
+MATCH (e:DeepBookEvent)-[:IN_POOL]->(p:Pool), (e)-[:FOR_ORDER]->(o:Order)
+WHERE p.base_asset CONTAINS 'SUI'
+RETURN o.order_id, e.event_name, e.payload.price
+```
+
+### 14. Pool Metadata Lookup (enrichment)
+
+```cypher
+MATCH (p:Pool)
+RETURN p.pool_id_short, p.base_asset, p.quote_asset, p.tick_size, p.lot_size
 ```
 
 ---

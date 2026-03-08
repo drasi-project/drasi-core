@@ -101,64 +101,88 @@ struct MockState {
 }
 
 async fn mock_sui_rpc(State(state): State<MockState>, Json(request): Json<Value>) -> Json<Value> {
-    let mut call_count = state.call_count.lock().await;
     let response_id = request
         .get("id")
         .cloned()
         .unwrap_or_else(|| serde_json::json!(1));
 
-    let payload = match *call_count {
-        0 => serde_json::json!({
-            "data": [
-                mock_event_with_pkg("0", "0xother-pkg", "TokenTransfer", serde_json::json!({
-                    "amount": "500"
-                })),
-                mock_event_with_pkg("1", "0xdeepbook", "OrderPlaced", serde_json::json!({
-                    "order_id": "42",
-                    "pool_id": "pool-alpha",
-                    "size": "1000",
-                    "price": "2.34"
-                }))
-            ],
-            "nextCursor": {"txDigest": "0xtx1", "eventSeq": "1"},
-            "hasNextPage": false
-        }),
-        1 => serde_json::json!({
-            "data": [
-                mock_event_with_pkg("2", "0xother-pkg", "SomethingElse", serde_json::json!({
-                    "foo": "bar"
-                })),
-                mock_event_with_pkg("3", "0xdeepbook", "OrderUpdated", serde_json::json!({
-                    "order_id": "42",
-                    "pool_id": "pool-alpha",
-                    "size": "1200",
-                    "price": "2.35"
-                }))
-            ],
-            "nextCursor": {"txDigest": "0xtx3", "eventSeq": "3"},
-            "hasNextPage": false
-        }),
-        2 => serde_json::json!({
-            "data": [mock_event_with_pkg("4", "0xdeepbook", "OrderCancelled", serde_json::json!({
-                "order_id": "42",
-                "pool_id": "pool-alpha"
-            }))],
-            "nextCursor": {"txDigest": "0xtx4", "eventSeq": "4"},
-            "hasNextPage": false
-        }),
-        _ => serde_json::json!({
-            "data": [],
-            "nextCursor": null,
-            "hasNextPage": false
-        }),
-    };
+    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
 
-    *call_count += 1;
+    let result = match method {
+        "sui_getObject" => {
+            // Return mock pool metadata for any object ID
+            serde_json::json!({
+                "data": {
+                    "objectId": "pool-alpha",
+                    "type": "0xdee9::pool::Pool<0x2::sui::SUI, 0xabc::usdc::USDC>",
+                    "content": {
+                        "dataType": "moveObject",
+                        "fields": {
+                            "tick_size": "1000000",
+                            "lot_size": "100000000",
+                            "min_size": "500000000"
+                        }
+                    }
+                }
+            })
+        }
+        _ => {
+            // suix_queryEvents
+            let mut call_count = state.call_count.lock().await;
+            let payload = match *call_count {
+                0 => serde_json::json!({
+                    "data": [
+                        mock_event_with_pkg("0", "0xother-pkg", "TokenTransfer", serde_json::json!({
+                            "amount": "500"
+                        })),
+                        mock_event_with_pkg("1", "0xdeepbook", "OrderPlaced", serde_json::json!({
+                            "order_id": "42",
+                            "pool_id": "pool-alpha",
+                            "size": "1000",
+                            "price": "2.34"
+                        }))
+                    ],
+                    "nextCursor": {"txDigest": "0xtx1", "eventSeq": "1"},
+                    "hasNextPage": false
+                }),
+                1 => serde_json::json!({
+                    "data": [
+                        mock_event_with_pkg("2", "0xother-pkg", "SomethingElse", serde_json::json!({
+                            "foo": "bar"
+                        })),
+                        mock_event_with_pkg("3", "0xdeepbook", "OrderUpdated", serde_json::json!({
+                            "order_id": "42",
+                            "pool_id": "pool-alpha",
+                            "size": "1200",
+                            "price": "2.35"
+                        }))
+                    ],
+                    "nextCursor": {"txDigest": "0xtx3", "eventSeq": "3"},
+                    "hasNextPage": false
+                }),
+                2 => serde_json::json!({
+                    "data": [mock_event_with_pkg("4", "0xdeepbook", "OrderCancelled", serde_json::json!({
+                        "order_id": "42",
+                        "pool_id": "pool-alpha"
+                    }))],
+                    "nextCursor": {"txDigest": "0xtx4", "eventSeq": "4"},
+                    "hasNextPage": false
+                }),
+                _ => serde_json::json!({
+                    "data": [],
+                    "nextCursor": null,
+                    "hasNextPage": false
+                }),
+            };
+            *call_count += 1;
+            payload
+        }
+    };
 
     Json(serde_json::json!({
         "jsonrpc": "2.0",
         "id": response_id,
-        "result": payload
+        "result": result
     }))
 }
 
@@ -269,9 +293,17 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
 
     // Verify that events from "0xother-pkg" were filtered out —
     // no entity_id should reference the non-DeepBook package events.
+    // Enrichment entity_ids (pool_meta:, trader:, order_meta:, rel:) are allowed.
     let leaked: Vec<&String> = seen_ids
         .iter()
-        .filter(|id| !id.starts_with("order:42") && !id.starts_with("pool:"))
+        .filter(|id| {
+            !id.starts_with("order:42")
+                && !id.starts_with("pool:")
+                && !id.starts_with("pool_meta:")
+                && !id.starts_with("trader:")
+                && !id.starts_with("order_meta:")
+                && !id.starts_with("rel:")
+        })
         .collect();
     assert!(
         leaked.is_empty(),
