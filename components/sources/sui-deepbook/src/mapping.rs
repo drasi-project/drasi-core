@@ -310,12 +310,12 @@ fn build_common_properties(event: &SuiEvent, entity_id: &str) -> ElementProperty
         ElementValue::String(Arc::from(event.event_type.as_str())),
     );
     // Short human-readable name extracted from the Move type path
-    // e.g. "0x337…::deep_price::PriceAdded" → "PriceAdded"
-    let event_name = event.event_type.split("::").last().unwrap_or("Event");
+    // e.g. "0x337…::deep_price::PriceAdded<0x2::sui::SUI>" → "PriceAdded"
+    let base_type = strip_type_params(&event.event_type);
+    let event_name = base_type.split("::").last().unwrap_or("Event");
     properties.insert("event_name", ElementValue::String(Arc::from(event_name)));
     // Module that emitted the event, e.g. "deep_price", "balance_manager"
-    let module_name = event
-        .event_type
+    let module_name = base_type
         .split("::")
         .nth(1)
         .unwrap_or(&event.transaction_module);
@@ -345,6 +345,12 @@ fn build_common_properties(event: &SuiEvent, entity_id: &str) -> ElementProperty
     }
 
     properties
+}
+
+/// Strips Move generic type parameters from an event type string.
+/// e.g. `"0xdee9::clob_v2::OrderPlaced<0x2::sui::SUI, ...>"` → `"0xdee9::clob_v2::OrderPlaced"`
+fn strip_type_params(event_type: &str) -> &str {
+    event_type.split('<').next().unwrap_or(event_type)
 }
 
 fn classify_operation(event_type: &str) -> EventOperation {
@@ -381,8 +387,8 @@ fn derive_entity_id(event: &SuiEvent) -> String {
 }
 
 fn derive_secondary_label(event: &SuiEvent) -> String {
-    let name = event
-        .event_type
+    let base_type = strip_type_params(&event.event_type);
+    let name = base_type
         .split("::")
         .last()
         .unwrap_or("Event")
@@ -404,7 +410,7 @@ fn derive_secondary_label(event: &SuiEvent) -> String {
 }
 
 fn extract_pool_id(parsed_json: &serde_json::Value) -> Option<String> {
-    extract_string_field(parsed_json, &["pool_id", "poolId", "pool"])
+    extract_string_field(parsed_json, &["pool_id", "poolId", "pool", "reference_pool", "target_pool"])
 }
 
 fn extract_string_field(parsed_json: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -717,5 +723,39 @@ mod tests {
         );
         assert_eq!(event_pool_id(&event_no_ids), None);
         assert_eq!(event_order_id(&event_no_ids), None);
+    }
+
+    #[test]
+    fn test_generic_event_type_parsing() {
+        // Real DeepBook event types include Move generic parameters
+        let event = event_with_type(
+            "0xdee9::clob_v2::OrderPlaced<0x2::sui::SUI, 0x5d4b::coin::COIN>",
+            serde_json::json!({"order_id": "99", "pool_id": "0xpool", "price": "1.5"}),
+        );
+        let change = map_event_to_change("src", &event);
+        match change {
+            SourceChange::Insert {
+                element: Element::Node { properties, .. },
+            } => {
+                // event_name must be "OrderPlaced", NOT "COIN>"
+                assert_eq!(
+                    properties["event_name"],
+                    ElementValue::String(Arc::from("OrderPlaced"))
+                );
+                // module must be "clob_v2", NOT something from generics
+                assert_eq!(
+                    properties["module"],
+                    ElementValue::String(Arc::from("clob_v2"))
+                );
+            }
+            _ => panic!("expected insert node"),
+        }
+    }
+
+    #[test]
+    fn test_strip_type_params() {
+        assert_eq!(strip_type_params("0x1::mod::Foo<0x2::bar::BAZ>"), "0x1::mod::Foo");
+        assert_eq!(strip_type_params("0x1::mod::Foo"), "0x1::mod::Foo");
+        assert_eq!(strip_type_params("Foo<A, B>"), "Foo");
     }
 }

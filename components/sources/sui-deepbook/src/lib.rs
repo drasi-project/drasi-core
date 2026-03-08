@@ -237,7 +237,14 @@ async fn run_poll_loop(
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let rpc_client = SuiRpcClient::new(config.rpc_endpoint.clone())?;
-    let query_filter = serde_json::json!({ "All": [] });
+    // Use MoveModule filter to only fetch events from the DeepBook package.
+    // This is orders of magnitude faster than {"All":[]} on Sui mainnet.
+    let query_filter = serde_json::json!({
+        "MoveModule": {
+            "package": config.deepbook_package_id,
+            "module": "pool"
+        }
+    });
 
     let mut cursor = load_cursor(source_id, &state_store).await?;
 
@@ -264,6 +271,30 @@ async fn run_poll_loop(
         seen_traders: HashSet::new(),
         seen_orders: HashSet::new(),
     };
+
+    // ── Lookback phase ──
+    // Fetch recent historical events in descending order so the dashboard
+    // has data immediately on startup.
+    if config.lookback_events > 0 && cursor.is_some() {
+        info!(
+            "Fetching up to {} recent events for lookback",
+            config.lookback_events
+        );
+        match fetch_lookback_events(
+            source_id,
+            &config,
+            &rpc_client,
+            &query_filter,
+            &enrichment,
+            &mut enrichment_state,
+            base,
+        )
+        .await
+        {
+            Ok(count) => info!("Lookback phase complete: processed {count} events"),
+            Err(err) => warn!("Lookback phase failed (non-fatal, continuing): {err}"),
+        }
+    }
 
     let mut consecutive_failures = 0usize;
     loop {
@@ -510,6 +541,93 @@ async fn initialize_cursor_for_now(
     Ok(result.next_cursor)
 }
 
+/// Fetch the most recent `lookback_events` events in descending order,
+/// reverse them into chronological order, and process them as inserts.
+/// This lets the dashboard display data immediately on startup.
+async fn fetch_lookback_events(
+    source_id: &str,
+    config: &SuiDeepBookSourceConfig,
+    rpc_client: &SuiRpcClient,
+    query_filter: &serde_json::Value,
+    enrichment: &EnrichmentConfig,
+    enrichment_state: &mut EnrichmentState,
+    base: &SourceBase,
+) -> Result<usize> {
+    let mut all_events = Vec::new();
+    let mut page_cursor: Option<EventCursor> = None;
+    let remaining = config.lookback_events as usize;
+    let page_size = config.request_limit.min(50);
+
+    // Fetch pages in descending (most recent first) order
+    loop {
+        let result = rpc_client
+            .query_events(
+                query_filter.clone(),
+                page_cursor.as_ref(),
+                page_size,
+                true, // descending
+            )
+            .await?;
+
+        for event in result.data {
+            if event.package_id != config.deepbook_package_id {
+                continue;
+            }
+            if !should_include_event(&event, &config.event_filters, &config.pools) {
+                continue;
+            }
+            all_events.push(event);
+            if all_events.len() >= remaining {
+                break;
+            }
+        }
+
+        if all_events.len() >= remaining || !result.has_next_page {
+            break;
+        }
+        page_cursor = result.next_cursor;
+    }
+
+    // Reverse to chronological order (oldest first)
+    all_events.reverse();
+
+    let count = all_events.len();
+    debug!("Lookback: processing {count} events in chronological order");
+
+    for event in &all_events {
+        let effective_from = event
+            .timestamp_ms
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+
+        emit_enrichment_nodes(
+            source_id,
+            event,
+            enrichment,
+            rpc_client,
+            enrichment_state,
+            effective_from,
+            base,
+        )
+        .await?;
+
+        let event_entity_id = crate::mapping::derive_entity_id_pub(event);
+        let change = map_event_to_change(source_id, event);
+        base.dispatch_source_change(change).await?;
+
+        emit_enrichment_relationships(
+            source_id,
+            event,
+            enrichment,
+            &event_entity_id,
+            effective_from,
+            base,
+        )
+        .await?;
+    }
+
+    Ok(count)
+}
+
 async fn load_cursor(
     source_id: &str,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
@@ -630,6 +748,14 @@ impl SuiDeepBookSourceBuilder {
 
     pub fn with_start_from_timestamp(mut self, timestamp_ms: i64) -> Self {
         self.config.start_position = StartPosition::Timestamp(timestamp_ms);
+        self
+    }
+
+    /// Fetch up to `count` recent historical events on startup before
+    /// entering the forward-polling loop.  Useful for populating dashboards
+    /// with recent data immediately.
+    pub fn with_lookback_events(mut self, count: u16) -> Self {
+        self.config.lookback_events = count;
         self
     }
 

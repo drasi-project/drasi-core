@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeepBook DeFi Dashboard — Drasi</title>
+  <style>
+    :root {
+      --bg: #0c0f1a;
+      --bg-card: #131726;
+      --bg-alt: #171c30;
+      --bg-hover: #1a2040;
+      --border: #232946;
+      --glow: #00e5a033;
+      --text: #e2e8f0;
+      --text2: #94a3b8;
+      --muted: #64748b;
+      --accent: #00e5a0;
+      --accent-d: #00e5a044;
+      --blue: #3b82f6;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --purple: #a78bfa;
+      --orange: #fb923c;
+      --mono: 'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;
+      --sans: 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+    .dash{max-width:1480px;margin:0 auto;padding:20px 24px}
+
+    /* Header */
+    .hdr{display:flex;align-items:center;justify-content:space-between;padding:14px 0 18px;border-bottom:1px solid var(--border);margin-bottom:18px}
+    .hdr-left{display:flex;align-items:center;gap:14px}
+    .logo{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),var(--blue));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--bg)}
+    .hdr-title{font-size:22px;font-weight:700;letter-spacing:-.5px}
+    .hdr-sub{font-size:12px;color:var(--muted);margin-top:2px}
+    .badge{display:flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600;border:1px solid var(--border);background:var(--bg-card)}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);transition:background .3s}
+    .badge.on .dot{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+    .badge.on{border-color:var(--accent-d);color:var(--accent)}
+    .badge.off .dot{background:var(--red);box-shadow:0 0 8px var(--red)}
+    .badge.off{border-color:#ef444444;color:var(--red)}
+
+    /* Stats */
+    .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:16px}
+    .stat{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px 18px;transition:border-color .3s}
+    .stat:hover{border-color:var(--glow)}
+    .stat-lbl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:6px}
+    .stat-val{font-family:var(--mono);font-size:24px;font-weight:700;line-height:1}
+    .stat-val .u{font-size:12px;font-weight:400;color:var(--text2);margin-left:3px}
+    .stat-ico{float:right;font-family:var(--mono);font-size:18px;color:var(--accent);opacity:.5;margin-top:-2px}
+
+    /* Ticker */
+    .ticker-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px;height:38px;position:relative}
+    .ticker-label{position:absolute;left:0;top:0;bottom:0;width:96px;background:var(--bg-card);z-index:2;display:flex;align-items:center;padding-left:14px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+    .ticker{display:flex;align-items:center;height:100%;gap:28px;padding-left:96px;white-space:nowrap}
+    .ticker.scrolling{animation:scroll 40s linear infinite}
+    .ticker.scrolling:hover{animation-play-state:paused}
+    .tick-item{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px}
+    .tick-pair{font-weight:600;color:var(--text)}
+    .tick-price{color:var(--accent)}
+    .tick-time{color:var(--muted);font-size:11px}
+    @keyframes scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+
+    /* Main grid */
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:18px;min-height:520px}
+
+    /* Panels */
+    .panel{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+    .panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
+    .panel-hdr .tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;background:var(--accent-d);color:var(--accent)}
+
+    /* Event feed table */
+    .feed{overflow:hidden;height:100%}
+    .feed-wrap{flex:1;overflow-y:auto}
+    .etbl{width:100%;border-collapse:collapse;font-size:12px}
+    .etbl thead th{position:sticky;top:0;background:var(--bg-card);padding:8px 10px;text-align:left;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);border-bottom:1px solid var(--border);z-index:1}
+    .etbl tbody tr{border-bottom:1px solid var(--border);transition:background .15s}
+    .etbl tbody tr:hover{background:var(--bg-hover)}
+    .etbl td{padding:8px 10px;white-space:nowrap;vertical-align:middle}
+    .addr{font-family:var(--mono);font-size:11px;color:var(--text2)}
+    .time{font-family:var(--mono);font-size:11px;color:var(--muted)}
+    .evbadge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.2px}
+    .ev-placed{background:#3b82f620;color:var(--blue)}
+    .ev-filled{background:#00e5a020;color:var(--accent)}
+    .ev-cancel{background:#ef444420;color:var(--red)}
+    .ev-modify{background:#f59e0b20;color:var(--yellow)}
+    .ev-other{background:#a78bfa20;color:var(--purple)}
+    .side-bid{font-size:10px;font-weight:700;color:var(--accent)}
+    .side-ask{font-size:10px;font-weight:700;color:var(--red)}
+    @keyframes flash{from{background:var(--accent-d)}to{background:transparent}}
+    .etbl tbody tr.flash{animation:flash 1s ease-out}
+
+    /* Empty / spinner */
+    .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:50px 20px;color:var(--muted);font-size:13px;gap:8px}
+    .spin{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp 1s linear infinite}
+    @keyframes sp{to{transform:rotate(360deg)}}
+
+    /* Sidebar */
+    .side{display:flex;flex-direction:column;gap:16px}
+
+    /* Pool cards */
+    .pool-list{padding:10px;flex:1;overflow-y:auto}
+    .pcard{background:var(--bg-alt);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px;transition:border-color .3s,transform .1s}
+    .pcard:hover{border-color:var(--glow);transform:translateY(-1px)}
+    .pcard-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+    .ppair{font-size:14px;font-weight:700;letter-spacing:-.3px}
+    .ppair .q{color:var(--text2);font-weight:400}
+    .pcard-stats{display:flex;gap:12px;margin-bottom:8px;font-family:var(--mono);font-size:11px}
+    .pcard-stats span{color:var(--text2)}
+    .pcard-stats .val{color:var(--text);font-weight:600}
+    .pcard-stats .price-val{color:var(--accent);font-weight:700}
+    .pid{font-family:var(--mono);font-size:10px;color:var(--muted)}
+    /* Loan badge in pool cards */
+    .pcard-loan{font-size:10px;font-weight:700;color:var(--blue);font-family:var(--mono)}
+
+    /* Donut chart */
+    .donut-wrap{padding:16px;display:flex;align-items:center;gap:20px}
+    .donut{width:100px;height:100px;border-radius:50%;position:relative;flex-shrink:0}
+    .donut-hole{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:60px;height:60px;border-radius:50%;background:var(--bg-card);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:16px;font-weight:700}
+    .donut-legend{flex:1;font-size:12px}
+    .leg-item{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+    .leg-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+    .leg-name{flex:1;color:var(--text2)}
+    .leg-val{font-family:var(--mono);font-weight:600}
+
+    /* Trader list */
+    .trader-list{padding:10px;flex:1;overflow-y:auto}
+    .trow{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:6px;margin-bottom:4px;transition:background .2s}
+    .trow:hover{background:var(--bg-alt)}
+    .trank{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--muted);width:26px}
+    .trank.top{color:var(--accent)}
+    .taddr{font-family:var(--mono);font-size:11px;color:var(--text2);flex:1}
+    .tcnt{font-family:var(--mono);font-size:11px;font-weight:600}
+
+    /* Flash Loan cards */
+    .fl-list{padding:10px;flex:1;overflow-y:auto;max-height:200px}
+    .fl-item{background:var(--bg-alt);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:12px}
+    .fl-item .fl-top{display:flex;justify-content:space-between;margin-bottom:4px}
+    .fl-item .fl-asset{font-weight:700;color:var(--accent)}
+    .fl-item .fl-time{font-family:var(--mono);font-size:11px;color:var(--muted)}
+    .fl-item .fl-detail{font-family:var(--mono);font-size:11px;color:var(--text2)}
+    @keyframes flIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
+    .fl-item.new{animation:flIn .4s ease-out}
+
+    /* Price Oracle items */
+    .po-list{padding:10px;flex:1;overflow-y:auto;max-height:200px}
+    .po-item{background:var(--bg-alt);border:1px solid var(--border);border-left:3px solid var(--blue);border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:12px}
+    .po-item .po-top{display:flex;justify-content:space-between;margin-bottom:4px}
+    .po-item .po-pair{font-weight:700;color:var(--blue)}
+    .po-item .po-time{font-family:var(--mono);font-size:11px;color:var(--muted)}
+    .po-item .po-detail{font-family:var(--mono);font-size:11px;color:var(--text2)}
+    .po-item .po-rate{color:var(--accent);font-weight:700;font-family:var(--mono)}
+    .po-dir{font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;background:#3b82f620;color:var(--blue)}
+
+    /* Scrollbar */
+    ::-webkit-scrollbar{width:5px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+    ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+
+    @media(max-width:960px){
+      .grid{grid-template-columns:1fr}
+      .stats{grid-template-columns:repeat(3,1fr)}
+    }
+  </style>
+</head>
+<body>
+<div class="dash">
+
+  <!-- Header -->
+  <header class="hdr">
+    <div class="hdr-left">
+      <div class="logo">D</div>
+      <div>
+        <div class="hdr-title">DeepBook DeFi Dashboard</div>
+        <div class="hdr-sub">Powered by Drasi Continuous Queries &middot; Sui Blockchain</div>
+      </div>
+    </div>
+    <div id="status" class="badge">
+      <span class="dot"></span>
+      <span id="statusTxt">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat"><div class="stat-ico">#</div><div class="stat-lbl">Total Events</div><div class="stat-val" id="sEvents">0</div></div>
+    <div class="stat"><div class="stat-ico">~</div><div class="stat-lbl">Active Pools</div><div class="stat-val" id="sPools">0</div></div>
+    <div class="stat"><div class="stat-ico">@</div><div class="stat-lbl">Unique Traders</div><div class="stat-val" id="sTraders">0</div></div>
+    <div class="stat"><div class="stat-ico">^</div><div class="stat-lbl">Flash Loans</div><div class="stat-val" id="sFlash">0</div></div>
+    <div class="stat"><div class="stat-ico">&gt;</div><div class="stat-lbl">Throughput</div><div class="stat-val" id="sRate">0<span class="u">/min</span></div></div>
+  </div>
+
+  <!-- Price Ticker -->
+  <div class="ticker-wrap">
+    <div class="ticker-label">PRICES</div>
+    <div class="ticker" id="ticker">
+      <span class="tick-item" style="color:var(--muted)">Waiting for price updates…</span>
+    </div>
+  </div>
+
+  <!-- Main Grid -->
+  <div class="grid">
+
+    <!-- Primary: Analytical Panels -->
+    <div class="side">
+
+      <!-- Pool Overview -->
+      <div class="panel" style="flex:1.2">
+        <div class="panel-hdr"><span>Pool Overview</span><span class="tag" id="poolTag">0</span></div>
+        <div class="pool-list" id="poolList">
+          <div class="empty" id="poolEmpty" style="padding:30px 20px"><div class="spin"></div><span>Discovering pools…</span></div>
+        </div>
+      </div>
+
+      <!-- Event Distribution + Top Traders row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+        <!-- Event Distribution -->
+        <div class="panel">
+          <div class="panel-hdr"><span>Event Distribution</span></div>
+          <div class="donut-wrap" id="donutWrap">
+            <div class="empty" id="donutEmpty" style="padding:20px"><div class="spin"></div><span>Collecting data…</span></div>
+          </div>
+        </div>
+
+        <!-- Top Traders -->
+        <div class="panel">
+          <div class="panel-hdr"><span>Top Traders</span><span class="tag" id="traderTag">0</span></div>
+          <div class="trader-list" id="traderList">
+            <div class="empty" id="traderEmpty" style="padding:30px 20px"><div class="spin"></div><span>Discovering traders…</span></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Live Order Book + Whale Alerts row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+
+        <!-- Flash Loan Activity -->
+        <div class="panel" style="max-height:340px">
+          <div class="panel-hdr"><span>Flash Loan Activity</span><span class="tag" id="flTag">0</span></div>
+          <div class="fl-list" id="flList">
+            <div class="empty" id="flEmpty" style="padding:30px 20px"><span>No flash loans yet</span></div>
+          </div>
+        </div>
+
+        <!-- Price Oracle -->
+        <div class="panel" style="max-height:340px">
+          <div class="panel-hdr"><span>Price Oracle</span><span class="tag" id="poTag">0</span></div>
+          <div class="po-list" id="poList">
+            <div class="empty" id="poEmpty" style="padding:20px"><span>No price updates yet</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Secondary: Event Feed (compact sidebar) -->
+    <div class="panel feed">
+      <div class="panel-hdr"><span>Live Event Feed</span><span class="tag" id="feedTag">0</span></div>
+      <div class="feed-wrap" id="feedWrap">
+        <div class="empty" id="feedEmpty"><div class="spin"></div><span>Waiting for events…</span></div>
+        <table class="etbl" id="feedTbl" style="display:none">
+          <thead><tr><th>Time</th><th>Event</th><th>Pool</th><th>Sender</th></tr></thead>
+          <tbody id="feedBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  const params = new URLSearchParams(location.search);
+  const SSE = params.get('sse') || `http://${location.hostname}:8080/events`;
+  const MAX_ROWS = 200;
+
+  // ── State ──
+  const S = {
+    total: 0,
+    pools: {},          // pool_id -> {base,quote,events,loans}
+    traders: {},        // addr -> count
+    breakdown: {},      // event_name -> count
+    flashLoans: 0,
+    flashLoanList: [],  // recent flash loan items
+    priceUpdates: [],   // recent price oracle items
+    ticks: [],          // [{pair,rate,time}]
+    rateTs: [],
+  };
+
+  // ── DOM ──
+  const $ = id => document.getElementById(id);
+  const D = {
+    status:$('status'), statusTxt:$('statusTxt'),
+    sEvents:$('sEvents'), sPools:$('sPools'), sTraders:$('sTraders'), sFlash:$('sFlash'), sRate:$('sRate'),
+    ticker:$('ticker'),
+    feedTbl:$('feedTbl'), feedBody:$('feedBody'), feedEmpty:$('feedEmpty'), feedTag:$('feedTag'),
+    poolList:$('poolList'), poolEmpty:$('poolEmpty'), poolTag:$('poolTag'),
+    donutWrap:$('donutWrap'), donutEmpty:$('donutEmpty'),
+    traderList:$('traderList'), traderEmpty:$('traderEmpty'), traderTag:$('traderTag'),
+    flList:$('flList'), flEmpty:$('flEmpty'), flTag:$('flTag'),
+    poList:$('poList'), poEmpty:$('poEmpty'), poTag:$('poTag'),
+  };
+
+  // ── SSE ──
+  let es = null, reconn = null;
+  function connect(){
+    if(es) es.close();
+    es = new EventSource(SSE);
+    es.onopen = () => { D.status.className='badge on'; D.statusTxt.textContent='Live'; if(reconn){clearTimeout(reconn);reconn=null} };
+    es.onmessage = e => { try{ const d=JSON.parse(e.data); if(d.type==='heartbeat') return; dispatch(d) }catch(x){} };
+    es.onerror = () => { D.status.className='badge off'; D.statusTxt.textContent='Reconnecting…'; es.close(); reconn=setTimeout(connect,3000) };
+  }
+
+  // ── Dispatch ──
+  function dispatch(d){
+    const q=d.queryId, rs=d.results||[];
+    for(const r of rs){
+      const t=r.type, p=r.data||r.after||{};
+      switch(q){
+        case 'event-feed':        onEvent(t,r); break;
+        case 'pool-tracker':      onPool(t,p); break;
+        case 'trader-tracker':    onTrader(t,p); break;
+        case 'event-breakdown':   onBreakdown(t,r); break;
+        case 'flash-loan-tracker':onFlashLoan(t,r); break;
+        case 'price-oracle':      onPriceOracle(t,r); break;
+      }
+    }
+  }
+
+  // ── Event Feed ──
+  function onEvent(t,r){
+    if(t!=='ADD') return;
+    const ev = r.data||{};
+    const pl = ev.payload||{};
+    S.total++;
+    trackRate();
+
+    const eName = ev.event_name||'';
+
+    // Update pool event count; auto-discover pool from events if pool-tracker was missed
+    if(ev.pool_id){
+      if(!S.pools[ev.pool_id]) S.pools[ev.pool_id]={base:'',quote:'',events:0,loans:0};
+      S.pools[ev.pool_id].events++;
+    }
+
+    // Update trader count (client-side)
+    if(ev.sender){ S.traders[ev.sender] = (S.traders[ev.sender]||0)+1 }
+
+    // Track flash loans from event feed
+    if(eName === 'FlashLoanBorrowed'){
+      S.flashLoans++;
+      if(ev.pool_id && S.pools[ev.pool_id]) S.pools[ev.pool_id].loans++;
+    }
+
+    // Price ticker (for PriceAdded events)
+    if(eName === 'PriceAdded' && pl.conversion_rate && ev.pool_id){
+      const rate = (Number(pl.conversion_rate) / 1e9).toFixed(4);
+      addTick(ev.pool_id, rate, ev.timestamp_ms || ev.timestamp);
+    }
+
+    // Table row
+    addFeedRow(ev, eName);
+    renderPools(); updateStats();
+  }
+
+  function addFeedRow(ev, eName){
+    D.feedTbl.style.display='';
+    D.feedEmpty.style.display='none';
+    const tr = document.createElement('tr');
+    tr.className='flash';
+    const badge = evClass(eName);
+    const short = eName.replace('Event','');
+    tr.innerHTML =
+      '<td class="time">'+fmtTime(ev.timestamp)+'</td>'+
+      '<td><span class="evbadge '+badge+'">'+esc(short)+'</span></td>'+
+      '<td class="addr">'+trunc(ev.pool_id)+'</td>'+
+      '<td class="addr">'+trunc(ev.sender)+'</td>';
+    D.feedBody.insertBefore(tr, D.feedBody.firstChild);
+    while(D.feedBody.children.length > MAX_ROWS) D.feedBody.removeChild(D.feedBody.lastChild);
+    D.feedTag.textContent = S.total;
+  }
+
+  // ── Pool Tracker ──
+  function onPool(t,p){
+    if(t==='ADD'){
+      const id=p.pool_id; if(!id) return;
+      if(!S.pools[id]) S.pools[id]={base:assetName(p.base_asset),quote:assetName(p.quote_asset),events:0,loans:0};
+    } else if(t==='DELETE'){
+      delete S.pools[p.pool_id];
+    }
+    renderPools(); updateStats();
+  }
+
+  // ── Trader Tracker ──
+  function onTrader(t,p){
+    if(t==='ADD'){ const a=p.address; if(a && !(a in S.traders)) S.traders[a]=0 }
+    else if(t==='DELETE'){ delete S.traders[p.address] }
+    renderTraders(); updateStats();
+  }
+
+  // ── Event Breakdown (aggregation) ──
+  function onBreakdown(t,r){
+    const d = r.data||r.after||{};
+    const name = d.event_name;
+    const cnt  = toNum(d.cnt);
+    if(!name) return;
+    if(t==='ADD'||t==='UPDATE') S.breakdown[name]=cnt;
+    else if(t==='DELETE') delete S.breakdown[name];
+    // Also handle aggregation type
+    if(t==='aggregation'){ const a=r.after||{}; if(a.event_name) S.breakdown[a.event_name]=toNum(a.cnt) }
+    renderDonut();
+  }
+
+  // ── Flash Loan Tracker (from flash-loan-tracker query) ──
+  function onFlashLoan(t,r){
+    if(t!=='ADD') return;
+    const d = r.data||{};
+    const pl = d.payload||{};
+    S.flashLoans++;
+    if(d.pool_id && S.pools[d.pool_id]) S.pools[d.pool_id].loans++;
+
+    const typeName = (pl.type_name && pl.type_name.name) || '';
+    const isSui = typeName.includes('sui::SUI');
+    const decimals = isSui ? 9 : 6;
+    const rawQty = Number(pl.borrow_quantity) || 0;
+    const qty = (rawQty / Math.pow(10, decimals)).toLocaleString(undefined, {maximumFractionDigits:2});
+    const assetShort = typeName ? typeName.split('::').pop() : '?';
+    const pool = S.pools[d.pool_id];
+    const poolName = pool && pool.base ? pool.base+'/'+pool.quote : trunc(d.pool_id);
+
+    S.flashLoanList.unshift({asset:assetShort, qty, poolName, sender:d.sender, time:fmtTime(d.timestamp)});
+    if(S.flashLoanList.length > 20) S.flashLoanList.pop();
+
+    D.flEmpty.style.display='none';
+    D.flTag.textContent = S.flashLoans;
+
+    const div = document.createElement('div');
+    div.className='fl-item new';
+    div.innerHTML =
+      '<div class="fl-top"><span class="fl-asset">⚡ '+esc(qty)+' '+esc(assetShort)+'</span><span class="fl-time">'+esc(S.flashLoanList[0].time)+'</span></div>'+
+      '<div class="fl-detail">Pool: '+esc(poolName)+' — '+trunc(d.sender)+'</div>';
+    D.flList.insertBefore(div, D.flList.querySelector('.fl-item'));
+    while(D.flList.querySelectorAll('.fl-item').length > 10){
+      const last = D.flList.querySelector('.fl-item:last-of-type');
+      if(last) last.remove();
+    }
+    updateStats();
+  }
+
+  // ── Price Oracle (from price-oracle query) ──
+  function onPriceOracle(t,r){
+    if(t!=='ADD') return;
+    const d = r.data||{};
+    const pl = d.payload||{};
+    const rate = (Number(pl.conversion_rate) / 1e9).toFixed(4);
+    const isBase = pl.is_base_conversion === true || pl.is_base_conversion === 'true';
+    const refPool = pl.reference_pool || '';
+    const tgtPool = pl.target_pool || '';
+    const refName = S.pools[refPool] ? S.pools[refPool].base+'/'+S.pools[refPool].quote : trunc(refPool);
+    const tgtName = S.pools[tgtPool] ? S.pools[tgtPool].base+'/'+S.pools[tgtPool].quote : trunc(tgtPool);
+
+    S.priceUpdates.unshift({refName, tgtName, rate, isBase, time:fmtTime(d.timestamp)});
+    if(S.priceUpdates.length > 30) S.priceUpdates.pop();
+
+    D.poEmpty.style.display='none';
+    D.poTag.textContent = S.priceUpdates.length;
+
+    const div = document.createElement('div');
+    div.className='po-item new';
+    div.innerHTML =
+      '<div class="po-top"><span class="po-pair">'+esc(refName)+' → '+esc(tgtName)+'</span><span class="po-time">'+esc(S.priceUpdates[0].time)+'</span></div>'+
+      '<div class="po-detail">Rate: <span class="po-rate">'+esc(rate)+'</span> <span class="po-dir">'+(isBase?'Base':'Quote')+'</span></div>';
+    D.poList.insertBefore(div, D.poList.querySelector('.po-item'));
+    while(D.poList.querySelectorAll('.po-item').length > 10){
+      const last = D.poList.querySelector('.po-item:last-of-type');
+      if(last) last.remove();
+    }
+
+    // Also feed price ticker
+    addTick(refPool, rate, d.timestamp);
+  }
+
+  // ── Price Ticker ──
+  function addTick(poolId, rate, ts){
+    const pool = S.pools[poolId];
+    const pair = pool && pool.base ? pool.base+'/'+pool.quote : trunc(poolId);
+    S.ticks.push({pair, rate, time:fmtTime(ts)});
+    if(S.ticks.length>60) S.ticks.shift();
+    renderTicker();
+  }
+
+  function renderTicker(){
+    if(!S.ticks.length) return;
+    D.ticker.classList.add('scrolling');
+    const items = [...S.ticks, ...S.ticks];
+    D.ticker.innerHTML = items.map(t =>
+      '<span class="tick-item"><span class="tick-pair">'+esc(t.pair)+'</span><span class="tick-price">'+esc(t.rate)+'</span><span class="tick-time">'+esc(t.time)+'</span></span>'
+    ).join('');
+  }
+
+  // ── Pool Cards ──
+  function renderPools(){
+    const ids = Object.keys(S.pools);
+    D.poolEmpty.style.display = ids.length?'none':'';
+    D.poolTag.textContent = ids.length;
+    ids.sort((a,b) => S.pools[b].events - S.pools[a].events);
+
+    const frag = document.createDocumentFragment();
+    for(const id of ids){
+      const p = S.pools[id];
+
+      const card = document.createElement('div');
+      card.className='pcard';
+      card.innerHTML =
+        '<div class="pcard-row"><span class="ppair">'+esc(p.base)+' <span class="q">/ '+esc(p.quote)+'</span></span></div>'+
+        '<div class="pcard-stats">'+
+          '<span>Events: <span class="val">'+p.events+'</span></span>'+
+          '<span>Loans: <span class="val pcard-loan">'+p.loans+'</span></span>'+
+        '</div>'+
+        '<div class="pid" style="margin-top:4px">'+trunc(id)+'</div>';
+      frag.appendChild(card);
+    }
+    const old = D.poolList.querySelectorAll('.pcard');
+    old.forEach(el=>el.remove());
+    D.poolList.appendChild(frag);
+  }
+
+  // ── Donut Chart ──
+  const DONUT_COLORS = ['#3b82f6','#00e5a0','#ef4444','#f59e0b','#a78bfa','#fb923c','#06b6d4','#ec4899'];
+  function renderDonut(){
+    const names = Object.keys(S.breakdown);
+    if(!names.length) return;
+    D.donutEmpty.style.display='none';
+
+    const total = names.reduce((s,n)=>s+S.breakdown[n],0);
+    names.sort((a,b)=>S.breakdown[b]-S.breakdown[a]);
+
+    // Conic gradient
+    let grad='', pct=0;
+    const legendHtml=[];
+    for(let i=0;i<names.length;i++){
+      const n=names[i], c=DONUT_COLORS[i%DONUT_COLORS.length];
+      const slice = total?S.breakdown[n]/total*100:0;
+      grad += (i?',':'') + c+' '+pct+'% '+(pct+slice)+'%';
+      pct+=slice;
+      legendHtml.push(
+        '<div class="leg-item"><div class="leg-dot" style="background:'+c+'"></div>'+
+        '<span class="leg-name">'+esc(n.replace('Event',''))+'</span>'+
+        '<span class="leg-val">'+S.breakdown[n]+'</span></div>'
+      );
+    }
+
+    D.donutWrap.innerHTML =
+      '<div class="donut" style="background:conic-gradient('+grad+')"><div class="donut-hole">'+total+'</div></div>'+
+      '<div class="donut-legend">'+legendHtml.join('')+'</div>';
+  }
+
+  // ── Trader Leaderboard ──
+  function renderTraders(){
+    const addrs = Object.keys(S.traders);
+    D.traderEmpty.style.display = addrs.length?'none':'';
+    D.traderTag.textContent = addrs.length;
+    addrs.sort((a,b)=>S.traders[b]-S.traders[a]);
+    const top = addrs.slice(0,15);
+
+    const frag = document.createDocumentFragment();
+    for(let i=0;i<top.length;i++){
+      const a=top[i], c=S.traders[a];
+      const row = document.createElement('div');
+      row.className='trow';
+      row.innerHTML='<span class="trank '+(i<3?'top':'')+'">'+(i+1)+'.</span><span class="taddr">'+trunc(a)+'</span><span class="tcnt">'+c+'</span>';
+      frag.appendChild(row);
+    }
+    const old = D.traderList.querySelectorAll('.trow');
+    old.forEach(el=>el.remove());
+    D.traderList.appendChild(frag);
+  }
+
+  // ── Stats ──
+  function updateStats(){
+    D.sEvents.textContent = S.total.toLocaleString();
+    D.sPools.textContent = Object.keys(S.pools).length;
+    D.sTraders.textContent = Object.keys(S.traders).length;
+    D.sFlash.textContent = S.flashLoans.toLocaleString();
+  }
+
+  function trackRate(){ const now=Date.now(); S.rateTs.push(now); while(S.rateTs.length&&S.rateTs[0]<now-60000) S.rateTs.shift() }
+  setInterval(()=>{
+    const now=Date.now(); while(S.rateTs.length&&S.rateTs[0]<now-60000) S.rateTs.shift();
+    D.sRate.innerHTML=S.rateTs.length+'<span class="u">/min</span>';
+  },1000);
+
+  // ── Helpers ──
+  function fmtTime(ts){ if(!ts) return '—'; const n=typeof ts==='string'?parseInt(ts,10):ts; if(isNaN(n)) return '—'; return new Date(n).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}) }
+  function trunc(s){ if(!s) return '—'; if(s.length<=14) return s; return s.slice(0,8)+'…'+s.slice(-6) }
+  function assetName(t){ if(!t) return '?'; const p=t.split('::'); return p.length>=3?p[p.length-1]:t }
+  function toNum(v){ const n=Number(v); return isNaN(n)?0:n }
+  function esc(s){ if(!s) return ''; const el=document.createElement('span'); el.textContent=s; return el.innerHTML }
+  function evClass(n){ if(!n) return 'ev-other'; if(n==='PriceAdded') return 'ev-placed'; if(n==='FlashLoanBorrowed') return 'ev-filled'; if(n==='ReferralClaimed') return 'ev-modify'; return 'ev-other' }
+
+  connect();
+})();
+</script>
+</body>
+</html>
