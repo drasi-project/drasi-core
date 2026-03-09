@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/mysql",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/mysql",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -119,6 +121,9 @@ drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrapp
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
+drasi-source-mysql = { version = "0.1.0", path = "components/sources/mysql" }
+drasi-bootstrap-mysql = { version = "0.1.0", path = "components/bootstrappers/mysql" }
+
 
 [workspace.lints.rust]
 warnings = "deny"

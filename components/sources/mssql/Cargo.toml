@@ -53,7 +53,7 @@ hex = "0.4"
 [dev-dependencies]
 env_logger = "0.11"
 tokio-test = "0.4"
-testcontainers = "0.23"
+testcontainers = "0.26.3"
 drasi-bootstrap-mssql.workspace = true
 drasi-reaction-application.workspace = true
 
