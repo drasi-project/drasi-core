@@ -1,7 +1,7 @@
 ---
 name: reaction-plan-executor
 description: Executes implementation plans for reaction components in Drasi.
-model: gpt-5.2-codex
+model: gpt-5.3-codex
 ---
 
 # reaction-plan-executor
@@ -373,7 +373,7 @@ Document in completion report:
 
 ### 9. Review
 
-- Review the new components for bugs and issues
+- Review the new components for bugs and issues, and spawn a parallel sub-agent without the session context to do an independent review
 - Fix any issues found during review
 - Do a second pass review and fix any further issues
 
