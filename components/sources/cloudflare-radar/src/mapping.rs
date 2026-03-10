@@ -480,6 +480,85 @@ pub fn map_leak(
     changes
 }
 
+/// Returns `(element_id, label)` pairs for all relationships belonging to an outage.
+pub fn relation_element_ids_for_outage(
+    outage_id: &str,
+    outage: &OutageAnnotation,
+) -> Vec<(String, String)> {
+    let mut ids = Vec::new();
+    for location in &outage.locations {
+        let location_id = format!("location-{}", normalize_id(location));
+        ids.push((
+            format!("{outage_id}-affects-{location_id}"),
+            "AFFECTS_LOCATION".to_string(),
+        ));
+    }
+    for asn in &outage.asns {
+        let asn_id = format!("as-{asn}");
+        ids.push((
+            format!("{outage_id}-affects-{asn_id}"),
+            "AFFECTS_ASN".to_string(),
+        ));
+    }
+    ids
+}
+
+/// Returns `(element_id, label)` pairs for all relationships belonging to a hijack.
+pub fn relation_element_ids_for_hijack(hijack: &BgpHijackEvent) -> Vec<(String, String)> {
+    let hijack_id = format!("bgp-hijack-{}", hijack.id);
+    let mut ids = Vec::new();
+    if let Some(asn) = hijack.hijacker_asn {
+        let asn_id = format!("as-{asn}");
+        ids.push((
+            format!("{hijack_id}-hijacker-{asn_id}"),
+            "HIJACKED_BY".to_string(),
+        ));
+    }
+    if let Some(ref victims) = hijack.victim_asns {
+        for asn in victims {
+            let asn_id = format!("as-{asn}");
+            ids.push((
+                format!("{hijack_id}-victim-{asn_id}"),
+                "VICTIM_ASN".to_string(),
+            ));
+        }
+    }
+    if let Some(ref prefixes) = hijack.prefixes {
+        for prefix in prefixes {
+            let prefix_id = format!("prefix-{}", normalize_id(prefix));
+            ids.push((
+                format!("{hijack_id}-targets-{prefix_id}"),
+                "TARGETS_PREFIX".to_string(),
+            ));
+        }
+    }
+    ids
+}
+
+/// Returns `(element_id, label)` pairs for all relationships belonging to a leak.
+pub fn relation_element_ids_for_leak(leak: &BgpLeakEvent) -> Vec<(String, String)> {
+    let leak_id = format!("bgp-leak-{}", leak.id);
+    let mut ids = Vec::new();
+    if let Some(asn) = leak.leak_asn {
+        let asn_id = format!("as-{asn}");
+        ids.push((
+            format!("{leak_id}-leaked-{asn_id}"),
+            "LEAKED_BY".to_string(),
+        ));
+    }
+    ids
+}
+
+/// Generates `SourceChange::Delete` entries for a list of relation `(element_id, label)` pairs.
+pub fn delete_relations(source_id: &str, relation_ids: &[(String, String)]) -> Vec<SourceChange> {
+    relation_ids
+        .iter()
+        .map(|(elem_id, label)| SourceChange::Delete {
+            metadata: relation_metadata(source_id, elem_id, &[label], now_millis()),
+        })
+        .collect()
+}
+
 pub fn map_http_summary(
     source_id: &str,
     node_id: &str,

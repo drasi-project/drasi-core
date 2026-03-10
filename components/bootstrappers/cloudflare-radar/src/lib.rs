@@ -83,7 +83,9 @@ impl CloudflareRadarBootstrapProviderBuilder {
             "attacks_l3" => self.config.categories.attacks_l3 = enabled,
             "domain_rankings" => self.config.categories.domain_rankings = enabled,
             "dns" => self.config.categories.dns = enabled,
-            _ => {}
+            _ => {
+                log::warn!("Unknown Cloudflare Radar category: '{}'", name);
+            }
         }
         self
     }
