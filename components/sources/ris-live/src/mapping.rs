@@ -115,7 +115,7 @@ impl GraphMapper {
                     });
                 }
 
-                let route_id = route_id(message.peer.as_deref(), prefix);
+                let route_id = route_id(message, prefix);
                 let route_element = build_route_relation(
                     &self.source_id,
                     &peer_id,
@@ -144,13 +144,13 @@ impl GraphMapper {
     /// Process withdrawals from an UPDATE message.
     pub fn process_withdrawals(&mut self, message: &RisMessageData) -> Vec<SourceChange> {
         let effective_from = effective_from(message);
-        let Some(peer) = message.peer.as_deref() else {
+        if message.peer.is_none() {
             return Vec::new();
-        };
+        }
 
         let mut changes = Vec::new();
         for prefix in message.withdrawals.as_ref().into_iter().flatten() {
-            let route_id = route_id(Some(peer), prefix);
+            let route_id = route_id(message, prefix);
             if self.state.active_routes.remove(&route_id) {
                 changes.push(SourceChange::Delete {
                     metadata: relation_metadata(&self.source_id, &route_id, effective_from),
@@ -190,11 +190,10 @@ fn peer_node_id(message: &RisMessageData) -> Option<String> {
     Some(format!("{host}|{peer}"))
 }
 
-fn route_id(peer: Option<&str>, prefix: &str) -> String {
-    match peer {
-        Some(peer_ip) => format!("{peer_ip}|{prefix}"),
-        None => format!("unknown|{prefix}"),
-    }
+fn route_id(message: &RisMessageData, prefix: &str) -> String {
+    let host = message.host.as_deref().unwrap_or("unknown");
+    let peer = message.peer.as_deref().unwrap_or("unknown");
+    format!("{host}|{peer}|{prefix}")
 }
 
 fn relation_metadata(source_id: &str, route_id: &str, effective_from: u64) -> ElementMetadata {

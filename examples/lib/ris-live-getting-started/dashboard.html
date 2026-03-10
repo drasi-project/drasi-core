@@ -195,7 +195,7 @@ tr.flash-delete td{animation:flashRed .8s}
   }
 
   function rowHtml(r) {
-    return `<td>${esc(r.prefix||'')}</td><td>${esc(r.peer||'')}</td><td>${r.peer_asn||''}</td><td>${esc(r.next_hop||'')}</td><td>${r.origin_asn||''}</td><td>${r.path_length||''}</td>`;
+    return `<td>${esc(r.prefix||'')}</td><td>${esc(r.peer||'')}</td><td>${esc(String(r.peer_asn||''))}</td><td>${esc(r.next_hop||'')}</td><td>${esc(String(r.origin_asn||''))}</td><td>${esc(String(r.path_length||''))}</td>`;
   }
 
   let pendingRebuild = false;

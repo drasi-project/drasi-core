@@ -15,7 +15,7 @@
 //! WebSocket stream processing for RIS Live.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -39,6 +39,9 @@ use crate::messages::{
 
 const STATE_KEY: &str = "ris-live.stream-state.v1";
 
+/// Minimum interval between state persistence writes.
+const PERSIST_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Runs the resilient streaming loop with reconnect behavior.
 pub async fn run_stream_loop(
     source_id: String,
@@ -49,6 +52,7 @@ pub async fn run_stream_loop(
 ) -> Result<()> {
     let initial_state = load_initial_state(&source_id, &config, &state_store).await?;
     let mut mapper = GraphMapper::new(source_id.clone(), initial_state);
+    let mut last_persisted = Instant::now();
 
     loop {
         if *shutdown_rx.borrow() {
@@ -63,6 +67,7 @@ pub async fn run_stream_loop(
             &dispatchers,
             &state_store,
             &mut mapper,
+            &mut last_persisted,
             &mut shutdown_rx,
         )
         .await
@@ -97,6 +102,7 @@ async fn run_single_connection(
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
+    last_persisted: &mut Instant,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     ensure_crypto_provider();
@@ -131,7 +137,7 @@ async fn run_single_connection(
             frame = socket.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        process_text_frame(source_id, config, dispatchers, state_store, mapper, &text).await?;
+                        process_text_frame(source_id, config, dispatchers, state_store, mapper, last_persisted, &text).await?;
                     }
                     Some(Ok(Message::Binary(_))) => {}
                     Some(Ok(Message::Ping(payload))) => {
@@ -166,6 +172,7 @@ async fn process_text_frame(
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: &Option<Arc<dyn StateStoreProvider>>,
     mapper: &mut GraphMapper,
+    last_persisted: &mut Instant,
     text: &str,
 ) -> Result<()> {
     let incoming: RisIncomingMessage = serde_json::from_str(text)
@@ -215,7 +222,10 @@ async fn process_text_frame(
                 for change in changes {
                     dispatch_change(source_id, dispatchers, change).await?;
                 }
-                persist_state(source_id, state_store, mapper.state()).await?;
+                if last_persisted.elapsed() >= PERSIST_INTERVAL {
+                    persist_state(source_id, state_store, mapper.state()).await?;
+                    *last_persisted = Instant::now();
+                }
             }
             Ok(())
         }
@@ -255,8 +265,14 @@ fn build_url(config: &RisLiveSourceConfig) -> Result<Url> {
         .with_context(|| format!("invalid websocket_url '{}'", config.websocket_url))?;
 
     if let Some(client_name) = &config.client_name {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("client", client_name);
+        // Remove any existing `client` parameter before appending ours
+        let existing: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(k, _)| k != "client")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        url.query_pairs_mut().clear().extend_pairs(existing);
+        url.query_pairs_mut().append_pair("client", client_name);
     }
 
     Ok(url)
