@@ -24,15 +24,17 @@ pub use config::{CategoryConfig, CloudflareRadarConfig, StartBehavior};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
 use log::{debug, error, info, warn};
 use mapping::{
-    map_attack_l3_summary, map_attack_l7_summary, map_dns_summary, map_domain_ranking, map_hijack,
-    map_http_summary, map_leak, map_outage, normalize_id, ChangeAction,
+    delete_relations, map_attack_l3_summary, map_attack_l7_summary, map_dns_summary,
+    map_domain_ranking, map_hijack, map_http_summary, map_leak, map_outage, normalize_id,
+    relation_element_ids_for_hijack, relation_element_ids_for_leak,
+    relation_element_ids_for_outage, ChangeAction,
 };
 use reqwest::Client;
 use serde::de::DeserializeOwned;
@@ -172,8 +174,14 @@ impl Source for CloudflareRadarSource {
             let _ = tx.send(());
         }
 
-        if let Some(handle) = self.base.task_handle.write().await.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        if let Some(mut handle) = self.base.task_handle.write().await.take() {
+            tokio::select! {
+                _ = &mut handle => {},
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    warn!("[{}] Polling task did not stop within 5s, aborting", self.base.id);
+                    handle.abort();
+                }
+            }
         }
 
         self.base.set_status(ComponentStatus::Stopped).await;
@@ -272,7 +280,9 @@ impl CloudflareRadarSourceBuilder {
             "attacks_l3" => self.config.categories.attacks_l3 = enabled,
             "domain_rankings" => self.config.categories.domain_rankings = enabled,
             "dns" => self.config.categories.dns = enabled,
-            _ => {}
+            _ => {
+                log::warn!("Unknown Cloudflare Radar category: '{}'", name);
+            }
         }
         self
     }
@@ -609,6 +619,19 @@ async fn poll_outages(
                 let changes =
                     map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
                 dispatch_changes(source_id, dispatchers, changes).await?;
+
+                // Delete old relationships and insert new ones
+                if let Some(old_outage) = state.seen_outage_ids.get(&outage_id) {
+                    let old_rels = relation_element_ids_for_outage(&outage_id, old_outage);
+                    let del_changes = delete_relations(source_id, &old_rels);
+                    dispatch_changes(source_id, dispatchers, del_changes).await?;
+                }
+                let new_rels =
+                    map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
+                // Skip the first element (the node itself) and dispatch only relations/shared nodes
+                if new_rels.len() > 1 {
+                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                }
             }
         }
     }
@@ -622,6 +645,10 @@ async fn poll_outages(
             .collect();
 
         for (id, outage) in removed {
+            let rel_ids = relation_element_ids_for_outage(&id, &outage);
+            let rel_changes = delete_relations(source_id, &rel_ids);
+            dispatch_changes(source_id, dispatchers, rel_changes).await?;
+
             let changes = map_outage(source_id, &id, &outage, ChangeAction::Delete, false);
             dispatch_changes(source_id, dispatchers, changes).await?;
         }
@@ -684,6 +711,17 @@ async fn poll_bgp_hijacks(
                 if should_emit {
                     let changes = map_hijack(source_id, &event, ChangeAction::Update, false);
                     dispatch_changes(source_id, dispatchers, changes).await?;
+
+                    // Delete old relationships and insert new ones
+                    if let Some(old_event) = state.seen_hijack_ids.get(&event.id) {
+                        let old_rels = relation_element_ids_for_hijack(old_event);
+                        let del_changes = delete_relations(source_id, &old_rels);
+                        dispatch_changes(source_id, dispatchers, del_changes).await?;
+                    }
+                    let new_rels = map_hijack(source_id, &event, ChangeAction::Insert, true);
+                    if new_rels.len() > 1 {
+                        dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                    }
                 }
             }
         }
@@ -698,14 +736,14 @@ async fn poll_bgp_hijacks(
             .collect();
 
         for id in removed_ids {
-            let change = SourceChange::Delete {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, &format!("bgp-hijack-{id}")),
-                    labels: vec![Arc::from("BgpHijack")].into(),
-                    effective_from: Utc::now().timestamp_millis() as u64,
-                },
-            };
-            dispatch_changes(source_id, dispatchers, vec![change]).await?;
+            if let Some(old_event) = state.seen_hijack_ids.get(&id) {
+                let rel_ids = relation_element_ids_for_hijack(old_event);
+                let rel_changes = delete_relations(source_id, &rel_ids);
+                dispatch_changes(source_id, dispatchers, rel_changes).await?;
+
+                let changes = map_hijack(source_id, old_event, ChangeAction::Delete, false);
+                dispatch_changes(source_id, dispatchers, changes).await?;
+            }
         }
     }
 
@@ -763,6 +801,17 @@ async fn poll_bgp_leaks(
                 if should_emit {
                     let changes = map_leak(source_id, &event, ChangeAction::Update, false);
                     dispatch_changes(source_id, dispatchers, changes).await?;
+
+                    // Delete old relationships and insert new ones
+                    if let Some(old_event) = state.seen_leak_ids.get(&event.id) {
+                        let old_rels = relation_element_ids_for_leak(old_event);
+                        let del_changes = delete_relations(source_id, &old_rels);
+                        dispatch_changes(source_id, dispatchers, del_changes).await?;
+                    }
+                    let new_rels = map_leak(source_id, &event, ChangeAction::Insert, true);
+                    if new_rels.len() > 1 {
+                        dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
+                    }
                 }
             }
         }
@@ -777,14 +826,14 @@ async fn poll_bgp_leaks(
             .collect();
 
         for id in removed_ids {
-            let change = SourceChange::Delete {
-                metadata: ElementMetadata {
-                    reference: ElementReference::new(source_id, &format!("bgp-leak-{id}")),
-                    labels: vec![Arc::from("BgpLeak")].into(),
-                    effective_from: Utc::now().timestamp_millis() as u64,
-                },
-            };
-            dispatch_changes(source_id, dispatchers, vec![change]).await?;
+            if let Some(old_event) = state.seen_leak_ids.get(&id) {
+                let rel_ids = relation_element_ids_for_leak(old_event);
+                let rel_changes = delete_relations(source_id, &rel_ids);
+                dispatch_changes(source_id, dispatchers, rel_changes).await?;
+
+                let changes = map_leak(source_id, old_event, ChangeAction::Delete, false);
+                dispatch_changes(source_id, dispatchers, changes).await?;
+            }
         }
     }
 

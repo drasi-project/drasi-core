@@ -168,7 +168,9 @@ impl SourcePluginDescriptor for CloudflareRadarSourceDescriptor {
         {
             Some(schema) => schema,
             None => {
-                log::warn!("Cloudflare Radar source schema generation failed; returning empty schema");
+                log::warn!(
+                    "Cloudflare Radar source schema generation failed; returning empty schema"
+                );
                 "{}".to_string()
             }
         }
