@@ -111,11 +111,22 @@ pub struct PostgresExecutor {
 
 impl PostgresExecutor {
     /// Create a new PostgreSQL executor
-    pub async fn new(config: &PostgresStoredProcReactionConfig) -> Result<Self> {
+    ///
+    /// The `identity_provider` parameter allows injecting a credential provider
+    /// from the runtime context. If provided, it takes precedence over the
+    /// config's identity_provider. Falls back to config's user/password if neither is set.
+    pub async fn new(
+        config: &PostgresStoredProcReactionConfig,
+        identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    ) -> Result<Self> {
         let port = config.get_port();
 
-        // Resolve credentials from identity provider or fall back to user/password
-        let credentials = if let Some(provider) = &config.identity_provider {
+        // Resolve credentials: injected provider > config provider > user/password
+        let effective_provider = identity_provider.as_ref().map(|p| p.as_ref());
+        let config_provider = config.identity_provider.as_deref();
+        let provider = effective_provider.or(config_provider);
+
+        let credentials = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
             Some(provider.get_credentials().await?)
         } else {

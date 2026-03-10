@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use async_stream::stream;
 use async_trait::async_trait;
 use drasi_core::{
     interface::{ElementArchiveIndex, ElementStream, IndexError},
@@ -35,7 +34,6 @@ pub const ARCHIVE_CF: &str = "archive";
 
 #[async_trait]
 impl ElementArchiveIndex for RocksDbElementIndex {
-    #[allow(clippy::unwrap_used)]
     async fn get_element_as_at(
         &self,
         element_ref: &ElementReference,
@@ -51,24 +49,22 @@ impl ElementArchiveIndex for RocksDbElementIndex {
                 .db
                 .cf_handle(ARCHIVE_CF)
                 .expect("Archive CF not found");
-            let mut iter = context
-                .db
-                .iterator_cf(
-                    &archive_cf,
-                    rocksdb::IteratorMode::From(&key, rocksdb::Direction::Reverse),
-                )
-                .take(1);
-            if let Some(item) = iter.next() {
-                match item {
-                    Ok((_, value)) => {
-                        return Ok(Some(value));
+            context.session_state.with_txn(|txn| {
+                let mut iter = txn
+                    .iterator_cf(
+                        &archive_cf,
+                        rocksdb::IteratorMode::From(&key, rocksdb::Direction::Reverse),
+                    )
+                    .take(1);
+                if let Some(item) = iter.next() {
+                    match item {
+                        Ok((_, value)) => Ok(Some(value)),
+                        Err(err) => Err(IndexError::other(err)),
                     }
-                    Err(err) => {
-                        return Err(IndexError::other(err));
-                    }
+                } else {
+                    Ok(None)
                 }
-            }
-            Ok(None)
+            })
         });
 
         match task.await {
@@ -95,7 +91,6 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         element_ref: &ElementReference,
         range: TimestampRange<ElementTimestamp>,
     ) -> Result<ElementStream, IndexError> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let context = self.context.clone();
         let element_key = super::hash_element_ref(element_ref);
 
@@ -105,32 +100,38 @@ impl ElementArchiveIndex for RocksDbElementIndex {
             TimestampBound::StartFromPrevious(from) => {
                 let context = context.clone();
                 let task = task::spawn_blocking(move || {
-                    let archive_cf = context.db.cf_handle(ARCHIVE_CF).unwrap();
+                    let archive_cf = context
+                        .db
+                        .cf_handle(ARCHIVE_CF)
+                        .expect("Archive CF not found");
                     let mut start_key = element_key.clone().to_vec();
                     start_key.extend_from_slice(&from.to_be_bytes());
-                    let mut iter = context
-                        .db
-                        .iterator_cf(
-                            &archive_cf,
-                            rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Reverse),
-                        )
-                        .take(1);
-                    if let Some(item) = iter.next() {
-                        match item {
-                            Ok((key, _)) => {
-                                let ts = match key.get(16..24) {
-                                    // last 8 bytesis the timestamp
-                                    Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
-                                    None => 0,
-                                };
-                                return Ok(ts);
+                    context.session_state.with_txn(|txn| {
+                        let mut iter = txn
+                            .iterator_cf(
+                                &archive_cf,
+                                rocksdb::IteratorMode::From(
+                                    &start_key,
+                                    rocksdb::Direction::Reverse,
+                                ),
+                            )
+                            .take(1);
+                        if let Some(item) = iter.next() {
+                            match item {
+                                Ok((key, _)) => {
+                                    let ts = match key.get(16..24) {
+                                        // last 8 bytes is the timestamp
+                                        Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+                                        None => 0,
+                                    };
+                                    Ok(ts)
+                                }
+                                Err(err) => Err(IndexError::other(err)),
                             }
-                            Err(err) => {
-                                return Err(IndexError::other(err));
-                            }
+                        } else {
+                            Ok(0)
                         }
-                    }
-                    Ok(0)
+                    })
                 });
 
                 match task.await {
@@ -143,55 +144,62 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         let to = range.to;
         let mut start_key = element_key.to_vec();
 
-        task::spawn_blocking(move || {
+        let task = task::spawn_blocking(move || {
             start_key.extend_from_slice(&from_timestamp.to_be_bytes());
-            let archive_cf = context.db.cf_handle(ARCHIVE_CF).unwrap();
-
-            for item in context.db.iterator_cf(
-                &archive_cf,
-                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-            ) {
-                match item {
-                    Ok((key, data)) => {
-                        if !key.starts_with(&element_key) {
-                            break;
-                        }
-                        let ts = match key.get(16..24) {
-                            Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
-                            None => {
-                                tx.blocking_send(Err(IndexError::CorruptedData)).unwrap();
+            let archive_cf = context
+                .db
+                .cf_handle(ARCHIVE_CF)
+                .expect("Archive CF not found");
+            context.session_state.with_txn(|txn| {
+                let mut results: Vec<Result<Arc<Element>, IndexError>> = Vec::new();
+                for item in txn.iterator_cf(
+                    &archive_cf,
+                    rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+                ) {
+                    match item {
+                        Ok((key, data)) => {
+                            if !key.starts_with(&element_key) {
                                 break;
                             }
-                        };
-
-                        if ts > to {
-                            break;
-                        }
-
-                        let stored_element: StoredElement =
-                            match StoredElementContainer::decode(data.as_ref()) {
-                                Ok(container) => match container.element {
-                                    Some(element) => element,
-                                    None => continue,
-                                },
-                                Err(e) => {
-                                    tx.blocking_send(Err(IndexError::other(e))).unwrap();
+                            let ts = match key.get(16..24) {
+                                Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+                                None => {
+                                    results.push(Err(IndexError::CorruptedData));
                                     break;
                                 }
                             };
-                        let element: Element = stored_element.into();
-                        tx.blocking_send(Ok(Arc::new(element))).unwrap()
+
+                            if ts > to {
+                                break;
+                            }
+
+                            let stored_element: StoredElement =
+                                match StoredElementContainer::decode(data.as_ref()) {
+                                    Ok(container) => match container.element {
+                                        Some(element) => element,
+                                        None => continue,
+                                    },
+                                    Err(e) => {
+                                        results.push(Err(IndexError::other(e)));
+                                        break;
+                                    }
+                                };
+                            let element: Element = stored_element.into();
+                            results.push(Ok(Arc::new(element)));
+                        }
+                        Err(e) => results.push(Err(IndexError::other(e))),
                     }
-                    Err(e) => tx.blocking_send(Err(IndexError::other(e))).unwrap(),
                 }
-            }
+                Ok(results)
+            })
         });
 
-        Ok(Box::pin(stream! {
-            while let Some(item) = rx.recv().await {
-                yield item;
-            }
-        }))
+        let results = match task.await {
+            Ok(result) => result?,
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        Ok(Box::pin(futures::stream::iter(results)))
     }
 
     async fn clear(&self) -> Result<(), IndexError> {

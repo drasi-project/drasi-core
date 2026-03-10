@@ -468,6 +468,24 @@ env_logger::init();
 - Monitor downstream consumer to ensure it's processing events
 - Increase channel buffer size if needed
 
+## Plugin Packaging
+
+This bootstrap provider is compiled as a dynamic plugin (cdylib) that can be loaded by drasi-server at runtime.
+
+**Key files:**
+- `Cargo.toml` — includes `crate-type = ["lib", "cdylib"]`
+- `src/descriptor.rs` — implements `BootstrapPluginDescriptor` with kind `"postgres"`, configuration DTO, and OpenAPI schema generation
+- `src/lib.rs` — invokes `drasi_plugin_sdk::export_plugin!` to export the plugin entry point
+
+**Building:**
+```bash
+cargo build -p drasi-bootstrap-postgres
+```
+
+The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+
+For more details on the plugin descriptor pattern and configuration DTOs, see the [Bootstrap Provider Developer Guide](../README.md#packaging-as-a-dynamic-plugin).
+
 ## License
 
 Copyright 2025 The Drasi Authors.

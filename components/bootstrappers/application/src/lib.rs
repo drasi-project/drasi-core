@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,8 +41,12 @@
 //! ```
 
 pub mod application;
+pub mod descriptor;
 
 pub use application::{ApplicationBootstrapProvider, ApplicationBootstrapProviderBuilder};
+
+// Dynamic plugin entry point.
+// Core plugin — registered statically by the server, not exported for dynamic loading.
 
 #[cfg(test)]
 mod tests {

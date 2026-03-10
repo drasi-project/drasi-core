@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2024 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,10 +37,12 @@ pub mod element_index;
 pub mod future_queue;
 mod plugin;
 pub mod result_index;
+pub(crate) mod session_state;
 mod storage_models;
 
 // Re-export the plugin provider for easy access
 pub use plugin::GarnetIndexProvider;
+pub use session_state::{GarnetSessionControl, GarnetSessionState};
 
 trait ClearByPattern {
     async fn clear(&self, pattern: String) -> Result<(), IndexError>;

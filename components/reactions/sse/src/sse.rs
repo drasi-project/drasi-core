@@ -27,10 +27,10 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, ResultDiff};
+use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::{QueryProvider, Reaction};
+use drasi_lib::Reaction;
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
@@ -266,10 +266,6 @@ impl Reaction for SseReaction {
                 Some("Starting SSE reaction".to_string()),
             )
             .await?;
-
-        // Subscribe to all configured queries using ReactionBase
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
 
         // Transition to Running
         self.base
@@ -605,5 +601,12 @@ impl Reaction for SseReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }

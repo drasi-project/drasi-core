@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -100,6 +101,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 
 #[cfg(test)]
 mod tests;
@@ -971,3 +973,17 @@ impl GrpcSourceBuilder {
         })
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "grpc-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::GrpcSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

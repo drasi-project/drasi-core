@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -158,6 +159,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub use config::PlatformSourceConfig;
 
 use anyhow::Result;
@@ -1425,8 +1427,8 @@ fn transform_platform_event(
                 Element::Relation {
                     metadata,
                     properties,
-                    out_node: ElementReference::new(source_id, start_id),
-                    in_node: ElementReference::new(source_id, end_id),
+                    in_node: ElementReference::new(source_id, start_id),
+                    out_node: ElementReference::new(source_id, end_id),
                 }
             }
             _ => return Err(anyhow::anyhow!("Unknown element type: {element_type}")),
@@ -1556,3 +1558,17 @@ fn transform_control_event(cloud_event: Value, control_type: &str) -> Result<Vec
 
     Ok(control_events)
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "platform-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::PlatformSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
