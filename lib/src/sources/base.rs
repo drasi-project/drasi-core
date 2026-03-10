@@ -251,8 +251,12 @@ impl SourceBase {
         // Extract services for convenience
         *self.status_tx.write().await = Some(context.status_tx.clone());
 
+        // Store state_store from context only if not already set programmatically
         if let Some(state_store) = context.state_store.as_ref() {
-            *self.state_store.write().await = Some(state_store.clone());
+            let mut guard = self.state_store.write().await;
+            if guard.is_none() {
+                *guard = Some(state_store.clone());
+            }
         }
 
         // Store identity provider from context if not already set programmatically

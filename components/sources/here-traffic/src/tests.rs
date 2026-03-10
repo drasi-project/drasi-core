@@ -108,16 +108,7 @@ fn test_relation_generation() {
     assert_eq!(changes.len(), 1);
     assert!(matches!(changes[0], SourceChange::Insert { .. }));
 
-    state.relations.insert(
-        "affects_INC_1_segment_52.50000_13.40000".to_string(),
-        RelationSnapshot {
-            id: "affects_INC_1_segment_52.50000_13.40000".to_string(),
-            incident_id: "INC_1".to_string(),
-            segment_id: "segment_52.50000_13.40000".to_string(),
-            distance_meters: 10.0,
-        },
-    );
-
+    // Calling again with the same state should produce no changes (idempotent)
     let changes = state.update_relations("source", &config);
     assert!(
         changes.is_empty(),

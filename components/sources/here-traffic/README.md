@@ -122,7 +122,7 @@ spec:
 ### Nodes
 
 - **TrafficSegment**
-  - `id`: `segment_{lat}_{lon}` (rounded to 2 decimals)
+  - `id`: `segment_{lat}_{lon}` (rounded to 5 decimals)
   - `road_name`, `current_speed`, `free_flow_speed`, `jam_factor`, `confidence`
   - `functional_class`, `length_meters`, `latitude`, `longitude`, `last_updated`
 

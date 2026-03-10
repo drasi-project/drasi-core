@@ -92,8 +92,15 @@ impl HereTrafficSource {
         mut stop_signal: watch::Receiver<bool>,
     ) {
         let source_id = base.id.clone();
-        if let Err(e) = load_last_poll_timestamp(&base).await {
-            warn!("[{source_id}] Failed to load last poll timestamp: {e}");
+        match load_last_poll_timestamp(&base).await {
+            Ok(Some(ts)) => {
+                state.lock().await.last_poll = Some(ts);
+                info!("[{source_id}] Resumed from last poll timestamp: {ts}");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("[{source_id}] Failed to load last poll timestamp: {e}");
+            }
         }
 
         match config.start_from {
