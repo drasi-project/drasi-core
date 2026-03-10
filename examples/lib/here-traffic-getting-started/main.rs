@@ -22,7 +22,7 @@
 //! - **OAuth 2.0**: set `HERE_ACCESS_KEY_ID` and `HERE_ACCESS_KEY_SECRET`
 //!
 //! # Configuration
-//! - `HERE_BBOX`: bounding box as `lat1,lon1,lat2,lon2` (default: Berlin)
+//! - `HERE_BBOX`: bounding box as `lat1,lon1,lat2,lon2` (default: Seattle)
 
 use std::collections::VecDeque;
 use std::env;
