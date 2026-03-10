@@ -128,7 +128,15 @@ impl SourceState {
         let prev_ids: HashSet<String> = self.relations.keys().cloned().collect();
 
         for (id, relation) in &next_relations {
-            if !prev_ids.contains(id) {
+            if let Some(prev) = self.relations.get(id) {
+                if (prev.distance_meters - relation.distance_meters).abs() > 1.0 {
+                    changes.push(build_relation_change(
+                        source_id,
+                        relation,
+                        ChangeKind::Update,
+                    ));
+                }
+            } else {
                 changes.push(build_relation_change(
                     source_id,
                     relation,

@@ -202,8 +202,10 @@ impl HereTrafficClient {
     where
         T: DeserializeOwned,
     {
+        const MAX_RETRIES: u32 = 5;
         let mut backoff = Duration::from_secs(1);
         let mut token_retried = false;
+        let mut retries: u32 = 0;
 
         loop {
             let mut request = self.client.get(url).query(&[
@@ -224,10 +226,16 @@ impl HereTrafficClient {
             let response = request.send().await?;
 
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                retries += 1;
+                if retries > MAX_RETRIES {
+                    return Err(anyhow::anyhow!(
+                        "HERE Traffic API rate limit exceeded after {MAX_RETRIES} retries"
+                    ));
+                }
                 let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
                 let wait = retry_after.unwrap_or(backoff);
                 warn!(
-                    "HERE Traffic API rate limit hit (429). Backing off for {:.1}s",
+                    "HERE Traffic API rate limit hit (429). Retry {retries}/{MAX_RETRIES}, backing off for {:.1}s",
                     wait.as_secs_f64()
                 );
                 tokio::time::sleep(wait).await;

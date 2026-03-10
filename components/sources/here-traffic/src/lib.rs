@@ -92,8 +92,15 @@ impl HereTrafficSource {
         mut stop_signal: watch::Receiver<bool>,
     ) {
         let source_id = base.id.clone();
-        if let Err(e) = load_last_poll_timestamp(&base).await {
-            warn!("[{source_id}] Failed to load last poll timestamp: {e}");
+        match load_last_poll_timestamp(&base).await {
+            Ok(Some(ts)) => {
+                state.lock().await.last_poll = Some(ts);
+                info!("[{source_id}] Resumed from last poll timestamp: {ts}");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("[{source_id}] Failed to load last poll timestamp: {e}");
+            }
         }
 
         match config.start_from {
@@ -200,7 +207,7 @@ impl Source for HereTrafficSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting HERE Traffic source '{}'", self.base.id);
 
         let base = self.base.clone_shared();
@@ -232,7 +239,7 @@ impl Source for HereTrafficSource {
         );
 
         *self.task_handle.write().await = Some(handle);
-        self.base.set_status(ComponentStatus::Running).await;
+        self.base.set_status(ComponentStatus::Running, None).await;
         Ok(())
     }
 
@@ -256,7 +263,7 @@ impl Source for HereTrafficSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base.set_status(ComponentStatus::Stopped, None).await;
         Ok(())
     }
 

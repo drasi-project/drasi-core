@@ -39,7 +39,7 @@ export HERE_ACCESS_KEY_SECRET=your_access_key_secret
 ./quickstart.sh
 ```
 
-You can also set `HERE_BBOX` to target a different area (default: central Berlin `52.5,13.3,52.6,13.5`).
+You can also set `HERE_BBOX` to target a different area (default: Seattle `47.5,-122.4,47.7,-122.2`).
 
 ## Example Queries
 
