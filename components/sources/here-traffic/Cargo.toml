@@ -1,0 +1,46 @@
+[package]
+name = "drasi-source-here-traffic"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "HERE Traffic API source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "source", "here", "traffic"]
+categories = ["database"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk.workspace = true
+utoipa.workspace = true
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = "0.4"
+log = "0.4"
+base64 = "0.22"
+hmac = "0.12"
+percent-encoding = "2.3"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+
+[dev-dependencies]
+drasi-bootstrap-here-traffic = { path = "../../bootstrappers/here-traffic" }
+drasi-reaction-application = { path = "../../../components/reactions/application" }
+env_logger = "0.11"
+tokio-test = "0.4"
+wiremock = "0.6"
+
+[features]
+dynamic-plugin = []

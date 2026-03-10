@@ -44,6 +44,7 @@ Bootstrap providers are responsible for:
 | `drasi-bootstrap-postgres` | PostgreSQL snapshot using COPY | `postgres/` |
 | `drasi-bootstrap-application` | Replays in-memory insert events | `application/` |
 | `drasi-bootstrap-platform` | HTTP streaming from remote Drasi | `platform/` |
+| `drasi-bootstrap-here-traffic` | HERE Traffic API snapshot | `here-traffic/` |
 
 ## Architecture
 
