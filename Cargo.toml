@@ -15,6 +15,7 @@ members = [
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
+  "components/bootstrappers/sqlite",
   "components/bootstrappers/platform",
   "components/bootstrappers/scriptfile",
   "components/bootstrappers/application",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/sqlite",
 
   # Reaction Plugins
   "components/reactions/http",
