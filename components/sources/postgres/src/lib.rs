@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -170,6 +171,7 @@
 pub mod config;
 pub mod connection;
 pub mod decoder;
+pub mod descriptor;
 pub mod protocol;
 pub mod scram;
 pub mod stream;
@@ -187,6 +189,7 @@ use tokio::sync::RwLock;
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
+use tracing::Instrument;
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///
@@ -350,31 +353,51 @@ impl Source for PostgresReplicationSource {
         let status_tx = self.base.status_tx();
         let status_clone = self.base.status.clone();
 
-        let task = tokio::spawn(async move {
-            if let Err(e) = run_replication(
-                source_id.clone(),
-                config,
-                dispatchers,
-                status_tx.clone(),
-                status_clone.clone(),
-            )
+        // Get instance_id from context for log routing isolation
+        let instance_id = self
+            .base
+            .context()
             .await
-            {
-                error!("Replication task failed for {source_id}: {e}");
-                *status_clone.write().await = ComponentStatus::Error;
-                if let Some(ref tx) = *status_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_id,
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Error,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Replication failed: {e}")),
-                        })
-                        .await;
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        // Create span for spawned task so log::info!, log::error! etc are routed
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "postgres_replication_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source"
+        );
+
+        let task = tokio::spawn(
+            async move {
+                if let Err(e) = run_replication(
+                    source_id.clone(),
+                    config,
+                    dispatchers,
+                    status_tx.clone(),
+                    status_clone.clone(),
+                )
+                .await
+                {
+                    error!("Replication task failed for {source_id}: {e}");
+                    *status_clone.write().await = ComponentStatus::Error;
+                    if let Some(ref tx) = *status_tx.read().await {
+                        let _ = tx
+                            .send(ComponentEvent {
+                                component_id: source_id,
+                                component_type: ComponentType::Source,
+                                status: ComponentStatus::Error,
+                                timestamp: chrono::Utc::now(),
+                                message: Some(format!("Replication failed: {e}")),
+                            })
+                            .await;
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
 
         *self.base.task_handle.write().await = Some(task);
         self.base.set_status(ComponentStatus::Running).await;
@@ -965,3 +988,17 @@ mod tests {
         }
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "postgres-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::PostgresSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

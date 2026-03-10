@@ -29,6 +29,7 @@ use serde_json::json;
 
 use self::data::get_bootstrap_data;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod data;
@@ -125,13 +126,17 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 01")),
-              "OrderNumber" => VariableValue::from(json!("order_01")),
-              "LicensePlate" => VariableValue::from(json!("ABC123"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 01")),
+                  "OrderNumber" => VariableValue::from(json!("order_01")),
+                  "LicensePlate" => VariableValue::from(json!("ABC123"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Order Delivered to Waiting Vehicle - order complete
@@ -151,13 +156,17 @@ pub async fn order_ready_then_vehicle_arrives(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 01")),
-              "OrderNumber" => VariableValue::from(json!("order_01")),
-              "LicensePlate" => VariableValue::from(json!("ABC123"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 01")),
+                  "OrderNumber" => VariableValue::from(json!("order_01")),
+                  "LicensePlate" => VariableValue::from(json!("ABC123"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -234,13 +243,17 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 02")),
-              "OrderNumber" => VariableValue::from(json!("order_02")),
-              "LicensePlate" => VariableValue::from(json!("XYZ789"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 02")),
+                  "OrderNumber" => VariableValue::from(json!("order_02")),
+                  "LicensePlate" => VariableValue::from(json!("XYZ789"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Order Delivered to Waiting Vehicle - order complete
@@ -260,13 +273,17 @@ pub async fn vehicle_arrives_then_order_ready(config: &(impl QueryTestConfig + S
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 02")),
-              "OrderNumber" => VariableValue::from(json!("order_02")),
-              "LicensePlate" => VariableValue::from(json!("XYZ789"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 02")),
+                  "OrderNumber" => VariableValue::from(json!("order_02")),
+                  "LicensePlate" => VariableValue::from(json!("XYZ789"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 
@@ -343,13 +360,17 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
 
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 03")),
-              "OrderNumber" => VariableValue::from(json!("order_03")),
-              "LicensePlate" => VariableValue::from(json!("drasi"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 03")),
+                  "OrderNumber" => VariableValue::from(json!("order_03")),
+                  "LicensePlate" => VariableValue::from(json!("drasi"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     {
@@ -368,13 +389,17 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Removing {
-            before: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 03")),
-              "OrderNumber" => VariableValue::from(json!("order_03")),
-              "LicensePlate" => VariableValue::from(json!("drasi"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 03")),
+                  "OrderNumber" => VariableValue::from(json!("order_03")),
+                  "LicensePlate" => VariableValue::from(json!("drasi"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
 
         let delete_vehicle = SourceChange::Delete {
             metadata: ElementMetadata {
@@ -446,12 +471,16 @@ pub async fn vehicle_arrives_then_order_ready_duplicate(config: &(impl QueryTest
 
         let result = query.process_source_change(change.clone()).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-              "DriverName" => VariableValue::from(json!("Driver 04")),
-              "OrderNumber" => VariableValue::from(json!("order_04")),
-              "LicensePlate" => VariableValue::from(json!("drasi"))
-            ),
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                  "DriverName" => VariableValue::from(json!("Driver 04")),
+                  "OrderNumber" => VariableValue::from(json!("order_04")),
+                  "LicensePlate" => VariableValue::from(json!("drasi"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }

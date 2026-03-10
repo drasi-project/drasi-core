@@ -232,4 +232,56 @@ mod tests {
             .await
             .is_ok());
     }
+
+    #[tokio::test]
+    async fn test_relation_direction() {
+        let (_source, handle) = create_test_application_source("test-source").await;
+
+        // Send nodes
+        let node_props = PropertyMapBuilder::new().build();
+        handle
+            .send_node_insert("start-node", vec!["Start"], node_props.clone())
+            .await
+            .expect("Failed to send start node");
+        handle
+            .send_node_insert("end-node", vec!["End"], node_props)
+            .await
+            .expect("Failed to send end node");
+
+        // Send relation from start-node to end-node
+        let rel_props = PropertyMapBuilder::new()
+            .with_string("type", "connects")
+            .build();
+
+        handle
+            .send_relation_insert(
+                "rel-1",
+                vec!["CONNECTS"],
+                rel_props,
+                "start-node",
+                "end-node",
+            )
+            .await
+            .expect("Failed to send relation");
+
+        // Test that we can create multiple relationships
+        let rel_props2 = PropertyMapBuilder::new().build();
+        handle
+            .send_relation_insert("rel-2", vec!["LINKS"], rel_props2, "start-node", "end-node")
+            .await
+            .expect("Failed to send second relation");
+    }
+
+    #[tokio::test]
+    async fn test_relation_insert_with_empty_properties() {
+        let (_source, handle) = create_test_application_source("test-source").await;
+
+        let props = PropertyMapBuilder::new().build();
+
+        let result = handle
+            .send_relation_insert("rel-1", vec!["TYPE"], props, "node-1", "node-2")
+            .await;
+
+        assert!(result.is_ok(), "Should send relation with empty properties");
+    }
 }

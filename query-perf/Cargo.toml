@@ -16,6 +16,7 @@ drasi-query-cypher.workspace = true
 drasi-functions-cypher.workspace = true
 drasi-index-garnet.workspace = true
 drasi-index-rocksdb.workspace = true
+redis = { version = "0.25", features = ["tokio-comp"] }
 serde = "1.0.163"
 serde_json = "1.0.96"
 rand = "0.8.5"

@@ -29,6 +29,7 @@ use drasi_core::{
 use drasi_functions_cypher::CypherFunctionSet;
 use drasi_query_cypher::CypherParser;
 
+use super::{contains_data, IGNORED_ROW_SIGNATURE};
 use crate::QueryTestConfig;
 
 mod queries;
@@ -100,12 +101,16 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t1: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "id" => VariableValue::from(json!("v1")),
-                "currentSpeed" => VariableValue::from(json!("119"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "id" => VariableValue::from(json!("v1")),
+                    "currentSpeed" => VariableValue::from(json!("119"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add next value
@@ -147,16 +152,20 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t2: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Updating {
-            before: variablemap!(
-                "id" => VariableValue::from(json!("v1")),
-                "currentSpeed" => VariableValue::from(json!("119"))
-            ),
-            after: variablemap!(
-                "id" => VariableValue::from(json!("v1")),
-                "currentSpeed" => VariableValue::from(json!("121"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Updating {
+                before: variablemap!(
+                    "id" => VariableValue::from(json!("v1")),
+                    "currentSpeed" => VariableValue::from(json!("119"))
+                ),
+                after: variablemap!(
+                    "id" => VariableValue::from(json!("v1")),
+                    "currentSpeed" => VariableValue::from(json!("121"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 
     //Add another vehicle
@@ -198,12 +207,16 @@ pub async fn remap(config: &(impl QueryTestConfig + Send)) {
             .unwrap();
         assert_eq!(result.len(), 1);
         println!("Node Result - Add t3: {result:?}");
-        assert!(result.contains(&QueryPartEvaluationContext::Adding {
-            after: variablemap!(
-                "id" => VariableValue::from(json!("v2")),
-                "currentSpeed" => VariableValue::from(json!("110"))
-            )
-        }));
+        assert!(contains_data(
+            &result,
+            &QueryPartEvaluationContext::Adding {
+                after: variablemap!(
+                    "id" => VariableValue::from(json!("v2")),
+                    "currentSpeed" => VariableValue::from(json!("110"))
+                ),
+                row_signature: IGNORED_ROW_SIGNATURE,
+            }
+        ));
     }
 }
 

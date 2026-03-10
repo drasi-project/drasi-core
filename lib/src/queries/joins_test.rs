@@ -115,7 +115,13 @@ mod query_joins_tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        let source_manager = Arc::new(SourceManager::new(event_tx.clone()));
+        // Use the global shared log registry for test isolation with tracing
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let source_manager = Arc::new(SourceManager::new(
+            "test-instance",
+            event_tx.clone(),
+            log_registry.clone(),
+        ));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
@@ -124,10 +130,12 @@ mod query_joins_tests {
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(QueryManager::new(
+            "test-instance",
             event_tx.clone(),
             source_manager.clone(),
             index_factory,
             middleware_registry,
+            log_registry,
         ));
 
         (query_manager, event_rx, event_tx, source_manager)

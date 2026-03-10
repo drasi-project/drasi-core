@@ -17,7 +17,9 @@
 //! This module provides all reaction-related operations including adding, removing,
 //! starting, and stopping reactions.
 
-use crate::channels::ComponentStatus;
+use futures::stream::Stream;
+
+use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_state_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
@@ -74,11 +76,11 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.remove_reaction("old-reaction").await?;
+    /// core.remove_reaction("old-reaction", false).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_reaction(&self, id: &str) -> Result<()> {
+    pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         // Stop if running
@@ -97,9 +99,48 @@ impl DrasiLib {
 
         // Delete the reaction
         self.reaction_manager
-            .delete_reaction(id.to_string())
+            .delete_reaction(id.to_string(), cleanup)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Update a reaction by replacing it with a new instance.
+    ///
+    /// This stops the old reaction, replaces it with the new one, and restarts
+    /// if it was running before. Log and event history are preserved.
+    ///
+    /// The new reaction must have the same ID as the existing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reaction doesn't exist, if the IDs don't match,
+    /// or if the new reaction cannot be started.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // let new_reaction = MyReaction::new(updated_config);
+    /// // core.update_reaction("my-reaction", new_reaction).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_reaction(
+        &self,
+        id: &str,
+        new_reaction: impl crate::reactions::Reaction + 'static,
+    ) -> Result<()> {
+        self.state_guard.require_initialized().await?;
+
+        self.reaction_manager
+            .update_reaction(id.to_string(), new_reaction)
+            .await
+            .map_err(|e| match e.downcast::<DrasiError>() {
+                Ok(drasi_err) => drasi_err,
+                Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
+            })?;
 
         Ok(())
     }
@@ -198,5 +239,117 @@ impl DrasiLib {
     /// ```
     pub async fn get_reaction_status(&self, id: &str) -> Result<ComponentStatus> {
         self.inspection.get_reaction_status(id).await
+    }
+
+    /// Get lifecycle events for a specific reaction as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first). Up to 100 most recent
+    /// events are retained per component.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_reaction_events("my-reaction").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_reaction_events(
+        &self,
+        id: &str,
+    ) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_reaction_events(id).await
+    }
+
+    /// Get all lifecycle events across all reactions as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_reaction_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_reaction_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_reaction_events().await
+    }
+
+    /// Get all lifecycle events across all components (sources, queries, reactions) as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{} ({:?}): {:?}", event.component_id, event.component_type, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_events().await
+    }
+
+    /// Subscribe to live logs for a reaction.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the reaction.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (history, mut receiver) = core.subscribe_reaction_logs("my-reaction").await?;
+    ///
+    /// // Print historical logs
+    /// for log in history {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    ///
+    /// // Listen for new logs
+    /// while let Ok(log) = receiver.recv().await {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_reaction_logs(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.inspection.subscribe_reaction_logs(id).await
+    }
+
+    /// Subscribe to live events for a reaction.
+    ///
+    /// Returns the event history (oldest first) and a broadcast receiver for new events
+    /// as they occur. Events include lifecycle status changes such as Starting, Running,
+    /// Error, Stopped.
+    pub async fn subscribe_reaction_events(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_reaction_events(id).await
     }
 }

@@ -34,7 +34,10 @@ use crate::{
         EvaluationError, ExpressionEvaluationContext, ExpressionEvaluator, InstantQueryClock,
         QueryPartEvaluator,
     },
-    interface::{ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock},
+    interface::{
+        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock,
+        SessionControl, SessionGuard,
+    },
     middleware::SourceMiddlewarePipelineCollection,
     models::{Element, SourceChange},
     path_solver::{
@@ -43,6 +46,15 @@ use crate::{
         MatchPathSolver, MatchSolveContext,
     },
 };
+
+/// Result of processing a due future item.
+/// Contains the evaluation results and the source_id from the popped future's element_ref,
+/// needed by the lib crate to record provenance in QueryResult metadata.
+pub struct DueFutureResult {
+    pub results: Vec<QueryPartEvaluationContext>,
+    /// The source_id from the popped future's element_ref.
+    pub source_id: Arc<str>,
+}
 
 pub struct ContinuousQuery {
     expression_evaluator: Arc<ExpressionEvaluator>,
@@ -56,6 +68,7 @@ pub struct ContinuousQuery {
     future_queue_task: Mutex<Option<JoinHandle<()>>>,
     change_lock: Mutex<()>,
     source_pipelines: SourceMiddlewarePipelineCollection,
+    session_control: Arc<dyn SessionControl>,
 }
 
 impl ContinuousQuery {
@@ -69,6 +82,7 @@ impl ContinuousQuery {
         part_evaluator: Arc<QueryPartEvaluator>,
         future_queue: Arc<dyn FutureQueue>,
         source_pipelines: SourceMiddlewarePipelineCollection,
+        session_control: Arc<dyn SessionControl>,
     ) -> Self {
         Self {
             expression_evaluator,
@@ -82,6 +96,7 @@ impl ContinuousQuery {
             future_queue_task: Mutex::new(None),
             change_lock: Mutex::new(()),
             source_pipelines,
+            session_control,
         }
     }
 
@@ -90,11 +105,58 @@ impl ContinuousQuery {
         &self,
         change: SourceChange,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        //println!("-> process_source_change {:?}", change);
         let _lock = self.change_lock.lock().await;
-        let mut result = Vec::new();
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
 
         let changes = self.execute_source_middleware(change).await?;
+        let result = self.process_changes_inner(changes).await?;
+
+        guard.commit().await?;
+        Ok(result)
+    }
+
+    /// Atomically pop a due future from the queue and process it within a single session.
+    ///
+    /// Returns `Ok(None)` when the queue is empty (stale peek).
+    /// Returns `Ok(Some(DueFutureResult))` with results and the original source_id.
+    ///
+    /// Pop happens inside the session → atomic with all downstream index writes.
+    /// If a crash occurs before commit, the pop rolls back and the item stays in the queue.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_due_futures(&self) -> Result<Option<DueFutureResult>, EvaluationError> {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let future_ref = match self.future_queue.pop().await {
+            Ok(Some(fr)) => fr,
+            Ok(None) => {
+                guard.commit().await?;
+                return Ok(None);
+            }
+            Err(e) => return Err(EvaluationError::from(e)),
+        };
+
+        let source_id = future_ref.element_ref.source_id.clone();
+        let change = SourceChange::Future { future_ref };
+        let changes = self.execute_source_middleware(change).await?;
+        let results = self.process_changes_inner(changes).await?;
+        guard.commit().await?;
+        Ok(Some(DueFutureResult { results, source_id }))
+    }
+
+    /// Expose the ContinuousQuery's future queue for external polling.
+    pub fn future_queue(&self) -> Arc<dyn FutureQueue> {
+        self.future_queue.clone()
+    }
+
+    /// Inner processing logic shared by `process_source_change` and `process_due_futures`.
+    /// Must be called within an active session and while holding `change_lock`.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    async fn process_changes_inner(
+        &self,
+        changes: Vec<SourceChange>,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
+        let mut result = Vec::new();
 
         for change in changes {
             let base_variables = QueryVariables::new(); //todo: get query parameters
@@ -111,7 +173,7 @@ impl ContinuousQuery {
             let mut aggregation_results = CollapsedAggregationResults::new();
 
             for (solution_signature, part_context) in solution_changes.changes {
-                let change_results = self
+                let change_results = match self
                     .project_solution(
                         part_context,
                         &ChangeContext {
@@ -125,7 +187,15 @@ impl ContinuousQuery {
                             after_grouping_hash: solution_signature,
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(EvaluationError::DivideByZero) => {
+                        log::debug!("Skipping solution due to DivideByZero in projection");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
                 change_results.into_iter().for_each(|ctx| {
                     match &ctx {
                         QueryPartEvaluationContext::Aggregation {
@@ -142,7 +212,7 @@ impl ContinuousQuery {
 
                             aggregation_results.insert(ctx);
                         }
-                        QueryPartEvaluationContext::Updating { before, after } => {
+                        QueryPartEvaluationContext::Updating { before, after, .. } => {
                             if before == after {
                                 return;
                             }
@@ -157,7 +227,7 @@ impl ContinuousQuery {
                 result.push(ctx);
             }
         }
-        //println!("--> process_source_change result {:?}", result);
+
         Ok(result)
     }
 
@@ -324,12 +394,14 @@ impl ContinuousQuery {
                     QueryPartEvaluationContext::Updating {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 )),
                 None => result.changes.push((
                     *sig,
                     QueryPartEvaluationContext::Removing {
                         before: before_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 )),
             }
@@ -341,6 +413,7 @@ impl ContinuousQuery {
                     *sig,
                     QueryPartEvaluationContext::Adding {
                         after: after_sol.into_query_variables(&self.match_path, base_variables),
+                        row_signature: 0,
                     },
                 ))
             }
@@ -491,7 +564,46 @@ impl ContinuousQuery {
             contexts = result.clone();
         }
 
-        Ok(result.into_iter().map(|(ctx, _)| ctx).collect())
+        Ok(result
+            .into_iter()
+            .map(|(ctx, cc)| match ctx {
+                QueryPartEvaluationContext::Adding { after, .. } => {
+                    QueryPartEvaluationContext::Adding {
+                        after,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Updating { before, after, .. } => {
+                    QueryPartEvaluationContext::Updating {
+                        before,
+                        after,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Removing { before, .. } => {
+                    QueryPartEvaluationContext::Removing {
+                        before,
+                        row_signature: cc.solution_signature,
+                    }
+                }
+                QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    ..
+                } => QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    row_signature: cc.after_grouping_hash,
+                },
+                QueryPartEvaluationContext::Noop => QueryPartEvaluationContext::Noop,
+            })
+            .collect())
     }
 
     #[tracing::instrument(skip_all, err, level = "debug")]
@@ -540,23 +652,11 @@ impl ContinuousQuery {
                         break;
                     }
                     peek = queue.peek_due_time() => {
-                        let fut_ref = match peek {
+                        match peek {
                             Ok(Some(due_time)) => {
                                 if due_time > consumer.now() {
                                     tokio::time::sleep(idle_interval).await;
                                     continue;
-                                }
-                                match queue.pop().await {
-                                    Ok(Some(element)) => element,
-                                    Ok(None) => {
-                                        tokio::time::sleep(idle_interval).await;
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        log::error!("Future queue consumer error: {e:?}");
-                                        tokio::time::sleep(error_interval).await;
-                                        continue;
-                                    }
                                 }
                             }
                             Ok(None) => {
@@ -570,13 +670,13 @@ impl ContinuousQuery {
                             }
                         };
 
-                        log::info!("Future queue consumer processing {}", &fut_ref.element_ref);
-
-                        match consumer.on_due(&fut_ref).await {
-                            Ok(_) => log::info!("Future queue consumer processed {}", &fut_ref.element_ref),
+                        // Items are due — delegate to consumer which calls process_due_futures()
+                        match consumer.on_items_due().await {
+                            Ok(_) => {}
                             Err(e) => {
                                 log::error!("Future queue consumer error: {e:?}");
-                                consumer.on_error(&fut_ref, e).await;
+                                consumer.on_error(e).await;
+                                tokio::time::sleep(error_interval).await;
                             }
                         }
                     }
@@ -660,6 +760,7 @@ impl CollapsedAggregationResults {
             grouping_keys,
             default_before,
             default_after,
+            ..
         } = context
         {
             let after_key = extract_grouping_value_hash(&grouping_keys, &after);
@@ -684,6 +785,7 @@ impl CollapsedAggregationResults {
                                     default_after,
                                     after,
                                     grouping_keys,
+                                    row_signature: after_key,
                                 },
                                 before_key,
                             ),
@@ -700,6 +802,7 @@ impl CollapsedAggregationResults {
                                 grouping_keys,
                                 default_before,
                                 default_after,
+                                row_signature: after_key,
                             },
                             before_key,
                         ),
@@ -725,7 +828,27 @@ impl CollapsedAggregationResults {
     }
 
     fn into_result_vec(self) -> Vec<QueryPartEvaluationContext> {
-        self.data.into_iter().map(|(_, (v, _))| v).collect()
+        self.data
+            .into_iter()
+            .map(|(after_key, (ctx, _))| match ctx {
+                QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    ..
+                } => QueryPartEvaluationContext::Aggregation {
+                    before,
+                    after,
+                    grouping_keys,
+                    default_before,
+                    default_after,
+                    row_signature: after_key,
+                },
+                other => other,
+            })
+            .collect()
     }
 }
 

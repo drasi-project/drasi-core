@@ -28,6 +28,9 @@ pub mod state_store;
 /// Error types for drasi-lib
 pub mod error;
 
+/// Identity providers for authentication credentials
+pub mod identity;
+
 // ============================================================================
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
@@ -98,8 +101,20 @@ pub use error::{DrasiError, Result};
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
 
+/// Component event for tracking lifecycle changes
+pub use channels::{ComponentEvent, ComponentType};
+
+/// Subscription response for source subscriptions
+pub use channels::SubscriptionResponse;
+
 /// Dispatch mode for configuring event routing (Broadcast or Channel)
 pub use channels::DispatchMode;
+
+/// Log level and log message types for component log streaming
+pub use managers::{LogLevel, LogMessage};
+
+/// Tracing initialization function - call to set up component log routing
+pub use managers::{get_or_init_global_registry, init_tracing, try_init_tracing};
 
 // ============================================================================
 // Configuration Types
@@ -108,7 +123,7 @@ pub use channels::DispatchMode;
 /// Configuration types
 pub use config::{
     DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime, ReactionRuntime, RuntimeConfig,
-    SourceRuntime,
+    SourceRuntime, SourceSubscriptionSettings,
 };
 
 /// Storage backend configuration types
@@ -122,7 +137,7 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use sources::Source;
 
 /// Reaction traits for implementing reaction plugins
-pub use reactions::{QueryProvider, Reaction};
+pub use reactions::Reaction;
 
 /// Bootstrap provider trait for implementing bootstrap plugins
 pub use bootstrap::BootstrapProvider;

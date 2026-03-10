@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::process_solution;
+use super::{process_solution, IGNORED_ROW_SIGNATURE};
 
 use crate::{
     evaluation::{
@@ -77,6 +77,7 @@ async fn aggregating_query_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -95,7 +96,8 @@ async fn aggregating_query_add_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(1.0),
               "my_min" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -104,6 +106,7 @@ async fn aggregating_query_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -122,7 +125,8 @@ async fn aggregating_query_add_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(3.0),
               "my_min" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -131,6 +135,7 @@ async fn aggregating_query_add_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -149,7 +154,8 @@ async fn aggregating_query_add_solution() {
               "key" => json!("bar"),
               "my_sum" => json!(5.0),
               "my_min" => json!(5.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -213,6 +219,7 @@ async fn aggregating_query_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -222,6 +229,7 @@ async fn aggregating_query_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -231,6 +239,7 @@ async fn aggregating_query_update_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -241,6 +250,7 @@ async fn aggregating_query_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -259,7 +269,8 @@ async fn aggregating_query_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(4.0),
               "my_min" => json!(2.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -269,6 +280,7 @@ async fn aggregating_query_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1a.clone()],
             after: variablemap!["a" => node1b.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -287,7 +299,8 @@ async fn aggregating_query_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(9.0),
               "my_min" => json!(2.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -297,6 +310,7 @@ async fn aggregating_query_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1b.clone()],
             after: variablemap!["a" => node1c.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -315,7 +329,8 @@ async fn aggregating_query_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(2.0),
               "my_min" => json!(2.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -325,6 +340,7 @@ async fn aggregating_query_update_solution() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1c.clone()],
             after: variablemap!["a" => node1d.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -339,7 +355,8 @@ async fn aggregating_query_update_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(5.0),
               "my_min" => json!(2.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -379,6 +396,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -388,6 +406,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -397,6 +416,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -406,6 +426,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -424,7 +445,8 @@ async fn aggregating_query_remove_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(1.0),
               "my_min" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -433,6 +455,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -451,7 +474,8 @@ async fn aggregating_query_remove_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(3.0),
               "my_min" => json!(1.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -460,6 +484,7 @@ async fn aggregating_query_remove_solution() {
         &evaluator,
         QueryPartEvaluationContext::Removing {
             before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -478,7 +503,8 @@ async fn aggregating_query_remove_solution() {
               "key" => json!("foo"),
               "my_sum" => json!(2.0),
               "my_min" => json!(2.0)
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -524,6 +550,7 @@ async fn group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -533,6 +560,7 @@ async fn group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -542,6 +570,7 @@ async fn group_switch() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -552,6 +581,7 @@ async fn group_switch() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -569,7 +599,8 @@ async fn group_switch() {
                 after: variablemap![
                   "key" => json!("bar"),
                   "my_sum" => json!(6.0)
-                ]
+                ],
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
@@ -582,7 +613,8 @@ async fn group_switch() {
                 after: variablemap![
                   "key" => json!("foo"),
                   "my_sum" => json!(2.0)
-                ]
+                ],
+                row_signature: IGNORED_ROW_SIGNATURE,
             }
         ]
     );
@@ -658,6 +690,7 @@ async fn group_switch_complex_accumulator() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -667,6 +700,7 @@ async fn group_switch_complex_accumulator() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -676,6 +710,7 @@ async fn group_switch_complex_accumulator() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node3.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -686,6 +721,7 @@ async fn group_switch_complex_accumulator() {
         QueryPartEvaluationContext::Updating {
             before: variablemap!["a" => node1.clone()],
             after: variablemap!["a" => node1a.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -703,7 +739,8 @@ async fn group_switch_complex_accumulator() {
                 after: variablemap![
                   "key" => json!("bar"),
                   "my_avg" => json!(3.0)
-                ]
+                ],
+                row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
@@ -716,7 +753,8 @@ async fn group_switch_complex_accumulator() {
                 after: variablemap![
                   "key" => json!("foo"),
                   "my_avg" => json!(2.0)
-                ]
+                ],
+                row_signature: IGNORED_ROW_SIGNATURE,
             }
         ]
     );
@@ -792,6 +830,7 @@ async fn test_aggregating_function_sum_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -806,7 +845,8 @@ async fn test_aggregating_function_sum_duration() {
             ]),
             after: variablemap![
               "my_sum" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -815,6 +855,7 @@ async fn test_aggregating_function_sum_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     );
 
@@ -829,7 +870,8 @@ async fn test_aggregating_function_sum_duration() {
             ]),
             after: variablemap![
               "my_sum" => VariableValue::Duration(Duration::new(ChronoDuration::hours(2) + ChronoDuration::minutes(1)+ ChronoDuration::seconds(1) + ChronoDuration::milliseconds(2),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -888,6 +930,7 @@ async fn test_aggregating_function_max_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -903,7 +946,8 @@ async fn test_aggregating_function_max_duration() {
             ]),
             after: variablemap![
               "max_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -912,6 +956,7 @@ async fn test_aggregating_function_max_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -927,7 +972,8 @@ async fn test_aggregating_function_max_duration() {
             ]),
             after: variablemap![
               "max_result" => VariableValue::Duration(Duration::new(ChronoDuration::hours(2) + ChronoDuration::minutes(1)+ ChronoDuration::milliseconds(2),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -936,6 +982,7 @@ async fn test_aggregating_function_max_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -951,7 +998,8 @@ async fn test_aggregating_function_max_duration() {
             ]),
             after: variablemap![
               "max_result" => VariableValue::Duration(Duration::new(ChronoDuration::hours(2) + ChronoDuration::minutes(1)+ ChronoDuration::milliseconds(2),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -1025,6 +1073,7 @@ async fn test_aggregating_function_max_temporal_instant() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1042,7 +1091,8 @@ async fn test_aggregating_function_max_temporal_instant() {
             after: variablemap![
                 "max_date" => VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2021, 1, 1).unwrap()),
                 "max_localdatetime" => VariableValue::LocalDateTime(chrono::NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 6).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1051,6 +1101,7 @@ async fn test_aggregating_function_max_temporal_instant() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1068,7 +1119,8 @@ async fn test_aggregating_function_max_temporal_instant() {
             after: variablemap![
                 "max_date" => VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2021, 1, 2).unwrap()),
                 "max_localdatetime" => VariableValue::LocalDateTime(chrono::NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 7).unwrap(), chrono::NaiveTime::from_hms_opt(2, 2, 2).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1077,6 +1129,7 @@ async fn test_aggregating_function_max_temporal_instant() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1094,7 +1147,8 @@ async fn test_aggregating_function_max_temporal_instant() {
             after: variablemap![
                 "max_date" => VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2021, 1, 2).unwrap()),
                 "max_localdatetime" => VariableValue::LocalDateTime(chrono::NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 7).unwrap(), chrono::NaiveTime::from_hms_opt(2, 2, 2).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -1153,6 +1207,7 @@ async fn test_aggregating_function_min_temporal_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1168,7 +1223,8 @@ async fn test_aggregating_function_min_temporal_duration() {
             ]),
             after: variablemap![
               "min_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1177,6 +1233,7 @@ async fn test_aggregating_function_min_temporal_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node2.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1192,7 +1249,8 @@ async fn test_aggregating_function_min_temporal_duration() {
             ]),
             after: variablemap![
               "min_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1201,6 +1259,7 @@ async fn test_aggregating_function_min_temporal_duration() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1216,7 +1275,8 @@ async fn test_aggregating_function_min_temporal_duration() {
             ]),
             after: variablemap![
               "min_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }
@@ -1289,6 +1349,7 @@ async fn test_aggregating_function_min_temporal_instant() {
         &evaluator,
         QueryPartEvaluationContext::Adding {
             after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1306,7 +1367,8 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_opt(21, 1, 1).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 6).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1317,6 +1379,7 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "a" => node2.clone()
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1334,7 +1397,8 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_milli_opt(11,32,23,123).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 1).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 
@@ -1345,6 +1409,7 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "a" => node1.clone()
             ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         },
     )
     .await;
@@ -1362,7 +1427,8 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_milli_opt(11,32,23,123).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 1).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
-            ]
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
 }

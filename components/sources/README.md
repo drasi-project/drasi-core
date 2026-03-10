@@ -16,6 +16,7 @@ This guide explains how to create custom source plugins for Drasi. Sources are t
 - [Configuration Patterns](#configuration-patterns)
 - [Testing Sources](#testing-sources)
 - [Key Files Reference](#key-files-reference)
+- [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)
 
 ## Overview
 
@@ -339,8 +340,6 @@ The unified event envelope:
 pub enum SourceEvent {
     Change(SourceChange),              // Data change
     Control(SourceControl),            // Query coordination
-    BootstrapStart { query_id: String },
-    BootstrapEnd { query_id: String },
 }
 ```
 
@@ -1107,6 +1106,12 @@ When creating a new source plugin:
 - [ ] Dispatch events with profiling metadata
 - [ ] Optional: Implement bootstrap provider
 - [ ] Optional: Implement builder pattern for ergonomic construction
+- [ ] Optional: Package as a dynamic plugin (see [Packaging as a Dynamic Plugin](#packaging-as-a-dynamic-plugin)):
+  - [ ] Set `crate-type = ["lib", "cdylib"]` in `Cargo.toml`
+  - [ ] Add `drasi-plugin-sdk` and `utoipa` dependencies
+  - [ ] Create `descriptor.rs` with configuration DTOs and `SourcePluginDescriptor` impl
+  - [ ] Add `export_plugin!` macro invocation in `lib.rs`
+  - [ ] Build and verify the `.so`/`.dylib`/`.dll` loads in the server's `plugins/` directory
 - [ ] Add unit tests
 - [ ] Add integration tests
 - [ ] Document configuration options
@@ -1271,8 +1276,190 @@ async fn start(&self) -> Result<()> {
 }
 ```
 
+## Packaging as a Dynamic Plugin
+
+Sources can be packaged as dynamic plugins (shared libraries) so they are loaded at runtime by the Drasi server. The mock source (`components/sources/mock/`) is the reference implementation for this pattern.
+
+### Cargo.toml Setup
+
+Add the `cdylib` crate type and the required dependencies:
+
+```toml
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+# ... your other dependencies
+```
+
+Keeping `"lib"` alongside `"cdylib"` lets the crate be used as a normal Rust library (e.g. in tests or when linking statically) in addition to producing the shared library.
+
+See `components/sources/mock/Cargo.toml` for a complete example.
+
+### Configuration DTOs
+
+Create a `descriptor.rs` module that defines configuration Data Transfer Objects (DTOs). These DTOs are serialized/deserialized from JSON and also provide an OpenAPI schema for the server's API documentation.
+
+```rust
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+/// Configuration DTO for my source.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = source::my_kind::MySourceConfig)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MySourceConfigDto {
+    pub endpoint: ConfigValue<String>,
+    #[serde(default = "default_interval")]
+    pub poll_interval_ms: ConfigValue<u64>,
+}
+
+fn default_interval() -> ConfigValue<u64> {
+    ConfigValue::Static(5000)
+}
+
+#[derive(OpenApi)]
+#[openapi(components(schemas(MySourceConfigDto)))]
+struct MySourceSchemas;
+```
+
+Key points:
+- **`#[schema(as = source::my_kind::ConfigName)]`** sets the schema path used by the server to locate the schema.
+- **`ConfigValue<T>`** wraps values that can be either a literal (`ConfigValue::Static(val)`) or resolved from an environment variable at runtime. Use `DtoMapper::resolve_typed()` to resolve them.
+- The `OpenApi` derive struct generates the JSON schema that the server exposes.
+
+### The SourcePluginDescriptor Trait
+
+Implement `SourcePluginDescriptor` to tell the plugin SDK how to create your source:
+
+```rust
+use crate::MySourceBuilder;
+use drasi_plugin_sdk::prelude::*;
+use utoipa::OpenApi;
+
+pub struct MySourceDescriptor;
+
+#[async_trait]
+impl SourcePluginDescriptor for MySourceDescriptor {
+    fn kind(&self) -> &str {
+        "my-kind"
+    }
+
+    fn config_version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn config_schema_name(&self) -> &str {
+        "source.my_kind.MySourceConfig"
+    }
+
+    fn config_schema_json(&self) -> String {
+        let api = MySourceSchemas::openapi();
+        serde_json::to_string(
+            &api.components
+                .as_ref()
+                .expect("OpenAPI components missing")
+                .schemas,
+        )
+        .expect("Failed to serialize config schema")
+    }
+
+    async fn create_source(
+        &self,
+        id: &str,
+        config_json: &serde_json::Value,
+        auto_start: bool,
+    ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
+        let dto: MySourceConfigDto = serde_json::from_value(config_json.clone())?;
+        let mapper = DtoMapper::new();
+
+        let source = MySourceBuilder::new(id)
+            .with_endpoint(&mapper.resolve_typed::<String>(&dto.endpoint)?)
+            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms)?)
+            .with_auto_start(auto_start)
+            .build()?;
+
+        Ok(Box::new(source))
+    }
+}
+```
+
+The `config_schema_name()` return value must match the `#[schema(as = ...)]` path on your config DTO, using dot-separated segments (e.g. `source.my_kind.MySourceConfig`).
+
+### The export_plugin! Macro
+
+In your `lib.rs`, invoke the `export_plugin!` macro to generate the FFI entry points that the server uses to load the plugin:
+
+```rust
+pub mod descriptor;
+
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
+```
+
+The mock source gates this behind a `dynamic-plugin` feature flag so the macro is only compiled when building the shared library. This is optional but can be useful if you want to avoid the cdylib overhead in tests.
+
+### Building
+
+Build the plugin with:
+
+```bash
+cargo build
+```
+
+This produces a shared library in `target/debug/`:
+- Linux: `libdrasi_source_my_kind.so`
+- macOS: `libdrasi_source_my_kind.dylib`
+- Windows: `drasi_source_my_kind.dll`
+
+Copy the shared library into the server's `plugins/` directory (next to the `drasi-server` binary) and the server will load it automatically on startup.
+
+### Bundling Bootstrap Providers
+
+If your source has an associated bootstrap provider, you can export it from the same plugin crate. Implement `BootstrapPluginDescriptor` in your `descriptor.rs` and add it to the `bootstrap_descriptors` list in the `export_plugin!` macro:
+
+```rust
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "my-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MySourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MyBootstrapDescriptor],
+);
+```
+
+This keeps the source and its bootstrap provider together in a single shared library.
+
+> **Signing:** Published plugins should be signed with cosign: `cargo xtask publish-plugins --sign`
+
 ## Additional Resources
 
 - See individual plugin directories for implementation examples
 - Check `lib/CLAUDE.md` for library architecture details
 - Review the parent `drasi-core/CLAUDE.md` for query engine information
+
+## AI Generated Sources (experimental)
+
+We have experimental AI agents for developing new sources. These agents work as a planner/executor pair where the `source-planner` will generate a comprehensive plan for building a source that the user must then review and refine. Once the user is satisfied with the plan, switch to the `source-plan-executor` agent to implement it.
+
+For local usage with the Copilot CLI:
+
+- Start Copilot CLI
+- Select the `source-planner` agent using `/agent`
+- Select the `claude-sonnet-4.5` or `claude-opus-4.5` model using `/model` (CLI does not use the model defined in the frontmatter)
+- Run a prompt like `Please write a plan for an XXXX source and save it to file in my workspace`
+- Once the plan is complete, review it and tweak it in the generated file
+- Switch to the `gpt-5.2-codex` model using `/model`
+- Switch to the `source-plan-executor` agent using `/agent`
+- Run the prompt: `please implement the plan`

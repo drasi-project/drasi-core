@@ -17,7 +17,9 @@
 //! This module provides all source-related operations including adding, removing,
 //! starting, and stopping sources.
 
-use crate::channels::ComponentStatus;
+use futures::stream::Stream;
+
+use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
 use crate::config::SourceRuntime;
 use crate::error::{DrasiError, Result};
@@ -74,11 +76,11 @@ impl DrasiLib {
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// core.remove_source("old-source").await?;
+    /// core.remove_source("old-source", false).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn remove_source(&self, id: &str) -> Result<()> {
+    pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
         // Stop if running
@@ -97,9 +99,48 @@ impl DrasiLib {
 
         // Delete the source
         self.source_manager
-            .delete_source(id.to_string())
+            .delete_source(id.to_string(), cleanup)
             .await
             .map_err(|e| DrasiError::provisioning(format!("Failed to delete source: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Update a source by replacing it with a new instance.
+    ///
+    /// This stops the old source, replaces it with the new one, and restarts
+    /// if it was running before. Log and event history are preserved.
+    ///
+    /// The new source must have the same ID as the existing one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source doesn't exist, if the IDs don't match,
+    /// or if the new source cannot be started.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// // let new_source = MySource::new(updated_config)?;
+    /// // core.update_source("my-source", new_source).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_source(
+        &self,
+        id: &str,
+        new_source: impl crate::sources::Source + 'static,
+    ) -> Result<()> {
+        self.state_guard.require_initialized().await?;
+
+        self.source_manager
+            .update_source(id.to_string(), new_source)
+            .await
+            .map_err(|e| match e.downcast::<DrasiError>() {
+                Ok(drasi_err) => drasi_err,
+                Err(e) => DrasiError::provisioning(format!("Failed to update source: {e}")),
+            })?;
 
         Ok(())
     }
@@ -192,5 +233,113 @@ impl DrasiLib {
     /// ```
     pub async fn get_source_status(&self, id: &str) -> Result<ComponentStatus> {
         self.inspection.get_source_status(id).await
+    }
+
+    /// Get lifecycle events for a specific source as an async stream.
+    ///
+    /// Returns events in chronological order (oldest first). Up to 100 most recent
+    /// events are retained per component.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_source_events("my-source").await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("Event: {:?} - {:?}", event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_source_events(&self, id: &str) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_source_events(id).await
+    }
+
+    /// Get all lifecycle events across all sources as an async stream.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # use futures::StreamExt;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut events = core.get_all_source_events().await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{}: {:?}", event.component_id, event.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_all_source_events(&self) -> Result<impl Stream<Item = ComponentEvent>> {
+        self.inspection.get_all_source_events().await
+    }
+
+    /// Subscribe to live logs for a source.
+    ///
+    /// Returns the log history and a broadcast receiver for new logs.
+    /// The receiver will receive new log messages as they are emitted by the source.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+    ///
+    /// // Print historical logs
+    /// for log in history {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    ///
+    /// // Listen for new logs
+    /// while let Ok(log) = receiver.recv().await {
+    ///     println!("[{:?}] {}", log.level, log.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_source_logs(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<crate::managers::LogMessage>,
+        tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
+    )> {
+        self.inspection.subscribe_source_logs(id).await
+    }
+
+    /// Subscribe to live events for a source.
+    ///
+    /// Returns the event history (oldest first) and a broadcast receiver for new events
+    /// as they occur. Events include lifecycle status changes such as Starting, Running,
+    /// Error, Stopped.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # async fn example(core: &DrasiLib) -> anyhow::Result<()> {
+    /// let (history, mut receiver) = core.subscribe_source_events("my-source").await?;
+    ///
+    /// // Print historical events
+    /// for event in history {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    ///
+    /// // Listen for new events
+    /// while let Ok(event) = receiver.recv().await {
+    ///     println!("[{:?}] {:?}: {:?}", event.timestamp, event.status, event.message);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_source_events(
+        &self,
+        id: &str,
+    ) -> Result<(
+        Vec<ComponentEvent>,
+        tokio::sync::broadcast::Receiver<ComponentEvent>,
+    )> {
+        self.inspection.subscribe_source_events(id).await
     }
 }
