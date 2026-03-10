@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/cloudflare-radar",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/cloudflare-radar",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -112,9 +114,11 @@ drasi-index-garnet = { version = "0.1.5", path = "components/indexes/garnet" }
 drasi-source-mssql = { version = "0.1.0", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.1.0", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-postgres = { version = "0.1.10", path = "components/bootstrappers/postgres" }
+drasi-bootstrap-cloudflare-radar = { version = "0.1.0", path = "components/bootstrappers/cloudflare-radar" }
 drasi-reaction-application = { version = "0.2.7", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.1.10", path = "components/sources/postgres" }
 drasi-source-application = { version = "0.1.9", path = "components/sources/application" }
+drasi-source-cloudflare-radar = { version = "0.1.0", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }

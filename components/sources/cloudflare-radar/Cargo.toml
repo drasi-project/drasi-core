@@ -1,0 +1,56 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-source-cloudflare-radar"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Cloudflare Radar source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "cloudflare", "radar"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+testcontainers = "0.23"
+drasi-bootstrap-cloudflare-radar.workspace = true
+drasi-reaction-application = { path = "../../reactions/application" }
+env_logger = "0.11"
+
+[features]
+# default = []
+dynamic-plugin = []

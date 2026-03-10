@@ -66,7 +66,7 @@ pub const MAX_REASONABLE_MILLIS_TIMESTAMP: u64 = 10_000_000_000_000;
 ///
 /// # Examples
 /// ```
-/// use drasi_core::models::element::validate_effective_from;
+/// use drasi_core::models::validate_effective_from;
 ///
 /// // Valid millisecond timestamp (Feb 2026)
 /// assert!(validate_effective_from(1_771_000_000_000).is_ok());
