@@ -50,7 +50,18 @@ impl RegisterAggregationFunctions for FunctionRegistry {
         self.register_function("count", Function::Aggregating(Arc::new(Count {})));
         self.register_function("min", Function::Aggregating(Arc::new(Min {})));
         self.register_function("max", Function::Aggregating(Arc::new(Max {})));
-        self.register_function("collect", Function::Aggregating(Arc::new(Collect {})));
+        self.register_function(
+            "collect",
+            Function::Aggregating(Arc::new(Collect {
+                name: "collect".to_owned(),
+            })),
+        );
+        self.register_function(
+            "collect_list",
+            Function::Aggregating(Arc::new(Collect {
+                name: "collect_list".to_owned(),
+            })),
+        );
         self.register_function(
             "drasi.linearGradient",
             Function::Aggregating(Arc::new(LinearGradient {})),
