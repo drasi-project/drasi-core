@@ -21,6 +21,7 @@ use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_sse::{QueryConfig, SseExtension, SseReaction, TemplateSpec};
 use futures_util::StreamExt;
 use mock_source::{MockSource, PropertyMapBuilder};
+use serde_json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -219,6 +220,330 @@ async fn test_sse_custom_templates_integration() -> Result<()> {
         received_custom_event,
         "Should receive custom templated event"
     );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test that aggregation query results are delivered as SSE events in default format.
+///
+/// When no custom routes are configured, the SSE reaction sends all results
+/// (including Aggregation variants) in the default JSON format.
+#[tokio::test]
+async fn test_sse_aggregation_default_format() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    // Aggregation query using COUNT
+    let query = Query::cypher("agg-default-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // No custom routes - uses default format
+    let sse_reaction = SseReaction::builder("test-sse-agg-default")
+        .with_port(18083)
+        .with_query("agg-default-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-default")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18083/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(5);
+
+    // Insert a sensor node - should trigger aggregation result
+    let props = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props)
+        .await?;
+
+    // Collect events with a timeout
+    let mut received_aggregation = false;
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received SSE event: {data}");
+
+                // Default format includes the serialized ResultDiff with type "aggregation"
+                if data.contains("aggregation") && data.contains("sensor_count") {
+                    received_aggregation = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for SSE aggregation event"
+    );
+    assert!(
+        received_aggregation,
+        "Should receive aggregation event with sensor_count"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test that aggregation results are routed through the `updated` template spec.
+///
+/// Aggregation events use the `updated` route configuration, allowing users
+/// to format aggregation output with custom Handlebars templates.
+#[tokio::test]
+async fn test_sse_aggregation_custom_template() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("agg-template-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // Configure an "updated" template — aggregation events route through it
+    let custom_config = QueryConfig {
+        added: None,
+        updated: Some(TemplateSpec::with_extension(
+            r#"{"event":"aggregation_update","sensor_count":{{after.sensor_count}}}"#,
+            SseExtension { path: None },
+        )),
+        deleted: None,
+    };
+
+    let sse_reaction = SseReaction::builder("test-sse-agg-template")
+        .with_port(18084)
+        .with_query("agg-template-query")
+        .with_route("agg-template-query", custom_config)
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-template")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18084/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(5);
+
+    let props = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props)
+        .await?;
+
+    let mut received_custom_event = false;
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received custom aggregation event: {data}");
+
+                if data.contains("aggregation_update") && data.contains("sensor_count") {
+                    // Verify the custom template was applied
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&data).expect("Event data should be valid JSON");
+                    assert_eq!(parsed["event"], "aggregation_update");
+                    assert_eq!(parsed["sensor_count"], 1);
+                    received_custom_event = true;
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for custom aggregation SSE event"
+    );
+    assert!(
+        received_custom_event,
+        "Should receive custom templated aggregation event"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test aggregation before/after values across multiple inserts.
+///
+/// The first insert produces `Aggregation { before: { sensor_count: 0 }, after: { sensor_count: 1 } }`.
+/// The second insert produces `Aggregation { before: { sensor_count: 1 }, after: { sensor_count: 2 } }`.
+#[tokio::test]
+async fn test_sse_aggregation_before_after() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("agg-ba-query")
+        .query(
+            r#"
+            MATCH (s:Sensor)
+            RETURN count(s) AS sensor_count
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // No custom routes - default format includes the full ResultDiff JSON
+    let sse_reaction = SseReaction::builder("test-sse-agg-ba")
+        .with_port(18085)
+        .with_query("agg-ba-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("test-core-agg-ba")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    let client = reqwest::Client::new();
+    let response = client.get("http://localhost:18085/events").send().await?;
+    assert_eq!(response.status(), 200);
+
+    let stream = response.bytes_stream();
+    let mut event_stream = eventsource_stream::EventStream::new(stream).take(10);
+
+    // Insert first sensor
+    let props1 = PropertyMapBuilder::new()
+        .with_string("location", "building-a")
+        .with_float("temperature", 22.5)
+        .build();
+    handle
+        .send_node_insert("sensor-1", vec!["Sensor"], props1)
+        .await?;
+
+    // Give time for first event to be processed
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert second sensor
+    let props2 = PropertyMapBuilder::new()
+        .with_string("location", "building-b")
+        .with_float("temperature", 24.0)
+        .build();
+    handle
+        .send_node_insert("sensor-2", vec!["Sensor"], props2)
+        .await?;
+
+    // Collect aggregation events
+    let mut aggregation_events: Vec<serde_json::Value> = Vec::new();
+    let collect_result = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event_result) = event_stream.next().await {
+            if let Ok(event) = event_result {
+                let data = event.data.clone();
+                log::info!("Received SSE event: {data}");
+
+                if data.contains("aggregation") && data.contains("sensor_count") {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
+                        aggregation_events.push(parsed);
+                        if aggregation_events.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        collect_result.is_ok(),
+        "Timed out waiting for aggregation SSE events"
+    );
+    assert!(
+        aggregation_events.len() >= 2,
+        "Should receive at least 2 aggregation events, got {}",
+        aggregation_events.len()
+    );
+
+    // First event: before has the initial aggregation state (count=0)
+    let first_results = aggregation_events[0]["results"]
+        .as_array()
+        .expect("results should be an array");
+    let first_agg = first_results
+        .iter()
+        .find(|r| r["type"] == "aggregation")
+        .expect("First event should contain aggregation result");
+    assert_eq!(
+        first_agg["before"]["sensor_count"], 0,
+        "First aggregation before should have sensor_count=0"
+    );
+    assert_eq!(first_agg["after"]["sensor_count"], 1);
+
+    // Second event: before should contain previous state (count=1)
+    let second_results = aggregation_events[1]["results"]
+        .as_array()
+        .expect("results should be an array");
+    let second_agg = second_results
+        .iter()
+        .find(|r| r["type"] == "aggregation")
+        .expect("Second event should contain aggregation result");
+    assert_eq!(
+        second_agg["before"]["sensor_count"], 1,
+        "Second aggregation before should have sensor_count=1"
+    );
+    assert_eq!(second_agg["after"]["sensor_count"], 2);
 
     core.stop().await?;
     Ok(())
