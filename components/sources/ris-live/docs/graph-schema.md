@@ -101,7 +101,7 @@ This reads as "Peer **routes** traffic toward Prefix".
 | Field | Description |
 |---|---|
 | **Label** | `ROUTES` |
-| **ID format** | `{peer_ip}\|{prefix}` (e.g. `208.80.153.193\|203.0.113.0/24`) |
+| **ID format** | `{host}\|{peer_ip}\|{prefix}` (e.g. `rrc00.ripe.net\|208.80.153.193\|203.0.113.0/24`) |
 | **Start node** | `Peer` (in_node) |
 | **End node** | `Prefix` (out_node) |
 
@@ -131,7 +131,7 @@ This reads as "Peer **routes** traffic toward Prefix".
 | Withdrawal | **DELETE** ROUTES relationship |
 
 **Notes:**
-- The relationship ID uses only `{peer_ip}|{prefix}` (without the host), meaning that if the same peer announces the same prefix and is seen by multiple collectors, each collector produces a separate ROUTES edge (because the Peer nodes differ).
+- The relationship ID includes `{host}|{peer_ip}|{prefix}`, so the same physical peer announcing the same prefix will produce distinct ROUTES edges when observed by different collectors.
 - When a route is updated (e.g. AS path changes), all properties are replaced with the new announcement's values.
 - Withdrawals only delete the ROUTES edge. The Peer and Prefix nodes remain.
 
@@ -154,7 +154,7 @@ Some ROUTES properties are computed from the raw BGP message:
 |---|---|---|
 | Peer node | `{host}\|{peer_ip}` | `rrc00.ripe.net\|208.80.153.193` |
 | Prefix node | `{prefix}` | `203.0.113.0/24` |
-| ROUTES rel | `{peer_ip}\|{prefix}` | `208.80.153.193\|203.0.113.0/24` |
+| ROUTES rel | `{host}\|{peer_ip}\|{prefix}` | `rrc00.ripe.net\|208.80.153.193\|203.0.113.0/24` |
 
 ---
 
@@ -165,20 +165,20 @@ The graph starts empty and fills as announcements arrive. Over time:
 ```
 t=0   (empty graph)
 
-t=1   Announcement: peer=10.0.0.1, prefix=192.168.0.0/16
+t=1   Announcement: host=rrc00, peer=10.0.0.1, prefix=192.168.0.0/16
       → INSERT Peer "rrc00|10.0.0.1"
       → INSERT Prefix "192.168.0.0/16"
-      → INSERT ROUTES "10.0.0.1|192.168.0.0/16"
+      → INSERT ROUTES "rrc00|10.0.0.1|192.168.0.0/16"
 
-t=2   Announcement: peer=10.0.0.1, prefix=10.0.0.0/8
-      → INSERT Prefix "10.0.0.0/8"                      (Peer already known → no insert)
-      → INSERT ROUTES "10.0.0.1|10.0.0.0/8"
+t=2   Announcement: host=rrc00, peer=10.0.0.1, prefix=10.0.0.0/8
+      → INSERT Prefix "10.0.0.0/8"                              (Peer already known → no insert)
+      → INSERT ROUTES "rrc00|10.0.0.1|10.0.0.0/8"
 
-t=3   Announcement: peer=10.0.0.1, prefix=192.168.0.0/16  (path changed)
-      → UPDATE ROUTES "10.0.0.1|192.168.0.0/16"         (properties refreshed)
+t=3   Announcement: host=rrc00, peer=10.0.0.1, prefix=192.168.0.0/16  (path changed)
+      → UPDATE ROUTES "rrc00|10.0.0.1|192.168.0.0/16"           (properties refreshed)
 
-t=4   Withdrawal: peer=10.0.0.1, prefix=10.0.0.0/8
-      → DELETE ROUTES "10.0.0.1|10.0.0.0/8"             (Peer and Prefix nodes remain)
+t=4   Withdrawal: host=rrc00, peer=10.0.0.1, prefix=10.0.0.0/8
+      → DELETE ROUTES "rrc00|10.0.0.1|10.0.0.0/8"               (Peer and Prefix nodes remain)
 
 t=5   RIS_PEER_STATE: peer=10.0.0.1, state=down
       → UPDATE Peer "rrc00|10.0.0.1"  (state → "down")
