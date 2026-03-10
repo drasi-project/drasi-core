@@ -28,6 +28,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/ris-live",
   "components/sources/mssql",
 
   # Reaction Plugins
@@ -115,6 +116,7 @@ drasi-bootstrap-postgres = { version = "0.1.10", path = "components/bootstrapper
 drasi-reaction-application = { version = "0.2.7", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.1.10", path = "components/sources/postgres" }
 drasi-source-application = { version = "0.1.9", path = "components/sources/application" }
+drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
 drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
