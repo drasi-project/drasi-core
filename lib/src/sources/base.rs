@@ -72,6 +72,8 @@ pub struct SourceBaseParams {
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Optional state store provider to set during construction
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
     /// Optional state store provider to use when running standalone
@@ -86,6 +88,10 @@ impl std::fmt::Debug for SourceBaseParams {
             .field("id", &self.id)
             .field("dispatch_mode", &self.dispatch_mode)
             .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
+            .field(
+                "state_store",
+                &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
+            )
             .field(
                 "bootstrap_provider",
                 &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
@@ -106,6 +112,7 @@ impl SourceBaseParams {
             id: id.into(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
+            state_store: None,
             bootstrap_provider: None,
             state_store: None,
             auto_start: true,
@@ -121,6 +128,15 @@ impl SourceBaseParams {
     /// Set the dispatch buffer capacity
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the state store provider
+    ///
+    /// This is typically used when constructing sources outside of DrasiLib
+    /// and you want to provide a persistent store for checkpointing.
+    pub fn with_state_store(mut self, store: Arc<dyn StateStoreProvider>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -253,7 +269,7 @@ impl SourceBase {
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
 
-        // Initialize bootstrap provider if provided (no async needed at construction time)
+        // Initialize providers if provided (no async needed at construction time)
         let bootstrap_provider = params
             .bootstrap_provider
             .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
