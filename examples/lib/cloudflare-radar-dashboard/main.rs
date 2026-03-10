@@ -133,8 +133,11 @@ async fn main() -> Result<()> {
         .route("/queries/:id/results", get(get_query_results))
         .with_state(api_core);
 
+    let bind_addr = env::var("CF_RADAR_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+
     let api_handle = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
         axum::serve(listener, results_api).await.unwrap();
     });
 
@@ -152,10 +155,18 @@ async fn get_query_results(
     State(core): State<Arc<DrasiLib>>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<serde_json::Value>>, (axum::http::StatusCode, String)> {
-    core.get_query_results(&id)
-        .await
-        .map(Json)
-        .map_err(|e| (axum::http::StatusCode::NOT_FOUND, e.to_string()))
+    match core.get_query_results(&id).await {
+        Ok(results) => Ok(Json(results)),
+        Err(e) => {
+            let msg = e.to_string();
+            let status = if msg.to_lowercase().contains("not found") {
+                axum::http::StatusCode::NOT_FOUND
+            } else {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            Err((status, msg))
+        }
+    }
 }
 
 async fn serve_dashboard() -> Html<&'static str> {
@@ -359,6 +370,13 @@ const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 <script>
 const REFRESH_MS = 10000;
 
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(String(v)));
+  return d.innerHTML;
+}
+
 function countryFlag(code) {
   if (!code || code.length !== 2) return '';
   const offset = 0x1F1E6;
@@ -398,9 +416,9 @@ function renderOutages(data) {
   let html = '<table><tr><th>Location</th><th>Scope</th><th>Cause</th><th>Started</th></tr>';
   for (const r of data) {
     html += '<tr>';
-    html += '<td><span class="country-flag">' + countryFlag(r.country) + '</span>' + (r.country || '—') + '</td>';
-    html += '<td>' + (r.scope || '—') + '</td>';
-    html += '<td>' + (r.cause || '—') + '</td>';
+    html += '<td><span class="country-flag">' + countryFlag(r.country) + '</span>' + esc(r.country || '—') + '</td>';
+    html += '<td>' + esc(r.scope || '—') + '</td>';
+    html += '<td>' + esc(r.cause || '—') + '</td>';
     html += '<td>' + timeAgo(r.started) + '</td>';
     html += '</tr>';
   }
@@ -422,10 +440,10 @@ function renderHijacks(data) {
   for (const r of data) {
     const cls = confClass(r.confidence);
     html += '<tr>';
-    html += '<td style="font-family:monospace;font-size:12px">' + (r.eventId || '—') + '</td>';
-    html += '<td>AS' + (r.hijackerAsn || '?') + '</td>';
-    html += '<td>AS' + (r.victimAsn || '?') + '</td>';
-    html += '<td><span class="confidence ' + cls + '">' + (r.confidence || '?') + '%</span></td>';
+    html += '<td style="font-family:monospace;font-size:12px">' + esc(r.eventId || '—') + '</td>';
+    html += '<td>AS' + esc(r.hijackerAsn || '?') + '</td>';
+    html += '<td>AS' + esc(r.victimAsn || '?') + '</td>';
+    html += '<td><span class="confidence ' + cls + '">' + esc(r.confidence || '?') + '%</span></td>';
     html += '</tr>';
   }
   html += '</table>';
@@ -444,8 +462,8 @@ function renderDomains(data) {
   let html = '<table><tr><th>Rank</th><th>Domain</th></tr>';
   for (const r of sorted.slice(0, 50)) {
     html += '<tr>';
-    html += '<td><span class="rank-num">' + r.rank + '</span></td>';
-    html += '<td>' + (r.domain || '—') + '</td>';
+    html += '<td><span class="rank-num">' + esc(r.rank) + '</span></td>';
+    html += '<td>' + esc(r.domain || '—') + '</td>';
     html += '</tr>';
   }
   if (sorted.length > 50) {

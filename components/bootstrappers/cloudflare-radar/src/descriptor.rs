@@ -140,7 +140,9 @@ impl BootstrapPluginDescriptor for CloudflareRadarBootstrapDescriptor {
         {
             Some(schema) => schema,
             None => {
-                log::warn!("Cloudflare Radar bootstrap schema generation failed; returning empty schema");
+                log::warn!(
+                    "Cloudflare Radar bootstrap schema generation failed; returning empty schema"
+                );
                 "{}".to_string()
             }
         }
