@@ -100,7 +100,7 @@ For a detailed reference of all node types, relationship types, properties, ID f
 |---|---|---|---|
 | **Peer** node | `Peer` | `{host}\|{peer_ip}` | `peer_ip`, `peer_asn`, `host`, `state` |
 | **Prefix** node | `Prefix` | `{prefix}` | `prefix` |
-| **ROUTES** rel | `ROUTES` | `{peer_ip}\|{prefix}` | `next_hop`, `origin_asn`, `path_length`, `path`, `origin`, `community` |
+| **ROUTES** rel | `ROUTES` | `{host}\|{peer_ip}\|{prefix}` | `next_hop`, `origin_asn`, `path_length`, `path`, `origin`, `community` |
 
 ### Event Lifecycle
 

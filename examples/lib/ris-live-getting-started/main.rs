@@ -35,7 +35,6 @@ use drasi_source_ris_live::RisLiveSource;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
-use tower_http::cors::CorsLayer;
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -198,7 +197,6 @@ async fn main() -> Result<()> {
                 }
             }),
         )
-        .layer(CorsLayer::permissive())
         .with_state(event_tx);
 
     println!();
@@ -223,7 +221,7 @@ async fn main() -> Result<()> {
     println!("  Press Ctrl+C to stop");
     println!();
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{dashboard_port}")).await?;
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{dashboard_port}")).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
