@@ -1,0 +1,16 @@
+[package]
+name = "oracle-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+drasi-lib = { path = "../../../lib" }
+drasi-bootstrap-oracle = { path = "../../../components/bootstrappers/oracle" }
+drasi-source-oracle = { path = "../../../components/sources/oracle" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+tokio = { version = "1.0", features = ["full"] }

@@ -31,6 +31,7 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -376,6 +377,17 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
+        self.subscribe_with_bootstrap_context(settings, source_type, HashMap::new())
+            .await
+    }
+
+    /// Subscribe to this source with optional bootstrap context properties.
+    pub async fn subscribe_with_bootstrap_context(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
             settings.query_id, source_type, self.id, settings.enable_bootstrap
@@ -388,7 +400,7 @@ impl SourceBase {
 
         // Handle bootstrap if requested and bootstrap provider is configured
         let bootstrap_receiver = if settings.enable_bootstrap {
-            self.handle_bootstrap_subscription(settings, source_type)
+            self.handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
                 .await?
         } else {
             None
@@ -402,11 +414,23 @@ impl SourceBase {
         })
     }
 
+    /// Create only the bootstrap receiver for a subscription.
+    pub async fn create_bootstrap_receiver(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<Option<BootstrapEventReceiver>> {
+        self.handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
+            .await
+    }
+
     /// Handle bootstrap subscription logic
     async fn handle_bootstrap_subscription(
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
     ) -> Result<Option<BootstrapEventReceiver>> {
         let provider_guard = self.bootstrap_provider.read().await;
         if let Some(provider) = provider_guard.clone() {
@@ -418,10 +442,18 @@ impl SourceBase {
             );
 
             // Create bootstrap context
-            let context = BootstrapContext::new_minimal(
-                self.id.clone(), // server_id
-                self.id.clone(), // source_id
-            );
+            let context = if bootstrap_properties.is_empty() {
+                BootstrapContext::new_minimal(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                )
+            } else {
+                BootstrapContext::with_properties(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                    bootstrap_properties,
+                )
+            };
 
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
