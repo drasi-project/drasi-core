@@ -513,8 +513,8 @@ mod event_transformation {
                     assert_eq!(metadata.reference.element_id.as_ref(), "rel1");
                     assert_eq!(metadata.labels.len(), 1);
                     assert_eq!(metadata.labels[0].as_ref(), "KNOWS");
-                    assert_eq!(out_node.element_id.as_ref(), "node1");
-                    assert_eq!(in_node.element_id.as_ref(), "node2");
+                    assert_eq!(in_node.element_id.as_ref(), "node1");
+                    assert_eq!(out_node.element_id.as_ref(), "node2");
                     assert_eq!(out_node.source_id.as_ref(), "test_source");
                     assert_eq!(in_node.source_id.as_ref(), "test_source");
                     assert!(properties.get("since").is_some());
@@ -554,8 +554,8 @@ mod event_transformation {
                 Element::Relation {
                     out_node, in_node, ..
                 } => {
-                    assert_eq!(out_node.element_id.as_ref(), "node1");
-                    assert_eq!(in_node.element_id.as_ref(), "node2");
+                    assert_eq!(in_node.element_id.as_ref(), "node1");
+                    assert_eq!(out_node.element_id.as_ref(), "node2");
                 }
                 _ => panic!("Expected Relation element"),
             },
