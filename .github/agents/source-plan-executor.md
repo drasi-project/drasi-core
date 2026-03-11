@@ -1,7 +1,7 @@
 ---
 name: source-plan-executor
 description: Executes implementation plans for data source and bootstrap components in Drasi.
-model: gpt-5.2-codex
+model: gpt-5.3-codex
 ---
 
 # source-plan-executor
@@ -709,6 +709,12 @@ Document in completion report:
 - Remove temporary files and POCs
 - Ensure no debug/test code in core components
 - Verify all TODOs resolved
+
+### 9. Review
+
+- Review the new components for bugs and issues, and spawn a parallel sub-agent without the session context to do an independent review
+- Fix any issues found during review
+- Do a second pass review and fix any further issues
 
 ## Runtime Debugging Guide
 
