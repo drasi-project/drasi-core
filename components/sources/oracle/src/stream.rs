@@ -485,7 +485,10 @@ fn event_group_key(
     }
 
     if let Some(sql_undo) = event.sql_undo.as_deref() {
-        let values = parse_sql_undo_insert(sql_undo)?;
+        let values = match event.operation {
+            OracleOperation::Delete | OracleOperation::Insert => parse_sql_undo_insert(sql_undo)?,
+            OracleOperation::Update => parse_sql_undo_update(sql_undo)?,
+        };
         let element_id =
             pk_cache.make_element_id_from_values(&event.schema_name, &event.table_name, &values)?;
         return Ok(element_id);

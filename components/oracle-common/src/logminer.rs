@@ -144,7 +144,9 @@ pub fn split_sql_values(values: &str) -> Vec<String> {
                 current.push(ch);
             }
             ')' if !in_string => {
-                paren_depth -= 1;
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
                 current.push(ch);
             }
             ',' if !in_string && paren_depth == 0 => {
