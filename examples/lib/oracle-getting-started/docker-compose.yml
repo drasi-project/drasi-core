@@ -1,0 +1,10 @@
+services:
+  oracle:
+    image: gvenzl/oracle-free:slim-faststart
+    container_name: drasi-oracle-example
+    ports:
+      - "1522:1521"
+    environment:
+      ORACLE_PASSWORD: drasi123
+      APP_USER: drasi
+      APP_USER_PASSWORD: drasi123
