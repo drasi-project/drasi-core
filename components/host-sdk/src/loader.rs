@@ -232,19 +232,14 @@ pub fn load_plugin_from_path(
             None
         };
 
-    let identity_provider_vtables = if !registration.identity_provider_plugins.is_null()
-        && registration.identity_provider_plugin_count > 0
-    {
-        Some(unsafe {
-            Vec::from_raw_parts(
-                registration.identity_provider_plugins,
-                registration.identity_provider_plugin_count,
-                registration.identity_provider_plugin_count,
-            )
-        })
-    } else {
-        None
-    };
+    // NOTE: We intentionally do not read `identity_provider_plugins` /
+    // `identity_provider_plugin_count` from `FfiPluginRegistration` here.
+    // Those fields were added in a later SDK version, and older plugins built
+    // against the previous ABI may provide a smaller `FfiPluginRegistration`
+    // allocation. Accessing the new fields in that case would read beyond the
+    // end of the struct, causing undefined behavior. Until ABI/SDK versioning
+    // guarantees are tightened, we treat identity provider plugins as absent.
+    let identity_provider_vtables = None;
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
