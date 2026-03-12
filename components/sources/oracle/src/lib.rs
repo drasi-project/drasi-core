@@ -221,7 +221,6 @@ impl Source for OracleSource {
         let query_id = settings.query_id.clone();
         let source_id = self.base.id.clone();
         let mut bootstrap_properties = HashMap::new();
-        let mut bootstrap_sync = self.bootstrap_sync.lock().await;
         let receiver = self.base.create_streaming_receiver().await?;
 
         if settings.enable_bootstrap {
@@ -233,18 +232,20 @@ impl Source for OracleSource {
                         anyhow::anyhow!("Oracle bootstrap SCN task failed: {error}")
                     })??;
 
-            bootstrap_sync.pending_scn = Some(bootstrap_scn);
+            self.bootstrap_sync.lock().await.pending_scn = Some(bootstrap_scn);
             bootstrap_properties.insert(
                 ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY.to_string(),
                 serde_json::Value::Number(serde_json::Number::from(bootstrap_scn.0)),
             );
         }
 
-        let bootstrap_receiver = self
-            .base
-            .create_bootstrap_receiver(&settings, "Oracle", bootstrap_properties)
-            .await?;
-        drop(bootstrap_sync);
+        let bootstrap_receiver = if settings.enable_bootstrap {
+            self.base
+                .create_bootstrap_receiver(&settings, "Oracle", bootstrap_properties)
+                .await?
+        } else {
+            None
+        };
 
         Ok(drasi_lib::channels::SubscriptionResponse {
             query_id,

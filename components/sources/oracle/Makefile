@@ -3,6 +3,7 @@
 ORACLE_CLIENT_HOME ?= $(HOME)/oracle/instantclient_23_3
 export ORACLE_CLIENT_HOME
 export DYLD_LIBRARY_PATH := $(ORACLE_CLIENT_HOME)$(if $(DYLD_LIBRARY_PATH),:$(DYLD_LIBRARY_PATH))
+export LD_LIBRARY_PATH := $(ORACLE_CLIENT_HOME)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
 
 build:
 	cargo build -p drasi-source-oracle
