@@ -218,40 +218,40 @@ fn run_logminer_poll_loop(
                     save_checkpoint(&runtime, &source_id, &state_store, current_checkpoint)?;
                 }
             }
+        }
 
-            let current_scn = get_current_scn(conn)?;
-            if current_scn <= current_checkpoint {
-                std::thread::sleep(Duration::from_millis(config.poll_interval_ms));
-                continue;
+        let current_scn = get_current_scn(conn)?;
+        if current_scn <= current_checkpoint {
+            std::thread::sleep(Duration::from_millis(config.poll_interval_ms));
+            continue;
+        }
+
+        match poll_logminer(
+            conn,
+            current_checkpoint,
+            current_scn,
+            &config.tables,
+            &config.user,
+        ) {
+            Ok((events, next_checkpoint)) => {
+                let changes = convert_events_to_changes(&source_id, conn, &pk_cache, &events)?;
+                if !changes.is_empty() {
+                    batch_tx
+                        .send(changes)
+                        .map_err(|error| anyhow!("failed to send Oracle batch: {error}"))?;
+                }
+                if next_checkpoint != current_checkpoint {
+                    save_checkpoint(&runtime, &source_id, &state_store, next_checkpoint)?;
+                    current_checkpoint = next_checkpoint;
+                }
             }
-
-            match poll_logminer(
-                conn,
-                current_checkpoint,
-                current_scn,
-                &config.tables,
-                &config.user,
-            ) {
-                Ok((events, next_checkpoint)) => {
-                    let changes = convert_events_to_changes(&source_id, conn, &pk_cache, &events)?;
-                    if !changes.is_empty() {
-                        batch_tx
-                            .send(changes)
-                            .map_err(|error| anyhow!("failed to send Oracle batch: {error}"))?;
-                    }
-                    if next_checkpoint != current_checkpoint {
-                        save_checkpoint(&runtime, &source_id, &state_store, next_checkpoint)?;
-                        current_checkpoint = next_checkpoint;
-                    }
+            Err(error) => {
+                if OracleError::classify(&error) == Some(OracleErrorKind::RecoverableScn) {
+                    clear_checkpoint(&runtime, &source_id, &state_store)?;
+                    current_checkpoint = get_current_scn(conn)?;
+                    continue;
                 }
-                Err(error) => {
-                    if OracleError::classify(&error) == Some(OracleErrorKind::RecoverableScn) {
-                        clear_checkpoint(&runtime, &source_id, &state_store)?;
-                        current_checkpoint = get_current_scn(conn)?;
-                        continue;
-                    }
-                    return Err(error);
-                }
+                return Err(error);
             }
         }
 
@@ -580,8 +580,8 @@ fn poll_logminer(
         let operation_code: i64 = row.get(2)?;
         let schema_name: String = row.get(3)?;
         let table_name: String = row.get(4)?;
-        let sql_undo: Option<String> = row.get(5).ok();
-        let row_id: Option<String> = row.get(6).ok();
+        let sql_undo: Option<String> = row.get(5)?;
+        let row_id: Option<String> = row.get(6)?;
 
         let commit_scn = Scn(commit_scn as u64);
         if commit_scn > max_commit_scn {
