@@ -229,10 +229,7 @@ mod tests {
 
         assert_eq!(dto.min_interval_ms, ConfigValue::Static(500));
         assert_eq!(dto.max_interval_seconds, ConfigValue::Static(30));
-        assert_eq!(
-            dto.api_version,
-            ConfigValue::Static("v9.2".to_string())
-        );
+        assert_eq!(dto.api_version, ConfigValue::Static("v9.2".to_string()));
         assert!(!dto.use_azure_cli);
         assert!(dto.entity_set_overrides.is_empty());
         assert!(dto.entity_columns.is_empty());

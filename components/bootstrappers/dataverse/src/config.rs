@@ -267,6 +267,4 @@ mod tests {
             "Azure CLI mode should not require client credentials"
         );
     }
-
-
 }

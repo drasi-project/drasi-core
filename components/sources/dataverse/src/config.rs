@@ -292,6 +292,4 @@ mod tests {
         );
         assert_eq!(config.select_columns("contact"), None);
     }
-
-
 }

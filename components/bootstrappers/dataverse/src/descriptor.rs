@@ -195,10 +195,7 @@ mod tests {
         let dto: DataverseBootstrapConfigDto =
             serde_json::from_value(json).expect("should deserialize");
 
-        assert_eq!(
-            dto.api_version,
-            ConfigValue::Static("v9.2".to_string())
-        );
+        assert_eq!(dto.api_version, ConfigValue::Static("v9.2".to_string()));
         assert_eq!(dto.page_size, ConfigValue::Static(5000));
         assert!(!dto.use_azure_cli);
         assert!(dto.entity_set_overrides.is_empty());
