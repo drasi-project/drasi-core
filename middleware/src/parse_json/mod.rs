@@ -114,6 +114,8 @@ impl ParseJson {
             ElementValue::List(_) => "List",
             ElementValue::Object(_) => "Object",
             ElementValue::Null => "Null",
+            ElementValue::LocalDateTime(_) => "LocalDateTime",
+            ElementValue::ZonedDateTime(_) => "ZonedDateTime",
         }
     }
 

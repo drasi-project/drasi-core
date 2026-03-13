@@ -112,6 +112,8 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             }
             serde_json::Value::Object(result)
         }
+        VariableValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
+        VariableValue::ZonedDateTime(dt) => serde_json::Value::String(dt.datetime().to_rfc3339()),
         // For complex types, convert to string representation
         _ => serde_json::Value::String(format!("{value:?}")),
     }
@@ -146,7 +148,7 @@ async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
     source_id: &str,
     query_id: &str,
-    current_results: &RwLock<Vec<serde_json::Value>>,
+    current_results: &Arc<RwLock<HashMap<u64, serde_json::Value>>>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
@@ -166,39 +168,41 @@ async fn dispatch_query_results(
                 after: convert_query_variables_to_json(after),
                 grouping_keys: None,
             },
-            QueryPartEvaluationContext::Aggregation { before, after, .. } => {
-                ResultDiff::Aggregation {
-                    before: before.as_ref().map(convert_query_variables_to_json),
-                    after: convert_query_variables_to_json(after),
-                }
-            }
+            QueryPartEvaluationContext::Aggregation {
+                before,
+                after,
+                grouping_keys,
+                ..
+            } => ResultDiff::Aggregation {
+                before: before.as_ref().map(convert_query_variables_to_json),
+                after: convert_query_variables_to_json(after),
+                grouping_keys: Some(grouping_keys.clone()),
+            },
             QueryPartEvaluationContext::Noop => ResultDiff::Noop,
         })
         .collect();
 
-    // Update the current result set based on the changes
-    let mut result_set = current_results.write().await;
-    for result in &converted_results {
-        match result {
-            ResultDiff::Add { data } => {
-                result_set.push(data.clone());
-            }
-            ResultDiff::Delete { data } => {
-                result_set.retain(|item| item != data);
-            }
-            ResultDiff::Update { before, after, .. } => {
-                if let Some(pos) = result_set.iter().position(|item| item == before) {
-                    result_set[pos] = after.clone();
-                } else {
-                    warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
-                    result_set.retain(|item| item != before);
-                    result_set.push(after.clone());
+    // Update current_results using row_signature from drasi-core
+    // as HashMap key for O(1) lookups.
+    {
+        let mut result_set = current_results.write().await;
+        for ctx in results {
+            let sig = ctx.row_signature();
+            match ctx {
+                QueryPartEvaluationContext::Adding { after, .. } => {
+                    result_set.insert(sig, convert_query_variables_to_json(after));
                 }
+                QueryPartEvaluationContext::Removing { .. } => {
+                    result_set.remove(&sig);
+                }
+                QueryPartEvaluationContext::Updating { after, .. }
+                | QueryPartEvaluationContext::Aggregation { after, .. } => {
+                    result_set.insert(sig, convert_query_variables_to_json(after));
+                }
+                QueryPartEvaluationContext::Noop => {}
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
         }
     }
-    drop(result_set);
 
     let query_result = QueryResult::with_profiling(
         query_id.to_string(),
@@ -246,7 +250,7 @@ pub struct DrasiQuery {
     base: QueryBase,
     #[allow(dead_code)]
     continuous_query: Option<ContinuousQuery>,
-    current_results: Arc<RwLock<Vec<serde_json::Value>>>,
+    current_results: Arc<RwLock<HashMap<u64, serde_json::Value>>>,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -283,7 +287,7 @@ impl DrasiQuery {
             instance_id: instance_id.into(),
             base,
             continuous_query: None,
-            current_results: Arc::new(RwLock::new(Vec::new())),
+            current_results: Arc::new(RwLock::new(HashMap::new())),
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -295,7 +299,12 @@ impl DrasiQuery {
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
-        self.current_results.read().await.clone()
+        self.current_results
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -724,30 +733,24 @@ impl Query for DrasiQuery {
                                             query_id_clone, results.len(), count
                                         );
 
-                                        // Apply bootstrap results to current_results so they
-                                        // are visible via the query results API.
+                                        // Apply bootstrap results to current_results.
+                                        // Uses row_signature from drasi-core as HashMap key
+                                        // for O(1) lookups instead of linear scans.
                                         let mut result_set = current_results_clone.write().await;
                                         for ctx in &results {
+                                            let sig = ctx.row_signature();
                                             match ctx {
                                                 QueryPartEvaluationContext::Adding { after, .. } => {
-                                                    result_set.push(convert_query_variables_to_json(after));
+                                                    result_set.insert(sig, convert_query_variables_to_json(after));
                                                 }
-                                                QueryPartEvaluationContext::Removing { before, .. } => {
-                                                    let data = convert_query_variables_to_json(before);
-                                                    result_set.retain(|item| item != &data);
+                                                QueryPartEvaluationContext::Removing { .. } => {
+                                                    result_set.remove(&sig);
                                                 }
-                                                QueryPartEvaluationContext::Updating { before, after, .. } => {
-                                                    let before_json = convert_query_variables_to_json(before);
-                                                    let after_json = convert_query_variables_to_json(after);
-                                                    if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
-                                                        result_set[pos] = after_json;
-                                                    } else {
-                                                        result_set.retain(|item| item != &before_json);
-                                                        result_set.push(after_json);
-                                                    }
+                                                QueryPartEvaluationContext::Updating { after, .. }
+                                                | QueryPartEvaluationContext::Aggregation { after, .. } => {
+                                                    result_set.insert(sig, convert_query_variables_to_json(after));
                                                 }
-                                                QueryPartEvaluationContext::Aggregation { .. }
-                                                | QueryPartEvaluationContext::Noop => {}
+                                                QueryPartEvaluationContext::Noop => {}
                                             }
                                         }
                                         drop(result_set);
