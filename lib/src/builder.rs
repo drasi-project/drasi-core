@@ -67,6 +67,7 @@ use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
+use crate::identity::IdentityProvider;
 use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
@@ -125,6 +126,7 @@ pub struct DrasiLibBuilder {
     reaction_instances: Vec<Box<dyn ReactionTrait>>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
+    identity_provider: Option<Arc<dyn IdentityProvider>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -146,6 +148,7 @@ impl DrasiLibBuilder {
             reaction_instances: Vec::new(),
             index_provider: None,
             state_store_provider: None,
+            identity_provider: None,
         }
     }
 
@@ -223,6 +226,31 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Set the identity provider for credential injection.
+    ///
+    /// Identity providers supply authentication credentials (passwords, tokens,
+    /// certificates) to sources and reactions that need them for connecting to
+    /// external systems.
+    ///
+    /// If no identity provider is set, sources and reactions will receive `None`
+    /// for `context.identity_provider`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_identity_azure::AzureIdentityProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+    /// let core = DrasiLib::builder()
+    ///     .with_identity_provider(Arc::new(provider))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
+        self.identity_provider = Some(provider);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -289,6 +317,7 @@ impl DrasiLibBuilder {
             config,
             self.index_provider,
             self.state_store_provider,
+            self.identity_provider,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
