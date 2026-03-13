@@ -2233,7 +2233,7 @@ async fn collect_sse_events(
 async fn test_cdylib_source_dispatches_events() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIPPING: cdylib mock source plugin not found");
-        return;
+        panic!("SKIPPING: cdylib mock source plugin not found");
     }
 
     let mock_source_path = require_plugin("drasi-source-mock");
