@@ -38,7 +38,6 @@ use std::collections::HashMap;
 /// # Optional Configuration
 ///
 /// - `entity_set_overrides`: Override computed entity set names for specific entities
-/// - `polling_interval_ms`: Polling interval in milliseconds (default: 5000)
 /// - `min_interval_ms`: Minimum adaptive polling interval (default: 500)
 /// - `max_interval_seconds`: Maximum adaptive polling interval (default: 30)
 /// - `api_version`: Dataverse Web API version (default: `v9.2`)
@@ -79,11 +78,6 @@ pub struct DataverseSourceConfig {
     /// Per-entity column selection. If an entity is not in this map,
     /// all columns are retrieved (equivalent to `ColumnSet(true)` in the SDK).
     pub entity_columns: HashMap<String, Vec<String>>,
-
-    /// Base polling interval in milliseconds. The source uses adaptive backoff
-    /// similar to the platform's SyncWorker: starts at `min_interval_ms`,
-    /// increases with multiplicative backoff when idle, resets on changes.
-    pub polling_interval_ms: u64,
 
     /// Minimum adaptive polling interval in milliseconds (default: 500).
     /// Matches the platform's `MinIntervalMs = 500`.
@@ -172,7 +166,6 @@ mod tests {
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -191,7 +184,6 @@ mod tests {
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -210,7 +202,6 @@ mod tests {
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -229,7 +220,6 @@ mod tests {
             entities: vec![],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -248,7 +238,6 @@ mod tests {
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -270,7 +259,6 @@ mod tests {
             entities: vec!["activityparty".to_string()],
             entity_set_overrides: overrides,
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -294,7 +282,6 @@ mod tests {
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: cols,
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),

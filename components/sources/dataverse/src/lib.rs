@@ -50,7 +50,6 @@
 //! | `entities`             | Vec\<String\>             | required  | Entity logical names to monitor          |
 //! | `entity_set_overrides` | HashMap\<String, String\> | `{}`      | Override entity set name mapping         |
 //! | `entity_columns`       | HashMap\<String, Vec...\> | `{}`      | Per-entity column selection              |
-//! | `polling_interval_ms`  | u64                       | `5000`    | Base polling interval                    |
 //! | `min_interval_ms`      | u64                       | `500`     | Minimum adaptive interval                |
 //! | `max_interval_seconds` | u64                       | `30`      | Per-entity max interval (sqrt-scaled by entity count) |
 //! | `api_version`          | String                    | `"v9.2"`  | Web API version                          |
@@ -810,7 +809,6 @@ pub struct DataverseSourceBuilder {
     entities: Vec<String>,
     entity_set_overrides: HashMap<String, String>,
     entity_columns: HashMap<String, Vec<String>>,
-    polling_interval_ms: u64,
     min_interval_ms: u64,
     max_interval_seconds: u64,
     api_version: String,
@@ -834,7 +832,6 @@ impl DataverseSourceBuilder {
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
-            polling_interval_ms: 5000,
             min_interval_ms: 500,
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
@@ -946,12 +943,6 @@ impl DataverseSourceBuilder {
         self
     }
 
-    /// Set the polling interval in milliseconds.
-    pub fn with_polling_interval_ms(mut self, ms: u64) -> Self {
-        self.polling_interval_ms = ms;
-        self
-    }
-
     /// Set the minimum adaptive polling interval in milliseconds.
     pub fn with_min_interval_ms(mut self, ms: u64) -> Self {
         self.min_interval_ms = ms;
@@ -1008,7 +999,6 @@ impl DataverseSourceBuilder {
             entities: self.entities,
             entity_set_overrides: self.entity_set_overrides,
             entity_columns: self.entity_columns,
-            polling_interval_ms: self.polling_interval_ms,
             min_interval_ms: self.min_interval_ms,
             max_interval_seconds: self.max_interval_seconds,
             api_version: self.api_version,
@@ -1095,7 +1085,6 @@ mod tests {
                 entities: vec!["account".to_string()],
                 entity_set_overrides: HashMap::new(),
                 entity_columns: HashMap::new(),
-                polling_interval_ms: 5000,
                 min_interval_ms: 500,
                 max_interval_seconds: 30,
                 api_version: "v9.2".to_string(),
@@ -1209,7 +1198,6 @@ mod tests {
                 .build()
                 .expect("should build");
 
-            assert_eq!(source.config.polling_interval_ms, 5000);
             assert_eq!(source.config.min_interval_ms, 500);
             assert_eq!(source.config.max_interval_seconds, 30);
             assert_eq!(source.config.api_version, "v9.2");
@@ -1224,7 +1212,6 @@ mod tests {
                 .with_client_id("custom-client")
                 .with_client_secret("custom-secret")
                 .with_entities(vec!["account".to_string()])
-                .with_polling_interval_ms(10000)
                 .with_min_interval_ms(200)
                 .with_max_interval_seconds(60)
                 .with_api_version("v9.1")
@@ -1235,7 +1222,6 @@ mod tests {
                 source.config.environment_url,
                 "https://custom.crm.dynamics.com"
             );
-            assert_eq!(source.config.polling_interval_ms, 10000);
             assert_eq!(source.config.min_interval_ms, 200);
             assert_eq!(source.config.max_interval_seconds, 60);
             assert_eq!(source.config.api_version, "v9.1");

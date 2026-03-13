@@ -21,10 +21,6 @@ use utoipa::OpenApi;
 
 // ── DTO types ────────────────────────────────────────────────────────────────
 
-fn default_polling_interval_ms() -> ConfigValue<u64> {
-    ConfigValue::Static(5000)
-}
-
 fn default_min_interval_ms() -> ConfigValue<u64> {
     ConfigValue::Static(500)
 }
@@ -71,10 +67,6 @@ pub struct DataverseSourceConfigDto {
     /// Per-entity column selection.
     #[serde(default)]
     pub entity_columns: HashMap<String, Vec<String>>,
-
-    /// Base polling interval in milliseconds.
-    #[serde(default = "default_polling_interval_ms")]
-    pub polling_interval_ms: ConfigValue<u64>,
 
     /// Minimum adaptive polling interval in milliseconds.
     #[serde(default = "default_min_interval_ms")]
@@ -143,7 +135,6 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
         let client_secret = mapper
             .resolve_optional_string(&dto.client_secret)?
             .unwrap_or_default();
-        let polling_interval_ms = mapper.resolve_typed(&dto.polling_interval_ms)?;
         let min_interval_ms = mapper.resolve_typed(&dto.min_interval_ms)?;
         let max_interval_seconds = mapper.resolve_typed(&dto.max_interval_seconds)?;
         let api_version = mapper.resolve_string(&dto.api_version)?;
@@ -157,7 +148,6 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             entities: dto.entities,
             entity_set_overrides: dto.entity_set_overrides,
             entity_columns: dto.entity_columns,
-            polling_interval_ms,
             min_interval_ms,
             max_interval_seconds,
             api_version,
@@ -169,7 +159,6 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             .with_client_id(config.client_id.clone())
             .with_client_secret(config.client_secret.clone())
             .with_entities(config.entities.clone())
-            .with_polling_interval_ms(config.polling_interval_ms)
             .with_min_interval_ms(config.min_interval_ms)
             .with_max_interval_seconds(config.max_interval_seconds)
             .with_api_version(config.api_version.clone())
@@ -226,7 +215,6 @@ mod tests {
         let dto: DataverseSourceConfigDto =
             serde_json::from_value(json).expect("should deserialize");
 
-        assert_eq!(dto.polling_interval_ms, ConfigValue::Static(5000));
         assert_eq!(dto.min_interval_ms, ConfigValue::Static(500));
         assert_eq!(dto.max_interval_seconds, ConfigValue::Static(30));
         assert_eq!(
