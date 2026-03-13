@@ -116,7 +116,9 @@ impl BootstrapProvider for BootstrapProviderProxy {
 
 impl Drop for BootstrapProviderProxy {
     fn drop(&mut self) {
-        (self.vtable.drop_fn)(self.vtable.state);
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 
@@ -256,6 +258,8 @@ impl BootstrapPluginDescriptor for BootstrapPluginProxy {
 
 impl Drop for BootstrapPluginProxy {
     fn drop(&mut self) {
-        (self.vtable.drop_fn)(self.vtable.state);
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
