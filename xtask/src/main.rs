@@ -781,9 +781,7 @@ fn publish_plugins(args: &[String]) {
             }
         }
 
-        println!(
-            "\n=== Published: {success_count} succeeded, {fail_count} failed ==="
-        );
+        println!("\n=== Published: {success_count} succeeded, {fail_count} failed ===");
 
         // Update plugin directory with entries for each successfully published plugin
         if success_count > 0 {
