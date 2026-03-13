@@ -68,7 +68,7 @@ use drasi_core::models::{
 use log::{debug, info, warn};
 
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
-use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender, SourceChangeEvent};
+use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::identity::{Credentials, IdentityProvider};
 
 /// Dataverse bootstrap provider for initial data loading.
