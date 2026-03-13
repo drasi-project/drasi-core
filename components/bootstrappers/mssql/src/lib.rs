@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,7 +35,22 @@
 //! # }
 //! ```
 
+pub mod descriptor;
 pub mod mssql;
 
-pub use drasi_source_mssql::{AuthMode, EncryptionMode, MsSqlSourceConfig, TableKeyConfig};
+pub use drasi_mssql_common::{AuthMode, EncryptionMode, MsSqlSourceConfig, TableKeyConfig};
 pub use mssql::{MsSqlBootstrapProvider, MsSqlBootstrapProviderBuilder};
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mssql-bootstrap",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [descriptor::MsSqlBootstrapDescriptor],
+);

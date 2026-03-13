@@ -1,6 +1,6 @@
 [package]
 name = "drasi-reaction-log"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Log reaction plugin for Drasi"
@@ -11,6 +11,9 @@ categories = ["development-tools::debugging"]
 
 [lints]
 workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -28,3 +31,9 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
 handlebars = "5.1"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+
+[features]
+# default = []
+dynamic-plugin = []

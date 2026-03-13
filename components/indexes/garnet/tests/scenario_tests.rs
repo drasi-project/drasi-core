@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use drasi_index_garnet::{
     element_index::GarnetElementIndex, future_queue::GarnetFutureQueue,
-    result_index::GarnetResultIndex,
+    result_index::GarnetResultIndex, GarnetSessionControl, GarnetSessionState,
 };
 
 struct GarnetQueryConfig {
@@ -53,10 +53,21 @@ impl GarnetQueryConfig {
         }
     }
 
-    pub async fn build_future_queue(&self, query_id: &str) -> GarnetFutureQueue {
+    pub async fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (
+        GarnetFutureQueue,
+        Arc<dyn drasi_core::interface::SessionControl>,
+    ) {
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
-        GarnetFutureQueue::new(query_id, connection)
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+        (
+            GarnetFutureQueue::new(query_id, connection, session_state),
+            session_control,
+        )
     }
 
     pub fn get_element_index(&self) -> Arc<dyn ElementIndex> {
@@ -74,9 +85,13 @@ impl QueryTestConfig for GarnetQueryConfig {
         let client = redis::Client::open(self.url.as_str()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
 
-        let element_index = GarnetElementIndex::new(&query_id, connection.clone(), true);
-        let ari = GarnetResultIndex::new(&query_id, connection.clone());
-        let fq = GarnetFutureQueue::new(&query_id, connection);
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = Arc::new(GarnetSessionControl::new(session_state.clone()));
+
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let ari = GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let fq = GarnetFutureQueue::new(&query_id, connection, session_state);
 
         let element_index = Arc::new(element_index);
         let archive_index = element_index.clone();
@@ -92,12 +107,14 @@ impl QueryTestConfig for GarnetQueryConfig {
                 .with_archive_index(archive_index)
                 .with_result_index(Arc::new(ari))
                 .with_future_queue(Arc::new(fq))
+                .with_session_control(session_control)
         } else {
             builder
                 .with_element_index(element_index)
                 .with_archive_index(archive_index)
                 .with_result_index(Arc::new(ari))
                 .with_future_queue(Arc::new(fq))
+                .with_session_control(session_control)
         }
     }
 }
@@ -323,43 +340,43 @@ mod index {
     #[tokio::test]
     async fn future_queue_push_always() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_push_not_exists() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_clear_removes_all() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 
     #[tokio::test]
     async fn future_queue_push_overwrite() {
         let test_config = GarnetQueryConfig::new(false).await;
-        let fqi = test_config
+        let (fqi, sc) = test_config
             .build_future_queue(format!("test-{}", Uuid::new_v4()).as_str())
             .await;
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
         test_config.redis_grd.cleanup().await;
     }
 }
@@ -439,6 +456,1016 @@ mod collect_aggregation {
         let test_config = GarnetQueryConfig::new(false).await;
         collect_aggregation::multiple_collects_test(&test_config).await;
         test_config.redis_grd.cleanup().await;
+    }
+}
+
+mod session {
+    use std::sync::Arc;
+
+    use drasi_core::{
+        evaluation::functions::aggregation::ValueAccumulator,
+        interface::{
+            AccumulatorIndex, ElementIndex, FutureQueue, LazySortedSetStore, PushType, ResultKey,
+            ResultOwner, ResultSequenceCounter, SessionControl,
+        },
+        models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
+    };
+    use drasi_index_garnet::{
+        element_index::GarnetElementIndex, future_queue::GarnetFutureQueue,
+        result_index::GarnetResultIndex, GarnetSessionControl, GarnetSessionState,
+    };
+    use futures::StreamExt;
+    use ordered_float::OrderedFloat;
+    use shared_tests::redis_helpers::setup_redis;
+    use uuid::Uuid;
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_rollback_discards_writes() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let result_index =
+            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then rollback
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.rollback().unwrap();
+
+        // Verify nothing persisted — reads require a session
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_none(), "element should not persist after rollback");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(
+            acc.is_none(),
+            "accumulator should not persist after rollback"
+        );
+
+        session_control.rollback().unwrap();
+
+        // peek_due_time runs outside the session by design
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert!(due.is_none(), "future queue should be empty after rollback");
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_commit_persists_writes() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let result_index =
+            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then commit
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.commit().await.unwrap();
+
+        // Verify data persisted — reads require a session
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should persist after commit");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "accumulator should persist after commit");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 42),
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        session_control.rollback().unwrap();
+
+        // peek_due_time runs outside the session by design
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert_eq!(due, Some(20));
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_read_your_writes() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let result_index =
+            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+
+        // Read within the same session — buffer should serve these
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should be visible within session");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(
+            acc.is_some(),
+            "accumulator should be visible within session"
+        );
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 42),
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        session_control.commit().await.unwrap();
+
+        // Verify still readable after commit — reads require a session
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should persist after commit");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "accumulator should persist after commit");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_rollback_then_retry() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+        let result_index =
+            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // First session: write v1, then rollback
+        let node_v1 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+
+        session_control.begin().await.unwrap();
+        element_index.set_element(&node_v1, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 99 }),
+            )
+            .await
+            .unwrap();
+        session_control.rollback().unwrap();
+
+        // Second session: write v2, then commit
+        let node_v2 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 2000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+
+        session_control.begin().await.unwrap();
+        element_index.set_element(&node_v2, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 77 }),
+            )
+            .await
+            .unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify v2 persisted (not v1) — reads require a session
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should persist after commit");
+        match elem.unwrap().as_ref() {
+            Element::Node { metadata, .. } => {
+                assert_eq!(metadata.effective_from, 2000, "should be v2, not v1");
+            }
+            _ => panic!("expected Node"),
+        }
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "accumulator should persist after commit");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => {
+                assert_eq!(value, 77, "should be second session's value");
+            }
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_increment_stacking() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index =
+            GarnetResultIndex::new(&query_id, connection.clone(), session_state.clone());
+
+        result_index.clear().await.unwrap();
+
+        session_control.begin().await.unwrap();
+
+        // Two increments to the same key within one session
+        result_index
+            .increment_value_count(1, OrderedFloat(5.0), 1)
+            .await
+            .unwrap();
+        result_index
+            .increment_value_count(1, OrderedFloat(5.0), 1)
+            .await
+            .unwrap();
+
+        // Within session: buffer should show accumulated count of 2
+        let count = result_index
+            .get_value_count(1, OrderedFloat(5.0))
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "buffer should show accumulated count within session"
+        );
+
+        session_control.commit().await.unwrap();
+
+        // After commit: Redis should show 2 — reads require a session
+        session_control.begin().await.unwrap();
+
+        let count = result_index
+            .get_value_count(1, OrderedFloat(5.0))
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "committed count should be 2");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_delete_then_reinsert() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection.clone(), true, session_state.clone());
+
+        element_index.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+
+        // Write v1 within a session
+        let node_v1 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        session_control.begin().await.unwrap();
+        element_index.set_element(&node_v1, &vec![]).await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Within a session: delete then reinsert with different effective_from
+        let node_v2 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 2000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+
+        session_control.begin().await.unwrap();
+        element_index.delete_element(&element_ref).await.unwrap();
+        element_index.set_element(&node_v2, &vec![]).await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify v2 persisted — reads require a session
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should exist after delete+reinsert");
+        match elem.unwrap().as_ref() {
+            Element::Node { metadata, .. } => {
+                assert_eq!(
+                    metadata.effective_from, 2000,
+                    "should be v2 after delete+reinsert"
+                );
+            }
+            _ => panic!("expected Node"),
+        }
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_get_value_count_missing_key() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+
+        result_index.clear().await.unwrap();
+
+        session_control.begin().await.unwrap();
+
+        // Query a value count for a key that has never been written
+        let count = result_index
+            .get_value_count(42, OrderedFloat(99.0))
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "missing key should return 0, not error");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_get_next_with_in_session_increments() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+
+        result_index.clear().await.unwrap();
+
+        session_control.begin().await.unwrap();
+
+        // Increment two different values in the same sorted set
+        result_index
+            .increment_value_count(1, OrderedFloat(10.0), 1)
+            .await
+            .unwrap();
+        result_index
+            .increment_value_count(1, OrderedFloat(20.0), 1)
+            .await
+            .unwrap();
+
+        // get_next(None) should return the smallest value
+        let next = result_index.get_next(1, None).await.unwrap();
+        assert_eq!(
+            next,
+            Some((OrderedFloat(10.0), 1)),
+            "first value should be 10.0 with count 1"
+        );
+
+        // get_next(Some(10.0)) should return the next value
+        let next = result_index
+            .get_next(1, Some(OrderedFloat(10.0)))
+            .await
+            .unwrap();
+        assert_eq!(
+            next,
+            Some((OrderedFloat(20.0), 1)),
+            "next after 10.0 should be 20.0 with count 1"
+        );
+
+        // get_next(Some(20.0)) should return None
+        let next = result_index
+            .get_next(1, Some(OrderedFloat(20.0)))
+            .await
+            .unwrap();
+        assert!(next.is_none(), "nothing after 20.0");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_future_queue_consecutive_pops() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+
+        future_queue.clear().await.unwrap();
+
+        session_control.begin().await.unwrap();
+
+        let ref_a = ElementReference::new("src", "a");
+        let ref_b = ElementReference::new("src", "b");
+        let ref_c = ElementReference::new("src", "c");
+
+        // Push 3 items with out-of-order due_times
+        future_queue
+            .push(PushType::Always, 1, 1, &ref_a, 100, 30)
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 2, 2, &ref_b, 100, 10)
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 3, 3, &ref_c, 100, 20)
+            .await
+            .unwrap();
+
+        // Pop should return in due_time order: 10, 20, 30
+        let first = future_queue.pop().await.unwrap().unwrap();
+        assert_eq!(first.due_time, 10, "first pop should be due_time 10");
+
+        let second = future_queue.pop().await.unwrap().unwrap();
+        assert_eq!(second.due_time, 20, "second pop should be due_time 20");
+
+        let third = future_queue.pop().await.unwrap().unwrap();
+        assert_eq!(third.due_time, 30, "third pop should be due_time 30");
+
+        let empty = future_queue.pop().await.unwrap();
+        assert!(empty.is_none(), "queue should be empty after 3 pops");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_future_queue_pop_after_rollback() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("src", "node1");
+
+        // Push in a session, then rollback
+        session_control.begin().await.unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 100, 200)
+            .await
+            .unwrap();
+        session_control.rollback().unwrap();
+
+        // peek_due_time runs outside session
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert!(due.is_none(), "nothing should persist after rollback");
+
+        // pop within a new session should also return None
+        session_control.begin().await.unwrap();
+        let popped = future_queue.pop().await.unwrap();
+        assert!(popped.is_none(), "pop should return None after rollback");
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_future_queue_remove_within_session() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let future_queue = GarnetFutureQueue::new(&query_id, connection, session_state);
+
+        future_queue.clear().await.unwrap();
+
+        session_control.begin().await.unwrap();
+
+        let element_ref = ElementReference::new("src", "node1");
+
+        // Push then remove in the same session
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 100, 200)
+            .await
+            .unwrap();
+        future_queue.remove(1, 1).await.unwrap();
+
+        // Pop should return None within the same session
+        let popped = future_queue.pop().await.unwrap();
+        assert!(
+            popped.is_none(),
+            "pop should return None after remove in same session"
+        );
+
+        session_control.commit().await.unwrap();
+
+        // Verify nothing persisted
+        session_control.begin().await.unwrap();
+        let popped = future_queue.pop().await.unwrap();
+        assert!(
+            popped.is_none(),
+            "pop should return None after commit of remove"
+        );
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_sequence_counter_rollback_and_commit() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+
+        result_index.clear().await.unwrap();
+
+        // Commit sequence 5
+        session_control.begin().await.unwrap();
+        result_index.apply_sequence(5, "change-1").await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify it persisted
+        session_control.begin().await.unwrap();
+        let seq = result_index.get_sequence().await.unwrap();
+        assert_eq!(seq.sequence, 5);
+        assert_eq!(seq.source_change_id.as_ref(), "change-1");
+
+        // Apply sequence 10 then rollback
+        result_index.apply_sequence(10, "change-2").await.unwrap();
+        session_control.rollback().unwrap();
+
+        // Verify rollback preserved the old value
+        session_control.begin().await.unwrap();
+        let seq = result_index.get_sequence().await.unwrap();
+        assert_eq!(seq.sequence, 5, "sequence should not change after rollback");
+        assert_eq!(
+            seq.source_change_id.as_ref(),
+            "change-1",
+            "source_change_id should not change after rollback"
+        );
+
+        // Now commit sequence 10
+        result_index.apply_sequence(10, "change-2").await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify it persisted
+        session_control.begin().await.unwrap();
+        let seq = result_index.get_sequence().await.unwrap();
+        assert_eq!(seq.sequence, 10);
+        assert_eq!(seq.source_change_id.as_ref(), "change-2");
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_relationship_edges() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
+
+        element_index.clear().await.unwrap();
+
+        let node_a_ref = ElementReference::new("src", "node_a");
+        let node_b_ref = ElementReference::new("src", "node_b");
+        let rel_ref = ElementReference::new("src", "rel1");
+
+        let node_a = Element::Node {
+            metadata: ElementMetadata {
+                reference: node_a_ref.clone(),
+                labels: Arc::new([Arc::from("Person")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let node_b = Element::Node {
+            metadata: ElementMetadata {
+                reference: node_b_ref.clone(),
+                labels: Arc::new([Arc::from("Person")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        // in_node = source, out_node = target
+        let relation = Element::Relation {
+            metadata: ElementMetadata {
+                reference: rel_ref.clone(),
+                labels: Arc::new([Arc::from("KNOWS")]),
+                effective_from: 1000,
+            },
+            in_node: node_a_ref.clone(),
+            out_node: node_b_ref.clone(),
+            properties: ElementPropertyMap::new(),
+        };
+
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node_a, &vec![0]).await.unwrap();
+        element_index.set_element(&node_b, &vec![0]).await.unwrap();
+        element_index
+            .set_element(&relation, &vec![0])
+            .await
+            .unwrap();
+
+        // Verify inbound edges: node_a is the in_node (source), so querying
+        // by inbound for node_a should return the relation
+        let inbound_stream = element_index
+            .get_slot_elements_by_inbound(0, &node_a_ref)
+            .await
+            .unwrap();
+        let inbound: Vec<_> = inbound_stream.collect().await;
+        assert_eq!(inbound.len(), 1, "should have 1 inbound relation");
+
+        // Verify outbound edges: node_b is the out_node (target), so querying
+        // by outbound for node_b should return the relation
+        let outbound_stream = element_index
+            .get_slot_elements_by_outbound(0, &node_b_ref)
+            .await
+            .unwrap();
+        let outbound: Vec<_> = outbound_stream.collect().await;
+        assert_eq!(outbound.len(), 1, "should have 1 outbound relation");
+
+        // Rollback — edges should disappear
+        session_control.rollback().unwrap();
+
+        session_control.begin().await.unwrap();
+
+        let inbound_stream = element_index
+            .get_slot_elements_by_inbound(0, &node_a_ref)
+            .await
+            .unwrap();
+        let inbound: Vec<_> = inbound_stream.collect().await;
+        assert!(inbound.is_empty(), "inbound should be empty after rollback");
+
+        let outbound_stream = element_index
+            .get_slot_elements_by_outbound(0, &node_b_ref)
+            .await
+            .unwrap();
+        let outbound: Vec<_> = outbound_stream.collect().await;
+        assert!(
+            outbound.is_empty(),
+            "outbound should be empty after rollback"
+        );
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_archive_get_element_as_at() {
+        use drasi_core::interface::ElementArchiveIndex;
+
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let element_index =
+            GarnetElementIndex::new(&query_id, connection, true, session_state.clone());
+
+        ElementIndex::clear(&element_index).await.unwrap();
+
+        let element_ref = ElementReference::new("src", "node1");
+
+        // Commit v1 with effective_from: 1000
+        let node_v1 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        session_control.begin().await.unwrap();
+        element_index.set_element(&node_v1, &vec![]).await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Commit v2 with effective_from: 2000
+        let node_v2 = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 2000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        session_control.begin().await.unwrap();
+        element_index.set_element(&node_v2, &vec![]).await.unwrap();
+        session_control.commit().await.unwrap();
+
+        // Query at different timestamps
+        session_control.begin().await.unwrap();
+
+        // At t=500: before any version exists
+        let result = element_index
+            .get_element_as_at(&element_ref, 500)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "no version at t=500");
+
+        // At t=1500: should get v1 (effective_from: 1000)
+        let result = element_index
+            .get_element_as_at(&element_ref, 1500)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "should find v1 at t=1500");
+        match result.unwrap().as_ref() {
+            Element::Node { metadata, .. } => {
+                assert_eq!(metadata.effective_from, 1000, "should be v1");
+            }
+            _ => panic!("expected Node"),
+        }
+
+        // At t=2500: should get v2 (effective_from: 2000)
+        let result = element_index
+            .get_element_as_at(&element_ref, 2500)
+            .await
+            .unwrap();
+        assert!(result.is_some(), "should find v2 at t=2500");
+        match result.unwrap().as_ref() {
+            Element::Node { metadata, .. } => {
+                assert_eq!(metadata.effective_from, 2000, "should be v2");
+            }
+            _ => panic!("expected Node"),
+        }
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_double_begin_errors() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+
+        let session_state = Arc::new(GarnetSessionState::new(connection));
+        let session_control = GarnetSessionControl::new(session_state);
+
+        session_control.begin().await.unwrap();
+
+        // Second begin should error
+        let result = session_control.begin().await;
+        assert!(result.is_err(), "double begin should return error");
+
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_commit_without_begin_errors() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+
+        let session_state = Arc::new(GarnetSessionState::new(connection));
+        let session_control = GarnetSessionControl::new(session_state);
+
+        // Commit without begin should error
+        let result = session_control.commit().await;
+        assert!(result.is_err(), "commit without begin should return error");
+
+        redis.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn session_result_index_delete_then_reinsert() {
+        let redis = setup_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+
+        result_index.clear().await.unwrap();
+
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        session_control.begin().await.unwrap();
+
+        // Set, delete, then re-set within the same session
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        result_index
+            .set(result_key.clone(), result_owner.clone(), None)
+            .await
+            .unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 77 }),
+            )
+            .await
+            .unwrap();
+
+        // Read within session should see the final value
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "should see reinserted value in session");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 77),
+            other => panic!("expected Count(77), got {other:?}"),
+        }
+
+        session_control.commit().await.unwrap();
+
+        // Verify persisted value after commit
+        session_control.begin().await.unwrap();
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "should persist after commit");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 77),
+            other => panic!("expected Count(77), got {other:?}"),
+        }
+        session_control.rollback().unwrap();
+
+        redis.cleanup().await;
     }
 }
 

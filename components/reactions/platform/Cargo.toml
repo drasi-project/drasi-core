@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-platform"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Platform reaction plugin for Drasi"
@@ -25,6 +25,9 @@ categories = ["network-programming"]
 
 [lints]
 workspace = true
+
+[lib]
+crate-type = ["lib"]
 
 [dependencies]
 drasi-lib.workspace = true
@@ -41,3 +44,5 @@ chrono = "0.4"
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }

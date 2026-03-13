@@ -1,0 +1,61 @@
+FROM ghcr.io/cross-rs/x86_64-pc-windows-gnu:0.2.5 AS toolchain
+
+FROM ubuntu:22.04
+
+# Remove symlink that conflicts with COPY from toolchain
+RUN rm -rf /usr/local/man
+
+# Copy mingw cross-toolchain and wine from the cross image
+COPY --from=toolchain /usr/local/ /usr/local/
+COPY --from=toolchain /usr/x86_64-w64-mingw32/ /usr/x86_64-w64-mingw32/
+
+# Install build dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc g++ libc6-dev pkg-config \
+    perl make autoconf automake libtool \
+    protobuf-compiler libprotobuf-dev \
+    gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 libclang-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix \
+    && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+# Create a linker wrapper that replaces dynamic MinGW runtime references
+# with their static equivalents, producing a standalone .exe with no DLL deps.
+#
+# Rust's linker invocation for windows-gnu looks like:
+#   x86_64-w64-mingw32-gcc <objs> ... -lgcc_s -lgcc ... -nodefaultlibs
+#
+# -lgcc_s → libgcc_s_seh-1.dll (GCC unwinder / SEH exception handling)
+# We replace it with -lgcc_eh (static exception handling archive).
+# We also force-static-link winpthread and stdc++ if they appear.
+RUN printf '#!/bin/sh\nnewargs=""\nfor arg in "$@"; do\n  case "$arg" in\n    -lgcc_s)      newargs="$newargs -lgcc_eh" ;;\n    -lwinpthread) newargs="$newargs -l:libwinpthread.a" ;;\n    -lstdc++)     newargs="$newargs -l:libstdc++.a" ;;\n    *)            newargs="$newargs $arg" ;;\n  esac\ndone\nexec x86_64-w64-mingw32-gcc $newargs\n' \
+    > /usr/local/bin/mingw-static-wrapper \
+    && chmod +x /usr/local/bin/mingw-static-wrapper
+
+# Build libjq from source for Windows (MinGW) with bundled oniguruma
+ENV JQ_VERSION=1.7.1
+RUN curl -sSL https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${JQ_VERSION}.tar.gz | tar xz \
+    && cd jq-${JQ_VERSION} \
+    && autoreconf -fi \
+    && CC=x86_64-w64-mingw32-gcc ./configure --host=x86_64-w64-mingw32 --disable-shared --enable-static --with-oniguruma=builtin --prefix=/usr/local/mingw-jq \
+    && make -j$(nproc) \
+    && make install \
+    && cd .. && rm -rf jq-${JQ_VERSION}
+
+ENV JQ_LIB_DIR=/usr/local/mingw-jq/lib
+ENV ONIG_LIB_DIR=/usr/local/mingw-jq/lib
+ENV JQ_INCLUDE_DIR=/usr/local/mingw-jq/include
+ENV CFLAGS_x86_64_pc_windows_gnu="-I/usr/local/mingw-jq/include"
+ENV LIBJQ_STATIC=1
+ENV LIBONIG_STATIC=1
+
+# Set cargo environment for cross-compilation
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=mingw-static-wrapper
+ENV CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+ENV CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++
+ENV AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
+ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_gnu="--sysroot=/usr/x86_64-w64-mingw32 -I/usr/lib/gcc/x86_64-w64-mingw32/10-win32/include"
+
+# Disable QUIC in vendored OpenSSL (mingw headers lack SIO_UDP_NETRESET)
+ENV OPENSSL_CONFIGURE_ARGS="no-quic"

@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -67,24 +68,25 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod connection;
 pub mod decoder;
-pub mod error;
-pub mod keys;
+pub mod descriptor;
 pub mod lsn;
 pub mod stream;
 pub mod types;
 
+// Re-export from drasi-mssql-common
+pub use drasi_mssql_common::config;
+pub use drasi_mssql_common::connection;
+pub use drasi_mssql_common::error;
+pub use drasi_mssql_common::keys;
+
 // Re-export main types
-pub use config::{
-    validate_sql_identifier, AuthMode, EncryptionMode, MsSqlSourceConfig, StartPosition,
+pub use decoder::CdcOperation;
+pub use drasi_mssql_common::{
+    validate_sql_identifier, AuthMode, ConnectionError, EncryptionMode, LsnError, MsSqlConnection,
+    MsSqlError, MsSqlErrorKind, MsSqlSourceConfig, PrimaryKeyCache, PrimaryKeyError, StartPosition,
     TableKeyConfig,
 };
-pub use connection::MsSqlConnection;
-pub use decoder::CdcOperation;
-pub use error::{ConnectionError, LsnError, MsSqlError, MsSqlErrorKind, PrimaryKeyError};
-pub use keys::PrimaryKeyCache;
 pub use lsn::Lsn;
 
 use anyhow::Result;
@@ -525,3 +527,17 @@ mod tests {
         assert_eq!(source.config.table_keys[0].table, "orders");
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mssql-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MsSqlSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

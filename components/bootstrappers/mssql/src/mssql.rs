@@ -22,7 +22,7 @@ use drasi_core::models::{
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
-use drasi_source_mssql::{
+use drasi_mssql_common::{
     validate_sql_identifier, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
 };
 use log::{debug, info, warn};

@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,9 +44,24 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub mod executor;
 pub mod parser;
 pub mod reaction;
 
 pub use config::{MsSqlStoredProcReactionConfig, QueryConfig, TemplateSpec};
 pub use reaction::MsSqlStoredProcReaction;
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "storedproc-mssql-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::MsSqlStoredProcReactionDescriptor],
+    bootstrap_descriptors = [],
+);

@@ -479,10 +479,6 @@ impl Reaction for AdaptiveHttpReaction {
             )
             .await?;
 
-        // Subscribe to queries
-        // QueryProvider is available from initialize() context
-        self.base.subscribe_to_queries().await?;
-
         // Set status to Running
         self.base
             .set_status_with_event(
@@ -565,5 +561,12 @@ impl Reaction for AdaptiveHttpReaction {
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
+    }
+
+    async fn enqueue_query_result(
+        &self,
+        result: drasi_lib::channels::QueryResult,
+    ) -> anyhow::Result<()> {
+        self.base.enqueue_query_result(result).await
     }
 }

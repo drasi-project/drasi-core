@@ -24,10 +24,11 @@ use shared_tests::QueryTestConfig;
 use uuid::Uuid;
 
 use drasi_index_rocksdb::{
-    element_index::{self, RocksDbElementIndex, RocksIndexOptions},
+    element_index::{RocksDbElementIndex, RocksIndexOptions},
     future_queue::RocksDbFutureQueue,
     open_unified_db,
     result_index::RocksDbResultIndex,
+    RocksDbSessionControl, RocksDbSessionState,
 };
 
 struct RocksDbQueryConfig {
@@ -47,13 +48,21 @@ impl RocksDbQueryConfig {
     }
 
     #[allow(clippy::unwrap_used)]
-    pub fn build_future_queue(&self, query_id: &str) -> RocksDbFutureQueue {
+    pub fn build_future_queue(
+        &self,
+        query_id: &str,
+    ) -> (
+        RocksDbFutureQueue,
+        Arc<dyn drasi_core::interface::SessionControl>,
+    ) {
         let options = RocksIndexOptions {
             archive_enabled: true,
             direct_io: false,
         };
         let db = open_unified_db(&self.url, query_id, &options).unwrap();
-        RocksDbFutureQueue::new(db)
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        (RocksDbFutureQueue::new(db, session_state), session_control)
     }
 }
 
@@ -77,10 +86,12 @@ impl QueryTestConfig for RocksDbQueryConfig {
         };
 
         let db = open_unified_db(&self.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
 
-        let element_index = RocksDbElementIndex::new(db.clone(), options);
-        let ari = RocksDbResultIndex::new(db.clone());
-        let fqi = RocksDbFutureQueue::new(db);
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let ari = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let fqi = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state));
 
         element_index.clear().await.unwrap();
         ari.clear().await.unwrap();
@@ -93,6 +104,7 @@ impl QueryTestConfig for RocksDbQueryConfig {
             .with_archive_index(element_index.clone())
             .with_result_index(Arc::new(ari))
             .with_future_queue(Arc::new(fqi))
+            .with_session_control(session_control)
     }
 }
 
@@ -274,35 +286,35 @@ mod index {
     #[serial]
     async fn future_queue_push_always() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_always(&fqi).await;
+        shared_tests::index::future_queue::push_always(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_not_exists() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_not_exists(&fqi).await;
+        shared_tests::index::future_queue::push_not_exists(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_clear_removes_all() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
-        shared_tests::index::future_queue::clear_removes_all(&fqi).await;
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        shared_tests::index::future_queue::clear_removes_all(&fqi, &sc).await;
     }
 
     #[tokio::test]
     #[serial]
     async fn future_queue_push_overwrite() {
         let test_config = RocksDbQueryConfig::new();
-        let fqi = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
+        let (fqi, sc) = test_config.build_future_queue(format!("test-{}", Uuid::new_v4()).as_str());
         fqi.clear().await.unwrap();
-        shared_tests::index::future_queue::push_overwrite(&fqi).await;
+        shared_tests::index::future_queue::push_overwrite(&fqi, &sc).await;
     }
 }
 
@@ -384,6 +396,173 @@ mod collect_aggregation {
     async fn multiple_collects() {
         let test_config = RocksDbQueryConfig::new();
         collect_aggregation::multiple_collects_test(&test_config).await;
+    }
+}
+
+mod session {
+    use std::sync::Arc;
+
+    use drasi_core::{
+        evaluation::functions::aggregation::ValueAccumulator,
+        interface::{
+            AccumulatorIndex, ElementIndex, FutureQueue, PushType, ResultKey, ResultOwner,
+            SessionControl,
+        },
+        models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
+    };
+    use drasi_index_rocksdb::{
+        element_index::{RocksDbElementIndex, RocksIndexOptions},
+        future_queue::RocksDbFutureQueue,
+        open_unified_db,
+        result_index::RocksDbResultIndex,
+        RocksDbSessionControl, RocksDbSessionState,
+    };
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    #[serial]
+    async fn session_rollback_discards_writes() {
+        let url = format!("test-data/{}", Uuid::new_v4());
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let future_queue = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = RocksDbSessionControl::new(session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then rollback
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.rollback();
+
+        // Verify nothing persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_none(), "element should not persist after rollback");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(
+            acc.is_none(),
+            "accumulator should not persist after rollback"
+        );
+
+        session_control.rollback().unwrap();
+
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert!(due.is_none(), "future queue should be empty after rollback");
+
+        let _ = std::fs::remove_dir_all(&url);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    #[serial]
+    async fn session_commit_persists_writes() {
+        let url = format!("test-data/{}", Uuid::new_v4());
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let db = open_unified_db(&url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let element_index = RocksDbElementIndex::new(db.clone(), options, session_state.clone());
+        let result_index = RocksDbResultIndex::new(db.clone(), session_state.clone());
+        let future_queue = RocksDbFutureQueue::new(db, session_state.clone());
+        let session_control = RocksDbSessionControl::new(session_state);
+
+        element_index.clear().await.unwrap();
+        result_index.clear().await.unwrap();
+        future_queue.clear().await.unwrap();
+
+        let element_ref = ElementReference::new("source1", "node1");
+        let node = Element::Node {
+            metadata: ElementMetadata {
+                reference: element_ref.clone(),
+                labels: Arc::new([Arc::from("TestLabel")]),
+                effective_from: 1000,
+            },
+            properties: ElementPropertyMap::new(),
+        };
+        let result_key = ResultKey::InputHash(1);
+        let result_owner = ResultOwner::Function(0);
+
+        // Begin session, write to all three indexes, then commit
+        session_control.begin().await.unwrap();
+
+        element_index.set_element(&node, &vec![]).await.unwrap();
+        result_index
+            .set(
+                result_key.clone(),
+                result_owner.clone(),
+                Some(ValueAccumulator::Count { value: 42 }),
+            )
+            .await
+            .unwrap();
+        future_queue
+            .push(PushType::Always, 1, 1, &element_ref, 10, 20)
+            .await
+            .unwrap();
+
+        session_control.commit().await.unwrap();
+
+        // Verify data persisted (reads require a session)
+        session_control.begin().await.unwrap();
+
+        let elem = element_index.get_element(&element_ref).await.unwrap();
+        assert!(elem.is_some(), "element should persist after commit");
+
+        let acc = result_index.get(&result_key, &result_owner).await.unwrap();
+        assert!(acc.is_some(), "accumulator should persist after commit");
+        match acc.unwrap() {
+            ValueAccumulator::Count { value } => assert_eq!(value, 42),
+            other => panic!("expected Count, got {other:?}"),
+        }
+
+        session_control.rollback().unwrap();
+
+        let due = future_queue.peek_due_time().await.unwrap();
+        assert_eq!(due, Some(20));
+
+        let _ = std::fs::remove_dir_all(&url);
     }
 }
 

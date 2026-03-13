@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mssql"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Microsoft SQL Server CDC source plugin for Drasi"
@@ -23,12 +23,18 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "mssql", "cdc"]
 categories = ["database"]
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [lints]
 workspace = true
 
 [dependencies]
+drasi-mssql-common = { workspace = true }
 drasi-lib.workspace = true
 drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 tiberius = { version = "0.12", features = ["chrono", "rust_decimal"] }
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -48,5 +54,10 @@ hex = "0.4"
 env_logger = "0.11"
 tokio-test = "0.4"
 testcontainers = "0.23"
-drasi-bootstrap-mssql.workspace = true
-drasi-reaction-application.workspace = true
+drasi-bootstrap-mssql = { path = "../../bootstrappers/mssql" }
+drasi-reaction-application = { path = "../../reactions/application" }
+
+
+[features]
+# default = []
+dynamic-plugin = []

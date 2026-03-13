@@ -25,7 +25,7 @@ use crate::{
         in_memory_element_index::InMemoryElementIndex, in_memory_future_queue::InMemoryFutureQueue,
         in_memory_result_index::InMemoryResultIndex,
     },
-    interface::{FutureElementRef, FutureQueueConsumer},
+    interface::FutureQueueConsumer,
     query::QueryBuilder,
 };
 
@@ -61,19 +61,11 @@ struct TestFutureConsumer {}
 
 #[async_trait]
 impl FutureQueueConsumer for TestFutureConsumer {
-    async fn on_due(
-        &self,
-        _future_ref: &FutureElementRef,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn on_items_due(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
-    async fn on_error(
-        &self,
-        _future_ref: &FutureElementRef,
-        _errorr: Box<dyn std::error::Error + Send + Sync>,
-    ) {
-    }
+    async fn on_error(&self, _error: Box<dyn std::error::Error + Send + Sync>) {}
 
     fn now(&self) -> u64 {
         0

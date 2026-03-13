@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -214,6 +215,7 @@
 //! ```
 
 pub mod config;
+pub mod descriptor;
 pub use config::HttpSourceConfig;
 
 mod adaptive_batcher;
@@ -1845,8 +1847,8 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
-                        assert_eq!(out_node.element_id.as_ref(), "user-1");
-                        assert_eq!(in_node.element_id.as_ref(), "user-2");
+                        assert_eq!(in_node.element_id.as_ref(), "user-1");
+                        assert_eq!(out_node.element_id.as_ref(), "user-2");
                     }
                     _ => panic!("Expected Relation element"),
                 },
@@ -1934,3 +1936,17 @@ mod tests {
         }
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "http-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::HttpSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);

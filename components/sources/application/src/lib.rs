@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -280,11 +281,11 @@ impl ApplicationSourceHandle {
             properties,
             in_node: ElementReference {
                 source_id: Arc::from(self.source_id.as_str()),
-                element_id: end_node_id.into(),
+                element_id: start_node_id.into(),
             },
             out_node: ElementReference {
                 source_id: Arc::from(self.source_id.as_str()),
-                element_id: start_node_id.into(),
+                element_id: end_node_id.into(),
             },
         };
 
