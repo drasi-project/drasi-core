@@ -162,8 +162,20 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             .with_min_interval_ms(config.min_interval_ms)
             .with_max_interval_seconds(config.max_interval_seconds)
             .with_api_version(config.api_version.clone())
-            .with_auto_start(auto_start)
-            .build()?;
+            .with_auto_start(auto_start);
+
+        // Apply entity set overrides
+        let mut source = source;
+        for (entity, set_name) in &config.entity_set_overrides {
+            source = source.with_entity_set_override(entity, set_name);
+        }
+
+        // Apply per-entity column selections
+        for (entity, columns) in &config.entity_columns {
+            source = source.with_entity_columns(entity, columns.clone());
+        }
+
+        let source = source.build()?;
 
         Ok(Box::new(source))
     }
