@@ -46,7 +46,6 @@ let source = DataverseSource::builder("dv-source")
 | `entities`             | `Vec<String>`               | required  | Entity logical names to monitor               |
 | `entity_set_overrides` | `HashMap<String, String>`   | `{}`      | Override entity set name for non-standard pluralization |
 | `entity_columns`       | `HashMap<String, Vec<String>>` | `{}`   | Per-entity column selection (`$select`)        |
-| `polling_interval_ms`  | `u64`                       | `5000`    | Base polling interval (ms)                    |
 | `min_interval_ms`      | `u64`                       | `500`     | Minimum adaptive polling interval (ms)        |
 | `max_interval_seconds` | `u64`                       | `30`      | Maximum adaptive polling interval (s)         |
 | `api_version`          | `String`                    | `"v9.2"`  | Dataverse Web API version                     |
