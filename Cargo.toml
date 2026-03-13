@@ -43,6 +43,7 @@ members = [
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/mqtt",
 
   # Index Plugins
   "components/indexes/rocksdb",
@@ -67,7 +68,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "lib-integration-tests",
+  "lib-integration-tests", "components/reactions/mqtt",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -118,6 +119,7 @@ drasi-source-application = { version = "0.1.9", path = "components/sources/appli
 drasi-bootstrap-application = { version = "0.1.8", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.9", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.6", path = "components/reactions/grpc" }
+drasi-reaction-mqtt = { version = "0.1.0", path = "components/reactions/mqtt" }
 drasi-mssql-common = { version = "0.1.0", path = "components/mssql-common" }
 
 [workspace.lints.rust]
