@@ -148,7 +148,7 @@ async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
     source_id: &str,
     query_id: &str,
-    current_results: &RwLock<Vec<serde_json::Value>>,
+    current_results: &Arc<RwLock<HashMap<u64, serde_json::Value>>>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
@@ -182,29 +182,27 @@ async fn dispatch_query_results(
         })
         .collect();
 
-    // Update the current result set based on the changes
-    let mut result_set = current_results.write().await;
-    for result in &converted_results {
-        match result {
-            ResultDiff::Add { data } => {
-                result_set.push(data.clone());
-            }
-            ResultDiff::Delete { data } => {
-                result_set.retain(|item| item != data);
-            }
-            ResultDiff::Update { before, after, .. } => {
-                if let Some(pos) = result_set.iter().position(|item| item == before) {
-                    result_set[pos] = after.clone();
-                } else {
-                    warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
-                    result_set.retain(|item| item != before);
-                    result_set.push(after.clone());
+    // Update current_results using row_signature from drasi-core
+    // as HashMap key for O(1) lookups.
+    {
+        let mut result_set = current_results.write().await;
+        for ctx in results {
+            let sig = ctx.row_signature();
+            match ctx {
+                QueryPartEvaluationContext::Adding { after, .. } => {
+                    result_set.insert(sig, convert_query_variables_to_json(after));
                 }
+                QueryPartEvaluationContext::Removing { .. } => {
+                    result_set.remove(&sig);
+                }
+                QueryPartEvaluationContext::Updating { after, .. }
+                | QueryPartEvaluationContext::Aggregation { after, .. } => {
+                    result_set.insert(sig, convert_query_variables_to_json(after));
+                }
+                QueryPartEvaluationContext::Noop => {}
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
         }
     }
-    drop(result_set);
 
     let query_result = QueryResult::with_profiling(
         query_id.to_string(),
@@ -1089,7 +1087,6 @@ impl Query for DrasiQuery {
                                         Err(e) => {
                                             error!("Query '{query_id}' failed to process source change: {e}");
                                         }
-                                        QueryPartEvaluationContext::Noop => {}
                                     }
                                 }
                                 SourceEvent::Control(_) => {
