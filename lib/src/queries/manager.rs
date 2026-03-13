@@ -113,9 +113,7 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             serde_json::Value::Object(result)
         }
         VariableValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
-        VariableValue::ZonedDateTime(dt) => {
-            serde_json::Value::String(dt.datetime().to_rfc3339())
-        }
+        VariableValue::ZonedDateTime(dt) => serde_json::Value::String(dt.datetime().to_rfc3339()),
         // For complex types, convert to string representation
         _ => serde_json::Value::String(format!("{value:?}")),
     }
@@ -170,12 +168,16 @@ async fn dispatch_query_results(
                 after: convert_query_variables_to_json(after),
                 grouping_keys: None,
             },
-            QueryPartEvaluationContext::Aggregation { before, after, .. } => {
-                ResultDiff::Aggregation {
-                    before: before.as_ref().map(convert_query_variables_to_json),
-                    after: convert_query_variables_to_json(after),
-                }
-            }
+            QueryPartEvaluationContext::Aggregation {
+                before,
+                after,
+                grouping_keys,
+                ..
+            } => ResultDiff::Aggregation {
+                before: before.as_ref().map(convert_query_variables_to_json),
+                after: convert_query_variables_to_json(after),
+                grouping_keys: Some(grouping_keys.clone()),
+            },
             QueryPartEvaluationContext::Noop => ResultDiff::Noop,
         })
         .collect();
