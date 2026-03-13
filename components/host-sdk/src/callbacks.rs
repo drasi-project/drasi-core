@@ -31,19 +31,10 @@ use drasi_plugin_sdk::ffi::{
 };
 use tokio::sync::RwLock;
 
-/// Spawn an async future on the host tokio runtime and block until it completes.
+/// Spawn an async future on the host tokio runtime.
 ///
 /// Callbacks are `extern "C"` functions invoked from within a plugin's own tokio
 /// runtime, so we cannot call `block_on` on the host runtime. Instead we
-/// fire-and-forget a task on the host runtime. This avoids deadlocks when the
-/// host runtime is single-threaded.
-fn run_on_host_runtime<F>(handle: &tokio::runtime::Handle, f: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    handle.spawn(f);
-}
-
 /// Host-side callback context that routes plugin logs and events into DrasiLib.
 ///
 /// One context is created per DrasiLib instance. The host passes a raw pointer
@@ -235,10 +226,7 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             ComponentType::Source, // TODO: parse from entry if available
         );
         let registry = context.log_registry.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            registry.log(log_message).await;
-        });
+        registry.try_log(log_message);
     }
 }
 
@@ -283,15 +271,15 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
             },
         };
 
-        // Route to the correct event history based on component type
+        // Use try_write to avoid spawning async tasks that block the scheduler
         let event_history = match component_type {
             ComponentType::Reaction => context.reaction_event_history.clone(),
             _ => context.source_event_history.clone(),
         };
-
-        run_on_host_runtime(&context.runtime_handle, async move {
-            event_history.write().await.record_event(component_event);
-        });
+        let write_result = event_history.try_write();
+        if let Ok(mut history) = write_result {
+            history.record_event(component_event);
+        }
     }
 }
 
@@ -370,10 +358,9 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             ComponentType::Source,
         );
         let registry = context.log_registry.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            registry.log(log_message).await;
-        });
+        // Use try_log (non-blocking) to avoid spawning async tasks that can
+        // block the current_thread scheduler during drop sequences.
+        registry.try_log(log_message);
     }
 }
 
@@ -422,12 +409,11 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         };
 
         let tx = context.event_tx.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            if let Err(e) = tx.send(component_event).await {
-                log::error!("Failed to send lifecycle event: {e}");
-            }
-        });
+        // Use try_send to avoid spawning an async task that may block
+        // the host runtime's current_thread scheduler during drop sequences.
+        if let Err(e) = tx.try_send(component_event) {
+            log::error!("Failed to send lifecycle event: {e}");
+        }
     }
 }
 
