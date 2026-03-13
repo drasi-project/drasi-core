@@ -153,7 +153,7 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             api_version,
         };
 
-        let source = crate::DataverseSourceBuilder::new(id)
+        let mut source = crate::DataverseSourceBuilder::new(id)
             .with_environment_url(config.environment_url.clone())
             .with_tenant_id(config.tenant_id.clone())
             .with_client_id(config.client_id.clone())
@@ -164,8 +164,11 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             .with_api_version(config.api_version.clone())
             .with_auto_start(auto_start);
 
+        if config.use_azure_cli {
+            source = source.with_azure_cli_auth();
+        }
+
         // Apply entity set overrides
-        let mut source = source;
         for (entity, set_name) in &config.entity_set_overrides {
             source = source.with_entity_set_override(entity, set_name);
         }
