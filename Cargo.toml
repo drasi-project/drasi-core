@@ -81,6 +81,7 @@ members = [
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
   "components/reactions/snapshot-test",
+  "components/reactions/mqtt",
 
   # Identity Provider Plugins
   "components/identity/azure",
@@ -117,7 +118,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "lib-integration-tests",
+  "lib-integration-tests", "components/reactions/mqtt",
   ]
 
 # Exclude internal crates from workspace packaging
@@ -205,6 +206,7 @@ drasi-source-neo4j = { version = "0.1.2", path = "components/sources/neo4j" }
 drasi-bootstrap-neo4j = { version = "0.1.2", path = "components/bootstrappers/neo4j" }
 drasi-neo4j-common = { version = "0.1.2", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.7", path = "components/bootstrappers/sqlite" }
+drasi-reaction-mqtt = { version = "0.1.0", path = "components/reactions/mqtt" }
 
 [workspace.lints.rust]
 warnings = "deny"
