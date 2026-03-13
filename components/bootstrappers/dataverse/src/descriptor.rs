@@ -148,3 +148,77 @@ impl BootstrapPluginDescriptor for DataverseBootstrapDescriptor {
         Ok(Box::new(provider))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dto_deserializes_from_camel_case_json() {
+        let json = serde_json::json!({
+            "environmentUrl": "https://myorg.crm.dynamics.com",
+            "tenantId": "tenant-1",
+            "clientId": "client-1",
+            "clientSecret": "secret-1",
+            "entities": ["account", "contact"]
+        });
+
+        let dto: DataverseBootstrapConfigDto =
+            serde_json::from_value(json).expect("should deserialize");
+
+        assert_eq!(
+            dto.environment_url,
+            ConfigValue::Static("https://myorg.crm.dynamics.com".to_string())
+        );
+        assert_eq!(
+            dto.tenant_id,
+            Some(ConfigValue::Static("tenant-1".to_string()))
+        );
+        assert_eq!(
+            dto.client_id,
+            Some(ConfigValue::Static("client-1".to_string()))
+        );
+        assert_eq!(
+            dto.client_secret,
+            Some(ConfigValue::Static("secret-1".to_string()))
+        );
+        assert_eq!(dto.entities, vec!["account", "contact"]);
+    }
+
+    #[test]
+    fn test_dto_applies_defaults() {
+        let json = serde_json::json!({
+            "environmentUrl": "https://myorg.crm.dynamics.com",
+            "entities": ["account"]
+        });
+
+        let dto: DataverseBootstrapConfigDto =
+            serde_json::from_value(json).expect("should deserialize");
+
+        assert_eq!(
+            dto.api_version,
+            ConfigValue::Static("v9.2".to_string())
+        );
+        assert_eq!(dto.page_size, ConfigValue::Static(5000));
+        assert!(!dto.use_azure_cli);
+        assert!(dto.entity_set_overrides.is_empty());
+        assert!(dto.entity_columns.is_empty());
+        assert_eq!(dto.tenant_id, None);
+        assert_eq!(dto.client_id, None);
+        assert_eq!(dto.client_secret, None);
+    }
+
+    #[test]
+    fn test_descriptor_metadata() {
+        let desc = DataverseBootstrapDescriptor;
+        assert_eq!(desc.kind(), "dataverse");
+        assert_eq!(desc.config_version(), "1.0.0");
+        assert_eq!(
+            desc.config_schema_name(),
+            "bootstrap.dataverse.DataverseBootstrapConfig"
+        );
+        let schema = desc.config_schema_json();
+        let _: serde_json::Value =
+            serde_json::from_str(&schema).expect("schema should be valid JSON");
+    }
+}

@@ -179,3 +179,95 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
         Ok(Box::new(source))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dto_deserializes_from_camel_case_json() {
+        let json = serde_json::json!({
+            "environmentUrl": "https://myorg.crm.dynamics.com",
+            "tenantId": "tenant-1",
+            "clientId": "client-1",
+            "clientSecret": "secret-1",
+            "entities": ["account", "contact"]
+        });
+
+        let dto: DataverseSourceConfigDto =
+            serde_json::from_value(json).expect("should deserialize");
+
+        assert_eq!(
+            dto.environment_url,
+            ConfigValue::Static("https://myorg.crm.dynamics.com".to_string())
+        );
+        assert_eq!(
+            dto.tenant_id,
+            Some(ConfigValue::Static("tenant-1".to_string()))
+        );
+        assert_eq!(
+            dto.client_id,
+            Some(ConfigValue::Static("client-1".to_string()))
+        );
+        assert_eq!(
+            dto.client_secret,
+            Some(ConfigValue::Static("secret-1".to_string()))
+        );
+        assert_eq!(dto.entities, vec!["account", "contact"]);
+    }
+
+    #[test]
+    fn test_dto_applies_defaults() {
+        let json = serde_json::json!({
+            "environmentUrl": "https://myorg.crm.dynamics.com",
+            "entities": ["account"]
+        });
+
+        let dto: DataverseSourceConfigDto =
+            serde_json::from_value(json).expect("should deserialize");
+
+        assert_eq!(dto.polling_interval_ms, ConfigValue::Static(5000));
+        assert_eq!(dto.min_interval_ms, ConfigValue::Static(500));
+        assert_eq!(dto.max_interval_seconds, ConfigValue::Static(30));
+        assert_eq!(
+            dto.api_version,
+            ConfigValue::Static("v9.2".to_string())
+        );
+        assert!(!dto.use_azure_cli);
+        assert!(dto.entity_set_overrides.is_empty());
+        assert!(dto.entity_columns.is_empty());
+        assert_eq!(dto.tenant_id, None);
+        assert_eq!(dto.client_id, None);
+        assert_eq!(dto.client_secret, None);
+    }
+
+    #[test]
+    fn test_dto_azure_cli_mode() {
+        let json = serde_json::json!({
+            "environmentUrl": "https://myorg.crm.dynamics.com",
+            "useAzureCli": true,
+            "entities": ["account"]
+        });
+
+        let dto: DataverseSourceConfigDto =
+            serde_json::from_value(json).expect("should deserialize");
+
+        assert!(dto.use_azure_cli);
+        assert_eq!(dto.tenant_id, None);
+    }
+
+    #[test]
+    fn test_descriptor_metadata() {
+        let desc = DataverseSourceDescriptor;
+        assert_eq!(desc.kind(), "dataverse");
+        assert_eq!(desc.config_version(), "1.0.0");
+        assert_eq!(
+            desc.config_schema_name(),
+            "source.dataverse.DataverseSourceConfig"
+        );
+        // Schema JSON should be valid JSON
+        let schema = desc.config_schema_json();
+        let _: serde_json::Value =
+            serde_json::from_str(&schema).expect("schema should be valid JSON");
+    }
+}

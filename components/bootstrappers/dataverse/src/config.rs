@@ -14,27 +14,7 @@
 
 //! Configuration for the Dataverse bootstrap provider.
 
-use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-
-/// Deserializes `entities` from either a JSON array of strings or a single
-/// comma-separated string.
-fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        Vec(Vec<String>),
-        String(String),
-    }
-
-    match StringOrVec::deserialize(deserializer)? {
-        StringOrVec::Vec(v) => Ok(v),
-        StringOrVec::String(s) => Ok(s.split(',').map(|t| t.trim().to_string()).collect()),
-    }
-}
 
 /// Configuration for the Dataverse bootstrap provider.
 ///
@@ -61,54 +41,42 @@ where
 /// };
 /// assert!(config.validate().is_ok());
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DataverseBootstrapConfig {
     /// Dataverse environment URL (e.g., "https://myorg.crm.dynamics.com")
-    /// Also accepted as `endpoint` in platform YAML.
-    #[serde(alias = "endpoint")]
     pub environment_url: String,
 
     /// Azure AD tenant ID for authentication.
     /// Required for client credentials flow, ignored when `use_azure_cli` is true.
-    #[serde(default, alias = "tenantId")]
     pub tenant_id: String,
 
     /// Azure AD application (client) ID.
     /// Required for client credentials flow, ignored when `use_azure_cli` is true.
-    #[serde(default, alias = "clientId")]
     pub client_id: String,
 
     /// Azure AD client secret.
     /// Required for client credentials flow, ignored when `use_azure_cli` is true.
-    #[serde(default, alias = "clientSecret")]
     pub client_secret: String,
 
     /// Use Azure CLI (`az account get-access-token`) for authentication.
     /// When true, `tenant_id`, `client_id`, and `client_secret` are not required.
-    #[serde(default, alias = "useAzureCli")]
     pub use_azure_cli: bool,
 
     /// Entity logical names to bootstrap (e.g., ["account", "contact"])
-    /// Accepts either a JSON array or a comma-separated string.
-    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub entities: Vec<String>,
 
     /// Override entity set names for non-standard pluralization
     /// Key: entity logical name, Value: entity set name
-    #[serde(default, alias = "entitySetOverrides")]
     pub entity_set_overrides: HashMap<String, String>,
 
     /// Per-entity column selection for `$select`
     /// Key: entity logical name, Value: list of column names
-    #[serde(default, alias = "entityColumns")]
     pub entity_columns: HashMap<String, Vec<String>>,
 
     /// Dataverse Web API version (default: "v9.2")
-    #[serde(default = "default_api_version", alias = "apiVersion")]
     pub api_version: String,
 
     /// Number of records per page (default: 5000)
-    #[serde(default = "default_page_size", alias = "pageSize")]
     pub page_size: usize,
 }
 
@@ -300,40 +268,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_config_camel_case_aliases() {
-        let config: DataverseBootstrapConfig = serde_json::from_str(
-            r#"{
-                "endpoint": "https://myorg.crm.dynamics.com",
-                "tenantId": "tenant-1",
-                "clientId": "client-1",
-                "clientSecret": "secret-1",
-                "entities": "lead"
-            }"#,
-        )
-        .expect("should deserialize from camelCase");
 
-        assert_eq!(config.environment_url, "https://myorg.crm.dynamics.com");
-        assert_eq!(config.tenant_id, "tenant-1");
-        assert_eq!(config.client_id, "client-1");
-        assert_eq!(config.client_secret, "secret-1");
-        assert_eq!(config.entities, vec!["lead"]);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_entities_comma_separated() {
-        let config: DataverseBootstrapConfig = serde_json::from_str(
-            r#"{
-                "endpoint": "https://test.crm.dynamics.com",
-                "tenantId": "t",
-                "clientId": "c",
-                "clientSecret": "s",
-                "entities": "account, contact, lead"
-            }"#,
-        )
-        .expect("should deserialize comma-separated entities");
-
-        assert_eq!(config.entities, vec!["account", "contact", "lead"]);
-    }
 }
