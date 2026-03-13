@@ -1424,8 +1424,6 @@ mod tests {
 }
 
 /// Dynamic plugin entry point.
-///
-/// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "dataverse-source",
