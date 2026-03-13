@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mssql"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Microsoft SQL Server CDC source plugin for Drasi"
@@ -54,8 +54,8 @@ hex = "0.4"
 env_logger = "0.11"
 tokio-test = "0.4"
 testcontainers = "0.23"
-drasi-bootstrap-mssql.workspace = true
-drasi-reaction-application.workspace = true
+drasi-bootstrap-mssql = { path = "../../bootstrappers/mssql" }
+drasi-reaction-application = { path = "../../reactions/application" }
 
 
 [features]

@@ -96,6 +96,16 @@ impl BootstrapProvider for BootstrapProviderProxy {
             sender_ptr,
         );
 
+        // Reclaim the FfiBootstrapSender so its drop_fn runs, which drops the
+        // std::sync::mpsc::Sender, causing the forwarding thread to exit and
+        // the tokio mpsc Sender (event_tx) to be dropped. Without this, the
+        // query's bootstrap_rx.recv() would never return None and the query
+        // would stay in Starting state forever.
+        unsafe {
+            let sender = Box::from_raw(sender_ptr);
+            (sender.drop_fn)(sender.state);
+        }
+
         if count < 0 {
             return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
         }
