@@ -408,3 +408,130 @@ async fn test_multiple_events_flow_through() {
 
     drasi.stop().await.unwrap();
 }
+
+/// Test that aggregation query results are stored in current_results and accessible
+/// via get_query_results().
+///
+/// This validates that when a continuous query produces `Aggregation` results,
+/// they are stored in the query's result set — not silently discarded.
+#[tokio::test]
+async fn test_aggregation_results_stored_in_current_results() {
+    let (source, injector) = InjectableSource::new("agg-src").unwrap();
+
+    let reaction = CapturingReaction::new("agg-rx", vec!["agg-query".to_string()]);
+    let captured = reaction.captured();
+
+    let drasi = DrasiLib::builder()
+        .with_source(source)
+        .with_query(
+            Query::cypher("agg-query")
+                .query(
+                    "MATCH (p:Product)<-[:REVIEWED]-(r:Review) \
+                     RETURN p.name AS product_name, count(r) AS review_count",
+                )
+                .from_source("agg-src")
+                .build(),
+        )
+        .with_reaction(reaction)
+        .build()
+        .await
+        .unwrap();
+
+    drasi.start().await.unwrap();
+
+    wait_for_status(&drasi, "source", "agg-src", ComponentStatus::Running).await;
+    wait_for_status(&drasi, "query", "agg-query", ComponentStatus::Running).await;
+    wait_for_status(&drasi, "reaction", "agg-rx", ComponentStatus::Running).await;
+
+    // Insert a Product node
+    let product = drasi_core::models::Element::Node {
+        metadata: drasi_core::models::ElementMetadata {
+            reference: drasi_core::models::ElementReference::new("agg-src", "p1"),
+            labels: Arc::from(vec![Arc::from("Product")]),
+            effective_from: 1000,
+        },
+        properties: drasi_core::models::ElementPropertyMap::from(serde_json::json!({
+            "name": "Widget"
+        })),
+    };
+    injector
+        .inject(drasi_core::models::SourceChange::Insert { element: product })
+        .await
+        .unwrap();
+
+    // Insert a Review node
+    let review = drasi_core::models::Element::Node {
+        metadata: drasi_core::models::ElementMetadata {
+            reference: drasi_core::models::ElementReference::new("agg-src", "r1"),
+            labels: Arc::from(vec![Arc::from("Review")]),
+            effective_from: 1001,
+        },
+        properties: drasi_core::models::ElementPropertyMap::from(serde_json::json!({
+            "rating": 5
+        })),
+    };
+    injector
+        .inject(drasi_core::models::SourceChange::Insert { element: review })
+        .await
+        .unwrap();
+
+    // Insert the REVIEWED relationship: (r1)-[:REVIEWED]->(p1)
+    // in_node = start of arrow = r1, out_node = end of arrow = p1
+    let rel = drasi_core::models::Element::Relation {
+        metadata: drasi_core::models::ElementMetadata {
+            reference: drasi_core::models::ElementReference::new("agg-src", "r1-p1"),
+            labels: Arc::from(vec![Arc::from("REVIEWED")]),
+            effective_from: 1002,
+        },
+        properties: drasi_core::models::ElementPropertyMap::default(),
+        in_node: drasi_core::models::ElementReference::new("agg-src", "r1"),
+        out_node: drasi_core::models::ElementReference::new("agg-src", "p1"),
+    };
+    injector
+        .inject(drasi_core::models::SourceChange::Insert { element: rel })
+        .await
+        .unwrap();
+
+    // Wait for the aggregation result to reach the reaction
+    let _received = timeout(Duration::from_secs(5), async {
+        loop {
+            let results = captured.read().await;
+            let has_agg = results.iter().any(|r| {
+                r.results
+                    .iter()
+                    .any(|d| matches!(d, ResultDiff::Aggregation { .. }))
+            });
+            if has_agg {
+                return results.clone();
+            }
+            drop(results);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for aggregation results to reach reaction");
+
+    // Now verify that get_query_results() returns the aggregation data.
+    // This is the key assertion: aggregation results must be stored in current_results.
+    let query_results = drasi.get_query_results("agg-query").await.unwrap();
+
+    assert!(
+        !query_results.is_empty(),
+        "get_query_results() should return aggregation results, but got empty"
+    );
+
+    // Verify the aggregation result contains the expected data
+    let result = &query_results[0];
+    assert_eq!(
+        result.get("product_name").and_then(|v| v.as_str()),
+        Some("Widget"),
+        "Aggregation result should contain product_name='Widget'"
+    );
+    assert_eq!(
+        result.get("review_count").and_then(|v| v.as_i64()),
+        Some(1),
+        "Aggregation result should have review_count=1"
+    );
+
+    drasi.stop().await.unwrap();
+}
