@@ -674,7 +674,6 @@ impl Source for DataverseSource {
 
         // Store the shutdown sender for stop()
         // We use a combined task that waits for all workers
-        let shutdown_tx_clone = shutdown_tx.clone();
         let source_id = self.base.id.clone();
         let combined_handle = tokio::spawn(async move {
             for (i, handle) in task_handles.into_iter().enumerate() {
@@ -687,17 +686,9 @@ impl Source for DataverseSource {
 
         *self.base.task_handle.write().await = Some(combined_handle);
 
-        // Store shutdown_tx in a custom slot
-        // We abuse the oneshot field by creating a bridge
-        let (oneshot_tx, _oneshot_rx) = tokio::sync::oneshot::channel::<()>();
-        // When oneshot_tx is dropped (in stop()), we trigger shutdown
-        // Actually, let's use a different approach: store shutdown_tx in context
-        // For now, store it directly - we need the watch::Sender
+        // Store a shutdown bridge so stop() can trigger shutdown via the watch channel
         {
-            // We'll trigger shutdown via the watch channel
-            // Store the sender so stop() can use it
             let mut lock = self.base.shutdown_tx.write().await;
-            // Create a bridge: when the oneshot is sent, signal the watch
             let shutdown_tx_for_stop = shutdown_tx.clone();
             let (bridge_tx, bridge_rx) = tokio::sync::oneshot::channel::<()>();
             tokio::spawn(async move {

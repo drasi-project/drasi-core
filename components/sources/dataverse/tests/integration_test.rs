@@ -32,7 +32,6 @@ mod integration_tests {
     use drasi_reaction_application::ApplicationReaction;
     use drasi_source_dataverse::DataverseSource;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use wiremock::matchers::{header, method, path, path_regex};
@@ -129,10 +128,6 @@ mod integration_tests {
         let mock_server = MockServer::start().await;
         let mock_uri = mock_server.uri();
 
-        // Track how many times the delta endpoint is called to sequence responses
-        let delta_call_count = Arc::new(AtomicUsize::new(0));
-        let delta_count_clone = delta_call_count.clone();
-
         // 2. Mount OAuth2 token mock (always available)
         Mock::given(method("POST"))
             .and(path_regex(r".*/oauth2/v2.0/token"))
@@ -145,7 +140,7 @@ mod integration_tests {
         let mock_uri_for_initial = mock_uri.clone();
         Mock::given(method("GET"))
             .and(path("/api/data/v9.2/accounts"))
-            .and(header("Prefer", "odata.track-changes"))
+            .and(header("Prefer", "odata.track-changes,odata.maxpagesize=1000"))
             .respond_with(empty_delta_response(&mock_uri_for_initial))
             .expect(1)
             .mount(&mock_server)
@@ -154,9 +149,6 @@ mod integration_tests {
         // 4. Mount delta link endpoint - returns sequenced responses
         // We use a custom responder that returns different responses based on call count
         let mock_uri_for_delta = mock_uri.clone();
-        let mock_uri_for_delta2 = mock_uri.clone();
-        let mock_uri_for_delta3 = mock_uri.clone();
-        let mock_uri_for_delta4 = mock_uri.clone();
 
         // Since wiremock doesn't natively support stateful responses easily,
         // we'll mount multiple mocks with different deltatoken query params.
@@ -175,7 +167,7 @@ mod integration_tests {
             .and(path_regex(
                 r".*/accounts\?.*deltatoken=after-insert-token-2",
             ))
-            .respond_with(update_delta_response(&mock_uri_for_delta2))
+            .respond_with(update_delta_response(&mock_uri_for_delta))
             .expect(1)
             .mount(&mock_server)
             .await;
@@ -185,7 +177,7 @@ mod integration_tests {
             .and(path_regex(
                 r".*/accounts\?.*deltatoken=after-update-token-3",
             ))
-            .respond_with(delete_delta_response(&mock_uri_for_delta3))
+            .respond_with(delete_delta_response(&mock_uri_for_delta))
             .expect(1)
             .mount(&mock_server)
             .await;
@@ -196,7 +188,7 @@ mod integration_tests {
                 r".*/accounts\?.*deltatoken=after-delete-token-4",
             ))
             .respond_with(no_changes_response(
-                &mock_uri_for_delta4,
+                &mock_uri_for_delta,
                 "after-delete-token-4",
             ))
             .expect(0..)
