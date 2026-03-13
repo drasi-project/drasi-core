@@ -239,7 +239,9 @@ pub fn load_plugin_from_path(
     // allocation. Accessing the new fields in that case would read beyond the
     // end of the struct, causing undefined behavior. Until ABI/SDK versioning
     // guarantees are tightened, we treat identity provider plugins as absent.
-    let identity_provider_vtables = None;
+    let identity_provider_vtables: Option<
+        Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
+    > = None;
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
