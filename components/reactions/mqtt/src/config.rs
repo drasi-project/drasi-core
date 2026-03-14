@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub fn default_base_topic() -> String {
-    "/topic/".to_string()
+    "".to_string()
 }
 
 pub fn default_timeout_ms() -> u64 {
@@ -28,16 +28,11 @@ pub fn default_timeout_ms() -> u64 {
 }
 
 /// MQTT message retain policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RetainPolicy {
     Retain,
+    #[default]
     NoRetain,
-}
-
-impl Default for RetainPolicy {
-    fn default() -> Self {
-        RetainPolicy::NoRetain
-    }
 }
 
 /// Specification for an MQTT call, including topic, retain policy, headers, and body template.
