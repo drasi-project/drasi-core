@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
+pub mod config;
 mod mqtt;
 
 use config::{
@@ -73,6 +73,11 @@ impl MqttReactionBuilder {
     /// Add a route configuration for a specific query
     pub fn with_route(mut self, query_id: impl Into<String>, config: MqttQueryConfig) -> Self {
         self.routes.insert(query_id.into(), config);
+        self
+    }
+
+    pub fn with_default_route(mut self, config: MqttQueryConfig) -> Self {
+        self.routes.insert("*".to_string(), config);
         self
     }
 
