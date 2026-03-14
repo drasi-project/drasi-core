@@ -1,0 +1,25 @@
+### ============================================================================
+### DrasiLib Stock Monitor - Query Results
+### ============================================================================
+### Use with VS Code REST Client extension or similar tools.
+###
+### The Results API listens on port 8080 and provides query results at:
+###   GET /queries/{query-id}/results
+###
+### ============================================================================
+
+### Get all stock prices
+### Returns all stocks with their current price, previous close, and volume
+GET http://localhost:8080/queries/all-prices/results
+
+###
+
+### Get gainers (stocks with price > previous_close)
+### Returns stocks that are up for the day with gain percentage
+GET http://localhost:8080/queries/gainers/results
+
+###
+
+### Get high volume stocks (volume > 1M)
+### Returns stocks with trading volume over 1 million shares
+GET http://localhost:8080/queries/high-volume/results
