@@ -13,12 +13,120 @@ let source = MsSqlSource::builder("mssql-source")
     .with_database("MyDatabase")
     .with_user("drasi_user")
     .with_password("password")
-    .with_tables(vec!["orders".to_string(), "customers".to_string()])
+    .with_tables(vec!["dbo.orders".to_string(), "dbo.customers".to_string()])
     .with_start_position(StartPosition::Current)  // or StartPosition::Beginning
     .build()?;
 
 source.start().await?;
 ```
+
+## Authentication
+
+The MSSQL source supports multiple authentication methods:
+
+### 1. SQL Server Authentication (Username/Password)
+
+```rust
+use drasi_source_mssql::MsSqlSource;
+
+let source = MsSqlSource::builder("mssql-source")
+    .with_host("localhost")
+    .with_port(1433)
+    .with_database("MyDatabase")
+    .with_user("drasi_user")
+    .with_password("secure_password")
+    .with_tables(vec!["dbo.orders".to_string()])
+    .build()?;
+```
+
+### 2. Azure AD with Developer Tools (az login)
+
+```rust
+use drasi_source_mssql::MsSqlSource;
+use drasi_identity_azure::AzureIdentityProvider;
+use drasi_mssql_common::EncryptionMode;
+
+let identity = AzureIdentityProvider::with_default_credentials(
+    "user@company.onmicrosoft.com"
+)?;
+
+let source = MsSqlSource::builder("mssql-source")
+    .with_host("myserver.database.windows.net")
+    .with_port(1433)
+    .with_database("production")
+    .with_tables(vec!["dbo.orders".to_string()])
+    .with_identity_provider(identity)
+    .with_encryption(EncryptionMode::NotSupported)
+    .with_trust_server_certificate(false)
+    .build()?;
+```
+
+**Setup:**
+```bash
+# Login with Azure CLI
+az login
+
+# Create Azure AD user in database (connect as AD admin)
+sqlcmd -S myserver.database.windows.net -d production -G
+```
+
+```sql
+CREATE USER [user@company.onmicrosoft.com] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_owner ADD MEMBER [user@company.onmicrosoft.com];
+GO
+```
+
+### 3. Azure AD with System-Assigned Managed Identity
+
+```rust
+use drasi_identity_azure::AzureIdentityProvider;
+
+let identity = AzureIdentityProvider::new("my-vm-identity")?;
+
+let source = MsSqlSource::builder("mssql-source")
+    .with_host("myserver.database.windows.net")
+    .with_database("production")
+    .with_tables(vec!["dbo.orders".to_string()])
+    .with_identity_provider(identity)
+    .with_encryption(EncryptionMode::NotSupported)
+    .build()?;
+```
+
+**Setup:**
+```bash
+# Enable system-assigned managed identity on VM
+az vm identity assign --name myVM --resource-group myRG
+```
+
+```sql
+-- Create managed identity user in database
+CREATE USER [my-vm-identity] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_owner ADD MEMBER [my-vm-identity];
+GO
+```
+
+### 4. Azure AD with User-Assigned Managed Identity
+
+```rust
+let identity = AzureIdentityProvider::with_managed_identity(
+    "drasi-identity",
+    "12345678-1234-1234-1234-123456789abc"  // Client ID
+)?;
+```
+
+### 5. Azure AD with Workload Identity (AKS)
+
+```rust
+let identity = AzureIdentityProvider::with_workload_identity(
+    "drasi-workload-id"
+)?;
+```
+
+**Requires environment variables:**
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+
+For complete authentication documentation, see [Authentication Guide](../../docs/AUTHENTICATION.md).
 
 ## Configuration
 
@@ -26,11 +134,13 @@ source.start().await?;
 host: localhost           # MS SQL Server hostname
 port: 1433               # Port (default: 1433)
 database: MyDatabase     # Database name
-user: drasi_user         # Username
-password: secret         # Password
-tables:                  # Tables to monitor
-  - orders
-  - customers
+user: drasi_user         # Username (not needed with identity provider)
+password: secret         # Password (not needed with identity provider)
+tables:                  # Tables to monitor (must include schema prefix)
+  - dbo.orders
+  - dbo.customers
+encryption: not_supported # Options: 'off', 'on', 'not_supported' (default)
+trustServerCertificate: false # Trust self-signed certs (default: false)
 start_position: current  # Starting position when no LSN in state store
                         # Options: 'beginning' or 'current' (default: current)
 table_keys:              # Optional: Override primary keys
@@ -39,6 +149,8 @@ table_keys:              # Optional: Override primary keys
       - order_id
       - product_id
 ```
+
+**Important:** Table names must include schema prefix (e.g., `dbo.orders` not just `orders`).
 
 ### Start Position Options
 
