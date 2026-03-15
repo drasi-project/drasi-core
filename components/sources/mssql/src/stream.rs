@@ -51,6 +51,7 @@ pub async fn run_cdc_stream(
     config: MsSqlSourceConfig,
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
@@ -70,6 +71,7 @@ pub async fn run_cdc_stream(
             &config,
             &dispatchers,
             &state_store,
+            identity_provider.clone(),
             &mut shutdown_rx,
         )
         .await
@@ -137,11 +139,12 @@ async fn run_cdc_polling_loop(
     config: &MsSqlSourceConfig,
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
-    // Connect to MS SQL
+    // Connect to MS SQL with identity provider
     info!("Connecting to MS SQL Server for source '{source_id}'");
-    let mut connection = MsSqlConnection::connect(config).await?;
+    let mut connection = MsSqlConnection::connect(config, identity_provider).await?;
     let client = connection.client_mut();
 
     // Discover primary keys

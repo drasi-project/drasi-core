@@ -114,6 +114,9 @@ pub struct MsSqlSource {
     /// State store for LSN persistence
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 
+    /// Identity provider for authentication
+    identity_provider: Arc<RwLock<Option<Arc<dyn drasi_lib::identity::IdentityProvider>>>>,
+
     /// CDC polling task handle
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
@@ -144,6 +147,7 @@ impl MsSqlSource {
             config,
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
@@ -238,6 +242,7 @@ impl Source for MsSqlSource {
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
         let state_store = self.state_store.read().await.clone();
+        let identity_provider = self.identity_provider.read().await.clone();
         let shutdown_rx = self.shutdown_rx.clone();
 
         // Spawn CDC polling task
@@ -247,6 +252,7 @@ impl Source for MsSqlSource {
                 config,
                 dispatchers,
                 state_store,
+                identity_provider,
                 shutdown_rx,
             )
             .await
@@ -315,6 +321,12 @@ impl Source for MsSqlSource {
         if let Some(state_store) = context.state_store {
             *self.state_store.write().await = Some(state_store);
             log::debug!("State store injected into MS SQL source '{}'", self.base.id);
+        }
+
+        // Store identity provider if provided
+        if let Some(identity_provider) = context.identity_provider {
+            *self.identity_provider.write().await = Some(identity_provider);
+            log::debug!("Identity provider injected into MS SQL source '{}'", self.base.id);
         }
     }
 
@@ -435,6 +447,16 @@ impl MsSqlSourceBuilder {
         self
     }
 
+    /// Set the identity provider for authentication
+    /// Takes precedence over with_user and with_password
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
+        self.config.identity_provider = Some(Arc::new(provider));
+        self
+    }
+
     /// Build the MS SQL source
     ///
     /// # Errors
@@ -444,8 +466,12 @@ impl MsSqlSourceBuilder {
         if self.config.database.is_empty() {
             return Err(anyhow::anyhow!("Database name is required"));
         }
-        if self.config.user.is_empty() {
-            return Err(anyhow::anyhow!("Database user is required"));
+        
+        // User is not required if identity provider is set
+        if self.config.identity_provider.is_none() && self.config.user.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Database user is required when not using identity provider"
+            ));
         }
 
         let source_id = self.id.clone();
@@ -466,6 +492,7 @@ impl MsSqlSourceBuilder {
             config: self.config,
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,

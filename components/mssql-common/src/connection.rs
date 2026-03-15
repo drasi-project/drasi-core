@@ -16,7 +16,10 @@
 
 use crate::config::{AuthMode, EncryptionMode, MsSqlSourceConfig};
 use anyhow::{anyhow, Result};
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 use log::{debug, info};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -31,10 +34,14 @@ impl MsSqlConnection {
     ///
     /// # Arguments
     /// * `config` - MS SQL source configuration
+    /// * `identity_provider` - Optional identity provider for authentication (overrides config)
     ///
     /// # Errors
     /// Returns error if connection fails
-    pub async fn connect(config: &MsSqlSourceConfig) -> Result<Self> {
+    pub async fn connect(
+        config: &MsSqlSourceConfig,
+        identity_provider: Option<Arc<dyn IdentityProvider>>,
+    ) -> Result<Self> {
         info!(
             "Connecting to MS SQL Server at {}:{} database '{}'",
             config.host, config.port, config.database
@@ -46,20 +53,56 @@ impl MsSqlConnection {
         tiberius_config.port(config.port);
         tiberius_config.database(&config.database);
 
+        // Determine effective identity provider
+        // Priority: injected provider > config provider > username/password
+        let effective_provider = identity_provider
+            .as_ref()
+            .or(config.identity_provider.as_ref());
+
         // Set authentication
-        match config.auth_mode {
-            AuthMode::SqlServer => {
-                debug!("Using SQL Server authentication");
-                tiberius_config
-                    .authentication(AuthMethod::sql_server(&config.user, &config.password));
+        if let Some(provider) = effective_provider {
+            debug!("Using identity provider for authentication");
+            
+            // Build credential context
+            let mut properties = HashMap::new();
+            properties.insert("hostname".to_string(), config.host.clone());
+            properties.insert("port".to_string(), config.port.to_string());
+            properties.insert("database".to_string(), config.database.clone());
+            let context = CredentialContext { properties };
+
+            // Get credentials from identity provider
+            let credentials = provider.get_credentials(&context).await?;
+
+            match credentials {
+                Credentials::Token { username, token } => {
+                    debug!("Using Azure AD token authentication for user: {}", username);
+                    tiberius_config.authentication(AuthMethod::aad_token(&token));
+                }
+                Credentials::UsernamePassword { username, password } => {
+                    debug!("Using username/password authentication from identity provider");
+                    tiberius_config.authentication(AuthMethod::sql_server(&username, &password));
+                }
+                Credentials::Certificate { .. } => {
+                    return Err(anyhow!("Certificate authentication not supported for MS SQL"));
+                }
             }
-            AuthMode::Windows => {
-                // TODO: Implement Windows authentication
-                // Windows integrated authentication not yet supported
-                return Err(anyhow!("Windows authentication not yet implemented"));
-            }
-            AuthMode::AzureAd => {
-                return Err(anyhow!("Azure AD authentication not yet implemented"));
+        } else {
+            // Fallback to username/password from config
+            match config.auth_mode {
+                AuthMode::SqlServer => {
+                    debug!("Using SQL Server authentication");
+                    tiberius_config
+                        .authentication(AuthMethod::sql_server(&config.user, &config.password));
+                }
+                AuthMode::Windows => {
+                    return Err(anyhow!("Windows authentication not yet implemented"));
+                }
+                AuthMode::AzureAd => {
+                    return Err(anyhow!(
+                        "Azure AD authentication requires an identity provider. \
+                         Use with_identity_provider() to configure one."
+                    ));
+                }
             }
         }
 

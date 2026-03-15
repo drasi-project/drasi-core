@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use crate::channels::*;
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::managers::{
     is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
     ComponentLogRegistry, Operation,
@@ -80,6 +81,7 @@ pub struct SourceManager {
     sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
     event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
 }
@@ -96,6 +98,7 @@ impl SourceManager {
             sources: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
         }
@@ -106,6 +109,13 @@ impl SourceManager {
     /// This allows sources to access the state store when they are added.
     pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
         *self.state_store.write().await = Some(state_store);
+    }
+
+    /// Inject the identity provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows sources to obtain authentication credentials when they are added.
+    pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(identity_provider);
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -138,12 +148,13 @@ impl SourceManager {
         let source_id = source.id().to_string();
 
         // Construct runtime context for this source
-        let context = SourceRuntimeContext::new(
+        let mut context = SourceRuntimeContext::new(
             &self.instance_id,
             &source_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
         );
+        context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the source with its runtime context
         source.initialize(context).await;
@@ -380,12 +391,13 @@ impl SourceManager {
 
             // Initialize the new source with runtime context
             let new_source: Arc<dyn Source> = Arc::new(new_source);
-            let context = SourceRuntimeContext::new(
+            let mut context = SourceRuntimeContext::new(
                 &self.instance_id,
                 &id,
                 self.event_tx.clone(),
                 self.state_store.read().await.clone(),
             );
+            context.identity_provider = self.identity_provider.read().await.clone();
             new_source.initialize(context).await;
 
             // Replace in the sources map only if the entry still exists

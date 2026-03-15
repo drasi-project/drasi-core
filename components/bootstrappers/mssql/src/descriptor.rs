@@ -203,6 +203,7 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
             user: mapper.resolve_string(&dto.user)?,
             password: mapper.resolve_string(&dto.password)?,
             auth_mode,
+            identity_provider: None,
             tables: dto.tables,
             poll_interval_ms: 1000,
             encryption,

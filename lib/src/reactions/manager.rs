@@ -22,6 +22,7 @@ use tracing::Instrument;
 use crate::channels::*;
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::managers::{
     is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
     ComponentLogRegistry, Operation,
@@ -38,6 +39,8 @@ pub struct ReactionManager {
     query_manager: Arc<RwLock<Option<Arc<crate::queries::QueryManager>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Identity provider for credential injection
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Event history for tracking component lifecycle events
     event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
@@ -59,6 +62,7 @@ impl ReactionManager {
             event_tx,
             query_manager: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -77,6 +81,13 @@ impl ReactionManager {
     /// This allows reactions to access the state store when they are added.
     pub async fn inject_state_store(&self, state_store: Arc<dyn StateStoreProvider>) {
         *self.state_store.write().await = Some(state_store);
+    }
+
+    /// Inject the identity provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows reactions to obtain authentication credentials when they are added.
+    pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(identity_provider);
     }
 
     /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
@@ -105,12 +116,13 @@ impl ReactionManager {
         let reaction_id = reaction.id().to_string();
 
         // Construct runtime context for this reaction
-        let context = ReactionRuntimeContext::new(
+        let mut context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
             self.event_tx.clone(),
             self.state_store.read().await.clone(),
         );
+        context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the reaction with its runtime context
         reaction.initialize(context).await;
@@ -352,12 +364,13 @@ impl ReactionManager {
 
             // Initialize the new reaction with runtime context
             let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let context = ReactionRuntimeContext::new(
+            let mut context = ReactionRuntimeContext::new(
                 &self.instance_id,
                 &id,
                 self.event_tx.clone(),
                 self.state_store.read().await.clone(),
             );
+            context.identity_provider = self.identity_provider.read().await.clone();
             new_reaction.initialize(context).await;
 
             // Replace in the reactions map only if the entry still exists

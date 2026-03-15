@@ -72,8 +72,15 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
             request.node_labels.len()
         );
 
-        // Create bootstrap handler
-        let mut handler = MsSqlBootstrapHandler::new(self.config.clone(), self.source_id.clone());
+        // Get identity provider from config
+        let identity_provider = self.config.identity_provider.clone();
+
+        // Create bootstrap handler with identity provider
+        let mut handler = MsSqlBootstrapHandler::new(
+            self.config.clone(),
+            self.source_id.clone(),
+            identity_provider,
+        );
 
         // Store query_id before moving request
         let query_id = request.query_id.clone();
@@ -144,13 +151,45 @@ impl MsSqlBootstrapProviderBuilder {
         self
     }
 
+    /// Set the identity provider for authentication
+    /// Takes precedence over with_user and with_password
+    pub fn with_identity_provider(
+        mut self,
+        provider: impl drasi_lib::identity::IdentityProvider + 'static,
+    ) -> Self {
+        self.config.identity_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set the encryption mode
+    pub fn with_encryption(mut self, encryption: drasi_mssql_common::EncryptionMode) -> Self {
+        self.config.encryption = encryption;
+        self
+    }
+
+    /// Set whether to trust the server certificate (for self-signed certs)
+    pub fn with_trust_server_certificate(mut self, trust: bool) -> Self {
+        self.config.trust_server_certificate = trust;
+        self
+    }
+
+    /// Set the authentication mode
+    pub fn with_auth_mode(mut self, auth_mode: drasi_mssql_common::AuthMode) -> Self {
+        self.config.auth_mode = auth_mode;
+        self
+    }
+
     /// Build the bootstrap provider
     pub fn build(self) -> Result<MsSqlBootstrapProvider> {
         if self.config.database.is_empty() {
             return Err(anyhow::anyhow!("Database name is required"));
         }
-        if self.config.user.is_empty() {
-            return Err(anyhow::anyhow!("Database user is required"));
+        
+        // User is not required if identity provider is set
+        if self.config.identity_provider.is_none() && self.config.user.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Database user is required when not using identity provider"
+            ));
         }
 
         Ok(MsSqlBootstrapProvider::new(self.source_id, self.config))
@@ -168,14 +207,20 @@ struct MsSqlBootstrapHandler {
     config: MsSqlSourceConfig,
     source_id: String,
     pk_cache: PrimaryKeyCache,
+    identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
 }
 
 impl MsSqlBootstrapHandler {
-    fn new(config: MsSqlSourceConfig, source_id: String) -> Self {
+    fn new(
+        config: MsSqlSourceConfig,
+        source_id: String,
+        identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    ) -> Self {
         Self {
             config,
             source_id,
             pk_cache: PrimaryKeyCache::new(),
+            identity_provider,
         }
     }
 
@@ -191,8 +236,8 @@ impl MsSqlBootstrapHandler {
             self.config.host, self.config.port
         );
 
-        // Connect to MS SQL
-        let mut connection = MsSqlConnection::connect(&self.config).await?;
+        // Connect to MS SQL with identity provider
+        let mut connection = MsSqlConnection::connect(&self.config, self.identity_provider.clone()).await?;
         let client = connection.client_mut();
 
         // Discover primary keys for all configured tables
