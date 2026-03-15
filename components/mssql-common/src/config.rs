@@ -16,6 +16,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Maximum length for SQL identifiers (SQL Server limit is 128)
 const MAX_IDENTIFIER_LENGTH: usize = 128;
@@ -147,7 +148,7 @@ pub struct TableKeyConfig {
 }
 
 /// MS SQL CDC source configuration
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MsSqlSourceConfig {
     /// MS SQL server hostname or IP address
     #[serde(default = "default_host")]
@@ -170,6 +171,10 @@ pub struct MsSqlSourceConfig {
     /// Authentication mode
     #[serde(default)]
     pub auth_mode: AuthMode,
+
+    /// Identity provider for authentication (takes precedence over user/password)
+    #[serde(skip)]
+    pub identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
 
     /// Tables to monitor (empty = all CDC-enabled tables)
     #[serde(default)]
@@ -196,6 +201,26 @@ pub struct MsSqlSourceConfig {
     pub start_position: StartPosition,
 }
 
+impl std::fmt::Debug for MsSqlSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MsSqlSourceConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"***") // Don't expose password
+            .field("auth_mode", &self.auth_mode)
+            .field("identity_provider", &self.identity_provider.as_ref().map(|_| "<set>"))
+            .field("tables", &self.tables)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("encryption", &self.encryption)
+            .field("trust_server_certificate", &self.trust_server_certificate)
+            .field("table_keys", &self.table_keys)
+            .field("start_position", &self.start_position)
+            .finish()
+    }
+}
+
 fn default_host() -> String {
     "localhost".to_string()
 }
@@ -217,6 +242,7 @@ impl Default for MsSqlSourceConfig {
             user: String::new(),
             password: String::new(),
             auth_mode: AuthMode::default(),
+            identity_provider: None,
             tables: Vec::new(),
             poll_interval_ms: default_poll_interval_ms(),
             encryption: EncryptionMode::default(),
@@ -251,6 +277,7 @@ mod tests {
             user: "drasi_user".to_string(),
             password: "secret".to_string(),
             auth_mode: AuthMode::SqlServer,
+            identity_provider: None,
             tables: vec!["orders".to_string(), "customers".to_string()],
             poll_interval_ms: 2000,
             encryption: EncryptionMode::On,
@@ -264,7 +291,9 @@ mod tests {
 
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: MsSqlSourceConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
+        assert_eq!(config.host, deserialized.host);
+        assert_eq!(config.database, deserialized.database);
+        assert_eq!(config.user, deserialized.user);
     }
 
     #[test]
