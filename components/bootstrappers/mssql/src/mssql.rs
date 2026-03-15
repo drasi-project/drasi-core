@@ -161,6 +161,24 @@ impl MsSqlBootstrapProviderBuilder {
         self
     }
 
+    /// Set the encryption mode
+    pub fn with_encryption(mut self, encryption: drasi_mssql_common::EncryptionMode) -> Self {
+        self.config.encryption = encryption;
+        self
+    }
+
+    /// Set whether to trust the server certificate (for self-signed certs)
+    pub fn with_trust_server_certificate(mut self, trust: bool) -> Self {
+        self.config.trust_server_certificate = trust;
+        self
+    }
+
+    /// Set the authentication mode
+    pub fn with_auth_mode(mut self, auth_mode: drasi_mssql_common::AuthMode) -> Self {
+        self.config.auth_mode = auth_mode;
+        self
+    }
+
     /// Build the bootstrap provider
     pub fn build(self) -> Result<MsSqlBootstrapProvider> {
         if self.config.database.is_empty() {
