@@ -1670,7 +1670,10 @@ async fn test_reaction_enqueue_query_result() {
     // This is the critical path: host calls enqueue_query_result on the reaction proxy,
     // which transfers the QueryResult as an opaque pointer through FFI into the
     // reaction's priority queue.
-    reaction.enqueue_query_result(query_result).await;
+    reaction
+        .enqueue_query_result(query_result)
+        .await
+        .expect("enqueue_query_result should succeed");
 
     // If we get here without panic/crash, the opaque pointer transfer worked.
     // Stop the reaction cleanly.
@@ -1723,7 +1726,10 @@ async fn test_reaction_enqueue_multiple_query_results() {
             vec![],
             std::collections::HashMap::new(),
         );
-        reaction.enqueue_query_result(result).await;
+        reaction
+            .enqueue_query_result(result)
+            .await
+            .expect("enqueue_query_result should succeed");
     }
 
     reaction.stop().await.expect("Reaction should stop");
@@ -1788,7 +1794,10 @@ async fn test_reaction_enqueue_query_result_with_data() {
 
     // Enqueue a result with actual data — validates that complex types
     // cross the FFI boundary correctly as opaque pointers
-    reaction.enqueue_query_result(query_result).await;
+    reaction
+        .enqueue_query_result(query_result)
+        .await
+        .expect("enqueue_query_result should succeed");
 
     reaction.stop().await.expect("Reaction should stop");
 }
