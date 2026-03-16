@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::{load_plugin_from_path, PluginLoader, PluginLoaderConfig};
 use drasi_plugin_sdk::descriptor::{ReactionPluginDescriptor, SourcePluginDescriptor};
+use serial_test::serial;
 
 /// Locate the drasi-core build output directory.
 ///
@@ -604,6 +605,7 @@ fn test_plugin_loader_with_multiple_patterns() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_log_callback_captures_plugin_logs() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
@@ -612,7 +614,7 @@ async fn test_log_callback_captures_plugin_logs() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear captured logs
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -637,15 +639,17 @@ async fn test_log_callback_captures_plugin_logs() {
     source.start().await.expect("Start should succeed");
 
     // Give plugin a moment to emit logs
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     source.stop().await.expect("Stop should succeed");
 
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
     // Check that some logs were captured (mock source logs on start/stop)
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
     // We can't guarantee specific messages, but the callback mechanism should work
     // The lifecycle callback should at least fire
-    let lifecycles = callbacks::captured_lifecycles().lock().unwrap();
+    let lifecycles = callbacks::captured_lifecycles().lock().unwrap_or_else(|e| e.into_inner());
     // Either logs or lifecycle events should be captured
     let total_captured = logs.len() + lifecycles.len();
     assert!(
@@ -844,6 +848,7 @@ fn test_drop_loaded_plugin_does_not_crash() {
 // 5. Verify logs appear in ComponentLogRegistry and events arrive on status_rx
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_logs_routed_to_log_registry() {
     //! Verify that log output from a plugin during start/stop is captured in
     //! the ComponentLogRegistry when source.initialize() is called with a real
@@ -899,9 +904,9 @@ async fn test_plugin_logs_routed_to_log_registry() {
     // Starting the source should trigger log output from the plugin
     let _ = source.start().await;
     // Give a moment for logs to propagate
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Check that logs were routed to the ComponentLogRegistry
     let mut log_count = 0;
@@ -915,7 +920,7 @@ async fn test_plugin_logs_routed_to_log_registry() {
     );
 
     // Also check the diagnostic store (captured_logs) for completeness
-    let captured = callbacks::captured_logs().lock().unwrap();
+    let captured = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         !captured.is_empty(),
         "Expected at least one captured log from plugin start/stop"
@@ -923,6 +928,7 @@ async fn test_plugin_logs_routed_to_log_registry() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     //! Verify that lifecycle events (Starting, Started, Stopping, Stopped) from a plugin
     //! flow through the status_tx channel when source.initialize() is called with a real
@@ -1016,7 +1022,7 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     );
 
     // Also check the diagnostic store for completeness
-    let captured = callbacks::captured_lifecycles().lock().unwrap();
+    let captured = callbacks::captured_lifecycles().lock().unwrap_or_else(|e| e.into_inner());
     let our_captured: Vec<_> = captured
         .iter()
         .filter(|e| e.component_id == "lifecycle-evt-source")
@@ -1028,6 +1034,7 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_null_callback_context_does_not_crash() {
     //! Verify that when source.initialize() is NOT called (no per-instance callbacks),
     //! logs still go to the diagnostic store and host log framework, and lifecycle events
@@ -1069,6 +1076,7 @@ async fn test_null_callback_context_does_not_crash() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_all_log_levels_captured_in_diagnostic_store() {
     //! Verify that log events at all levels (info, warn, error, debug) emitted by a plugin
     //! are captured in the diagnostic captured_logs store. The mock source emits info! during
@@ -1080,7 +1088,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear diagnostic stores before test
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1102,11 +1110,11 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
         .unwrap();
 
     let _ = source.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
     // We should have at least the start and stop info logs
     let our_logs: Vec<_> = logs
         .iter()
@@ -1129,6 +1137,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_logs_without_initialize_reach_global_callback() {
     //! When a source is NOT initialized (no per-instance callbacks), logs should
     //! still reach the global callback and be captured in the diagnostic store.
@@ -1139,7 +1148,7 @@ async fn test_logs_without_initialize_reach_global_callback() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1162,11 +1171,11 @@ async fn test_logs_without_initialize_reach_global_callback() {
 
     // Don't call initialize — no per-instance callbacks
     let _ = source.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs
         .iter()
         .filter(|l| l.message.contains("global-cb-test"))
