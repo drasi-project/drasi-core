@@ -160,6 +160,7 @@ async fn main() -> Result<()> {
             body: "[{{query_name}}] + {{after.symbol}}: ${{after.price}}".to_string(),
             retain: RetainPolicy::Retain,
             headers: HashMap::new(),
+            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
         }),
         updated: Some(MqttCallSpec {
             topic: "/stocks/updated".to_string(),
@@ -167,12 +168,14 @@ async fn main() -> Result<()> {
                 .to_string(),
             retain: RetainPolicy::Retain,
             headers: HashMap::new(),
+            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
         }),
         deleted: Some(MqttCallSpec {
             topic: "/stocks/deleted".to_string(),
             body: "[{{query_name}}] - {{before.symbol}} removed".to_string(),
             retain: RetainPolicy::Retain,
             headers: HashMap::new(),
+            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
         }),
     };
 
