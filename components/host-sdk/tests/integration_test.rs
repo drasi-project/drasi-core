@@ -614,7 +614,10 @@ async fn test_log_callback_captures_plugin_logs() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear captured logs
-    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -646,10 +649,14 @@ async fn test_log_callback_captures_plugin_logs() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Check that some logs were captured (mock source logs on start/stop)
-    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // We can't guarantee specific messages, but the callback mechanism should work
     // The lifecycle callback should at least fire
-    let lifecycles = callbacks::captured_lifecycles().lock().unwrap_or_else(|e| e.into_inner());
+    let lifecycles = callbacks::captured_lifecycles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Either logs or lifecycle events should be captured
     let total_captured = logs.len() + lifecycles.len();
     assert!(
@@ -920,7 +927,9 @@ async fn test_plugin_logs_routed_to_log_registry() {
     );
 
     // Also check the diagnostic store (captured_logs) for completeness
-    let captured = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+    let captured = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     assert!(
         !captured.is_empty(),
         "Expected at least one captured log from plugin start/stop"
@@ -1022,7 +1031,9 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     );
 
     // Also check the diagnostic store for completeness
-    let captured = callbacks::captured_lifecycles().lock().unwrap_or_else(|e| e.into_inner());
+    let captured = callbacks::captured_lifecycles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let our_captured: Vec<_> = captured
         .iter()
         .filter(|e| e.component_id == "lifecycle-evt-source")
@@ -1088,7 +1099,10 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear diagnostic stores before test
-    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1114,7 +1128,9 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // We should have at least the start and stop info logs
     let our_logs: Vec<_> = logs
         .iter()
@@ -1148,7 +1164,10 @@ async fn test_logs_without_initialize_reach_global_callback() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1175,7 +1194,9 @@ async fn test_logs_without_initialize_reach_global_callback() {
     let _ = source.stop().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap_or_else(|e| e.into_inner());
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs
         .iter()
         .filter(|l| l.message.contains("global-cb-test"))
