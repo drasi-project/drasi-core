@@ -415,8 +415,8 @@ fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Resul
     // Check if this is a relation (has start_id and end_id)
     if let (Some(start_id), Some(end_id)) = (&bootstrap_elem.start_id, &bootstrap_elem.end_id) {
         // Create start and end element references
-        let in_node = ElementReference::new(source_id, end_id);
-        let out_node = ElementReference::new(source_id, start_id);
+        let in_node = ElementReference::new(source_id, start_id);
+        let out_node = ElementReference::new(source_id, end_id);
 
         Ok(Element::Relation {
             metadata: ElementMetadata {
@@ -552,8 +552,8 @@ mod tests {
                 assert_eq!(metadata.reference.element_id.as_ref(), "r1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(metadata.labels[0].as_ref(), "WORKS_FOR");
-                assert_eq!(out_node.element_id.as_ref(), "1");
-                assert_eq!(in_node.element_id.as_ref(), "2");
+                assert_eq!(in_node.element_id.as_ref(), "1");
+                assert_eq!(out_node.element_id.as_ref(), "2");
             }
             _ => panic!("Expected Relation element"),
         }
