@@ -17,7 +17,7 @@
 //! This module contains configuration types for MQTT reaction and shared types.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, default};
 
 pub fn default_base_topic() -> String {
     "".to_string()
@@ -27,12 +27,33 @@ pub fn default_timeout_ms() -> u64 {
     5000
 }
 
+pub fn default_port() -> u16 {
+    1883
+}
+
+pub fn default_host() -> String {
+    "localhost".to_string()
+}
+
+pub fn default_capacity() -> usize {
+    10
+}
+
 /// MQTT message retain policy.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RetainPolicy {
     Retain,
     #[default]
     NoRetain,
+}
+
+/// QoS level for MQTT messages.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum QualityOfService {
+    AtMostOnce,
+    AtLeastOnce,
+    #[default]
+    ExactlyOnce,
 }
 
 /// Specification for an MQTT call, including topic, retain policy, headers, and body template.
@@ -58,6 +79,10 @@ pub struct MqttCallSpec {
     /// Header values support Handlebars templates.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// QoS level for MQTT messages.
+    #[serde(default)]
+    pub qos: QualityOfService,
 }
 
 /// Configuration for query-specific MQTT calls.
@@ -82,6 +107,15 @@ pub struct MqttQueryConfig {
 /// MQTT reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttReactionConfig {
+
+    /// MQTT broker host (default: "localhost")
+    #[serde(default = "default_host")]
+    pub host: String,
+
+    /// MQTT broker port (default: 1883)
+    #[serde(default = "default_port")]
+    pub port: u16,
+
     /// Base topic for MQTT requests
     #[serde(default = "default_base_topic")]
     pub base_topic: String,
@@ -93,14 +127,21 @@ pub struct MqttReactionConfig {
     /// Query-specific call configurations
     #[serde(default)]
     pub routes: HashMap<String, MqttQueryConfig>,
+
+    /// Capacity of the priority queue for incoming query results
+    #[serde(default)]
+    pub capacity: usize,
 }
 
 impl Default for MqttReactionConfig {
     fn default() -> Self {
         Self {
+            host: default_host(),
+            port: default_port(),
             base_topic: default_base_topic(),
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
+            capacity: default_capacity(),
         }
     }
 }

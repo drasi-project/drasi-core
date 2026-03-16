@@ -48,7 +48,7 @@ prost-types = "0.12"
 ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-
+rumqttc = "0.25.1"
 
 [features]
 # default = []

@@ -17,7 +17,7 @@ pub mod config;
 mod mqtt;
 
 use config::{
-    default_base_topic, default_timeout_ms, MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
+    default_base_topic, default_timeout_ms, default_host, default_port, default_capacity, MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
 };
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
@@ -28,8 +28,11 @@ pub struct MqttReactionBuilder {
     base_topic: String,
     timeout_ms: u64,
     routes: HashMap<String, MqttQueryConfig>,
+    host: String,
+    port: u16,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
+    capacity: usize,
 }
 
 impl MqttReactionBuilder {
@@ -43,7 +46,20 @@ impl MqttReactionBuilder {
             routes: HashMap::new(),
             priority_queue_capacity: None,
             auto_start: true,
+            host: default_host(),
+            port: default_port(),
+            capacity: default_capacity(),
         }
+    }
+
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
     }
 
     // Set the query IDs to subscribe to
@@ -93,8 +109,15 @@ impl MqttReactionBuilder {
         self
     }
 
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: MqttReactionConfig) -> Self {
+        self.host = config.host;
+        self.port = config.port;
         self.base_topic = config.base_topic;
         self.timeout_ms = config.timeout_ms;
         self.routes = config.routes;
@@ -104,9 +127,12 @@ impl MqttReactionBuilder {
     /// Build the MQTT reaction
     pub fn build(self) -> anyhow::Result<MqttReaction> {
         let config = MqttReactionConfig {
+            host: self.host,
+            port: self.port,
             base_topic: self.base_topic,
             timeout_ms: self.timeout_ms,
             routes: self.routes,
+            capacity: self.capacity
         };
 
         Ok(MqttReaction::from_builder(
