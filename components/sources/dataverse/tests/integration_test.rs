@@ -140,7 +140,10 @@ mod integration_tests {
         let mock_uri_for_initial = mock_uri.clone();
         Mock::given(method("GET"))
             .and(path("/api/data/v9.2/accounts"))
-            .and(header("Prefer", "odata.track-changes,odata.maxpagesize=1000"))
+            .and(header(
+                "Prefer",
+                "odata.track-changes,odata.maxpagesize=1000",
+            ))
             .respond_with(empty_delta_response(&mock_uri_for_initial))
             .expect(1)
             .mount(&mock_server)
