@@ -271,11 +271,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting platform reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Emit Running control event
         if let Err(e) = self.emit_control_event(ControlSignal::Running).await {
@@ -284,11 +284,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Platform reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -507,11 +507,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Platform reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

@@ -19,8 +19,8 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
-// Re-export the Reaction trait
-pub use traits::Reaction;
+// Re-export the Reaction trait and QueryProvider
+pub use traits::{QueryProvider, Reaction};
 
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;

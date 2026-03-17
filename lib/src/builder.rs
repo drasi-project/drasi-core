@@ -295,6 +295,29 @@ impl DrasiLibBuilder {
         // Initialize the server
         core.initialize().await?;
 
+        // Register the component graph source before user sources.
+        // This built-in source exposes the ComponentGraph as a queryable Drasi source
+        // so queries can reactively observe component topology and lifecycle changes.
+        {
+            use crate::sources::component_graph_source::ComponentGraphSource;
+            let graph_source = ComponentGraphSource::new(
+                core.component_event_broadcast_tx.clone(),
+                core.config.id.clone(),
+                core.component_graph.clone(),
+            )
+            .map_err(|e| {
+                DrasiError::provisioning(format!("Failed to create component graph source: {e}"))
+            })?;
+            core.source_manager
+                .add_source(graph_source)
+                .await
+                .map_err(|e| {
+                    DrasiError::provisioning(format!(
+                        "Failed to register component graph source: {e}"
+                    ))
+                })?;
+        }
+
         // Inject pre-built source instances
         for source in self.source_instances {
             let source_id = source.id().to_string();

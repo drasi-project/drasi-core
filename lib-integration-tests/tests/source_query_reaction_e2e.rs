@@ -83,8 +83,8 @@ impl Source for InjectableSource {
 
     async fn start(&self) -> anyhow::Result<()> {
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -173,8 +173,8 @@ impl Reaction for CapturingReaction {
 
     async fn start(&self) -> anyhow::Result<()> {
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         // Spawn processing task that dequeues from priority queue and captures results
         let priority_queue = self.base.priority_queue.clone();

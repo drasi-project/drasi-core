@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
@@ -39,6 +40,8 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// - **Sources**: Data ingestion points (PostgreSQL, HTTP, gRPC, Application, Mock, Platform)
 /// - **Queries**: Continuous Cypher or GQL queries that process data changes in real-time
 /// - **Reactions**: Output destinations that receive query results (HTTP, gRPC, Application, Log)
+/// - **Component Graph**: A directed dependency graph tracking all components and their
+///   bidirectional relationships (Source→Query→Reaction). The DrasiLib instance is the root node.
 ///
 /// # Lifecycle States
 ///
@@ -160,11 +163,22 @@ pub struct DrasiLib {
     // Inspection API for querying server state
     pub(crate) inspection: InspectionAPI,
     // Lifecycle manager for orchestrating component lifecycle
-    pub(crate) lifecycle: Arc<RwLock<LifecycleManager>>,
+    pub(crate) lifecycle: Arc<LifecycleManager>,
     // Middleware registry for source middleware
     pub(crate) middleware_registry: Arc<MiddlewareTypeRegistry>,
     // Component log registry for live log streaming
     pub(crate) log_registry: Arc<ComponentLogRegistry>,
+    // Broadcast sender for component events — shared with ComponentGraph.
+    //
+    // This is the *same* sender that the ComponentGraph uses internally to emit
+    // events on mutations. Cloned before the graph is wrapped in `Arc<RwLock<>>`,
+    // so subscribers can call `.subscribe()` without acquiring the graph lock.
+    pub(crate) component_event_broadcast_tx: ComponentEventBroadcastSender,
+    /// Component dependency graph — the single source of truth for component relationships.
+    ///
+    /// All managers share this graph via `Arc<RwLock<>>`. The graph is updated atomically
+    /// alongside the manager HashMaps when components are added, removed, or updated.
+    pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl Clone for DrasiLib {
@@ -180,6 +194,8 @@ impl Clone for DrasiLib {
             lifecycle: Arc::clone(&self.lifecycle),
             middleware_registry: Arc::clone(&self.middleware_registry),
             log_registry: Arc::clone(&self.log_registry),
+            component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
+            component_graph: Arc::clone(&self.component_graph),
         }
     }
 }
@@ -198,11 +214,18 @@ impl DrasiLib {
         Arc::new(self.clone())
     }
 
+    /// Subscribe to all component events (status changes, additions, removals).
+    ///
+    /// Returns a broadcast receiver that gets a copy of every `ComponentEvent` across
+    /// all sources, queries, and reactions. Used by the component graph source to
+    /// detect component lifecycle changes in real-time.
+    pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
+        self.component_event_broadcast_tx.subscribe()
+    }
+
     /// Internal constructor - creates uninitialized server
     /// Use `builder()` instead
     pub(crate) fn new(config: Arc<RuntimeConfig>) -> Self {
-        let (channels, receivers) = EventChannels::new();
-
         // Use the shared global log registry.
         // Since tracing uses a single global subscriber, all DrasiLib instances
         // share the same log registry. This ensures logs are properly routed
@@ -212,10 +235,19 @@ impl DrasiLib {
         // Get the instance ID from config for log routing
         let instance_id = config.id.clone();
 
+        // Create the shared component graph with the instance as root node.
+        // Extract the broadcast sender and update sender BEFORE wrapping in Arc<RwLock<>>
+        // so subscribers and components can use them without acquiring the graph lock.
+        let (graph, update_rx) = ComponentGraph::new(&instance_id);
+        let component_event_broadcast_tx = graph.event_sender().clone();
+        let update_tx = graph.update_sender();
+        let component_graph = Arc::new(RwLock::new(graph));
+
         let source_manager = Arc::new(SourceManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             log_registry.clone(),
+            component_graph.clone(),
+            update_tx.clone(),
         ));
 
         // Initialize middleware registry and register all standard middleware factories
@@ -252,17 +284,19 @@ impl DrasiLib {
 
         let query_manager = Arc::new(QueryManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             source_manager.clone(),
             config.index_factory.clone(),
             middleware_registry.clone(),
             log_registry.clone(),
+            component_graph.clone(),
+            update_tx.clone(),
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(
             &instance_id,
-            channels.component_event_tx.clone(),
             log_registry.clone(),
+            component_graph.clone(),
+            update_tx.clone(),
         ));
 
         let state_guard = StateGuard::new();
@@ -275,13 +309,48 @@ impl DrasiLib {
             config.clone(),
         );
 
-        let lifecycle = Arc::new(RwLock::new(LifecycleManager::new(
+        let lifecycle = Arc::new(LifecycleManager::new(
             config.clone(),
             source_manager.clone(),
             query_manager.clone(),
             reaction_manager.clone(),
-            Some(receivers),
-        )));
+        ));
+
+        // Spawn the graph update loop — sole consumer of component status updates.
+        // Components send status changes via the mpsc update channel (fire-and-forget),
+        // and this loop applies them to the graph, emits broadcast events, and records
+        // events in each manager's ComponentEventHistory.
+        {
+            let graph = component_graph.clone();
+            let sm = source_manager.clone();
+            let qm = query_manager.clone();
+            let rm = reaction_manager.clone();
+            tokio::spawn(async move {
+                let mut update_rx = update_rx;
+                while let Some(update) = update_rx.recv().await {
+                    let mut g = graph.write().await;
+                    let event = g.apply_update(update);
+                    drop(g); // release lock before async record_event
+
+                    if let Some(event) = event {
+                        log::info!(
+                            "Component Event - {:?} {}: {:?} - {}",
+                            event.component_type,
+                            event.component_id,
+                            event.status,
+                            event.message.clone().unwrap_or_default()
+                        );
+
+                        match event.component_type {
+                            ComponentType::Source => sm.record_event(event).await,
+                            ComponentType::Query => qm.record_event(event).await,
+                            ComponentType::Reaction => rm.record_event(event).await,
+                        }
+                    }
+                }
+                tracing::debug!("Graph update loop exited — all senders dropped");
+            });
+        }
 
         Self {
             config,
@@ -294,6 +363,8 @@ impl DrasiLib {
             lifecycle,
             middleware_registry,
             log_registry,
+            component_event_broadcast_tx,
+            component_graph,
         }
     }
 
@@ -311,7 +382,9 @@ impl DrasiLib {
         // Inject QueryManager into ReactionManager
         // This allows the host to subscribe reactions to query results
         self.reaction_manager
-            .inject_query_manager(Arc::clone(&self.query_manager))
+            .inject_query_provider(
+                Arc::clone(&self.query_manager) as Arc<dyn crate::reactions::QueryProvider>
+            )
             .await;
 
         // Inject StateStoreProvider into SourceManager and ReactionManager
@@ -323,14 +396,7 @@ impl DrasiLib {
         self.reaction_manager.inject_state_store(state_store).await;
 
         // Load configuration
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.load_configuration().await?;
-        drop(lifecycle);
-
-        // Start event processors (one-time)
-        let mut lifecycle = self.lifecycle.write().await;
-        lifecycle.start_event_processors().await;
-        drop(lifecycle);
+        self.lifecycle.load_configuration().await?;
 
         self.state_guard.mark_initialized().await;
         info!("Drasi Server Core initialized successfully");
@@ -387,8 +453,7 @@ impl DrasiLib {
         }
 
         // Start all configured components
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.start_components().await?;
+        self.lifecycle.start_components().await?;
 
         *running = true;
         info!("Drasi Server Core started successfully");
@@ -436,8 +501,7 @@ impl DrasiLib {
         info!("Stopping Drasi Server Core");
 
         // Stop all components
-        let lifecycle = self.lifecycle.read().await;
-        lifecycle.stop_all_components().await?;
+        self.lifecycle.stop_all_components().await?;
 
         *running = false;
         info!("Drasi Server Core stopped successfully");

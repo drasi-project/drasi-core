@@ -20,6 +20,10 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::channels::*;
+use crate::component_graph::{
+    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
+    RelationshipKind,
+};
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::managers::{
@@ -27,49 +31,61 @@ use crate::managers::{
     ComponentLogRegistry, Operation,
 };
 use crate::queries::Query;
-use crate::reactions::Reaction;
+use crate::reactions::{QueryProvider, Reaction};
 use crate::state_store::StateStoreProvider;
 
 pub struct ReactionManager {
     instance_id: String,
     reactions: Arc<RwLock<HashMap<String, Arc<dyn Reaction>>>>,
-    event_tx: ComponentEventSender,
-    /// Query manager for subscribing reactions to query results
-    query_manager: Arc<RwLock<Option<Arc<crate::queries::QueryManager>>>>,
+    /// Query provider for reactions to access queries (injected after DrasiLib is constructed)
+    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Event history for tracking component lifecycle events
     event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Handles to subscription forwarder tasks per reaction
+    /// Handles to subscription forwarder tasks per reaction (used for non-self-managing reactions)
     subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+    /// Shared component graph — the authoritative registry for component state and events
+    graph: Arc<RwLock<ComponentGraph>>,
+    /// Channel sender for routing status updates through the graph update loop.
+    /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
+    /// the loop applies them to the graph and records events automatically.
+    update_tx: ComponentUpdateSender,
 }
 
 impl ReactionManager {
     /// Create a new ReactionManager
+    ///
+    /// # Parameters
+    /// - `instance_id`: The DrasiLib instance ID for log routing
+    /// - `log_registry`: Shared log registry for component log streaming
+    /// - `graph`: Shared component graph for tracking component relationships and emitting events
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             reactions: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
-            query_manager: Arc::new(RwLock::new(None)),
+            query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
+            graph,
+            update_tx,
         }
     }
 
-    /// Inject the query manager (called after DrasiLib is fully constructed)
+    /// Inject the query provider (called after DrasiLib is fully constructed)
     ///
-    /// This allows the ReactionManager to subscribe reactions to query results.
-    pub async fn inject_query_manager(&self, qm: Arc<crate::queries::QueryManager>) {
-        *self.query_manager.write().await = Some(qm);
+    /// This allows the ReactionManager to provide query access to reactions.
+    pub async fn inject_query_provider(&self, qp: Arc<dyn QueryProvider>) {
+        *self.query_provider.write().await = Some(qp);
     }
 
     /// Inject the state store provider (called after DrasiLib is fully constructed)
@@ -104,30 +120,63 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
+        // Registry-first: register in the component graph before creating runtime state.
+        // The graph is the authoritative source of truth — if it rejects the add
+        // (duplicate ID), the runtime instance is never created.
+        {
+            let mut graph = self.graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), reaction.type_name().to_string());
+            let node = ComponentNode {
+                id: reaction_id.clone(),
+                kind: ComponentKind::Reaction,
+                status: ComponentStatus::Added,
+                metadata,
+            };
+            graph.add_component(node)?;
+
+            // Create bidirectional Feeds/SubscribesTo edges for each subscribed query
+            for query_id in reaction.query_ids() {
+                if graph.contains(&query_id) {
+                    let _ =
+                        graph.add_relationship(&query_id, &reaction_id, RelationshipKind::Feeds);
+                }
+            }
+        }
+        // Graph emits ComponentEvent(Added) automatically
+
+        // Query provider must be available for reactions
+        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "QueryProvider not injected - was ReactionManager initialized properly?"
+            )
+        })?;
+
         // Construct runtime context for this reaction
+        let update_tx = {
+            let graph = self.graph.read().await;
+            graph.update_sender()
+        };
         let context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
-            self.event_tx.clone(),
             self.state_store.read().await.clone(),
+            query_provider,
+            update_tx,
+            None,
         );
 
         // Initialize the reaction with its runtime context
         reaction.initialize(context).await;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance for fast lookups
         {
             let mut reactions = self.reactions.write().await;
-            if reactions.contains_key(&reaction_id) {
-                return Err(anyhow::anyhow!(
-                    "Reaction with id '{reaction_id}' already exists"
-                ));
-            }
-            reactions.insert(reaction_id.clone(), reaction);
+            reactions.insert(reaction_id.clone(), reaction.clone());
         }
 
         info!("Added reaction: {reaction_id}");
+
         Ok(())
     }
 
@@ -147,10 +196,25 @@ impl ReactionManager {
         if let Some(reaction) = reaction {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Route transitional state through the graph update loop
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Starting,
+                    message: Some("Starting reaction".to_string()),
+                })
+                .await;
+
             reaction.start().await?;
 
-            // Subscribe to queries on behalf of the reaction and forward results
-            self.subscribe_reaction_to_queries(&id, reaction).await?;
+            // Hybrid subscription model:
+            // - Self-managing reactions (native) subscribe to queries themselves via QueryProvider
+            // - Non-self-managing reactions (FFI proxy) need host-managed subscription forwarding
+            if !reaction.self_manages_subscriptions() {
+                self.subscribe_reaction_to_queries(&id, reaction).await?;
+            }
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
         }
@@ -168,8 +232,18 @@ impl ReactionManager {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
-            // Abort subscription forwarder tasks
+            // Abort host-managed subscription forwarder tasks (no-op for self-managing reactions)
             self.abort_subscription_tasks(&id).await;
+
+            // Route transitional state through the graph update loop
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopping,
+                    message: Some("Stopping reaction".to_string()),
+                })
+                .await;
 
             reaction.stop().await?;
         } else {
@@ -263,6 +337,11 @@ impl ReactionManager {
             // Now remove the reaction
             self.reactions.write().await.remove(&id);
             self.abort_subscription_tasks(&id).await;
+            // Remove from the component graph (emits Removed event automatically)
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.remove_component(&id);
+            }
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
             // Clean up log registry for this reaction
@@ -313,14 +392,12 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Emit Reconfiguring event
+            // Route transitional state through the graph update loop
             let _ = self
-                .event_tx
-                .send(ComponentEvent {
+                .update_tx
+                .send(ComponentUpdate::Status {
                     component_id: id.clone(),
-                    component_type: ComponentType::Reaction,
                     status: ComponentStatus::Reconfiguring,
-                    timestamp: chrono::Utc::now(),
                     message: Some("Reconfiguring reaction".to_string()),
                 })
                 .await;
@@ -352,11 +429,22 @@ impl ReactionManager {
 
             // Initialize the new reaction with runtime context
             let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
+            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "QueryProvider not injected - was ReactionManager initialized properly?"
+                )
+            })?;
+            let update_tx = {
+                let graph = self.graph.read().await;
+                graph.update_sender()
+            };
             let context = ReactionRuntimeContext::new(
                 &self.instance_id,
                 &id,
-                self.event_tx.clone(),
                 self.state_store.read().await.clone(),
+                query_provider,
+                update_tx,
+                None,
             );
             new_reaction.initialize(context).await;
 
@@ -541,16 +629,17 @@ impl ReactionManager {
 
     /// Subscribe a reaction to its configured queries and spawn forwarder tasks.
     ///
-    /// This is called by the host after `reaction.start()` succeeds.
+    /// This is used for non-self-managing reactions (e.g., FFI proxies) where the host
+    /// manages query subscriptions on behalf of the reaction.
     /// For each query the reaction is interested in, the manager:
-    /// 1. Gets the query instance from the QueryManager
+    /// 1. Gets the query instance from the QueryProvider
     /// 2. Subscribes to the query's result stream
     /// 3. Spawns a forwarder task that calls `reaction.enqueue_query_result()`
     ///
     /// # Locking invariant
     ///
-    /// The `query_manager` RwLock is held only long enough to clone the inner
-    /// `Arc<QueryManager>`. All subsequent calls (`get_query_instance`, `subscribe`)
+    /// The `query_provider` RwLock is held only long enough to clone the inner
+    /// `Arc<dyn QueryProvider>`. All subsequent calls (`get_query_instance`, `subscribe`)
     /// operate on the cloned Arc, so no locks are held while calling into external code.
     async fn subscribe_reaction_to_queries(
         &self,
@@ -563,18 +652,17 @@ impl ReactionManager {
         }
 
         // Clone the Arc and release the RwLock guard immediately.
-        let query_manager = self.query_manager.read().await.clone().ok_or_else(|| {
-            anyhow::anyhow!("QueryManager not injected - was ReactionManager initialized properly?")
+        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "QueryProvider not injected - was ReactionManager initialized properly?"
+            )
         })?;
 
         let instance_id = self.instance_id.clone();
         let mut tasks = Vec::new();
 
         for query_id in &query_ids {
-            let query = query_manager
-                .get_query_instance(query_id)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let query = query_provider.get_query_instance(query_id).await?;
 
             let subscription = query
                 .subscribe(reaction_id.to_string())

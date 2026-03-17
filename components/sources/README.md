@@ -134,7 +134,7 @@ pub trait Source: Send + Sync {
 
     /// Initialize the source with runtime context.
     /// Called automatically by DrasiLib when the source is added.
-    /// The context provides access to DrasiLib services like status_tx and state_store.
+    /// The context provides access to the graph update channel (`update_tx`) and state_store.
     async fn initialize(&self, context: SourceRuntimeContext);
 
     /// Set the bootstrap provider for this source.
@@ -151,7 +151,7 @@ pub trait Source: Send + Sync {
 
 ### Key Design Points
 
-- **Context-based initialization**: Sources receive a `SourceRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to the status channel, state store, and other DrasiLib services.
+- **Context-based initialization**: Sources receive a `SourceRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to `update_tx` (for status updates to the graph), state store, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`, `subscribe`) are async.
 - **Generic properties**: The `properties()` method returns a HashMap for API inspection, while the actual typed configuration is owned by the plugin.
 - **Query context in subscribe**: The `subscribe()` method receives `SourceSubscriptionSettings` which includes the specific node and relation labels the query needs, enabling sources and bootstrap providers to filter data at the source level.
@@ -243,11 +243,7 @@ impl SourceBaseParams {
 impl SourceBase {
     // Status management
     pub async fn get_status(&self) -> ComponentStatus;
-    pub async fn set_status(&self, status: ComponentStatus);
-    pub async fn set_status_with_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
-
-    // Component lifecycle events
-    pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>);
 
     // Event dispatching
     pub async fn dispatch_source_change(&self, change: SourceChange) -> Result<()>;
@@ -280,7 +276,7 @@ impl SourceBase {
 
     // Context initialization (called automatically by DrasiLib)
     pub async fn initialize(&self, context: SourceRuntimeContext);
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>>;
+    pub fn status_handle(&self) -> ComponentStatusHandle;
     pub async fn state_store(&self) -> Option<Arc<dyn StateStoreProvider>>;
 
     // Auto-start configuration
@@ -561,14 +557,11 @@ pub enum ComponentStatus {
 Use `SourceBase` methods for status management:
 
 ```rust
-// Set status only
-self.base.set_status(ComponentStatus::Running).await;
-
 // Set status and send lifecycle event
-self.base.set_status_with_event(
+self.base.set_status(
     ComponentStatus::Running,
     Some("Connected to database".to_string()),
-).await?;
+).await;
 ```
 
 ## Creating a Source Plugin
@@ -705,15 +698,12 @@ impl Source for MySource {
 
     async fn start(&self) -> Result<()> {
         info!("Starting MySource '{}'", self.base.id);
-        self.base.set_status(ComponentStatus::Starting).await;
-        self.base
-            .send_component_event(ComponentStatus::Starting, Some("Initializing".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Starting, Some("Initializing".to_string())).await;
 
         // Clone what we need for the spawned task
         let dispatchers = self.base.dispatchers.clone();
         let source_id = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let config = self.config.clone();
 
         // Spawn the main processing task
@@ -727,7 +717,7 @@ impl Source for MySource {
                 interval.tick().await;
 
                 // Check if we should stop
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -786,20 +776,14 @@ impl Source for MySource {
         });
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-        self.base
-            .send_component_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Running, Some("Started".to_string())).await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         info!("Stopping MySource '{}'", self.base.id);
-        self.base.set_status(ComponentStatus::Stopping).await;
-        self.base
-            .send_component_event(ComponentStatus::Stopping, Some("Stopping".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Stopping, Some("Stopping".to_string())).await;
 
         // Cancel the task
         if let Some(handle) = self.base.task_handle.write().await.take() {
@@ -807,10 +791,7 @@ impl Source for MySource {
             let _ = handle.await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
-        self.base
-            .send_component_event(ComponentStatus::Stopped, Some("Stopped".to_string()))
-            .await?;
+        self.base.set_status(ComponentStatus::Stopped, Some("Stopped".to_string())).await;
 
         Ok(())
     }
@@ -1258,19 +1239,17 @@ Always send component events when transitioning states:
 
 ```rust
 async fn start(&self) -> Result<()> {
-    self.base.set_status(ComponentStatus::Starting).await;
-    self.base.send_component_event(
+    self.base.set_status(
         ComponentStatus::Starting,
         Some("Connecting to database".to_string()),
-    ).await?;
+    ).await;
 
     // ... initialization logic ...
 
-    self.base.set_status(ComponentStatus::Running).await;
-    self.base.send_component_event(
+    self.base.set_status(
         ComponentStatus::Running,
         Some("Connected successfully".to_string()),
-    ).await?;
+    ).await;
 
     Ok(())
 }

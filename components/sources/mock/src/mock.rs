@@ -180,13 +180,12 @@ impl Source for MockSource {
     async fn start(&self) -> Result<()> {
         log_component_start("Mock Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting mock source".to_string()),
             )
-            .await?;
+            .await;
 
         // Get broadcast_tx for publishing
         let base_dispatchers = self.base.dispatchers.clone();
@@ -211,7 +210,7 @@ impl Source for MockSource {
             .unwrap_or_default();
 
         // Start the data generation task with component span for proper log routing
-        let status = Arc::clone(&self.base.status);
+        let status_handle = self.base.status_handle();
         let source_name = self.base.id.clone();
         let source_id_for_span = source_id.clone();
         let span = tracing::info_span!(
@@ -230,7 +229,7 @@ impl Source for MockSource {
                     interval.tick().await;
 
                     // Check if we should stop
-                    if !matches!(*status.read().await, ComponentStatus::Running) {
+                    if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                         break;
                     }
 
@@ -425,14 +424,12 @@ impl Source for MockSource {
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Mock source started successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -440,13 +437,12 @@ impl Source for MockSource {
     async fn stop(&self) -> Result<()> {
         log_component_stop("Mock Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping mock source".to_string()),
             )
-            .await?;
+            .await;
 
         // Cancel the task
         if let Some(handle) = self.base.task_handle.write().await.take() {
@@ -454,13 +450,12 @@ impl Source for MockSource {
             let _ = handle.await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Mock source stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

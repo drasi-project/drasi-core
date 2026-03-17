@@ -32,37 +32,34 @@ use tokio::sync::RwLock;
 /// A simple test mock source for unit testing.
 ///
 /// This mock source supports event injection for testing data flow through queries.
+/// Status events are emitted through the component graph (set via initialize()).
 pub struct TestMockSource {
     id: String,
     auto_start: bool,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    /// Status handle — always available, wired to graph during initialize().
+    status_handle: crate::component_graph::ComponentStatusHandle,
     /// Dispatchers for sending events to subscribed queries
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
 }
 
 impl TestMockSource {
-    pub fn new(id: String, event_tx: ComponentEventSender) -> Result<Self> {
+    pub fn new(id: String) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
         Ok(Self {
             id,
             auto_start: true,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
     /// Create a new test mock source with configurable auto_start
-    pub fn with_auto_start(
-        id: String,
-        event_tx: ComponentEventSender,
-        auto_start: bool,
-    ) -> Result<Self> {
+    pub fn with_auto_start(id: String, auto_start: bool) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
         Ok(Self {
             id,
             auto_start,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
         })
     }
@@ -102,59 +99,33 @@ impl Source for TestMockSource {
     }
 
     async fn start(&self) -> Result<()> {
-        *self.status.write().await = ComponentStatus::Starting;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting source".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some("Source started".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
+        self.status_handle
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting source".to_string()),
+            )
+            .await;
+        self.status_handle
+            .set_status(ComponentStatus::Running, Some("Source started".to_string()))
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        *self.status.write().await = ComponentStatus::Stopping;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping source".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Source stopped".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
+        self.status_handle
+            .set_status(
+                ComponentStatus::Stopping,
+                Some("Stopping source".to_string()),
+            )
+            .await;
+        self.status_handle
+            .set_status(ComponentStatus::Stopped, Some("Source stopped".to_string()))
+            .await;
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
     async fn subscribe(
@@ -178,14 +149,14 @@ impl Source for TestMockSource {
         self
     }
 
-    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
-        // TestMockSource already has event_tx from constructor, so we don't need to store it again
+    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestMockSource instance
-pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> TestMockSource {
-    TestMockSource::new(id, event_tx).unwrap()
+pub fn create_test_mock_source(id: String) -> TestMockSource {
+    TestMockSource::new(id).unwrap()
 }
 
 /// A test mock source that provides a bootstrap channel for testing the bootstrap gate.
@@ -196,23 +167,19 @@ pub fn create_test_mock_source(id: String, event_tx: ComponentEventSender) -> Te
 pub struct TestBootstrapMockSource {
     id: String,
     auto_start: bool,
-    status: Arc<RwLock<ComponentStatus>>,
-    event_tx: ComponentEventSender,
+    /// Status handle — always available, wired to graph during initialize().
+    status_handle: crate::component_graph::ComponentStatusHandle,
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
     bootstrap_rx: Arc<tokio::sync::Mutex<Option<BootstrapEventReceiver>>>,
 }
 
 impl TestBootstrapMockSource {
-    pub fn new(
-        id: String,
-        event_tx: ComponentEventSender,
-        bootstrap_rx: BootstrapEventReceiver,
-    ) -> Result<Self> {
+    pub fn new(id: String, bootstrap_rx: BootstrapEventReceiver) -> Result<Self> {
+        let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
         Ok(Self {
             id,
             auto_start: true,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            event_tx,
+            status_handle,
             dispatchers: Arc::new(RwLock::new(Vec::new())),
             bootstrap_rx: Arc::new(tokio::sync::Mutex::new(Some(bootstrap_rx))),
         })
@@ -238,59 +205,33 @@ impl Source for TestBootstrapMockSource {
     }
 
     async fn start(&self) -> Result<()> {
-        *self.status.write().await = ComponentStatus::Starting;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting source".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
-        *self.status.write().await = ComponentStatus::Running;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Running,
-            timestamp: chrono::Utc::now(),
-            message: Some("Source started".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
+        self.status_handle
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting source".to_string()),
+            )
+            .await;
+        self.status_handle
+            .set_status(ComponentStatus::Running, Some("Source started".to_string()))
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        *self.status.write().await = ComponentStatus::Stopping;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopping,
-            timestamp: chrono::Utc::now(),
-            message: Some("Stopping source".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
-        *self.status.write().await = ComponentStatus::Stopped;
-
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status: ComponentStatus::Stopped,
-            timestamp: chrono::Utc::now(),
-            message: Some("Source stopped".to_string()),
-        };
-        let _ = self.event_tx.send(event).await;
-
+        self.status_handle
+            .set_status(
+                ComponentStatus::Stopping,
+                Some("Stopping source".to_string()),
+            )
+            .await;
+        self.status_handle
+            .set_status(ComponentStatus::Stopped, Some("Source stopped".to_string()))
+            .await;
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
     async fn subscribe(
@@ -314,18 +255,17 @@ impl Source for TestBootstrapMockSource {
         self
     }
 
-    async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {
-        // TestBootstrapMockSource already has event_tx from constructor
+    async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+        self.status_handle.wire(context.update_tx.clone()).await;
     }
 }
 
 /// Helper to create a TestBootstrapMockSource instance
 pub fn create_test_bootstrap_mock_source(
     id: String,
-    event_tx: ComponentEventSender,
     bootstrap_rx: BootstrapEventReceiver,
 ) -> TestBootstrapMockSource {
-    TestBootstrapMockSource::new(id, event_tx, bootstrap_rx).unwrap()
+    TestBootstrapMockSource::new(id, bootstrap_rx).unwrap()
 }
 
 /// A test source that uses SourceBase for logging integration tests.
@@ -377,8 +317,8 @@ impl Source for LoggingTestSource {
 
     async fn start(&self) -> Result<()> {
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -412,7 +352,6 @@ impl Source for LoggingTestSource {
 mod manager_tests {
     use super::*;
     use crate::sources::SourceManager;
-    use tokio::sync::mpsc;
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -427,26 +366,49 @@ mod manager_tests {
 
     async fn create_test_manager() -> (
         Arc<SourceManager>,
-        mpsc::Receiver<ComponentEvent>,
-        mpsc::Sender<ComponentEvent>,
+        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
     ) {
         // Use the global shared log registry since tracing subscriber is global
         let log_registry = crate::managers::get_or_init_global_registry();
 
-        let (event_tx, event_rx) = mpsc::channel(100);
+        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+        let graph = Arc::new(tokio::sync::RwLock::new(graph));
+
+        // Spawn a mini graph update loop for tests (consumes mpsc updates and applies to graph)
+        {
+            let graph_clone = graph.clone();
+            tokio::spawn(async move {
+                let mut rx = update_rx;
+                while let Some(update) = rx.recv().await {
+                    let mut g = graph_clone.write().await;
+                    g.apply_update(update);
+                }
+            });
+        }
+
         let manager = Arc::new(SourceManager::new(
             "test-instance",
-            event_tx.clone(),
             log_registry,
+            graph.clone(),
+            update_tx,
         ));
-        (manager, event_rx, event_tx)
+        (manager, graph)
+    }
+
+    /// Create a test manager that also returns the shared graph for event subscription.
+    async fn create_test_manager_with_graph() -> (
+        Arc<SourceManager>,
+        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+    ) {
+        create_test_manager().await
     }
 
     #[tokio::test]
     async fn test_add_source() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
-        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        let source = create_test_mock_source("test-source".to_string());
         let result = manager.add_source(source).await;
 
         assert!(result.is_ok());
@@ -459,10 +421,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_source() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
-        let source1 = create_test_mock_source("test-source".to_string(), event_tx.clone());
-        let source2 = create_test_mock_source("test-source".to_string(), event_tx);
+        let source1 = create_test_mock_source("test-source".to_string());
+        let source2 = create_test_mock_source("test-source".to_string());
 
         // Add source first time
         assert!(manager.add_source(source1).await.is_ok());
@@ -475,9 +437,9 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_source() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
-        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        let source = create_test_mock_source("test-source".to_string());
         manager.add_source(source).await.unwrap();
 
         // Remove the source
@@ -493,7 +455,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_source() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let result = manager
             .delete_source("nonexistent".to_string(), false)
@@ -504,9 +466,12 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_start_source() {
-        let (manager, mut event_rx, event_tx) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
-        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = create_test_mock_source("test-source".to_string());
         manager.add_source(source).await.unwrap();
 
         // Start the source
@@ -515,8 +480,12 @@ mod manager_tests {
 
         // Check for status event
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Some(event) = event_rx.recv().await {
+            while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-source" {
+                    // Skip the Added event emitted by add_source
+                    if matches!(event.status, ComponentStatus::Added) {
+                        continue;
+                    }
                     assert!(
                         matches!(event.status, ComponentStatus::Starting)
                             || matches!(event.status, ComponentStatus::Running)
@@ -531,9 +500,12 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_stop_source() {
-        let (manager, mut event_rx, event_tx) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
-        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = create_test_mock_source("test-source".to_string());
         manager.add_source(source).await.unwrap();
         manager
             .start_source("test-source".to_string())
@@ -549,7 +521,7 @@ mod manager_tests {
 
         // Check for stop event
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while let Some(event) = event_rx.recv().await {
+            while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-source"
                     && matches!(event.status, ComponentStatus::Stopped)
                 {
@@ -563,9 +535,9 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_source_info() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
-        let source = create_test_mock_source("test-source".to_string(), event_tx);
+        let source = create_test_mock_source("test-source".to_string());
         manager.add_source(source).await.unwrap();
 
         let retrieved = manager.get_source("test-source".to_string()).await;
@@ -578,11 +550,11 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_list_sources_with_status() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Add multiple sources
-        let source1 = create_test_mock_source("source1".to_string(), event_tx.clone());
-        let source2 = create_test_mock_source("source2".to_string(), event_tx);
+        let source1 = create_test_mock_source("source1".to_string());
+        let source2 = create_test_mock_source("source2".to_string());
 
         manager.add_source(source1).await.unwrap();
         manager.add_source(source2).await.unwrap();
@@ -619,15 +591,14 @@ mod manager_tests {
     /// This tests the TOCTOU fix where we use a single write lock for check-and-insert.
     #[tokio::test]
     async fn test_concurrent_add_source_same_id() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Spawn multiple tasks trying to add a source with the same ID concurrently
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
-            let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
-                let source = create_test_mock_source("same-source".to_string(), event_tx_clone);
+                let source = create_test_mock_source("same-source".to_string());
                 let result = manager_clone.add_source(source).await;
                 (i, result.is_ok())
             }));
@@ -658,15 +629,14 @@ mod manager_tests {
     /// Test that concurrent add_source calls with different IDs all succeed.
     #[tokio::test]
     async fn test_concurrent_add_source_different_ids() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Spawn multiple tasks adding sources with unique IDs
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
-            let event_tx_clone = event_tx.clone();
             handles.push(tokio::spawn(async move {
-                let source = create_test_mock_source(format!("source-{i}"), event_tx_clone);
+                let source = create_test_mock_source(format!("source-{i}"));
                 manager_clone.add_source(source).await
             }));
         }
@@ -692,24 +662,16 @@ mod manager_tests {
     /// Test that start_all only starts sources with auto_start=true
     #[tokio::test]
     async fn test_start_all_respects_auto_start() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Add source with auto_start=true
-        let source1 = TestMockSource::with_auto_start(
-            "auto-start-source".to_string(),
-            event_tx.clone(),
-            true,
-        )
-        .unwrap();
+        let source1 =
+            TestMockSource::with_auto_start("auto-start-source".to_string(), true).unwrap();
         manager.add_source(source1).await.unwrap();
 
         // Add source with auto_start=false
-        let source2 = TestMockSource::with_auto_start(
-            "no-auto-start-source".to_string(),
-            event_tx.clone(),
-            false,
-        )
-        .unwrap();
+        let source2 =
+            TestMockSource::with_auto_start("no-auto-start-source".to_string(), false).unwrap();
         manager.add_source(source2).await.unwrap();
 
         // Start all sources
@@ -741,10 +703,10 @@ mod manager_tests {
     /// Test that source auto_start defaults to true
     #[tokio::test]
     async fn test_source_auto_start_defaults_to_true() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Create source using default constructor (should have auto_start=true)
-        let source = create_test_mock_source("default-source".to_string(), event_tx);
+        let source = create_test_mock_source("default-source".to_string());
 
         // Verify auto_start is true
         assert!(source.auto_start(), "Default auto_start should be true");
@@ -769,11 +731,10 @@ mod manager_tests {
     /// Test that source with auto_start=false can be manually started
     #[tokio::test]
     async fn test_source_auto_start_false_can_be_manually_started() {
-        let (manager, _event_rx, event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Add source with auto_start=false
-        let source =
-            TestMockSource::with_auto_start("manual-source".to_string(), event_tx, false).unwrap();
+        let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
         manager.add_source(source).await.unwrap();
 
         // start_all should not start it
@@ -814,10 +775,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_source_log_subscription() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Create a mock source
-        let source = create_test_mock_source("logging-source".to_string(), _event_tx);
+        let source = create_test_mock_source("logging-source".to_string());
         manager.add_source(source).await.unwrap();
 
         // Subscribe to logs
@@ -834,7 +795,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_source_log_subscription_nonexistent() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Try to subscribe to a non-existent source
         let result = manager.subscribe_logs("nonexistent-source").await;
@@ -848,7 +809,7 @@ mod manager_tests {
     async fn test_source_base_logs_flow_to_subscriber() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("logger-source");
@@ -897,7 +858,7 @@ mod manager_tests {
     async fn test_source_base_logs_all_levels() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("multi-level-source");
@@ -942,7 +903,7 @@ mod manager_tests {
     async fn test_source_base_log_history_persists() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("history-source");
@@ -990,7 +951,7 @@ mod manager_tests {
     async fn test_log_macro_routed_to_component_logs() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("log-routing-source");
@@ -1046,7 +1007,7 @@ mod manager_tests {
     /// Test that deleting a source cleans up its event history
     #[tokio::test]
     async fn test_delete_source_cleans_up_event_history() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("cleanup-events-source");
@@ -1086,7 +1047,7 @@ mod manager_tests {
     async fn test_delete_source_cleans_up_log_history() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("cleanup-logs-source");
@@ -1136,7 +1097,7 @@ mod manager_tests {
     /// A test source that tracks deprovision calls.
     struct DeprovisionTestSource {
         id: String,
-        status: Arc<RwLock<ComponentStatus>>,
+        status_handle: crate::component_graph::ComponentStatusHandle,
         deprovision_called: Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -1146,7 +1107,7 @@ mod manager_tests {
             (
                 Self {
                     id: id.to_string(),
-                    status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
                     deprovision_called: deprovision_called.clone(),
                 },
                 deprovision_called,
@@ -1156,7 +1117,7 @@ mod manager_tests {
         fn new_simple(id: &str) -> Self {
             Self {
                 id: id.to_string(),
-                status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+                status_handle: crate::component_graph::ComponentStatusHandle::new(id),
                 deprovision_called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }
         }
@@ -1181,17 +1142,21 @@ mod manager_tests {
         }
 
         async fn start(&self) -> Result<()> {
-            *self.status.write().await = ComponentStatus::Running;
+            self.status_handle
+                .set_status(ComponentStatus::Running, None)
+                .await;
             Ok(())
         }
 
         async fn stop(&self) -> Result<()> {
-            *self.status.write().await = ComponentStatus::Stopped;
+            self.status_handle
+                .set_status(ComponentStatus::Stopped, None)
+                .await;
             Ok(())
         }
 
         async fn status(&self) -> ComponentStatus {
-            self.status.read().await.clone()
+            self.status_handle.get_status().await
         }
 
         async fn subscribe(
@@ -1211,12 +1176,14 @@ mod manager_tests {
             Ok(())
         }
 
-        async fn initialize(&self, _context: crate::context::SourceRuntimeContext) {}
+        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
     }
 
     #[tokio::test]
     async fn test_delete_with_cleanup_calls_deprovision() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let (source, deprovision_flag) = DeprovisionTestSource::new("deprovision-source");
         manager.add_source(source).await.unwrap();
@@ -1235,7 +1202,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_without_cleanup_skips_deprovision() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let (source, deprovision_flag) = DeprovisionTestSource::new("no-deprovision-source");
         manager.add_source(source).await.unwrap();
@@ -1258,7 +1225,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_replaces_stopped_source() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
         manager.add_source(source).await.unwrap();
@@ -1280,7 +1247,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_stops_and_restarts_running_source() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("reconfig-running-source");
         manager.add_source(source).await.unwrap();
@@ -1315,7 +1282,7 @@ mod manager_tests {
     async fn test_update_source_preserves_log_history() {
         use tracing::Instrument;
 
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let source_id = unique_id("reconfig-logs-source");
         let source = DeprovisionTestSource::new_simple(&source_id);
@@ -1356,7 +1323,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_emits_reconfiguring_event() {
-        let (manager, mut event_rx, _event_tx) = create_test_manager().await;
+        let (manager, graph) = create_test_manager_with_graph().await;
+
+        // Subscribe to graph events BEFORE adding source
+        let mut event_rx = graph.read().await.subscribe();
 
         let source = DeprovisionTestSource::new_simple("reconfig-event-source");
         manager.add_source(source).await.unwrap();
@@ -1368,13 +1338,24 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Check events
+        // Check events from graph broadcast.
+        // Events now arrive asynchronously via the graph update loop, so we
+        // wait briefly for the loop to process the channel message.
         let mut found_reconfiguring = false;
-        while let Ok(event) = event_rx.try_recv() {
-            if event.component_id == "reconfig-event-source"
-                && event.status == ComponentStatus::Reconfiguring
-            {
-                found_reconfiguring = true;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match event_rx.try_recv() {
+                Ok(event) => {
+                    if event.component_id == "reconfig-event-source"
+                        && event.status == ComponentStatus::Reconfiguring
+                    {
+                        found_reconfiguring = true;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
             }
         }
         assert!(found_reconfiguring, "Expected Reconfiguring event");
@@ -1382,7 +1363,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_rejects_mismatched_id() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("original-source");
         manager.add_source(source).await.unwrap();
@@ -1398,7 +1379,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_nonexistent_source() {
-        let (manager, _event_rx, _event_tx) = create_test_manager().await;
+        let (manager, _graph) = create_test_manager().await;
 
         let new_source = DeprovisionTestSource::new_simple("nonexistent");
         let result = manager

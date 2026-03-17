@@ -30,9 +30,10 @@ use std::sync::Arc;
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::{
-    BootstrapEvent, BootstrapEventSender, ComponentEventReceiver, SourceEvent, SourceEventWrapper,
+    BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
 };
 use drasi_lib::channels::ChangeReceiver;
+use drasi_lib::component_graph::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
@@ -106,6 +107,8 @@ fn component_status_to_ffi(s: ComponentStatus) -> FfiComponentStatus {
         ComponentStatus::Stopping => FfiComponentStatus::Stopping,
         ComponentStatus::Reconfiguring => FfiComponentStatus::Reconfiguring,
         ComponentStatus::Error => FfiComponentStatus::Error,
+        ComponentStatus::Added => FfiComponentStatus::Stopped,
+        ComponentStatus::Removed => FfiComponentStatus::Stopped,
     }
 }
 
@@ -180,7 +183,7 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
     /// Keeps the dummy status_rx alive so inner source's status_tx.send() doesn't error.
-    pub _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -509,7 +512,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -814,7 +817,7 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
-    pub _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -1106,7 +1109,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1889,7 +1892,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
 /// Build a SourceRuntimeContext from FFI runtime context.
 fn build_source_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (SourceRuntimeContext, ComponentEventReceiver) {
+) -> (SourceRuntimeContext, ComponentUpdateReceiver) {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
     let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
@@ -1907,20 +1910,40 @@ fn build_source_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
+    // Create a dummy mpsc channel pair.
+    // The update_tx is provided to satisfy the SourceRuntimeContext signature.
+    // In the plugin-side context, status updates flow through the FFI lifecycle callback,
+    // not through this channel. The receiver is returned so it stays alive.
+    let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
-        status_tx,
+        update_tx,
         state_store,
         identity_provider,
     };
     (ctx, status_rx)
 }
 
+/// Dummy QueryProvider for plugin-side reaction contexts.
+/// FFI reactions use host-managed subscriptions, so this is never called.
+struct NoopQueryProvider;
+
+#[async_trait::async_trait]
+impl drasi_lib::QueryProvider for NoopQueryProvider {
+    async fn get_query_instance(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Arc<dyn drasi_lib::queries::Query>> {
+        Err(anyhow::anyhow!(
+            "QueryProvider not available in plugin context (query '{id}')"
+        ))
+    }
+}
+
 fn build_reaction_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (drasi_lib::ReactionRuntimeContext, ComponentEventReceiver) {
+) -> (drasi_lib::ReactionRuntimeContext, ComponentUpdateReceiver) {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
     let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
@@ -1938,14 +1961,15 @@ fn build_reaction_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
         reaction_id: component_id,
-        status_tx,
+        update_tx,
         state_store,
         identity_provider,
+        query_provider: Arc::new(NoopQueryProvider),
     };
     (ctx, status_rx)
 }

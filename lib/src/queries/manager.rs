@@ -35,6 +35,10 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
+use crate::component_graph::{
+    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
+    RelationshipKind,
+};
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
@@ -43,6 +47,7 @@ use crate::managers::{
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
+use crate::sources::FutureQueueSource;
 use crate::sources::Source;
 use crate::sources::SourceManager;
 use tracing::Instrument;
@@ -261,13 +266,14 @@ pub struct DrasiQuery {
     index_factory: Arc<crate::indexes::IndexFactory>,
     // Middleware registry for query middleware
     middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // FutureQueueSource for temporal query support
+    future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
 }
 
 impl DrasiQuery {
     pub fn new(
         instance_id: impl Into<String>,
         config: QueryConfig,
-        event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
@@ -277,7 +283,7 @@ impl DrasiQuery {
         let priority_queue = PriorityQueue::new(priority_capacity);
 
         // Create QueryBase for common functionality
-        let base = QueryBase::new(config, event_tx).context("Failed to create QueryBase")?;
+        let base = QueryBase::new(config).context("Failed to create QueryBase")?;
 
         Ok(Self {
             instance_id: instance_id.into(),
@@ -291,7 +297,16 @@ impl DrasiQuery {
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
             middleware_registry,
+            future_queue_source: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Initialize the query with runtime context.
+    ///
+    /// Wires the status handle to the component graph, following the same
+    /// pattern as Source and Reaction initialization.
+    pub async fn initialize(&self, context: crate::context::QueryRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
@@ -312,20 +327,14 @@ impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
         log_component_start("Query", &self.base.config.id);
 
-        *self.base.status.write().await = ComponentStatus::Starting;
         self.bootstrap_state.write().await.clear();
 
-        let event = ComponentEvent {
-            component_id: self.base.config.id.clone(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting query".to_string()),
-        };
-
-        if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {e}");
-        }
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting query".to_string()),
+            )
+            .await;
 
         // Build and initialize the actual Drasi ContinuousQuery
         let query_str = self.base.config.query.clone();
@@ -414,19 +423,12 @@ impl Query for DrasiQuery {
             Ok(query) => query,
             Err(e) => {
                 error!("Failed to build query '{}': {}", self.base.config.id, e);
-                *self.base.status.write().await = ComponentStatus::Error;
-
-                let event = ComponentEvent {
-                    component_id: self.base.config.id.clone(),
-                    component_type: ComponentType::Query,
-                    status: ComponentStatus::Error,
-                    timestamp: chrono::Utc::now(),
-                    message: Some(format!("Failed to build query: {e}")),
-                };
-
-                if let Err(e) = self.base.event_tx.send(event).await {
-                    error!("Failed to send component event: {e}");
-                }
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Failed to build query: {e}")),
+                    )
+                    .await;
 
                 return Err(anyhow::anyhow!("Failed to build query: {e}"));
             }
@@ -460,19 +462,12 @@ impl Query for DrasiQuery {
                         "Failed to build subscription settings for query '{}': {}",
                         self.base.config.id, e
                     );
-                    *self.base.status.write().await = ComponentStatus::Error;
-
-                    let event = ComponentEvent {
-                        component_id: self.base.config.id.clone(),
-                        component_type: ComponentType::Query,
-                        status: ComponentStatus::Error,
-                        timestamp: chrono::Utc::now(),
-                        message: Some(format!("Failed to build subscription settings: {e}")),
-                    };
-
-                    if let Err(e) = self.base.event_tx.send(event).await {
-                        error!("Failed to send component event: {e}");
-                    }
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to build subscription settings: {e}")),
+                        )
+                        .await;
 
                     return Err(anyhow::anyhow!(
                         "Failed to build subscription settings: {e}"
@@ -481,6 +476,44 @@ impl Query for DrasiQuery {
             };
 
         // Subscribe to each source sequentially
+        // Also includes FutureQueueSource for temporal query support
+
+        // Set up FutureQueueSource for temporal query support
+        // This creates a virtual source that polls the future queue and emits due elements
+        // as source events, integrating temporal queries into the standard source subscription
+        // mechanism. Events preserve their original source_id from the FutureElementRef.
+        debug!(
+            "Query '{}' setting up FutureQueueSource for temporal queries",
+            self.base.config.id
+        );
+
+        let future_queue_source = Arc::new(FutureQueueSource::new(
+            continuous_query.future_queue(),
+            self.base.config.id.clone(),
+        ));
+
+        // Start the FutureQueueSource
+        if let Err(e) = future_queue_source.start().await {
+            error!(
+                "Query '{}' failed to start FutureQueueSource: {}",
+                self.base.config.id, e
+            );
+            self.base
+                .set_status(
+                    ComponentStatus::Error,
+                    Some(format!("Failed to start FutureQueueSource: {e}")),
+                )
+                .await;
+            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
+        }
+
+        info!(
+            "Query '{}' FutureQueueSource started successfully",
+            self.base.config.id
+        );
+
+        // Store the FutureQueueSource for cleanup
+        *self.future_queue_source.write().await = Some(future_queue_source.clone());
 
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
@@ -522,7 +555,12 @@ impl Query for DrasiQuery {
                         handle.abort();
                         let _ = handle.await;
                     }
-                    *self.base.status.write().await = ComponentStatus::Error;
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Source '{source_id}' not found")),
+                        )
+                        .await;
                     return Err(anyhow::anyhow!("Source '{source_id}' not found"));
                 }
             }
@@ -541,7 +579,12 @@ impl Query for DrasiQuery {
                         handle.abort();
                         let _ = handle.await;
                     }
-                    *self.base.status.write().await = ComponentStatus::Error;
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to subscribe to source '{source_id}': {e}")),
+                        )
+                        .await;
                     return Err(anyhow::anyhow!(
                         "Failed to subscribe to source '{source_id}': {e}"
                     ));
@@ -831,8 +874,7 @@ impl Query for DrasiQuery {
             // bootstrap task would leave the gate closed forever.
             {
                 let bootstrap_gate_clone = bootstrap_gate.clone();
-                let status_clone = self.base.status.clone();
-                let event_tx_clone = self.base.event_tx.clone();
+                let reporter_clone = self.base.status_handle();
                 let query_id_clone = self.base.config.id.clone();
                 let instance_id_clone = self.instance_id.clone();
 
@@ -853,18 +895,10 @@ impl Query for DrasiQuery {
                                  transitioning to Error and opening gate"
                             );
 
-                            *status_clone.write().await = ComponentStatus::Error;
-
-                            let error_event = ComponentEvent {
-                                component_id: query_id_clone.clone(),
-                                component_type: ComponentType::Query,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!(
-                                    "Bootstrap failed: {panic_count} task(s) panicked"
-                                )),
-                            };
-                            let _ = event_tx_clone.send(error_event).await;
+                            reporter_clone.set_status(
+                                ComponentStatus::Error,
+                                Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
+                            ).await;
 
                             bootstrap_gate_clone.notify_one();
                         }
@@ -915,10 +949,8 @@ impl Query for DrasiQuery {
         let current_results = self.current_results.clone();
         let task_handle_clone = self.base.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
-        let status = self.base.status.clone();
         let instance_id = self.instance_id.clone();
-        let event_tx_for_processor = self.base.event_tx.clone();
-        let config_id_for_processor = self.base.config.id.clone();
+        let reporter_for_processor = self.base.status_handle();
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -954,33 +986,19 @@ impl Query for DrasiQuery {
                 // Bootstrap complete — transition to Running only if still Starting.
                 // If stop() was called during bootstrap, status may already be
                 // Stopping and we must not overwrite it.
-                let should_run = {
-                    let mut guard = status.write().await;
-                    if matches!(*guard, ComponentStatus::Starting) {
-                        *guard = ComponentStatus::Running;
-                        true
-                    } else {
-                        warn!(
-                            "Query '{query_id}' bootstrap completed but status is {:?}, \
-                             skipping transition to Running",
-                            *guard
-                        );
-                        false
-                    }
-                };
+                let should_run = matches!(reporter_for_processor.get_status().await, ComponentStatus::Starting);
 
                 if should_run {
-                    let running_event = ComponentEvent {
-                        component_id: config_id_for_processor,
-                        component_type: ComponentType::Query,
-                        status: ComponentStatus::Running,
-                        timestamp: chrono::Utc::now(),
-                        message: Some("Query started successfully".to_string()),
-                    };
-
-                    if let Err(e) = event_tx_for_processor.send(running_event).await {
-                        error!("Failed to send component event: {e}");
-                    }
+                    reporter_for_processor.set_status(
+                        ComponentStatus::Running,
+                        Some("Query started successfully".to_string()),
+                    ).await;
+                } else {
+                    let current = reporter_for_processor.get_status().await;
+                    warn!(
+                        "Query '{query_id}' bootstrap completed but status is {current:?}, \
+                         skipping transition to Running"
+                    );
                 }
 
                 // Start FutureQueueSource after bootstrap completes
@@ -992,10 +1010,10 @@ impl Query for DrasiQuery {
 
                 loop {
                     // Check if query is still running
-                    let status_check = status.read().await.clone();
-                    if !matches!(status_check, ComponentStatus::Running) {
+                    let current_status = reporter_for_processor.get_status().await;
+                    if !matches!(current_status, ComponentStatus::Running) {
                         info!(
-                            "Query '{query_id}' status changed to non-running ({status_check:?}), exiting processing loop"
+                            "Query '{query_id}' status changed to non-running ({current_status:?}), exiting processing loop"
                         );
                         break;
                     }
@@ -1112,7 +1130,10 @@ impl Query for DrasiQuery {
         log_component_stop("Query", &self.base.config.id);
 
         self.base
-            .emit_status_event(ComponentStatus::Stopping, Some("Stopping query"))
+            .set_status(
+                ComponentStatus::Stopping,
+                Some("Stopping query".to_string()),
+            )
             .await;
 
         // Abort bootstrap tasks and supervisor
@@ -1139,14 +1160,17 @@ impl Query for DrasiQuery {
         self.base.stop_common().await?;
 
         self.base
-            .emit_status_event(ComponentStatus::Stopped, Some("Query stopped successfully"))
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Query stopped successfully".to_string()),
+            )
             .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.base.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &QueryConfig {
@@ -1174,32 +1198,39 @@ impl Query for DrasiQuery {
 pub struct QueryManager {
     instance_id: String,
     queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
-    event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
     index_factory: Arc<crate::indexes::IndexFactory>,
     middleware_registry: Arc<MiddlewareTypeRegistry>,
     event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
+    /// Shared component graph — the authoritative registry for component state and events
+    graph: Arc<RwLock<ComponentGraph>>,
+    /// Channel sender for routing status updates through the graph update loop.
+    /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
+    /// the loop applies them to the graph and records events automatically.
+    update_tx: ComponentUpdateSender,
 }
 
 impl QueryManager {
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
             queries: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
             source_manager,
             index_factory,
             middleware_registry,
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            graph,
+            update_tx,
         }
     }
 
@@ -1226,31 +1257,57 @@ impl QueryManager {
     }
 
     async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
-        // Create the query instance first (before acquiring lock)
+        // Registry-first: register in the component graph before creating runtime state.
+        // The graph is the authoritative source of truth — if it rejects the add
+        // (duplicate ID), the runtime instance is never created.
+        {
+            let mut graph = self.graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            let node = ComponentNode {
+                id: config.id.clone(),
+                kind: ComponentKind::Query,
+                status: ComponentStatus::Added,
+                metadata,
+            };
+            graph.add_component(node)?;
+
+            // Create bidirectional Feeds/SubscribesTo edges for each source subscription
+            for sub in &config.sources {
+                if graph.contains(&sub.source_id) {
+                    let _ =
+                        graph.add_relationship(&sub.source_id, &config.id, RelationshipKind::Feeds);
+                }
+            }
+        }
+        // Graph emits ComponentEvent(Added) automatically
+
+        // Create the query instance
+        let update_tx = {
+            let graph = self.graph.read().await;
+            graph.update_sender()
+        };
         let query = DrasiQuery::new(
             &self.instance_id,
             config.clone(),
-            self.event_tx.clone(),
             self.source_manager.clone(),
             self.index_factory.clone(),
             self.middleware_registry.clone(),
         )?;
+
+        // Wire status handle to graph via context (same pattern as Source/Reaction)
+        let context =
+            crate::context::QueryRuntimeContext::new(&self.instance_id, &config.id, update_tx);
+        query.initialize(context).await;
 
         let query: Arc<dyn Query> = Arc::new(query);
 
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance for fast lookups
         {
             let mut queries = self.queries.write().await;
-            if queries.contains_key(&config.id) {
-                return Err(anyhow::anyhow!(
-                    "Query with id '{}' already exists",
-                    config.id
-                ));
-            }
             queries.insert(config.id.clone(), query);
         }
 
@@ -1274,6 +1331,17 @@ impl QueryManager {
         if let Some(query) = query {
             let status = query.status().await;
             is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Route transitional state through the graph update loop
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Starting,
+                    message: Some("Starting query".to_string()),
+                })
+                .await;
+
             query.start().await?;
         } else {
             return Err(anyhow::anyhow!("Query not found: {id}"));
@@ -1291,6 +1359,17 @@ impl QueryManager {
         if let Some(query) = query {
             let status = query.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
+
+            // Route transitional state through the graph update loop
+            let _ = self
+                .update_tx
+                .send(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopping,
+                    message: Some("Stopping query".to_string()),
+                })
+                .await;
+
             query.stop().await?;
         } else {
             return Err(anyhow::anyhow!("Query not found: {id}"));
@@ -1429,6 +1508,11 @@ impl QueryManager {
 
             // Now remove the query
             self.queries.write().await.remove(&id);
+            // Remove from the component graph (emits Removed event automatically)
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.remove_component(&id);
+            }
             // Clean up event history for this query
             self.event_history.write().await.remove_component(&id);
             // Clean up log resources for this query
@@ -1604,5 +1688,14 @@ impl QueryManager {
         }
 
         Some(self.event_history.write().await.subscribe(id))
+    }
+}
+
+#[async_trait]
+impl crate::reactions::QueryProvider for QueryManager {
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>> {
+        self.get_query_instance(id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }

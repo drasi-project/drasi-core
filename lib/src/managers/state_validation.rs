@@ -98,6 +98,11 @@ pub fn is_operation_valid(status: &ComponentStatus, operation: &Operation) -> Re
         (ComponentStatus::Error, Operation::Stop) => {
             Err("Cannot stop a component that is in error state".to_string())
         }
+
+        // Added/Removed are transient events, not actionable states
+        (ComponentStatus::Added, _) | (ComponentStatus::Removed, _) => {
+            Err("Component is in a transient state".to_string())
+        }
     }
 }
 
@@ -110,5 +115,6 @@ pub fn get_allowed_operations(status: &ComponentStatus) -> Vec<&'static str> {
         ComponentStatus::Stopping => vec!["get"],
         ComponentStatus::Reconfiguring => vec!["get"],
         ComponentStatus::Error => vec!["get", "start", "update", "delete"],
+        ComponentStatus::Added | ComponentStatus::Removed => vec![],
     }
 }

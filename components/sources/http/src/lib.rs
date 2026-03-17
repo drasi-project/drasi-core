@@ -924,13 +924,12 @@ impl Source for HttpSource {
     async fn start(&self) -> Result<()> {
         info!("[{}] Starting adaptive HTTP source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting adaptive HTTP source".to_string()),
             )
-            .await?;
+            .await;
 
         let host = self.config.host.clone();
         let port = self.config.port;
@@ -1090,22 +1089,20 @@ impl Source for HttpSource {
         // Check for startup errors with a short timeout
         match timeout(Duration::from_millis(500), error_rx).await {
             Ok(Ok(error_msg)) => {
-                self.base.set_status(ComponentStatus::Error).await;
+                self.base.set_status(ComponentStatus::Error, None).await;
                 return Err(anyhow::anyhow!("{error_msg}"));
             }
             _ => {
-                self.base.set_status(ComponentStatus::Running).await;
-            }
-        }
-
-        self.base
-            .send_component_event(
-                ComponentStatus::Running,
-                Some(format!(
+                self.base
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some(format!(
                     "Adaptive HTTP source running on {host_clone}:{port} with batch support"
                 )),
-            )
-            .await?;
+                    )
+                    .await;
+            }
+        }
 
         Ok(())
     }
@@ -1113,13 +1110,12 @@ impl Source for HttpSource {
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping adaptive HTTP source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping adaptive HTTP source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -1129,13 +1125,12 @@ impl Source for HttpSource {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive HTTP source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

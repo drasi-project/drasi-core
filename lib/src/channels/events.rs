@@ -164,6 +164,10 @@ pub enum ComponentStatus {
     Stopped,
     Reconfiguring,
     Error,
+    /// Component was added to the system
+    Added,
+    /// Component was removed from the system
+    Removed,
 }
 
 #[derive(Debug, Clone)]
@@ -427,8 +431,12 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
+pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
+pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
+/// Backward-compatible mpsc channel types used by host-sdk plugin callbacks.
+/// New code should use `ComponentUpdateSender` from `component_graph` instead.
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
+pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
@@ -487,31 +495,26 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
     pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            component_event_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            component_event_rx,
             _control_rx: control_rx,
             control_signal_rx,
         };

@@ -323,7 +323,7 @@ impl AdaptiveGrpcReaction {
                     result = base.priority_queue.dequeue() => result,
                 };
 
-                if !matches!(*base.status.read().await, ComponentStatus::Running) {
+                if !matches!(base.get_status().await, ComponentStatus::Running) {
                     info!("[{reaction_name}] Reaction status changed to non-running, exiting");
                     break;
                 }
@@ -469,19 +469,19 @@ impl Reaction for AdaptiveGrpcReaction {
 
         // Set status to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting adaptive gRPC reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Set status to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Adaptive gRPC reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let shutdown_rx = self.base.create_shutdown_channel().await;
@@ -521,11 +521,11 @@ impl Reaction for AdaptiveGrpcReaction {
 
         // Set status to Stopping
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping adaptive gRPC reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Perform common cleanup
         self.base.stop_common().await?;
@@ -535,11 +535,11 @@ impl Reaction for AdaptiveGrpcReaction {
 
         // Set status to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Adaptive gRPC reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

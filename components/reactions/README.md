@@ -73,7 +73,7 @@ DrasiLib has no knowledge of which plugins exist - it only knows about the `Reac
 ### Context-based Initialization
 
 Reactions receive dependencies through a single `initialize()` method that provides a `ReactionRuntimeContext`:
-- `status_tx` - Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `update_tx` - mpsc sender for fire-and-forget status updates to the component graph
 - `query_provider` - Query provider for accessing queries
 - `state_store` - Optional persistent state storage (if configured)
 - `reaction_id` - The reaction's unique identifier
@@ -87,7 +87,7 @@ All reactions must implement the `Reaction` trait from `drasi_lib`:
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::{Reaction, QueryProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ pub trait Reaction: Send + Sync {
 
     /// Initialize the reaction with runtime context.
     /// Called automatically by DrasiLib when the reaction is added.
-    /// The context provides access to status_tx, query_provider, and state_store.
+    /// The context provides access to update_tx, query_provider, and state_store.
     async fn initialize(&self, context: ReactionRuntimeContext);
 
     /// Start the reaction.
@@ -135,7 +135,7 @@ pub trait Reaction: Send + Sync {
 
 ### Key Design Points
 
-- **Context-based initialization**: Reactions receive a `ReactionRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to status_tx, query_provider, state_store, and other DrasiLib services.
+- **Context-based initialization**: Reactions receive a `ReactionRuntimeContext` via `initialize()` when added to DrasiLib. The context provides access to `update_tx` (graph status channel), `query_provider`, `state_store`, and other DrasiLib services.
 - **Async lifecycle**: All lifecycle methods (`start`, `stop`) are async.
 - **Multi-query subscription**: Reactions can subscribe to multiple queries via `query_ids()`.
 - **Priority queue processing**: Results from all queries are merged in timestamp order.
@@ -209,10 +209,7 @@ impl ReactionBaseParams {
 impl ReactionBase {
     // Status management
     pub async fn get_status(&self) -> ComponentStatus;
-    pub async fn set_status_with_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
-
-    // Component lifecycle events
-    pub async fn send_component_event(&self, status: ComponentStatus, message: Option<String>) -> Result<()>;
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>);
 
     // Context initialization (called automatically by DrasiLib)
     pub async fn initialize(&self, context: ReactionRuntimeContext);
@@ -356,10 +353,10 @@ Use `ReactionBase` methods for status management:
 
 ```rust
 // Set status and send lifecycle event
-self.base.set_status_with_event(
+self.base.set_status(
     ComponentStatus::Running,
     Some("Connected to API".to_string()),
-).await?;
+).await;
 ```
 
 ## Creating a Reaction Plugin
@@ -430,7 +427,7 @@ pub use config::MyReactionConfig;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::{QueryProvider, Reaction};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use log::{debug, info};
@@ -495,11 +492,11 @@ impl Reaction for MyReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Subscribe to all configured queries using ReactionBase
         // QueryProvider was injected via inject_query_provider() when reaction was added
@@ -507,11 +504,11 @@ impl Reaction for MyReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -569,11 +566,11 @@ impl Reaction for MyReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -769,7 +766,7 @@ mod tests {
     async fn test_status_reporting() {
         use drasi_lib::context::ReactionRuntimeContext;
 
-        let (status_tx, mut event_rx) = mpsc::channel(100);
+        let (update_tx, mut event_rx) = mpsc::channel(100);
         let reaction = MyReaction::builder("test-reaction")
             .with_query("query1")
             .build();
@@ -783,22 +780,22 @@ mod tests {
             }
         }
 
-        // Initialize with context
+        // Initialize with context (wires the status handle to the graph channel)
         let context = ReactionRuntimeContext::new(
             "test-reaction",
-            status_tx,
+            update_tx,
             None,
             std::sync::Arc::new(MockQueryProvider),
         );
         reaction.base.initialize(context).await;
 
         // Manually trigger a status event
-        reaction.base.set_status_with_event(
+        reaction.base.set_status(
             ComponentStatus::Starting,
             Some("Test".to_string()),
-        ).await.unwrap();
+        ).await;
 
-        // Verify event was sent
+        // Verify event was sent to graph
         let event = event_rx.try_recv().unwrap();
         assert_eq!(event.status, ComponentStatus::Starting);
     }
@@ -984,17 +981,17 @@ Always send component events when transitioning states:
 
 ```rust
 async fn start(&self) -> Result<()> {
-    self.base.set_status_with_event(
+    self.base.set_status(
         ComponentStatus::Starting,
         Some("Initializing connection".to_string()),
-    ).await?;
+    ).await;
 
     // ... initialization logic ...
 
-    self.base.set_status_with_event(
+    self.base.set_status(
         ComponentStatus::Running,
         Some("Connected successfully".to_string()),
-    ).await?;
+    ).await;
 
     Ok(())
 }

@@ -251,7 +251,7 @@ impl Source for SourceProxy {
             instance_id: instance_id_str.clone(),
             runtime_handle: tokio::runtime::Handle::current(),
             log_registry: drasi_lib::managers::get_or_init_global_registry(),
-            event_tx: context.status_tx.clone(),
+            update_tx: context.update_tx.clone(),
         });
 
         // Use as_ptr (no refcount increment) — the Arc in _callback_ctx keeps

@@ -39,9 +39,21 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
+use crate::queries::Query;
+
+/// Trait for providing access to queries without requiring full DrasiLib dependency.
+///
+/// This trait provides a way for reactions to access query instances for subscription
+/// without needing a direct dependency on the server core.
+#[async_trait]
+pub trait QueryProvider: Send + Sync {
+    /// Get a query instance by ID
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
+}
 
 /// Trait defining the interface for all reaction implementations.
 ///
@@ -59,10 +71,11 @@ use crate::context::ReactionRuntimeContext;
 ///
 /// # Subscription Model
 ///
-/// Query subscriptions are managed by the host (DrasiLib/ReactionManager).
-/// After `start()` succeeds, the host subscribes to the reaction's configured queries
-/// and forwards results via `enqueue_query_result()`. Reactions should NOT
-/// subscribe to queries themselves.
+/// Reactions support two subscription models:
+/// - **Self-managed** (default): Reactions subscribe to queries themselves via `QueryProvider`
+///   injected through `ReactionRuntimeContext`. Call `self.base.subscribe_to_queries()` in `start()`.
+/// - **Host-managed**: For FFI proxy reactions that return `false` from `self_manages_subscriptions()`,
+///   the host subscribes on their behalf and forwards results via `enqueue_query_result()`.
 ///
 /// # Example Implementation
 ///
@@ -169,15 +182,27 @@ pub trait Reaction: Send + Sync {
     /// Get the current status of the reaction
     async fn status(&self) -> ComponentStatus;
 
-    /// Enqueue a query result for processing.
+    /// Whether this reaction manages its own query subscriptions.
     ///
-    /// The host calls this to forward query results to the reaction.
-    /// The default implementation pushes to the reaction's priority queue
-    /// via `ReactionBase`.
+    /// Default: `false` — the host manages subscriptions and forwards results
+    /// via `enqueue_query_result()`.
+    /// Native reactions that self-subscribe via `QueryProvider` should override
+    /// this to return `true`.
+    fn self_manages_subscriptions(&self) -> bool {
+        false
+    }
+
+    /// Enqueue a query result for processing (host-managed subscription path).
     ///
-    /// Returns `Ok(())` on success, or `Err` if the queue is closed or the
-    /// reaction has stopped accepting results.
-    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()>;
+    /// Called by the host when `self_manages_subscriptions()` returns `false`.
+    /// The host subscribes to queries on behalf of the reaction and forwards
+    /// results through this method.
+    ///
+    /// Reactions that self-manage subscriptions (`self_manages_subscriptions() = true`)
+    /// do not need to implement this.
+    async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+        Ok(())
+    }
 
     /// Permanently clean up internal state when the reaction is being removed.
     ///
@@ -217,6 +242,10 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     fn auto_start(&self) -> bool {
         (**self).auto_start()
+    }
+
+    fn self_manages_subscriptions(&self) -> bool {
+        (**self).self_manages_subscriptions()
     }
 
     async fn initialize(&self, context: ReactionRuntimeContext) {

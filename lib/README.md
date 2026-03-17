@@ -496,6 +496,11 @@ let reactions = core.list_reactions().await?;
 let status = core.get_source_status("my-source").await?;
 let results = core.get_query_results("my-query").await?;
 
+// Component dependency graph
+let graph = core.get_graph().await;
+let dependents = core.get_dependents("my-source").await;
+let dependencies = core.get_dependencies("my-query").await;
+
 // Check running state
 let is_running = core.is_running().await;
 
@@ -509,7 +514,7 @@ let config = core.get_current_config().await?;
 
 ### Sources
 
-Sources ingest data from external systems and emit graph elements (nodes and relationships). DrasiLib provides a trait-based plugin architecture.
+Sources ingest data from external systems and emit graph elements (nodes and relationships). DrasiLib provides a trait-based plugin architecture. Each source uses a `ComponentStatusHandle` for unified status reporting — status changes flow to the component dependency graph automatically.
 
 **Important**: Sources are plugins that must be instantiated externally and passed to DrasiLib. DrasiLib has no awareness of which source plugins exist.
 
@@ -535,6 +540,59 @@ Reactions respond to query results by triggering actions (webhooks, logging, etc
 ### Bootstrap Providers
 
 Bootstrap providers deliver initial data to queries before streaming begins. Any source can use any bootstrap provider, enabling flexible scenarios like "bootstrap from database, stream changes via HTTP."
+
+---
+
+## Component Dependency Graph
+
+DrasiLib maintains an internal **component dependency graph** that tracks all components and their relationships. The graph is backed by [petgraph](https://docs.rs/petgraph/) and serves as the source of truth for component relationships.
+
+### Graph Structure
+
+The DrasiLib instance itself is the root node. All components (sources, queries, reactions) are connected to it via ownership edges. Data-flow relationships (Source→Query→Reaction) are tracked via bidirectional Feeds/SubscribesTo edges.
+
+```
+Instance ("my-app")
+├──Owns──> Source: "orders_db"
+│          └──Feeds──> Query: "active_orders"
+├──Owns──> Query: "active_orders"
+│          └──Feeds──> Reaction: "webhook"
+└──Owns──> Reaction: "webhook"
+```
+
+### Querying the Graph
+
+```rust
+// Get a full snapshot (serializable to JSON)
+let snapshot = core.get_graph().await;
+println!("Components: {}", snapshot.nodes.len());
+println!("Relationships: {}", snapshot.edges.len());
+
+// Find what depends on a source
+let dependents = core.get_dependents("orders_db").await;
+for dep in &dependents {
+    println!("{} ({:?}) depends on orders_db", dep.id, dep.kind);
+}
+
+// Find what a query depends on
+let dependencies = core.get_dependencies("active_orders").await;
+
+// Check if a component can be safely removed
+match core.can_remove_component("orders_db").await {
+    Ok(()) => println!("Safe to remove"),
+    Err(e) => println!("Cannot remove: {}", e),
+}
+```
+
+### Relationship Types
+
+| From | Relationship | To | Reverse |
+|------|-------------|-----|---------|
+| Instance | Owns → | Component | ← OwnedBy |
+| Source | Feeds → | Query | ← SubscribesTo |
+| Query | Feeds → | Reaction | ← SubscribesTo |
+
+The graph is automatically maintained as components are added, removed, or updated — no manual graph management is needed. Status changes flow to the graph automatically via `ComponentStatusHandle` — every `set_status()` call updates both local state and the graph.
 
 ---
 

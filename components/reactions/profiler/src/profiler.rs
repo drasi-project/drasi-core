@@ -477,19 +477,19 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting profiler reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Profiler reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
@@ -561,11 +561,11 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Profiler reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
