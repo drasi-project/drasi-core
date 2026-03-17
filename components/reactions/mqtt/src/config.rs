@@ -56,6 +56,17 @@ pub enum QualityOfService {
     ExactlyOnce,
 }
 
+/// Authentication configuration for MQTT broker connection.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MqttAuthMode {
+    /// No authentication (default)
+    #[default]
+    None,
+
+    /// Username and password authentication
+    UsernamePassword { username: String, password: String },
+}
+
 /// Specification for an MQTT call, including topic, retain policy, headers, and body template.
 ///
 /// This type is used to configure MQTT requests for different operation types (added, updated, deleted).
@@ -107,7 +118,6 @@ pub struct MqttQueryConfig {
 /// MQTT reaction configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttReactionConfig {
-
     /// MQTT broker host (default: "localhost")
     #[serde(default = "default_host")]
     pub host: String,
@@ -131,6 +141,10 @@ pub struct MqttReactionConfig {
     /// Capacity of the priority queue for incoming query results
     #[serde(default)]
     pub capacity: usize,
+
+    /// Authentication mode for connecting to the MQTT broker.
+    #[serde(default)]
+    pub auth_mode: MqttAuthMode,
 }
 
 impl Default for MqttReactionConfig {
@@ -142,6 +156,7 @@ impl Default for MqttReactionConfig {
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
             capacity: default_capacity(),
+            auth_mode: MqttAuthMode::None,
         }
     }
 }

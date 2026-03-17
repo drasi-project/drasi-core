@@ -49,7 +49,7 @@ use axum::{
 };
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_mqtt::config::{MqttCallSpec, MqttQueryConfig, RetainPolicy};
+use drasi_reaction_mqtt::config::{MqttAuthMode, MqttCallSpec, MqttQueryConfig, RetainPolicy};
 use drasi_reaction_mqtt::MqttReaction;
 use drasi_source_http::HttpSource;
 use std::collections::HashMap;
@@ -158,24 +158,24 @@ async fn main() -> Result<()> {
         added: Some(MqttCallSpec {
             topic: "/stocks/added".to_string(),
             body: "[{{query_name}}] + {{after.symbol}}: ${{after.price}}".to_string(),
-            retain: RetainPolicy::Retain,
+            retain: RetainPolicy::NoRetain,
             headers: HashMap::new(),
-            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
+            qos: drasi_reaction_mqtt::config::QualityOfService::ExactlyOnce,
         }),
         updated: Some(MqttCallSpec {
             topic: "/stocks/updated".to_string(),
             body: "[{{query_name}}] ~ {{after.symbol}}: ${{before.price}} -> ${{after.price}}"
                 .to_string(),
-            retain: RetainPolicy::Retain,
+            retain: RetainPolicy::NoRetain,
             headers: HashMap::new(),
-            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
+            qos: drasi_reaction_mqtt::config::QualityOfService::ExactlyOnce,
         }),
         deleted: Some(MqttCallSpec {
             topic: "/stocks/deleted".to_string(),
             body: "[{{query_name}}] - {{before.symbol}} removed".to_string(),
-            retain: RetainPolicy::Retain,
+            retain: RetainPolicy::NoRetain,
             headers: HashMap::new(),
-            qos: drasi_reaction_mqtt::config::QualityOfService::AtLeastOnce,
+            qos: drasi_reaction_mqtt::config::QualityOfService::ExactlyOnce,
         }),
     };
 
@@ -184,6 +184,10 @@ async fn main() -> Result<()> {
         .with_query("gainers")
         .with_query("high-volume")
         .with_default_route(default_template)
+        .with_auth_mode(MqttAuthMode::UsernamePassword {
+            username: "ahmed".to_string(),
+            password: "ahmed".to_string(),
+        })
         .build()
         .expect("Failed to build MQTT reaction");
 

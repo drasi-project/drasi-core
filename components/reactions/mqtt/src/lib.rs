@@ -17,7 +17,8 @@ pub mod config;
 mod mqtt;
 
 use config::{
-    default_base_topic, default_timeout_ms, default_host, default_port, default_capacity, MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
+    default_base_topic, default_capacity, default_host, default_port, default_timeout_ms,
+    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
 };
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
@@ -33,6 +34,7 @@ pub struct MqttReactionBuilder {
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
     capacity: usize,
+    auth_mode: MqttAuthMode,
 }
 
 impl MqttReactionBuilder {
@@ -49,6 +51,7 @@ impl MqttReactionBuilder {
             host: default_host(),
             port: default_port(),
             capacity: default_capacity(),
+            auth_mode: MqttAuthMode::None,
         }
     }
 
@@ -114,6 +117,12 @@ impl MqttReactionBuilder {
         self
     }
 
+    /// Set the authentication mode for connecting to the MQTT broker
+    pub fn with_auth_mode(mut self, auth_mode: MqttAuthMode) -> Self {
+        self.auth_mode = auth_mode;
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: MqttReactionConfig) -> Self {
         self.host = config.host;
@@ -121,6 +130,7 @@ impl MqttReactionBuilder {
         self.base_topic = config.base_topic;
         self.timeout_ms = config.timeout_ms;
         self.routes = config.routes;
+        self.auth_mode = config.auth_mode;
         self
     }
 
@@ -132,7 +142,8 @@ impl MqttReactionBuilder {
             base_topic: self.base_topic,
             timeout_ms: self.timeout_ms,
             routes: self.routes,
-            capacity: self.capacity
+            capacity: self.capacity,
+            auth_mode: self.auth_mode,
         };
 
         Ok(MqttReaction::from_builder(
