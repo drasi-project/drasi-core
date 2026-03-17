@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::MqttReactionBuilder;
-use crate::config::{MqttCallSpec, MqttQueryConfig, MqttReactionConfig, RetainPolicy};
+use crate::config::{
+    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, RetainPolicy,
+};
 
 use anyhow::Result;
 pub struct MqttReaction {
@@ -24,17 +26,17 @@ use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
     channels::{ComponentStatus, ResultDiff},
     managers::log_component_start,
-    Reaction
+    Reaction,
 };
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 
 use async_trait::async_trait;
-use drasi_lib::reactions::{ ReactionBase, ReactionBaseParams};
+use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 use serde_json::{Map, Value};
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, os::unix::process, time::Duration};
 
-use rumqttc::v5::{MqttOptions, AsyncClient, Event, Incoming, mqttbytes::QoS};
-
+use handlebars::{template, Handlebars};
+use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
 impl MqttReaction {
     // Create a builder for MqttReaction
     pub fn builder(id: impl Into<String>) -> MqttReactionBuilder {
@@ -73,25 +75,33 @@ impl MqttReaction {
         }
     }
 
-    pub fn process_result(
+    #[allow(clippy::too_many_arguments)]
+    async fn process_result(
         id: impl Into<String>,
         mqtt_client: &AsyncClient,
+        handlebars: &Handlebars<'_>,
         result: &ResultDiff,
         query_config: &MqttQueryConfig,
         base_topic: &str,
         query_name: &str,
     ) -> Result<()> {
         let mut context = Map::new();
-
-        match result {
-            ResultDiff::Add{data } => {
+        let mut type_str = "";
+        let mut data = match result {
+            ResultDiff::Add { data } => {
                 if let Some(spec) = query_config.added.as_ref() {
                     context.insert("after".to_string(), data.clone());
+                    type_str = "ADD";
+                    Some(data.clone())
+                } else {
+                    None
                 }
             }
-            ResultDiff::Update{..} => {
+            ResultDiff::Update { .. } => {
                 if let Some(spec) = query_config.updated.as_ref() {
-                    let data_to_process = serde_json::to_value(result).expect("ResultDiff serialization should succeed");
+                    let data_to_process = serde_json::to_value(result)
+                        .expect("ResultDiff serialization should succeed");
+                    let data = data_to_process.clone();
                     if let Some(obj) = data_to_process.as_object() {
                         if let Some(before) = obj.get("before") {
                             context.insert("before".to_string(), before.clone());
@@ -105,28 +115,74 @@ impl MqttReaction {
                     } else {
                         context.insert("after".to_string(), data_to_process);
                     }
-                    
+                    type_str = "UPDATE";
+                    Some(data)
+                } else {
+                    None
                 }
-            },
-            ResultDiff::Delete {data} => {
+            }
+            ResultDiff::Delete { data } => {
                 if let Some(spec) = query_config.deleted.as_ref() {
                     context.insert("before".to_string(), data.clone());
+                    type_str = "DELETE";
+                    Some(data.clone())
+                } else {
+                    None
                 }
-            },
+            }
             ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                return Ok(()); // No MQTT call for aggregation or noop results
-            },
-        }
+                // return Ok(()); // No MQTT call for aggregation or noop results
+                None
+            }
+        };
 
-
-        context.insert("query_name".to_string(), Value::String(query_name.to_string()));
+        context.insert(
+            "query_name".to_string(),
+            Value::String(query_name.to_string()),
+        );
 
         let type_str = result_type(result);
         context.insert("operation".to_string(), Value::String(type_str.to_string()));
 
+        let call_spec_result = match type_str {
+            "ADD" => query_config.added.as_ref(),
+            "UPDATE" => query_config.updated.as_ref(),
+            "DELETE" => query_config.deleted.as_ref(),
+            _ => None,
+        };
 
-        println!("Context for MQTT call: {context:#?}");
+        if let Some(call_spec) = call_spec_result {
+            let body = if !call_spec.body.is_empty() {
+                let rendered_body = handlebars.render_template(&call_spec.body, &context)?;
+                rendered_body
+            } else {
+                serde_json::to_string(&data)?
+            };
+            let topic = call_spec.topic.clone();
+            let qos = match call_spec.qos {
+                crate::config::QualityOfService::AtMostOnce => QoS::AtMostOnce,
+                crate::config::QualityOfService::AtLeastOnce => QoS::AtLeastOnce,
+                crate::config::QualityOfService::ExactlyOnce => QoS::ExactlyOnce,
+            };
 
+            let retain = match call_spec.retain {
+                RetainPolicy::Retain => true,
+                RetainPolicy::NoRetain => false,
+            };
+
+            println!(
+                "Publishing to MQTT topic: {}, QoS: {:?}, Retain: {}, Body: {}",
+                topic, qos, retain, body
+            );
+            match mqtt_client.publish(topic, qos, retain, body).await {
+                Ok(_) => {
+                    println!("Success");
+                }
+                Err(e) => {
+                    println!("Error publishing MQTT message: {}", e);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -222,50 +278,75 @@ impl Reaction for MqttReaction {
         let priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult> =
             self.base.priority_queue.clone();
         let capacity = self.config.capacity;
+        let auth_mode = self.config.auth_mode.clone();
 
         let processing_task_handle = tokio::spawn(async move {
-
             // Initialize MQTT client options
             let mqtt_id = reaction_name.clone();
             let reaction_name_eventloop = reaction_name.clone();
             let mut options = MqttOptions::new(mqtt_id, host, port);
             options.set_keep_alive(Duration::from_secs(timeout_ms));
 
+            // Set up Handlebars with json helper
+            let mut handlebars = Handlebars::new();
+            handlebars.register_helper(
+                "json",
+                Box::new(
+                    |h: &handlebars::Helper,
+                     _: &Handlebars,
+                     _: &handlebars::Context,
+                     _: &mut handlebars::RenderContext,
+                     out: &mut dyn handlebars::Output|
+                     -> handlebars::HelperResult {
+                        if let Some(value) = h.param(0) {
+                            let json_str = serde_json::to_string(&value.value())
+                                .unwrap_or_else(|_| "null".to_string());
+                            out.write(&json_str)?;
+                        }
+                        Ok(())
+                    },
+                ),
+            );
+
+            match auth_mode {
+                MqttAuthMode::UsernamePassword { username, password } => {
+                    options.set_credentials(username, password);
+                }
+                _ => {} // No authentication
+            }
+
             // Create MQTT client
             let (mqtt_client, mut eventloop) = AsyncClient::new(options, capacity);
 
             // Task to handle MQTT connection events
-            let (mut event_loop_shutdown_tx, mut event_loop_shutdown_rx) = tokio::sync::mpsc::channel(1);
+            let (mut event_loop_shutdown_tx, mut event_loop_shutdown_rx) =
+                tokio::sync::mpsc::channel(1);
             let event_loop_handler = tokio::spawn(async move {
-                  loop {
+                loop {
                     tokio::select! {
                         _ = event_loop_shutdown_rx.recv() => {
-                            debug!("[{}] Received MQTT event loop shutdown signal, exiting event loop", reaction_name_eventloop);
+                            info!("[{}] Received MQTT event loop shutdown signal, exiting event loop", reaction_name_eventloop);
                             break;
                         },
                         event = eventloop.poll() => {
                             match event {
-                                Ok(_) => {
-                                    println!("MQTT event loop tick");
-                                    println!("Current event: {:?}", event);
-                                }
+                                Ok(_) => {},
                                 Err(e) => {
                                     warn!("[{}] MQTT event loop error: {}", reaction_name_eventloop, e);
                                 }
                             }
                         }
                     }
-                  }
                 }
-            );
+            });
 
             loop {
                 let query_result_arc = tokio::select! {
                     biased; // give priority to shutdown
 
                     _ = &mut shutdown_rx => {
-                        debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
-                        event_loop_shutdown_tx.send(()).await.ok();
+                        info!("[{reaction_name}] Received shutdown signal, exiting processing loop");
+                        event_loop_shutdown_tx.send(()).await;
                         break;
                     },
 
@@ -285,12 +366,21 @@ impl Reaction for MqttReaction {
                 let query_name = &query_result_ref.query_id;
 
                 // Check if we have a route configured for this query
-                let route = query_configs.get(query_name).or_else(|| {
+                let route = if query_configs.len() == 1 && query_configs.contains_key("*") {
+                    query_configs.get("*")
+                } else {
+                    query_configs.get(query_name).or_else(|| {
+                        query_name
+                            .split('.')
+                            .next_back()
+                            .and_then(|name| query_configs.get(name))
+                    })
+                };
+
+                println!(
+                    "Received result for query '{}', checking for route configuration",
                     query_name
-                        .split('.')
-                        .next_back()
-                        .and_then(|name| query_configs.get(name))
-                });
+                );
 
                 let query_config = match route {
                     Some(config) => config.clone(),
@@ -311,7 +401,19 @@ impl Reaction for MqttReaction {
 
                 // Process each result
                 for result in &query_result_ref.results {
-                    println!("Processing result: {result:?}");
+                    if let Err(e) = Self::process_result(
+                        reaction_name.clone(),
+                        &mqtt_client,
+                        &handlebars,
+                        result,
+                        &query_config,
+                        &base_topic,
+                        query_name,
+                    )
+                    .await
+                    {
+                        error!("[{reaction_name}] Failed to process result: {e}");
+                    }
                 }
             }
 
@@ -362,24 +464,24 @@ fn default_config_for_query(query_name: &str, base_topic: &str) -> MqttQueryConf
     MqttQueryConfig {
         added: Some(MqttCallSpec {
             topic: format!("/{base_topic}"),
-            body: String::new(),
             retain: RetainPolicy::default(),
+            body: String::new(),
             headers: HashMap::new(),
-            qos: crate::config::QualityOfService::ExactlyOnce
+            qos: crate::config::QualityOfService::ExactlyOnce,
         }),
         updated: Some(MqttCallSpec {
             topic: format!("/{base_topic}"),
-            body: String::new(),
             retain: RetainPolicy::default(),
+            body: String::new(),
             headers: HashMap::new(),
-            qos: crate::config::QualityOfService::ExactlyOnce
+            qos: crate::config::QualityOfService::ExactlyOnce,
         }),
         deleted: Some(MqttCallSpec {
             topic: format!("/{base_topic}"),
-            body: String::new(),
             retain: RetainPolicy::default(),
+            body: String::new(),
             headers: HashMap::new(),
-            qos: crate::config::QualityOfService::ExactlyOnce
+            qos: crate::config::QualityOfService::ExactlyOnce,
         }),
     }
 }
