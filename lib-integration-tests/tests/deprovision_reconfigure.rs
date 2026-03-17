@@ -791,6 +791,9 @@ async fn test_source_update_preserves_log_history() {
     drasi.start().await.unwrap();
     wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
 
+    // Give the source a moment to emit logs after reaching Running status
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     // Capture pre-update log count
     let (pre_logs, _) = drasi
         .subscribe_source_logs("reconfig-log-src")
