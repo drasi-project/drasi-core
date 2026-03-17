@@ -182,6 +182,12 @@ pub struct FfiRuntimeContext {
     pub identity_provider: *const super::identity::IdentityProviderVtable,
 }
 
+// Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
+// The vtables contain only function pointers and Send+Sync state.
+// The ctx pointers point to Arc-backed structures that are Send+Sync.
+unsafe impl Send for FfiRuntimeContext {}
+unsafe impl Sync for FfiRuntimeContext {}
+
 // ============================================================================
 // Source vtable
 // ============================================================================

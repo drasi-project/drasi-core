@@ -25,11 +25,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: read
-      checks: write
-      pull-requests: write
     services:
       redis:
         image: redis:7-alpine
@@ -78,19 +73,10 @@ jobs:
     - name: Run tests
       env:
         REDIS_URL: redis://localhost:6379
-      run: |
-        cargo install junitify
-        cargo test --workspace --exclude drasi-host-sdk -- --format=json -Z unstable-options --report-time | junitify --ignore-parse-errors --out ./test-results
-        ls
+      run: cargo test --workspace --exclude drasi-host-sdk
 
     - name: Run host-sdk integration tests
       run: make test-host-sdk
-
-    - name: Publish Test Results
-      uses: EnricoMi/publish-unit-test-result-action@567cc7f8dcea3eba5da355f6ebc95663310d8a07 # v2.17.0
-      with:
-        files: |
-          test-results/evaluation-0.xml
 
   perf-test:
     runs-on: ubuntu-latest
