@@ -85,8 +85,67 @@ pub struct McpReactionConfigDto {
     pub session_channel_capacity: Option<usize>,
 
     /// Query-specific configurations.
-    #[serde(default)]
+    ///
+    /// Each entry maps a query ID to its MCP configuration. Accepts both a
+    /// single object and a single-element array per key (for YAML friendliness).
+    #[serde(default, deserialize_with = "deserialize_routes")]
     pub routes: HashMap<String, McpQueryConfigDto>,
+}
+
+/// Deserialize the `routes` map, tolerating single-element arrays as values.
+///
+/// In YAML, users sometimes write:
+/// ```yaml
+/// routes:
+///   my-query:
+///     - title: My Query    # ← dash creates an array
+/// ```
+/// instead of:
+/// ```yaml
+/// routes:
+///   my-query:
+///     title: My Query      # ← correct map syntax
+/// ```
+///
+/// This deserializer accepts both forms: a bare object or a single-element array
+/// containing an object.
+fn deserialize_routes<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, McpQueryConfigDto>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let raw: HashMap<String, serde_json::Value> = HashMap::deserialize(deserializer)?;
+    let mut result = HashMap::with_capacity(raw.len());
+
+    for (key, value) in raw {
+        let dto = match &value {
+            // Single-element array → unwrap and deserialize the element
+            serde_json::Value::Array(arr) if arr.len() == 1 => {
+                serde_json::from_value::<McpQueryConfigDto>(arr[0].clone()).map_err(|e| {
+                    D::Error::custom(format!(
+                        "invalid route config for '{key}' (inside single-element array): {e}"
+                    ))
+                })?
+            }
+            // Empty or multi-element array → clear error
+            serde_json::Value::Array(arr) => {
+                return Err(D::Error::custom(format!(
+                    "route '{key}' must be an object, not an array of {} elements",
+                    arr.len()
+                )));
+            }
+            // Normal object → deserialize directly
+            _ => serde_json::from_value::<McpQueryConfigDto>(value).map_err(|e| {
+                D::Error::custom(format!("invalid route config for '{key}': {e}"))
+            })?,
+        };
+        result.insert(key, dto);
+    }
+
+    Ok(result)
 }
 
 fn map_template(dto: &NotificationTemplateDto) -> NotificationTemplate {
@@ -210,5 +269,80 @@ mod tests {
         assert_eq!(token, "token");
 
         std::env::remove_var(&env_var);
+    }
+
+    #[test]
+    fn test_routes_as_map() {
+        let json = serde_json::json!({
+            "port": 8083,
+            "routes": {
+                "query1": {
+                    "title": "My Query",
+                    "added": {"template": "added {{after.name}}"},
+                    "deleted": {"template": "deleted {{before.name}}"}
+                }
+            }
+        });
+        let dto: McpReactionConfigDto = serde_json::from_value(json).expect("should parse");
+        let route = dto.routes.get("query1").expect("route exists");
+        assert_eq!(route.title.as_deref(), Some("My Query"));
+        assert_eq!(
+            route.added.as_ref().unwrap().template,
+            "added {{after.name}}"
+        );
+    }
+
+    #[test]
+    fn test_routes_as_single_element_array() {
+        let json = serde_json::json!({
+            "port": 8083,
+            "routes": {
+                "query1": [{
+                    "title": "My Query",
+                    "added": {"template": "added {{after.name}}"},
+                    "deleted": {"template": "deleted {{before.name}}"}
+                }]
+            }
+        });
+        let dto: McpReactionConfigDto = serde_json::from_value(json).expect("should parse");
+        let route = dto.routes.get("query1").expect("route exists");
+        assert_eq!(route.title.as_deref(), Some("My Query"));
+        assert_eq!(
+            route.added.as_ref().unwrap().template,
+            "added {{after.name}}"
+        );
+    }
+
+    #[test]
+    fn test_routes_empty_array_rejected() {
+        let json = serde_json::json!({
+            "routes": {
+                "query1": []
+            }
+        });
+        let result: Result<McpReactionConfigDto, _> = serde_json::from_value(json);
+        let err = result.expect_err("should fail");
+        assert!(
+            err.to_string().contains("not an array of 0 elements"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_routes_multi_element_array_rejected() {
+        let json = serde_json::json!({
+            "routes": {
+                "query1": [
+                    {"title": "A"},
+                    {"title": "B"}
+                ]
+            }
+        });
+        let result: Result<McpReactionConfigDto, _> = serde_json::from_value(json);
+        let err = result.expect_err("should fail");
+        assert!(
+            err.to_string().contains("not an array of 2 elements"),
+            "unexpected error: {err}"
+        );
     }
 }
