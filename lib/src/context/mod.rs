@@ -59,11 +59,9 @@
 //! ```
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::component_graph::ComponentUpdateSender;
 use crate::identity::IdentityProvider;
-use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
 /// Context provided to Source plugins during initialization.
@@ -189,7 +187,6 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// - `instance_id`: The DrasiLib instance ID (for log routing isolation)
 /// - `reaction_id`: The unique identifier for this reaction instance
 /// - `state_store`: Optional persistent state storage (if configured)
-/// - `query_provider`: Access to query instances for subscription
 /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
 /// - `identity_provider`: Optional identity provider for credential injection
 ///
@@ -210,12 +207,6 @@ pub struct ReactionRuntimeContext {
     /// This is `Some` if a state store provider was configured on DrasiLib,
     /// otherwise `None`. Reactions can use this to persist state across restarts.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
-
-    /// Access to query instances and subscription.
-    ///
-    /// Reactions use this to get query instances and subscribe to their results.
-    /// This is always available (not optional) since reactions require queries.
-    pub query_provider: Arc<dyn QueryProvider>,
 
     /// mpsc sender for fire-and-forget component status updates.
     ///
@@ -242,14 +233,12 @@ impl ReactionRuntimeContext {
     /// * `instance_id` - The DrasiLib instance ID
     /// * `reaction_id` - The unique identifier for this reaction
     /// * `state_store` - Optional persistent state storage
-    /// * `query_provider` - Access to query instances for subscription
     /// * `update_tx` - mpsc sender for status updates to the component graph
     /// * `identity_provider` - Optional identity provider for credential injection
     pub fn new(
         instance_id: impl Into<String>,
         reaction_id: impl Into<String>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
-        query_provider: Arc<dyn QueryProvider>,
         update_tx: ComponentUpdateSender,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
     ) -> Self {
@@ -257,7 +246,6 @@ impl ReactionRuntimeContext {
             instance_id: instance_id.into(),
             reaction_id: reaction_id.into(),
             state_store,
-            query_provider,
             update_tx,
             identity_provider,
         }
@@ -288,7 +276,6 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                 "state_store",
                 &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
             )
-            .field("query_provider", &"<QueryProvider>")
             .field("update_tx", &"<ComponentUpdateSender>")
             .field(
                 "identity_provider",
@@ -375,20 +362,8 @@ impl std::fmt::Debug for QueryRuntimeContext {
 mod tests {
     use super::*;
     use crate::component_graph::ComponentGraph;
-    use crate::queries::Query;
     use crate::state_store::MemoryStateStoreProvider;
-    use async_trait::async_trait;
     use std::sync::Arc;
-
-    // Mock QueryProvider for testing
-    struct MockQueryProvider;
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(&self, _id: &str) -> anyhow::Result<Arc<dyn Query>> {
-            Err(anyhow::anyhow!("MockQueryProvider: query not found"))
-        }
-    }
 
     fn test_update_tx() -> ComponentUpdateSender {
         let (graph, _rx) = ComponentGraph::new("test-instance");
@@ -444,14 +419,12 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_runtime_context_creation() {
         let state_store = Arc::new(MemoryStateStoreProvider::new());
-        let query_provider = Arc::new(MockQueryProvider);
         let update_tx = test_update_tx();
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
             "test-reaction",
             Some(state_store),
-            query_provider,
             update_tx,
             None,
         );
@@ -463,17 +436,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_reaction_runtime_context_without_state_store() {
-        let query_provider = Arc::new(MockQueryProvider);
         let update_tx = test_update_tx();
 
-        let context = ReactionRuntimeContext::new(
-            "test-instance",
-            "test-reaction",
-            None,
-            query_provider,
-            update_tx,
-            None,
-        );
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
 
         assert_eq!(context.reaction_id(), "test-reaction");
         assert!(context.state_store().is_none());
@@ -482,14 +448,12 @@ mod tests {
     #[tokio::test]
     async fn test_reaction_runtime_context_clone() {
         let state_store = Arc::new(MemoryStateStoreProvider::new());
-        let query_provider = Arc::new(MockQueryProvider);
         let update_tx = test_update_tx();
 
         let context = ReactionRuntimeContext::new(
             "test-instance",
             "test-reaction",
             Some(state_store),
-            query_provider,
             update_tx,
             None,
         );
@@ -509,16 +473,8 @@ mod tests {
 
     #[test]
     fn test_reaction_runtime_context_debug() {
-        let query_provider = Arc::new(MockQueryProvider);
         let update_tx = test_update_tx();
-        let context = ReactionRuntimeContext::new(
-            "test-instance",
-            "test",
-            None,
-            query_provider,
-            update_tx,
-            None,
-        );
+        let context = ReactionRuntimeContext::new("test-instance", "test", None, update_tx, None);
         let debug_str = format!("{context:?}");
         assert!(debug_str.contains("ReactionRuntimeContext"));
         assert!(debug_str.contains("test"));

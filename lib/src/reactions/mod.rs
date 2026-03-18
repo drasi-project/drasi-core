@@ -19,8 +19,9 @@ mod traits;
 #[cfg(test)]
 mod tests;
 
-// Re-export the Reaction trait and QueryProvider
-pub use traits::{QueryProvider, Reaction};
+// Re-export the Reaction trait. QueryProvider is internal to ReactionManager.
+pub(crate) use traits::QueryProvider;
+pub use traits::Reaction;
 
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;

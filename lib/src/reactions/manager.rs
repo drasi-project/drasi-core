@@ -45,7 +45,7 @@ pub struct ReactionManager {
     event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Handles to subscription forwarder tasks per reaction (used for non-self-managing reactions)
+    /// Handles to subscription forwarder tasks per reaction
     subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
     /// Shared component graph — the authoritative registry for component state and events
     graph: Arc<RwLock<ComponentGraph>>,
@@ -145,13 +145,6 @@ impl ReactionManager {
         }
         // Graph emits ComponentEvent(Added) automatically
 
-        // Query provider must be available for reactions
-        let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "QueryProvider not injected - was ReactionManager initialized properly?"
-            )
-        })?;
-
         // Construct runtime context for this reaction
         let update_tx = {
             let graph = self.graph.read().await;
@@ -161,7 +154,6 @@ impl ReactionManager {
             &self.instance_id,
             &reaction_id,
             self.state_store.read().await.clone(),
-            query_provider,
             update_tx,
             None,
         );
@@ -209,12 +201,7 @@ impl ReactionManager {
 
             reaction.start().await?;
 
-            // Hybrid subscription model:
-            // - Self-managing reactions (native) subscribe to queries themselves via QueryProvider
-            // - Non-self-managing reactions (FFI proxy) need host-managed subscription forwarding
-            if !reaction.self_manages_subscriptions() {
-                self.subscribe_reaction_to_queries(&id, reaction).await?;
-            }
+            self.subscribe_reaction_to_queries(&id, reaction).await?;
         } else {
             return Err(anyhow::anyhow!("Reaction not found: {id}"));
         }
@@ -232,7 +219,7 @@ impl ReactionManager {
             let status = reaction.status().await;
             is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
 
-            // Abort host-managed subscription forwarder tasks (no-op for self-managing reactions)
+            // Abort subscription forwarder tasks
             self.abort_subscription_tasks(&id).await;
 
             // Route transitional state through the graph update loop
@@ -429,11 +416,6 @@ impl ReactionManager {
 
             // Initialize the new reaction with runtime context
             let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let query_provider = self.query_provider.read().await.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "QueryProvider not injected - was ReactionManager initialized properly?"
-                )
-            })?;
             let update_tx = {
                 let graph = self.graph.read().await;
                 graph.update_sender()
@@ -442,7 +424,6 @@ impl ReactionManager {
                 &self.instance_id,
                 &id,
                 self.state_store.read().await.clone(),
-                query_provider,
                 update_tx,
                 None,
             );
@@ -629,8 +610,7 @@ impl ReactionManager {
 
     /// Subscribe a reaction to its configured queries and spawn forwarder tasks.
     ///
-    /// This is used for non-self-managing reactions (e.g., FFI proxies) where the host
-    /// manages query subscriptions on behalf of the reaction.
+    /// The host manages query subscriptions on behalf of the reaction.
     /// For each query the reaction is interested in, the manager:
     /// 1. Gets the query instance from the QueryProvider
     /// 2. Subscribes to the query's result stream

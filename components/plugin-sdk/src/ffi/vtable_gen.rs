@@ -1925,22 +1925,6 @@ fn build_source_runtime_context(
     (ctx, status_rx)
 }
 
-/// Dummy QueryProvider for plugin-side reaction contexts.
-/// FFI reactions use host-managed subscriptions, so this is never called.
-struct NoopQueryProvider;
-
-#[async_trait::async_trait]
-impl drasi_lib::QueryProvider for NoopQueryProvider {
-    async fn get_query_instance(
-        &self,
-        id: &str,
-    ) -> anyhow::Result<Arc<dyn drasi_lib::queries::Query>> {
-        Err(anyhow::anyhow!(
-            "QueryProvider not available in plugin context (query '{id}')"
-        ))
-    }
-}
-
 fn build_reaction_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
 ) -> (drasi_lib::ReactionRuntimeContext, ComponentUpdateReceiver) {
@@ -1969,7 +1953,6 @@ fn build_reaction_runtime_context(
         update_tx,
         state_store,
         identity_provider,
-        query_provider: Arc::new(NoopQueryProvider),
     };
     (ctx, status_rx)
 }

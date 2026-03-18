@@ -1675,21 +1675,6 @@ async fn test_source_with_identity_provider_injection() {
 // Reaction enqueue_query_result E2E Tests
 // ============================================================================
 
-/// A no-op QueryProvider for tests that don't need real query access.
-struct NoopQueryProvider;
-
-#[async_trait::async_trait]
-impl drasi_lib::QueryProvider for NoopQueryProvider {
-    async fn get_query_instance(
-        &self,
-        id: &str,
-    ) -> anyhow::Result<std::sync::Arc<dyn drasi_lib::queries::Query>> {
-        Err(anyhow::anyhow!(
-            "NoopQueryProvider: no query instance for '{id}'"
-        ))
-    }
-}
-
 /// Test that enqueue_query_result successfully pushes a QueryResult through FFI
 /// into the reaction's processing queue. This validates the full host-managed
 /// query subscription data flow for dynamic plugins.
@@ -1726,7 +1711,6 @@ async fn test_reaction_enqueue_query_result() {
         reaction_id: "enqueue-test".to_string(),
         update_tx,
         state_store: None,
-        query_provider: std::sync::Arc::new(NoopQueryProvider),
         identity_provider: None,
     };
     reaction.initialize(context).await;
@@ -1788,7 +1772,6 @@ async fn test_reaction_enqueue_multiple_query_results() {
         reaction_id: "multi-enqueue-test".to_string(),
         update_tx,
         state_store: None,
-        query_provider: std::sync::Arc::new(NoopQueryProvider),
         identity_provider: None,
     };
     reaction.initialize(context).await;
@@ -1845,7 +1828,6 @@ async fn test_reaction_enqueue_query_result_with_data() {
         reaction_id: "data-enqueue-test".to_string(),
         update_tx,
         state_store: None,
-        query_provider: std::sync::Arc::new(NoopQueryProvider),
         identity_provider: None,
     };
     reaction.initialize(context).await;

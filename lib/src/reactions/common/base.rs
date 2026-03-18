@@ -40,7 +40,6 @@ use crate::channels::{ComponentStatus, QueryResult};
 use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
-use crate::reactions::QueryProvider;
 use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
@@ -107,8 +106,6 @@ pub struct ReactionBase {
     status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
-    /// Query provider for accessing queries (extracted from context)
-    query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -138,7 +135,6 @@ impl ReactionBase {
             auto_start: params.auto_start,
             status_handle: ComponentStatusHandle::new(&params.id),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            query_provider: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
@@ -155,7 +151,6 @@ impl ReactionBase {
     /// The context provides access to:
     /// - `reaction_id`: The reaction's unique identifier
     /// - `state_store`: Optional persistent state storage
-    /// - `query_provider`: Access to query instances for subscription
     /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
@@ -163,7 +158,6 @@ impl ReactionBase {
 
         // Wire the status handle to the graph update channel
         self.status_handle.wire(context.update_tx.clone()).await;
-        *self.query_provider.write().await = Some(context.query_provider.clone());
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -226,7 +220,6 @@ impl ReactionBase {
             auto_start: self.auto_start,
             status_handle: self.status_handle.clone(),
             context: self.context.clone(),
-            query_provider: self.query_provider.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
@@ -389,18 +382,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
-    use crate::queries::Query;
-    use async_trait::async_trait;
-
-    struct MockQueryProvider;
-
-    #[async_trait]
-    impl QueryProvider for MockQueryProvider {
-        async fn get_query_instance(&self, _id: &str) -> anyhow::Result<Arc<dyn Query>> {
-            Err(anyhow::anyhow!("MockQueryProvider: query not found"))
-        }
-    }
-
     #[tokio::test]
     async fn test_reaction_base_creation() {
         let params = ReactionBaseParams::new("test-reaction", vec!["query1".to_string()])
@@ -423,14 +404,8 @@ mod tests {
         let base = ReactionBase::new(params);
 
         // Create context and initialize
-        let context = ReactionRuntimeContext::new(
-            "test-instance",
-            "test-reaction",
-            None,
-            std::sync::Arc::new(MockQueryProvider),
-            update_tx,
-            None,
-        );
+        let context =
+            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
         base.initialize(context).await;
 
         // Test status transition
