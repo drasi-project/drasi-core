@@ -508,11 +508,16 @@ impl Reaction for McpReaction {
                         }
                     };
 
+                    debug!(
+                        "[{reaction_id}] Rendered template for {query_id}/{operation}: {rendered}"
+                    );
+
                     let payload: Value = match serde_json::from_str(&rendered) {
                         Ok(value) => value,
                         Err(err) => {
                             warn!(
-                                "[{reaction_id}] Template output was not valid JSON for {query_id}: {err}"
+                                "[{reaction_id}] Template output was not valid JSON for {query_id}: {err}. \
+                                 Rendered output: '{rendered}'"
                             );
                             continue;
                         }
