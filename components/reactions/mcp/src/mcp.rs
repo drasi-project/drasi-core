@@ -88,6 +88,12 @@ impl McpState {
             .entry(uri.to_string())
             .or_default()
             .insert(session_id.to_string());
+
+        let subscriber_count = subscribers_by_uri.get(uri).map_or(0, |s| s.len());
+        debug!(
+            "[{}] Session {session_id} subscribed to {uri} ({subscriber_count} total subscribers)",
+            self.reaction_id
+        );
     }
 
     async fn remove_subscription(&self, session_id: &str, uri: &str) {
@@ -106,6 +112,11 @@ impl McpState {
                 subscribers_by_uri.remove(uri);
             }
         }
+
+        debug!(
+            "[{}] Session {session_id} unsubscribed from {uri}",
+            self.reaction_id
+        );
     }
 
     async fn cleanup_session(&self, session_id: &str) {
@@ -113,6 +124,11 @@ impl McpState {
 
         let mut subscriptions = self.subscriptions.write().await;
         if let Some(uris) = subscriptions.remove(session_id) {
+            debug!(
+                "[{}] Cleaning up session {session_id} ({} subscriptions)",
+                self.reaction_id,
+                uris.len()
+            );
             let mut subscribers_by_uri = self.subscribers_by_uri.write().await;
             for uri in uris {
                 if let Some(set) = subscribers_by_uri.get_mut(&uri) {
@@ -122,6 +138,11 @@ impl McpState {
                     }
                 }
             }
+        } else {
+            debug!(
+                "[{}] Cleaning up session {session_id} (no subscriptions)",
+                self.reaction_id
+            );
         }
     }
 }
@@ -177,6 +198,10 @@ impl Drop for SessionStream {
     fn drop(&mut self) {
         let state = self.state.clone();
         let session_id = self.session_id.clone();
+        info!(
+            "[{}] SSE stream closed for session {session_id}",
+            state.reaction_id
+        );
         tokio::spawn(async move {
             state.cleanup_session(&session_id).await;
         });
@@ -325,6 +350,16 @@ impl Reaction for McpReaction {
     async fn start(&self) -> Result<()> {
         log_component_start("MCP Reaction", &self.base.id);
 
+        info!(
+            "[{}] Starting MCP server on {}:{} (auth={}, max_sessions={}, queries={:?})",
+            self.base.id,
+            self.config.host,
+            self.config.port,
+            self.config.bearer_token.is_some(),
+            self.config.max_sessions,
+            self.base.queries
+        );
+
         self.base
             .set_status_with_event(
                 ComponentStatus::Starting,
@@ -397,12 +432,18 @@ impl Reaction for McpReaction {
                 };
 
                 if query_result.results.is_empty() {
+                    debug!("[{reaction_id}] Received empty result set from query, skipping");
                     continue;
                 }
 
                 let query_id = query_result.query_id.clone();
                 let query_config = get_query_config(&query_id, &query_configs);
                 let uri = format!("drasi://query/{query_id}");
+
+                debug!(
+                    "[{reaction_id}] Processing {} result diffs for query '{query_id}'",
+                    query_result.results.len()
+                );
 
                 for diff in &query_result.results {
                     apply_diff(&query_id, diff, &current_results).await;
@@ -501,8 +542,16 @@ impl Reaction for McpReaction {
                     };
 
                     if subscribed_sessions.is_empty() {
+                        debug!(
+                            "[{reaction_id}] No subscribers for {uri}, skipping {operation} notification"
+                        );
                         continue;
                     }
+
+                    debug!(
+                        "[{reaction_id}] Sending {operation} notification for {uri} to {} session(s)",
+                        subscribed_sessions.len()
+                    );
 
                     let mut to_cleanup = Vec::new();
                     {
@@ -542,6 +591,15 @@ impl Reaction for McpReaction {
     }
 
     async fn stop(&self) -> Result<()> {
+        info!("[{}] Stopping MCP reaction", self.base.id);
+        let session_count = self.sessions.read().await.len();
+        if session_count > 0 {
+            info!(
+                "[{}] Disconnecting {session_count} active session(s)",
+                self.base.id
+            );
+        }
+
         if let Some(task) = self.server_task.lock().await.take() {
             task.abort();
         }
@@ -560,6 +618,12 @@ impl Reaction for McpReaction {
     }
 
     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        debug!(
+            "[{}] Enqueuing {} result diff(s) for query '{}'",
+            self.base.id,
+            result.results.len(),
+            result.query_id
+        );
         self.base.enqueue_query_result(result).await
     }
 }
@@ -643,6 +707,7 @@ async fn cleanup_session_maps(
     subscriptions: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
     subscribers_by_uri: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
+    debug!("Cleaning up disconnected session {session_id}");
     sessions.write().await.remove(session_id);
     let mut subscriptions_guard = subscriptions.write().await;
     if let Some(uris) = subscriptions_guard.remove(session_id) {
@@ -750,6 +815,10 @@ async fn handle_post(
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     if !check_authorization(&headers, &state.config.bearer_token) {
+        warn!(
+            "[{}] Unauthorized POST request rejected",
+            state.reaction_id
+        );
         return (
             StatusCode::UNAUTHORIZED,
             jsonrpc_error(None, -32000, "Unauthorized"),
@@ -760,6 +829,10 @@ async fn handle_post(
     let request: JsonRpcRequest = match serde_json::from_value(payload) {
         Ok(req) => req,
         Err(err) => {
+            warn!(
+                "[{}] Invalid JSON-RPC request: {err}",
+                state.reaction_id
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 jsonrpc_error(None, -32700, format!("Parse error: {err}")),
@@ -797,6 +870,10 @@ async fn handle_post(
                 _ => {
                     let sessions = state.sessions.read().await;
                     if sessions.len() >= state.config.max_sessions {
+                        warn!(
+                            "[{}] Maximum session limit ({}) reached, rejecting initialize",
+                            state.reaction_id, state.config.max_sessions
+                        );
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
                             jsonrpc_error(request.id, -32000, "Maximum session limit reached"),
@@ -816,6 +893,10 @@ async fn handle_post(
                         .write()
                         .await
                         .insert(session_id.clone(), session);
+                    info!(
+                        "[{}] New MCP session created: {session_id}",
+                        state.reaction_id
+                    );
                     session_id
                 }
             };
@@ -853,6 +934,10 @@ async fn handle_post(
             let session_id = match session_id {
                 Some(id) => id,
                 None => {
+                    warn!(
+                        "[{}] Request '{}' rejected: missing session ID",
+                        state.reaction_id, request.method
+                    );
                     return (
                         StatusCode::BAD_REQUEST,
                         jsonrpc_error(request_id.clone(), -32000, "Missing session ID"),
@@ -862,12 +947,21 @@ async fn handle_post(
             };
 
             if !state.sessions.read().await.contains_key(&session_id) {
+                warn!(
+                    "[{}] Request '{}' rejected: invalid session ID {session_id}",
+                    state.reaction_id, request.method
+                );
                 return (
                     StatusCode::BAD_REQUEST,
                     jsonrpc_error(request_id.clone(), -32000, "Invalid session ID"),
                 )
                     .into_response();
             }
+
+            debug!(
+                "[{}] Handling '{}' for session {session_id}",
+                state.reaction_id, request.method
+            );
 
             match request.method.as_str() {
                 "resources/subscribe" => {
@@ -879,6 +973,10 @@ async fn handle_post(
                     let uri = match uri {
                         Some(uri) => uri,
                         None => {
+                            warn!(
+                                "[{}] resources/subscribe: missing URI param",
+                                state.reaction_id
+                            );
                             return (
                                 StatusCode::BAD_REQUEST,
                                 jsonrpc_error(request_id.clone(), -32602, "URI is required"),
@@ -887,6 +985,10 @@ async fn handle_post(
                         }
                     };
                     if validate_subscription_uri(uri, &state.query_ids).is_none() {
+                        warn!(
+                            "[{}] resources/subscribe: invalid URI '{uri}' (known queries: {:?})",
+                            state.reaction_id, state.query_ids
+                        );
                         return (
                             StatusCode::BAD_REQUEST,
                             jsonrpc_error(
@@ -955,6 +1057,12 @@ async fn handle_post(
                         });
                     }
 
+                    debug!(
+                        "[{}] resources/list: returning {} resource(s)",
+                        state.reaction_id,
+                        resources.len()
+                    );
+
                     let response = ResourcesListResponse {
                         resources,
                         next_cursor: None,
@@ -971,6 +1079,10 @@ async fn handle_post(
                     let read_request: ReadResourceRequest = match serde_json::from_value(params) {
                         Ok(req) => req,
                         Err(err) => {
+                            warn!(
+                                "[{}] resources/read: invalid params: {err}",
+                                state.reaction_id
+                            );
                             return (
                                 StatusCode::BAD_REQUEST,
                                 jsonrpc_error(
@@ -991,6 +1103,10 @@ async fn handle_post(
                     };
 
                     if query_id.is_empty() || !state.query_ids.contains(&query_id) {
+                        warn!(
+                            "[{}] resources/read: unknown query '{query_id}' (known: {:?})",
+                            state.reaction_id, state.query_ids
+                        );
                         return (
                             StatusCode::BAD_REQUEST,
                             jsonrpc_error(
@@ -1004,6 +1120,11 @@ async fn handle_post(
 
                     let current = state.current_results.read().await;
                     let results = current.get(&query_id).cloned().unwrap_or_default();
+                    debug!(
+                        "[{}] resources/read: returning {} result(s) for '{query_id}'",
+                        state.reaction_id,
+                        results.len()
+                    );
                     let contents = ResourceContents {
                         uri: read_request.uri.clone(),
                         mime_type: Some("application/json".to_string()),
@@ -1023,15 +1144,27 @@ async fn handle_post(
                     .into_response()
                 }
                 "notifications/initialized" => {
-                    // Client acknowledgement after initialize — accept silently
+                    debug!(
+                        "[{}] Client initialized acknowledgement received",
+                        state.reaction_id
+                    );
                     jsonrpc_result(request_id.clone(), json!({})).into_response()
                 }
-                "ping" => jsonrpc_result(request_id.clone(), json!({})).into_response(),
-                _ => (
-                    StatusCode::BAD_REQUEST,
-                    jsonrpc_error(request_id.clone(), -32601, "Method not found"),
-                )
-                    .into_response(),
+                "ping" => {
+                    debug!("[{}] Ping received", state.reaction_id);
+                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                }
+                unknown => {
+                    warn!(
+                        "[{}] Unknown method: '{unknown}'",
+                        state.reaction_id
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        jsonrpc_error(request_id.clone(), -32601, "Method not found"),
+                    )
+                        .into_response()
+                }
             }
         }
     }
@@ -1039,6 +1172,7 @@ async fn handle_post(
 
 async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> impl IntoResponse {
     if !check_authorization(&headers, &state.config.bearer_token) {
+        warn!("[{}] Unauthorized SSE request rejected", state.reaction_id);
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -1048,7 +1182,13 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
         .map(str::to_string);
     let session_id = match session_id {
         Some(id) => id,
-        None => return StatusCode::BAD_REQUEST.into_response(),
+        None => {
+            warn!(
+                "[{}] SSE request rejected: missing session ID header",
+                state.reaction_id
+            );
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     };
 
     let session = {
@@ -1058,7 +1198,13 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
 
     let session = match session {
         Some(session) => session,
-        None => return StatusCode::BAD_REQUEST.into_response(),
+        None => {
+            warn!(
+                "[{}] SSE request rejected: unknown session {session_id}",
+                state.reaction_id
+            );
+            return StatusCode::BAD_REQUEST.into_response();
+        }
     };
 
     let receiver = {
@@ -1068,8 +1214,19 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
 
     let receiver = match receiver {
         Some(receiver) => receiver,
-        None => return StatusCode::CONFLICT.into_response(),
+        None => {
+            warn!(
+                "[{}] SSE request rejected: session {session_id} already has an active SSE stream",
+                state.reaction_id
+            );
+            return StatusCode::CONFLICT.into_response();
+        }
     };
+
+    info!(
+        "[{}] SSE stream opened for session {session_id}",
+        state.reaction_id
+    );
 
     let stream = SessionStream {
         inner: ReceiverStream::new(receiver),

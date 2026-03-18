@@ -202,6 +202,9 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
+        log::info!("[{id}] Creating MCP reaction (queries: {query_ids:?}, auto_start: {auto_start})");
+        log::debug!("[{id}] Raw config JSON: {config_json}");
+
         let dto: McpReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
@@ -210,30 +213,46 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {
-            builder = builder.with_host(mapper.resolve_string(host)?);
+            let resolved = mapper.resolve_string(host)?;
+            log::debug!("[{id}] Resolved host: {resolved}");
+            builder = builder.with_host(resolved);
         }
 
         if let Some(ref port) = dto.port {
-            builder = builder.with_port(mapper.resolve_typed(port)?);
+            let resolved = mapper.resolve_typed(port)?;
+            log::debug!("[{id}] Resolved port: {resolved}");
+            builder = builder.with_port(resolved);
         }
 
         if let Some(ref token) = dto.bearer_token {
-            builder = builder.with_bearer_token(mapper.resolve_string(token)?);
+            let resolved = mapper.resolve_string(token)?;
+            log::debug!("[{id}] Bearer token configured ({} chars)", resolved.len());
+            builder = builder.with_bearer_token(resolved);
         }
 
         if let Some(max_sessions) = dto.max_sessions {
+            log::debug!("[{id}] Max sessions: {max_sessions}");
             builder = builder.with_max_sessions(max_sessions);
         }
 
         if let Some(capacity) = dto.session_channel_capacity {
+            log::debug!("[{id}] Session channel capacity: {capacity}");
             builder = builder.with_session_channel_capacity(capacity);
         }
 
         for (query_id, config) in &dto.routes {
+            log::debug!(
+                "[{id}] Route '{query_id}': title={:?}, has_added={}, has_updated={}, has_deleted={}",
+                config.title,
+                config.added.is_some(),
+                config.updated.is_some(),
+                config.deleted.is_some()
+            );
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
         let reaction = builder.build()?;
+        log::info!("[{id}] MCP reaction created successfully");
         Ok(Box::new(reaction))
     }
 }
