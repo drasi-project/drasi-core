@@ -1,5 +1,5 @@
 [package]
-name = "with-mqtt-reaction-example"
+name = "with-mqtt-reaction"
 version = "0.1.0"
 edition = "2021"
 publish = false

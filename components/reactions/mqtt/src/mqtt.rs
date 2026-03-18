@@ -81,12 +81,22 @@ impl MqttReaction {
         mqtt_client: &AsyncClient,
         handlebars: &Handlebars<'_>,
         result: &ResultDiff,
-        query_config: &MqttQueryConfig,
-        base_topic: &str,
         query_name: &str,
+        query_config: &MqttQueryConfig,
     ) -> Result<()> {
-        let mut context = Map::new();
+        match result {
+            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
+                debug!(
+                    "[{}] Received aggregation or noop result, skipping MQTT call",
+                    id.into()
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let mut type_str = "";
+        let mut context: Map<String, Value> = Map::new();
         let mut data = match result {
             ResultDiff::Add { data } => {
                 if let Some(spec) = query_config.added.as_ref() {
@@ -130,8 +140,8 @@ impl MqttReaction {
                     None
                 }
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                // return Ok(()); // No MQTT call for aggregation or noop results
+            _ => {
+                // This should not happen due to the early check.
                 None
             }
         };
@@ -153,8 +163,7 @@ impl MqttReaction {
 
         if let Some(call_spec) = call_spec_result {
             let body = if !call_spec.body.is_empty() {
-                let rendered_body = handlebars.render_template(&call_spec.body, &context)?;
-                rendered_body
+                handlebars.render_template(&call_spec.body, &context)?
             } else {
                 serde_json::to_string(&data)?
             };
@@ -170,16 +179,23 @@ impl MqttReaction {
                 RetainPolicy::NoRetain => false,
             };
 
-            println!(
-                "Publishing to MQTT topic: {}, QoS: {:?}, Retain: {}, Body: {}",
-                topic, qos, retain, body
-            );
             match mqtt_client.publish(topic, qos, retain, body).await {
                 Ok(_) => {
-                    println!("Success");
+                    debug!(
+                        "[{}] Published MQTT message for {} operation on query '{}'",
+                        id.into(),
+                        type_str,
+                        query_name
+                    );
                 }
                 Err(e) => {
-                    println!("Error publishing MQTT message: {}", e);
+                    error!(
+                        "[{}] Failed to publish MQTT message for {} operation on query '{}': {}",
+                        id.into(),
+                        type_str,
+                        query_name,
+                        e
+                    );
                 }
             }
         }
@@ -218,8 +234,8 @@ impl Reaction for MqttReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
         props.insert(
-            "base_topic".to_string(),
-            serde_json::Value::String(self.config.base_topic.clone()),
+            "default_topic".to_string(),
+            serde_json::Value::String(self.config.default_topic.clone()),
         );
         props.insert(
             "timeout_ms".to_string(),
@@ -244,8 +260,8 @@ impl Reaction for MqttReaction {
         log_component_start("MQTT Reaction", &self.base.id);
 
         info!(
-            "[{}] MQTT reaction started - sending to base topic: {}",
-            self.base.id, self.config.base_topic
+            "[{}] MQTT reaction started - sending to default topic: {}",
+            self.base.id, self.config.default_topic
         );
 
         // Transition to Starting
@@ -270,10 +286,10 @@ impl Reaction for MqttReaction {
         // Spawn the main processing task
         let reaction_name = self.base.id.clone();
         let host = self.config.host.clone();
-        let port = self.config.port.clone();
+        let port = self.config.port;
         let status = self.base.status.clone();
         let query_configs = self.config.routes.clone();
-        let base_topic = self.config.base_topic.clone();
+        let default_topic = self.config.default_topic.clone();
         let timeout_ms = self.config.timeout_ms;
         let priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult> =
             self.base.priority_queue.clone();
@@ -308,11 +324,8 @@ impl Reaction for MqttReaction {
                 ),
             );
 
-            match auth_mode {
-                MqttAuthMode::UsernamePassword { username, password } => {
-                    options.set_credentials(username, password);
-                }
-                _ => {} // No authentication
+            if let MqttAuthMode::UsernamePassword { username, password } = auth_mode {
+                options.set_credentials(username, password);
             }
 
             // Create MQTT client
@@ -325,14 +338,14 @@ impl Reaction for MqttReaction {
                 loop {
                     tokio::select! {
                         _ = event_loop_shutdown_rx.recv() => {
-                            info!("[{}] Received MQTT event loop shutdown signal, exiting event loop", reaction_name_eventloop);
+                            info!("[{reaction_name_eventloop}] Received MQTT event loop shutdown signal, exiting event loop");
                             break;
                         },
                         event = eventloop.poll() => {
                             match event {
                                 Ok(_) => {},
                                 Err(e) => {
-                                    warn!("[{}] MQTT event loop error: {}", reaction_name_eventloop, e);
+                                    warn!("[{reaction_name_eventloop}] MQTT event loop error: {e}");
                                 }
                             }
                         }
@@ -366,21 +379,14 @@ impl Reaction for MqttReaction {
                 let query_name = &query_result_ref.query_id;
 
                 // Check if we have a route configured for this query
-                let route = if query_configs.len() == 1 && query_configs.contains_key("*") {
-                    query_configs.get("*")
-                } else {
-                    query_configs.get(query_name).or_else(|| {
+                let route = query_configs.get(query_name).or_else(|| {
+                    query_configs.get("*").or_else(|| {
                         query_name
                             .split('.')
                             .next_back()
                             .and_then(|name| query_configs.get(name))
                     })
-                };
-
-                println!(
-                    "Received result for query '{}', checking for route configuration",
-                    query_name
-                );
+                });
 
                 let query_config = match route {
                     Some(config) => config.clone(),
@@ -388,7 +394,7 @@ impl Reaction for MqttReaction {
                         debug!(
                             "[{reaction_name}] No configuration for query '{query_name}', using default"
                         );
-                        default_config_for_query(query_name, &base_topic)
+                        default_config_for_query(&default_topic)
                     }
                 };
 
@@ -406,9 +412,8 @@ impl Reaction for MqttReaction {
                         &mqtt_client,
                         &handlebars,
                         result,
-                        &query_config,
-                        &base_topic,
                         query_name,
+                        &query_config,
                     )
                     .await
                     {
@@ -460,24 +465,24 @@ impl Reaction for MqttReaction {
 //  helper methods
 // ==================================
 #[inline]
-fn default_config_for_query(query_name: &str, base_topic: &str) -> MqttQueryConfig {
+fn default_config_for_query(default_topic: &str) -> MqttQueryConfig {
     MqttQueryConfig {
         added: Some(MqttCallSpec {
-            topic: format!("/{base_topic}"),
+            topic: format!("/{default_topic}"),
             retain: RetainPolicy::default(),
             body: String::new(),
             headers: HashMap::new(),
             qos: crate::config::QualityOfService::ExactlyOnce,
         }),
         updated: Some(MqttCallSpec {
-            topic: format!("/{base_topic}"),
+            topic: format!("/{default_topic}"),
             retain: RetainPolicy::default(),
             body: String::new(),
             headers: HashMap::new(),
             qos: crate::config::QualityOfService::ExactlyOnce,
         }),
         deleted: Some(MqttCallSpec {
-            topic: format!("/{base_topic}"),
+            topic: format!("/{default_topic}"),
             retain: RetainPolicy::default(),
             body: String::new(),
             headers: HashMap::new(),

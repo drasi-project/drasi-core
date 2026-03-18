@@ -17,8 +17,8 @@ pub mod config;
 mod mqtt;
 
 use config::{
-    default_base_topic, default_capacity, default_host, default_port, default_timeout_ms,
-    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
+    default_capacity, default_host, default_port, default_timeout_ms, default_topic, MqttAuthMode,
+    MqttCallSpec, MqttQueryConfig, MqttReactionConfig,
 };
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 pub struct MqttReactionBuilder {
     id: String,
     queries: Vec<String>,
-    base_topic: String,
+    default_topic: String,
     timeout_ms: u64,
     routes: HashMap<String, MqttQueryConfig>,
     host: String,
@@ -43,7 +43,7 @@ impl MqttReactionBuilder {
         Self {
             id: id.into(),
             queries: Vec::new(),
-            base_topic: default_base_topic(),
+            default_topic: default_topic(),
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
             priority_queue_capacity: None,
@@ -77,9 +77,9 @@ impl MqttReactionBuilder {
         self
     }
 
-    /// Set the base topic for MQTT messages
-    pub fn with_base_topic(mut self, base_topic: impl Into<String>) -> Self {
-        self.base_topic = base_topic.into();
+    /// Set the default topic for MQTT messages
+    pub fn with_default_topic(mut self, default_topic: impl Into<String>) -> Self {
+        self.default_topic = default_topic.into();
         self
     }
 
@@ -127,7 +127,7 @@ impl MqttReactionBuilder {
     pub fn with_config(mut self, config: MqttReactionConfig) -> Self {
         self.host = config.host;
         self.port = config.port;
-        self.base_topic = config.base_topic;
+        self.default_topic = config.default_topic;
         self.timeout_ms = config.timeout_ms;
         self.routes = config.routes;
         self.auth_mode = config.auth_mode;
@@ -139,7 +139,7 @@ impl MqttReactionBuilder {
         let config = MqttReactionConfig {
             host: self.host,
             port: self.port,
-            base_topic: self.base_topic,
+            default_topic: self.default_topic,
             timeout_ms: self.timeout_ms,
             routes: self.routes,
             capacity: self.capacity,

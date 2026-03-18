@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, default};
 
-pub fn default_base_topic() -> String {
+pub fn default_topic() -> String {
     "".to_string()
 }
 
@@ -127,8 +127,8 @@ pub struct MqttReactionConfig {
     pub port: u16,
 
     /// Base topic for MQTT requests
-    #[serde(default = "default_base_topic")]
-    pub base_topic: String,
+    #[serde(default = "default_topic")]
+    pub default_topic: String,
 
     /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
@@ -152,7 +152,7 @@ impl Default for MqttReactionConfig {
         Self {
             host: default_host(),
             port: default_port(),
-            base_topic: default_base_topic(),
+            default_topic: default_topic(),
             timeout_ms: default_timeout_ms(),
             routes: HashMap::new(),
             capacity: default_capacity(),
