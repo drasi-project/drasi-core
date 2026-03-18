@@ -831,10 +831,7 @@ async fn handle_post(
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
     if !check_authorization(&headers, &state.config.bearer_token) {
-        warn!(
-            "[{}] Unauthorized POST request rejected",
-            state.reaction_id
-        );
+        warn!("[{}] Unauthorized POST request rejected", state.reaction_id);
         return (
             StatusCode::UNAUTHORIZED,
             jsonrpc_error(None, -32000, "Unauthorized"),
@@ -927,10 +924,7 @@ async fn handle_post(
             let request: JsonRpcRequest = match serde_json::from_value(payload) {
                 Ok(req) => req,
                 Err(err) => {
-                    warn!(
-                        "[{}] Invalid JSON-RPC request: {err}",
-                        state.reaction_id
-                    );
+                    warn!("[{}] Invalid JSON-RPC request: {err}", state.reaction_id);
                     return (
                         StatusCode::BAD_REQUEST,
                         jsonrpc_error(None, -32700, format!("Parse error: {err}")),
@@ -946,15 +940,15 @@ async fn handle_post(
                 return StatusCode::ACCEPTED.into_response();
             }
 
-            let body = result
-                .body
-                .unwrap_or_else(|| serde_json::to_value(JsonRpcResponse {
+            let body = result.body.unwrap_or_else(|| {
+                serde_json::to_value(JsonRpcResponse {
                     jsonrpc: "2.0",
                     id: None,
                     result: Some(json!({})),
                     error: None,
                 })
-                .unwrap_or(Value::Null));
+                .unwrap_or(Value::Null)
+            });
 
             let mut response = Json(body).into_response();
             if let Some(sid) = result.session_id {
@@ -980,7 +974,6 @@ async fn handle_single_request(
     session_id: &Option<String>,
     request: JsonRpcRequest,
 ) -> SingleRequestResult {
-
     match request.method.as_str() {
         "initialize" => {
             let params = request.params.clone().unwrap_or(Value::Null);
@@ -988,12 +981,14 @@ async fn handle_single_request(
                 Ok(req) => req,
                 Err(err) => {
                     return SingleRequestResult {
-                        body: Some(serde_json::to_value(make_error(
-                            request.id,
-                            -32602,
-                            format!("Invalid params: {err}"),
-                        ))
-                        .unwrap_or(Value::Null)),
+                        body: Some(
+                            serde_json::to_value(make_error(
+                                request.id,
+                                -32602,
+                                format!("Invalid params: {err}"),
+                            ))
+                            .unwrap_or(Value::Null),
+                        ),
                         session_id: None,
                         status: StatusCode::BAD_REQUEST,
                     };
@@ -1008,22 +1003,23 @@ async fn handle_single_request(
             // Protocol version negotiation per MCP spec:
             // echo back the client's version if supported, otherwise respond with our latest.
             const SUPPORTED_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
-            let negotiated_version =
-                if SUPPORTED_VERSIONS.contains(&init_request.protocol_version.as_str()) {
-                    info!(
-                        "[{}] Negotiated protocol version: {}",
-                        state.reaction_id, init_request.protocol_version
-                    );
-                    init_request.protocol_version.clone()
-                } else {
-                    warn!(
-                        "[{}] Client requested unsupported protocol version '{}', responding with {}",
-                        state.reaction_id,
-                        init_request.protocol_version,
-                        LATEST_PROTOCOL_VERSION.as_str()
-                    );
-                    LATEST_PROTOCOL_VERSION.as_str().to_string()
-                };
+            let negotiated_version = if SUPPORTED_VERSIONS
+                .contains(&init_request.protocol_version.as_str())
+            {
+                info!(
+                    "[{}] Negotiated protocol version: {}",
+                    state.reaction_id, init_request.protocol_version
+                );
+                init_request.protocol_version.clone()
+            } else {
+                warn!(
+                    "[{}] Client requested unsupported protocol version '{}', responding with {}",
+                    state.reaction_id,
+                    init_request.protocol_version,
+                    LATEST_PROTOCOL_VERSION.as_str()
+                );
+                LATEST_PROTOCOL_VERSION.as_str().to_string()
+            };
 
             let new_session_id = match session_id {
                 Some(id) if state.sessions.read().await.contains_key(id) => id.clone(),
@@ -1035,12 +1031,14 @@ async fn handle_single_request(
                             state.reaction_id, state.config.max_sessions
                         );
                         return SingleRequestResult {
-                            body: Some(serde_json::to_value(make_error(
-                                request.id,
-                                -32000,
-                                "Maximum session limit reached",
-                            ))
-                            .unwrap_or(Value::Null)),
+                            body: Some(
+                                serde_json::to_value(make_error(
+                                    request.id,
+                                    -32000,
+                                    "Maximum session limit reached",
+                                ))
+                                .unwrap_or(Value::Null),
+                            ),
                             session_id: None,
                             status: StatusCode::SERVICE_UNAVAILABLE,
                         };
@@ -1053,15 +1051,8 @@ async fn handle_single_request(
                         sender: tx,
                         receiver: Arc::new(Mutex::new(Some(rx))),
                     };
-                    state
-                        .sessions
-                        .write()
-                        .await
-                        .insert(sid.clone(), session);
-                    info!(
-                        "[{}] New MCP session created: {sid}",
-                        state.reaction_id
-                    );
+                    state.sessions.write().await.insert(sid.clone(), session);
+                    info!("[{}] New MCP session created: {sid}", state.reaction_id);
                     sid
                 }
             };
@@ -1103,12 +1094,14 @@ async fn handle_single_request(
                         state.reaction_id, request.method
                     );
                     return SingleRequestResult {
-                        body: Some(serde_json::to_value(make_error(
-                            request_id,
-                            -32000,
-                            "Missing session ID",
-                        ))
-                        .unwrap_or(Value::Null)),
+                        body: Some(
+                            serde_json::to_value(make_error(
+                                request_id,
+                                -32000,
+                                "Missing session ID",
+                            ))
+                            .unwrap_or(Value::Null),
+                        ),
                         session_id: None,
                         status: StatusCode::BAD_REQUEST,
                     };
@@ -1121,12 +1114,10 @@ async fn handle_single_request(
                     state.reaction_id, request.method
                 );
                 return SingleRequestResult {
-                    body: Some(serde_json::to_value(make_error(
-                        request_id,
-                        -32000,
-                        "Invalid session ID",
-                    ))
-                    .unwrap_or(Value::Null)),
+                    body: Some(
+                        serde_json::to_value(make_error(request_id, -32000, "Invalid session ID"))
+                            .unwrap_or(Value::Null),
+                    ),
                     session_id: None,
                     status: StatusCode::NOT_FOUND,
                 };
@@ -1152,12 +1143,14 @@ async fn handle_single_request(
                                 state.reaction_id
                             );
                             return SingleRequestResult {
-                                body: Some(serde_json::to_value(make_error(
-                                    request_id,
-                                    -32602,
-                                    "URI is required",
-                                ))
-                                .unwrap_or(Value::Null)),
+                                body: Some(
+                                    serde_json::to_value(make_error(
+                                        request_id,
+                                        -32602,
+                                        "URI is required",
+                                    ))
+                                    .unwrap_or(Value::Null),
+                                ),
                                 session_id: None,
                                 status: StatusCode::BAD_REQUEST,
                             };
@@ -1169,12 +1162,14 @@ async fn handle_single_request(
                             state.reaction_id, state.query_ids
                         );
                         return SingleRequestResult {
-                            body: Some(serde_json::to_value(make_error(
-                                request_id,
-                                -32602,
-                                "Invalid URI (expected drasi://query/{known-query-id})",
-                            ))
-                            .unwrap_or(Value::Null)),
+                            body: Some(
+                                serde_json::to_value(make_error(
+                                    request_id,
+                                    -32602,
+                                    "Invalid URI (expected drasi://query/{known-query-id})",
+                                ))
+                                .unwrap_or(Value::Null),
+                            ),
                             session_id: None,
                             status: StatusCode::BAD_REQUEST,
                         };
@@ -1192,12 +1187,14 @@ async fn handle_single_request(
                         Some(uri) => uri,
                         None => {
                             return SingleRequestResult {
-                                body: Some(serde_json::to_value(make_error(
-                                    request_id,
-                                    -32602,
-                                    "URI is required",
-                                ))
-                                .unwrap_or(Value::Null)),
+                                body: Some(
+                                    serde_json::to_value(make_error(
+                                        request_id,
+                                        -32602,
+                                        "URI is required",
+                                    ))
+                                    .unwrap_or(Value::Null),
+                                ),
                                 session_id: None,
                                 status: StatusCode::BAD_REQUEST,
                             };
@@ -1205,12 +1202,14 @@ async fn handle_single_request(
                     };
                     if validate_subscription_uri(uri, &state.query_ids).is_none() {
                         return SingleRequestResult {
-                            body: Some(serde_json::to_value(make_error(
-                                request_id,
-                                -32602,
-                                "Invalid URI (expected drasi://query/{known-query-id})",
-                            ))
-                            .unwrap_or(Value::Null)),
+                            body: Some(
+                                serde_json::to_value(make_error(
+                                    request_id,
+                                    -32602,
+                                    "Invalid URI (expected drasi://query/{known-query-id})",
+                                ))
+                                .unwrap_or(Value::Null),
+                            ),
                             session_id: None,
                             status: StatusCode::BAD_REQUEST,
                         };
@@ -1269,12 +1268,14 @@ async fn handle_single_request(
                                 state.reaction_id
                             );
                             return SingleRequestResult {
-                                body: Some(serde_json::to_value(make_error(
-                                    request_id,
-                                    -32602,
-                                    format!("Invalid params: {err}"),
-                                ))
-                                .unwrap_or(Value::Null)),
+                                body: Some(
+                                    serde_json::to_value(make_error(
+                                        request_id,
+                                        -32602,
+                                        format!("Invalid params: {err}"),
+                                    ))
+                                    .unwrap_or(Value::Null),
+                                ),
                                 session_id: None,
                                 status: StatusCode::BAD_REQUEST,
                             };
@@ -1294,12 +1295,14 @@ async fn handle_single_request(
                             state.reaction_id, state.query_ids
                         );
                         return SingleRequestResult {
-                            body: Some(serde_json::to_value(make_error(
-                                request_id,
-                                -32602,
-                                "Invalid URI format (expected drasi://query/{id})",
-                            ))
-                            .unwrap_or(Value::Null)),
+                            body: Some(
+                                serde_json::to_value(make_error(
+                                    request_id,
+                                    -32602,
+                                    "Invalid URI format (expected drasi://query/{id})",
+                                ))
+                                .unwrap_or(Value::Null),
+                            ),
                             session_id: None,
                             status: StatusCode::BAD_REQUEST,
                         };
@@ -1345,10 +1348,7 @@ async fn handle_single_request(
                     make_result(request_id, json!({}))
                 }
                 unknown => {
-                    warn!(
-                        "[{}] Unknown method: '{unknown}'",
-                        state.reaction_id
-                    );
+                    warn!("[{}] Unknown method: '{unknown}'", state.reaction_id);
                     make_error(request_id, -32601, "Method not found")
                 }
             };

@@ -202,7 +202,9 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
-        log::info!("[{id}] Creating MCP reaction (queries: {query_ids:?}, auto_start: {auto_start})");
+        log::info!(
+            "[{id}] Creating MCP reaction (queries: {query_ids:?}, auto_start: {auto_start})"
+        );
         log::debug!("[{id}] Raw config JSON: {config_json}");
 
         let dto: McpReactionConfigDto = serde_json::from_value(config_json.clone())?;
