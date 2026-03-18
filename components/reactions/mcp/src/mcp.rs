@@ -528,8 +528,10 @@ impl Reaction for McpReaction {
                         "method": "notifications/resources/updated",
                         "params": {
                             "uri": uri,
-                            "operation": operation,
-                            "data": payload
+                            "_meta": {
+                                "operation": operation,
+                                "data": payload
+                            }
                         }
                     });
 
