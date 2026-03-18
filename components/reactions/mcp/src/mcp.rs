@@ -779,12 +779,28 @@ fn jsonrpc_error(
 }
 
 fn jsonrpc_result(id: Option<Value>, result: Value) -> Json<JsonRpcResponse> {
-    Json(JsonRpcResponse {
+    Json(make_result(id, result))
+}
+
+fn make_result(id: Option<Value>, result: Value) -> JsonRpcResponse {
+    JsonRpcResponse {
         jsonrpc: "2.0",
         id,
         result: Some(result),
         error: None,
-    })
+    }
+}
+
+fn make_error(id: Option<Value>, code: i64, message: impl Into<String>) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(JsonRpcErrorObject {
+            code,
+            message: message.into(),
+        }),
+    }
 }
 
 async fn run_server(state: Arc<McpState>, bound_port: Arc<AtomicU16>) -> Result<()> {
@@ -826,25 +842,144 @@ async fn handle_post(
             .into_response();
     }
 
-    let request: JsonRpcRequest = match serde_json::from_value(payload) {
-        Ok(req) => req,
-        Err(err) => {
-            warn!(
-                "[{}] Invalid JSON-RPC request: {err}",
-                state.reaction_id
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                jsonrpc_error(None, -32700, format!("Parse error: {err}")),
-            )
-                .into_response();
-        }
-    };
-
     let session_id = headers
         .get(MCP_SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+
+    // JSON-RPC batch support: accept both single objects and arrays.
+    match payload {
+        Value::Array(items) => {
+            debug!(
+                "[{}] Received JSON-RPC batch with {} message(s)",
+                state.reaction_id,
+                items.len()
+            );
+            if items.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    jsonrpc_error(None, -32600, "Empty batch"),
+                )
+                    .into_response();
+            }
+
+            let mut responses: Vec<Value> = Vec::new();
+            let mut session_header: Option<String> = None;
+
+            for item in items {
+                let request: JsonRpcRequest = match serde_json::from_value(item) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        warn!(
+                            "[{}] Invalid JSON-RPC message in batch: {err}",
+                            state.reaction_id
+                        );
+                        responses.push(
+                            serde_json::to_value(JsonRpcResponse {
+                                jsonrpc: "2.0",
+                                id: None,
+                                result: None,
+                                error: Some(JsonRpcErrorObject {
+                                    code: -32700,
+                                    message: format!("Parse error: {err}"),
+                                }),
+                            })
+                            .unwrap_or(Value::Null),
+                        );
+                        continue;
+                    }
+                };
+
+                let is_notification = request.id.is_none();
+                let result = handle_single_request(&state, &session_id, request).await;
+
+                if let Some(sid) = result.session_id {
+                    session_header = Some(sid);
+                }
+
+                if is_notification {
+                    // Notifications do not produce a response in a batch.
+                    continue;
+                }
+
+                if let Some(body) = result.body {
+                    responses.push(body);
+                }
+            }
+
+            if responses.is_empty() {
+                // All items were notifications/responses — return 202.
+                return StatusCode::ACCEPTED.into_response();
+            }
+
+            let mut response = Json(Value::Array(responses)).into_response();
+            if let Some(sid) = session_header {
+                if let Ok(header_value) = HeaderValue::from_str(&sid) {
+                    response
+                        .headers_mut()
+                        .insert(HeaderName::from_static(MCP_SESSION_HEADER), header_value);
+                }
+            }
+            response
+        }
+        _ => {
+            // Single JSON-RPC message.
+            let request: JsonRpcRequest = match serde_json::from_value(payload) {
+                Ok(req) => req,
+                Err(err) => {
+                    warn!(
+                        "[{}] Invalid JSON-RPC request: {err}",
+                        state.reaction_id
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        jsonrpc_error(None, -32700, format!("Parse error: {err}")),
+                    )
+                        .into_response();
+                }
+            };
+
+            let is_notification = request.id.is_none();
+            let result = handle_single_request(&state, &session_id, request).await;
+
+            if is_notification {
+                return StatusCode::ACCEPTED.into_response();
+            }
+
+            let body = result
+                .body
+                .unwrap_or_else(|| serde_json::to_value(JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id: None,
+                    result: Some(json!({})),
+                    error: None,
+                })
+                .unwrap_or(Value::Null));
+
+            let mut response = Json(body).into_response();
+            if let Some(sid) = result.session_id {
+                if let Ok(header_value) = HeaderValue::from_str(&sid) {
+                    response
+                        .headers_mut()
+                        .insert(HeaderName::from_static(MCP_SESSION_HEADER), header_value);
+                }
+            }
+            response
+        }
+    }
+}
+
+struct SingleRequestResult {
+    body: Option<Value>,
+    session_id: Option<String>,
+    status: StatusCode,
+}
+
+async fn handle_single_request(
+    state: &Arc<McpState>,
+    session_id: &Option<String>,
+    request: JsonRpcRequest,
+) -> SingleRequestResult {
 
     match request.method.as_str() {
         "initialize" => {
@@ -852,11 +987,16 @@ async fn handle_post(
             let init_request: InitializeRequest = match serde_json::from_value(params) {
                 Ok(req) => req,
                 Err(err) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        jsonrpc_error(request.id, -32602, format!("Invalid params: {err}")),
-                    )
-                        .into_response();
+                    return SingleRequestResult {
+                        body: Some(serde_json::to_value(make_error(
+                            request.id,
+                            -32602,
+                            format!("Invalid params: {err}"),
+                        ))
+                        .unwrap_or(Value::Null)),
+                        session_id: None,
+                        status: StatusCode::BAD_REQUEST,
+                    };
                 }
             };
 
@@ -865,8 +1005,28 @@ async fn handle_post(
                 state.reaction_id, init_request.protocol_version
             );
 
-            let session_id = match session_id {
-                Some(id) if state.sessions.read().await.contains_key(&id) => id,
+            // Protocol version negotiation per MCP spec:
+            // echo back the client's version if supported, otherwise respond with our latest.
+            const SUPPORTED_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
+            let negotiated_version =
+                if SUPPORTED_VERSIONS.contains(&init_request.protocol_version.as_str()) {
+                    info!(
+                        "[{}] Negotiated protocol version: {}",
+                        state.reaction_id, init_request.protocol_version
+                    );
+                    init_request.protocol_version.clone()
+                } else {
+                    warn!(
+                        "[{}] Client requested unsupported protocol version '{}', responding with {}",
+                        state.reaction_id,
+                        init_request.protocol_version,
+                        LATEST_PROTOCOL_VERSION.as_str()
+                    );
+                    LATEST_PROTOCOL_VERSION.as_str().to_string()
+                };
+
+            let new_session_id = match session_id {
+                Some(id) if state.sessions.read().await.contains_key(id) => id.clone(),
                 _ => {
                     let sessions = state.sessions.read().await;
                     if sessions.len() >= state.config.max_sessions {
@@ -874,15 +1034,20 @@ async fn handle_post(
                             "[{}] Maximum session limit ({}) reached, rejecting initialize",
                             state.reaction_id, state.config.max_sessions
                         );
-                        return (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            jsonrpc_error(request.id, -32000, "Maximum session limit reached"),
-                        )
-                            .into_response();
+                        return SingleRequestResult {
+                            body: Some(serde_json::to_value(make_error(
+                                request.id,
+                                -32000,
+                                "Maximum session limit reached",
+                            ))
+                            .unwrap_or(Value::Null)),
+                            session_id: None,
+                            status: StatusCode::SERVICE_UNAVAILABLE,
+                        };
                     }
                     drop(sessions);
 
-                    let session_id = Uuid::new_v4().to_string();
+                    let sid = Uuid::new_v4().to_string();
                     let (tx, rx) = mpsc::channel(state.config.session_channel_capacity);
                     let session = SessionState {
                         sender: tx,
@@ -892,17 +1057,17 @@ async fn handle_post(
                         .sessions
                         .write()
                         .await
-                        .insert(session_id.clone(), session);
+                        .insert(sid.clone(), session);
                     info!(
-                        "[{}] New MCP session created: {session_id}",
+                        "[{}] New MCP session created: {sid}",
                         state.reaction_id
                     );
-                    session_id
+                    sid
                 }
             };
 
             let response = InitializeResponse {
-                protocol_version: LATEST_PROTOCOL_VERSION.as_str().to_string(),
+                protocol_version: negotiated_version,
                 capabilities: ServerCapabilities {
                     resources: Some(ResourceCapabilities {
                         subscribe: Some(true),
@@ -917,32 +1082,36 @@ async fn handle_post(
                 instructions: Some("Drasi MCP server providing query resources.".to_string()),
             };
 
-            let mut response = jsonrpc_result(
+            let body = make_result(
                 request.id,
                 serde_json::to_value(response).unwrap_or(Value::Null),
-            )
-            .into_response();
-            if let Ok(header_value) = HeaderValue::from_str(&session_id) {
-                response
-                    .headers_mut()
-                    .insert(HeaderName::from_static(MCP_SESSION_HEADER), header_value);
+            );
+
+            SingleRequestResult {
+                body: Some(serde_json::to_value(body).unwrap_or(Value::Null)),
+                session_id: Some(new_session_id),
+                status: StatusCode::OK,
             }
-            response
         }
         _ => {
             let request_id = request.id.clone();
             let session_id = match session_id {
-                Some(id) => id,
+                Some(id) => id.clone(),
                 None => {
                     warn!(
                         "[{}] Request '{}' rejected: missing session ID",
                         state.reaction_id, request.method
                     );
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        jsonrpc_error(request_id.clone(), -32000, "Missing session ID"),
-                    )
-                        .into_response();
+                    return SingleRequestResult {
+                        body: Some(serde_json::to_value(make_error(
+                            request_id,
+                            -32000,
+                            "Missing session ID",
+                        ))
+                        .unwrap_or(Value::Null)),
+                        session_id: None,
+                        status: StatusCode::BAD_REQUEST,
+                    };
                 }
             };
 
@@ -951,11 +1120,16 @@ async fn handle_post(
                     "[{}] Request '{}' rejected: invalid session ID {session_id}",
                     state.reaction_id, request.method
                 );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    jsonrpc_error(request_id.clone(), -32000, "Invalid session ID"),
-                )
-                    .into_response();
+                return SingleRequestResult {
+                    body: Some(serde_json::to_value(make_error(
+                        request_id,
+                        -32000,
+                        "Invalid session ID",
+                    ))
+                    .unwrap_or(Value::Null)),
+                    session_id: None,
+                    status: StatusCode::NOT_FOUND,
+                };
             }
 
             debug!(
@@ -963,7 +1137,7 @@ async fn handle_post(
                 state.reaction_id, request.method
             );
 
-            match request.method.as_str() {
+            let body = match request.method.as_str() {
                 "resources/subscribe" => {
                     let uri = request
                         .params
@@ -977,11 +1151,16 @@ async fn handle_post(
                                 "[{}] resources/subscribe: missing URI param",
                                 state.reaction_id
                             );
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                jsonrpc_error(request_id.clone(), -32602, "URI is required"),
-                            )
-                                .into_response();
+                            return SingleRequestResult {
+                                body: Some(serde_json::to_value(make_error(
+                                    request_id,
+                                    -32602,
+                                    "URI is required",
+                                ))
+                                .unwrap_or(Value::Null)),
+                                session_id: None,
+                                status: StatusCode::BAD_REQUEST,
+                            };
                         }
                     };
                     if validate_subscription_uri(uri, &state.query_ids).is_none() {
@@ -989,18 +1168,19 @@ async fn handle_post(
                             "[{}] resources/subscribe: invalid URI '{uri}' (known queries: {:?})",
                             state.reaction_id, state.query_ids
                         );
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            jsonrpc_error(
-                                request_id.clone(),
+                        return SingleRequestResult {
+                            body: Some(serde_json::to_value(make_error(
+                                request_id,
                                 -32602,
                                 "Invalid URI (expected drasi://query/{known-query-id})",
-                            ),
-                        )
-                            .into_response();
+                            ))
+                            .unwrap_or(Value::Null)),
+                            session_id: None,
+                            status: StatusCode::BAD_REQUEST,
+                        };
                     }
                     state.add_subscription(&session_id, uri).await;
-                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                    make_result(request_id, json!({}))
                 }
                 "resources/unsubscribe" => {
                     let uri = request
@@ -1011,26 +1191,32 @@ async fn handle_post(
                     let uri = match uri {
                         Some(uri) => uri,
                         None => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                jsonrpc_error(request_id.clone(), -32602, "URI is required"),
-                            )
-                                .into_response();
+                            return SingleRequestResult {
+                                body: Some(serde_json::to_value(make_error(
+                                    request_id,
+                                    -32602,
+                                    "URI is required",
+                                ))
+                                .unwrap_or(Value::Null)),
+                                session_id: None,
+                                status: StatusCode::BAD_REQUEST,
+                            };
                         }
                     };
                     if validate_subscription_uri(uri, &state.query_ids).is_none() {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            jsonrpc_error(
-                                request_id.clone(),
+                        return SingleRequestResult {
+                            body: Some(serde_json::to_value(make_error(
+                                request_id,
                                 -32602,
                                 "Invalid URI (expected drasi://query/{known-query-id})",
-                            ),
-                        )
-                            .into_response();
+                            ))
+                            .unwrap_or(Value::Null)),
+                            session_id: None,
+                            status: StatusCode::BAD_REQUEST,
+                        };
                     }
                     state.remove_subscription(&session_id, uri).await;
-                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                    make_result(request_id, json!({}))
                 }
                 "resources/list" => {
                     let mut resources = Vec::new();
@@ -1068,11 +1254,10 @@ async fn handle_post(
                         next_cursor: None,
                         meta: None,
                     };
-                    jsonrpc_result(
-                        request_id.clone(),
+                    make_result(
+                        request_id,
                         serde_json::to_value(response).unwrap_or(Value::Null),
                     )
-                    .into_response()
                 }
                 "resources/read" => {
                     let params = request.params.clone().unwrap_or(Value::Null);
@@ -1083,15 +1268,16 @@ async fn handle_post(
                                 "[{}] resources/read: invalid params: {err}",
                                 state.reaction_id
                             );
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                jsonrpc_error(
-                                    request_id.clone(),
+                            return SingleRequestResult {
+                                body: Some(serde_json::to_value(make_error(
+                                    request_id,
                                     -32602,
                                     format!("Invalid params: {err}"),
-                                ),
-                            )
-                                .into_response();
+                                ))
+                                .unwrap_or(Value::Null)),
+                                session_id: None,
+                                status: StatusCode::BAD_REQUEST,
+                            };
                         }
                     };
 
@@ -1107,15 +1293,16 @@ async fn handle_post(
                             "[{}] resources/read: unknown query '{query_id}' (known: {:?})",
                             state.reaction_id, state.query_ids
                         );
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            jsonrpc_error(
-                                request_id.clone(),
+                        return SingleRequestResult {
+                            body: Some(serde_json::to_value(make_error(
+                                request_id,
                                 -32602,
                                 "Invalid URI format (expected drasi://query/{id})",
-                            ),
-                        )
-                            .into_response();
+                            ))
+                            .unwrap_or(Value::Null)),
+                            session_id: None,
+                            status: StatusCode::BAD_REQUEST,
+                        };
                     }
 
                     let current = state.current_results.read().await;
@@ -1137,34 +1324,39 @@ async fn handle_post(
                         contents: vec![contents],
                         meta: None,
                     };
-                    jsonrpc_result(
-                        request_id.clone(),
+                    make_result(
+                        request_id,
                         serde_json::to_value(response).unwrap_or(Value::Null),
                     )
-                    .into_response()
                 }
                 "notifications/initialized" => {
                     debug!(
                         "[{}] Client initialized acknowledgement received",
                         state.reaction_id
                     );
-                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                    return SingleRequestResult {
+                        body: None,
+                        session_id: None,
+                        status: StatusCode::ACCEPTED,
+                    };
                 }
                 "ping" => {
                     debug!("[{}] Ping received", state.reaction_id);
-                    jsonrpc_result(request_id.clone(), json!({})).into_response()
+                    make_result(request_id, json!({}))
                 }
                 unknown => {
                     warn!(
                         "[{}] Unknown method: '{unknown}'",
                         state.reaction_id
                     );
-                    (
-                        StatusCode::BAD_REQUEST,
-                        jsonrpc_error(request_id.clone(), -32601, "Method not found"),
-                    )
-                        .into_response()
+                    make_error(request_id, -32601, "Method not found")
                 }
+            };
+
+            SingleRequestResult {
+                body: Some(serde_json::to_value(body).unwrap_or(Value::Null)),
+                session_id: None,
+                status: StatusCode::OK,
             }
         }
     }
@@ -1203,7 +1395,7 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
                 "[{}] SSE request rejected: unknown session {session_id}",
                 state.reaction_id
             );
-            return StatusCode::BAD_REQUEST.into_response();
+            return StatusCode::NOT_FOUND.into_response();
         }
     };
 
@@ -1345,5 +1537,118 @@ mod tests {
 
         // Invalid: no prefix match
         assert_eq!(validate_subscription_uri("query1", &query_ids), None);
+    }
+
+    fn test_state_with_session() -> (Arc<McpState>, String) {
+        let session_id = "test-session-id".to_string();
+        let (tx, rx) = mpsc::channel(16);
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id.clone(),
+            SessionState {
+                sender: tx,
+                receiver: Arc::new(Mutex::new(Some(rx))),
+            },
+        );
+        let state = Arc::new(McpState {
+            reaction_id: "test".to_string(),
+            config: McpReactionConfig::default(),
+            query_ids: vec!["query1".to_string()],
+            sessions: Arc::new(RwLock::new(sessions)),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
+            current_results: Arc::new(RwLock::new(HashMap::new())),
+        });
+        (state, session_id)
+    }
+
+    #[tokio::test]
+    async fn test_version_negotiation_supported() {
+        let (state, _) = test_state_with_session();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1.0" }
+            })),
+        };
+
+        let result = handle_single_request(&state, &None, request).await;
+        assert_eq!(result.status, StatusCode::OK);
+        let body = result.body.expect("should have body");
+        assert_eq!(body["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    #[tokio::test]
+    async fn test_version_negotiation_unsupported() {
+        let (state, _) = test_state_with_session();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "1999-01-01",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1.0" }
+            })),
+        };
+
+        let result = handle_single_request(&state, &None, request).await;
+        assert_eq!(result.status, StatusCode::OK);
+        let body = result.body.expect("should have body");
+        assert_eq!(body["result"]["protocolVersion"], "2025-03-26");
+    }
+
+    #[tokio::test]
+    async fn test_expired_session_returns_404() {
+        let (state, _) = test_state_with_session();
+        let bad_session = Some("nonexistent-session".to_string());
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "resources/list".to_string(),
+            params: None,
+        };
+
+        let result = handle_single_request(&state, &bad_session, request).await;
+        assert_eq!(result.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_notification_returns_accepted() {
+        let (state, session_id) = test_state_with_session();
+        let sid = Some(session_id);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+
+        let result = handle_single_request(&state, &sid, request).await;
+        assert_eq!(result.status, StatusCode::ACCEPTED);
+        assert!(result.body.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_returns_session_id() {
+        let (state, _) = test_state_with_session();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "1.0" }
+            })),
+        };
+
+        let result = handle_single_request(&state, &None, request).await;
+        assert_eq!(result.status, StatusCode::OK);
+        assert!(result.session_id.is_some(), "should assign session ID");
     }
 }
