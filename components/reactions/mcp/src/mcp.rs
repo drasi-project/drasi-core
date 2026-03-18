@@ -1380,11 +1380,11 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
     let session_id = match session_id {
         Some(id) => id,
         None => {
-            warn!(
-                "[{}] SSE request rejected: missing session ID header",
+            debug!(
+                "[{}] GET without session ID — returning 405 (SSE requires prior initialization)",
                 state.reaction_id
             );
-            return StatusCode::BAD_REQUEST.into_response();
+            return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
     };
 
