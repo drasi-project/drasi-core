@@ -98,7 +98,6 @@ pub fn is_operation_valid(status: &ComponentStatus, operation: &Operation) -> Re
         (ComponentStatus::Error, Operation::Stop) => {
             Err("Cannot stop a component that is in error state".to_string())
         }
-
     }
 }
 

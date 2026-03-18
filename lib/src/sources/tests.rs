@@ -404,12 +404,44 @@ mod manager_tests {
         create_test_manager().await
     }
 
+    /// Helper: register a source in the graph, then provision it in the manager.
+    async fn add_source(
+        manager: &SourceManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source: impl Source + 'static,
+    ) -> anyhow::Result<()> {
+        let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
+        let auto_start = source.auto_start();
+        {
+            let mut g = graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), auto_start.to_string());
+            g.register_source(&source_id, metadata)?;
+        }
+        manager.provision_source(source).await
+    }
+
+    /// Helper: teardown a source in the manager, then deregister from the graph.
+    async fn delete_source(
+        manager: &SourceManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        id: &str,
+        cleanup: bool,
+    ) -> anyhow::Result<()> {
+        manager.teardown_source(id.to_string(), cleanup).await?;
+        let mut g = graph.write().await;
+        g.deregister(id)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_add_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = create_test_mock_source("test-source".to_string());
-        let result = manager.add_source(source).await;
+        let result = add_source(&manager, &graph, source).await;
 
         assert!(result.is_ok());
 
@@ -421,31 +453,29 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source1 = create_test_mock_source("test-source".to_string());
         let source2 = create_test_mock_source("test-source".to_string());
 
         // Add source first time
-        assert!(manager.add_source(source1).await.is_ok());
+        assert!(add_source(&manager, &graph, source1).await.is_ok());
 
         // Try to add same source again
-        let result = manager.add_source(source2).await;
+        let result = add_source(&manager, &graph, source2).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[tokio::test]
     async fn test_remove_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = create_test_mock_source("test-source".to_string());
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Remove the source
-        let result = manager
-            .delete_source("test-source".to_string(), false)
-            .await;
+        let result = delete_source(&manager, &graph, "test-source", false).await;
         assert!(result.is_ok());
 
         // Verify source was removed
@@ -455,11 +485,9 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_remove_nonexistent_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
-        let result = manager
-            .delete_source("nonexistent".to_string(), false)
-            .await;
+        let result = delete_source(&manager, &graph, "nonexistent", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -472,7 +500,7 @@ mod manager_tests {
         let mut event_rx = graph.read().await.subscribe();
 
         let source = create_test_mock_source("test-source".to_string());
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Start the source
         let result = manager.start_source("test-source".to_string()).await;
@@ -483,7 +511,11 @@ mod manager_tests {
             while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-source" {
                     // Skip the Stopped event emitted by add_source (with "added" message)
-                    if event.message.as_deref().map_or(false, |m| m.ends_with("added")) {
+                    if event
+                        .message
+                        .as_deref()
+                        .is_some_and(|m| m.ends_with("added"))
+                    {
                         continue;
                     }
                     assert!(
@@ -506,7 +538,7 @@ mod manager_tests {
         let mut event_rx = graph.read().await.subscribe();
 
         let source = create_test_mock_source("test-source".to_string());
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
         manager
             .start_source("test-source".to_string())
             .await
@@ -535,10 +567,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_source_info() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = create_test_mock_source("test-source".to_string());
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         let retrieved = manager.get_source("test-source".to_string()).await;
         assert!(retrieved.is_ok());
@@ -550,14 +582,14 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_list_sources_with_status() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add multiple sources
         let source1 = create_test_mock_source("source1".to_string());
         let source2 = create_test_mock_source("source2".to_string());
 
-        manager.add_source(source1).await.unwrap();
-        manager.add_source(source2).await.unwrap();
+        add_source(&manager, &graph, source1).await.unwrap();
+        add_source(&manager, &graph, source2).await.unwrap();
 
         // Start one source
         manager.start_source("source1".to_string()).await.unwrap();
@@ -591,15 +623,16 @@ mod manager_tests {
     /// This tests the TOCTOU fix where we use a single write lock for check-and-insert.
     #[tokio::test]
     async fn test_concurrent_add_source_same_id() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Spawn multiple tasks trying to add a source with the same ID concurrently
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
+            let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
                 let source = create_test_mock_source("same-source".to_string());
-                let result = manager_clone.add_source(source).await;
+                let result = add_source(&manager_clone, &graph_clone, source).await;
                 (i, result.is_ok())
             }));
         }
@@ -629,15 +662,16 @@ mod manager_tests {
     /// Test that concurrent add_source calls with different IDs all succeed.
     #[tokio::test]
     async fn test_concurrent_add_source_different_ids() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Spawn multiple tasks adding sources with unique IDs
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
+            let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
                 let source = create_test_mock_source(format!("source-{i}"));
-                manager_clone.add_source(source).await
+                add_source(&manager_clone, &graph_clone, source).await
             }));
         }
 
@@ -662,17 +696,17 @@ mod manager_tests {
     /// Test that start_all only starts sources with auto_start=true
     #[tokio::test]
     async fn test_start_all_respects_auto_start() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add source with auto_start=true
         let source1 =
             TestMockSource::with_auto_start("auto-start-source".to_string(), true).unwrap();
-        manager.add_source(source1).await.unwrap();
+        add_source(&manager, &graph, source1).await.unwrap();
 
         // Add source with auto_start=false
         let source2 =
             TestMockSource::with_auto_start("no-auto-start-source".to_string(), false).unwrap();
-        manager.add_source(source2).await.unwrap();
+        add_source(&manager, &graph, source2).await.unwrap();
 
         // Start all sources
         manager.start_all().await.unwrap();
@@ -703,7 +737,7 @@ mod manager_tests {
     /// Test that source auto_start defaults to true
     #[tokio::test]
     async fn test_source_auto_start_defaults_to_true() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Create source using default constructor (should have auto_start=true)
         let source = create_test_mock_source("default-source".to_string());
@@ -711,7 +745,7 @@ mod manager_tests {
         // Verify auto_start is true
         assert!(source.auto_start(), "Default auto_start should be true");
 
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Start all should start this source
         manager.start_all().await.unwrap();
@@ -731,11 +765,11 @@ mod manager_tests {
     /// Test that source with auto_start=false can be manually started
     #[tokio::test]
     async fn test_source_auto_start_false_can_be_manually_started() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add source with auto_start=false
         let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // start_all should not start it
         manager.start_all().await.unwrap();
@@ -775,11 +809,11 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_source_log_subscription() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Create a mock source
         let source = create_test_mock_source("logging-source".to_string());
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Subscribe to logs
         let result = manager.subscribe_logs("logging-source").await;
@@ -795,7 +829,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_source_log_subscription_nonexistent() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Try to subscribe to a non-existent source
         let result = manager.subscribe_logs("nonexistent-source").await;
@@ -809,7 +843,7 @@ mod manager_tests {
     async fn test_source_base_logs_flow_to_subscriber() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("logger-source");
@@ -817,7 +851,7 @@ mod manager_tests {
 
         // Create a LoggingTestSource that uses SourceBase
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Subscribe to logs before emitting
         let (history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
@@ -858,7 +892,7 @@ mod manager_tests {
     async fn test_source_base_logs_all_levels() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("multi-level-source");
@@ -866,7 +900,7 @@ mod manager_tests {
 
         // Create a LoggingTestSource
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Emit logs at all levels within a component span (must include instance_id)
         let span = tracing::info_span!(
@@ -903,7 +937,7 @@ mod manager_tests {
     async fn test_source_base_log_history_persists() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("history-source");
@@ -911,7 +945,7 @@ mod manager_tests {
 
         // Create and add source
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Emit some logs within a component span (must include instance_id)
         let span = tracing::info_span!(
@@ -951,14 +985,14 @@ mod manager_tests {
     async fn test_log_macro_routed_to_component_logs() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("log-routing-source");
         let source_id_clone = source_id.clone();
 
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         let (_history, mut receiver) = manager.subscribe_logs(&source_id).await.unwrap();
 
@@ -1007,14 +1041,14 @@ mod manager_tests {
     /// Test that deleting a source cleans up its event history
     #[tokio::test]
     async fn test_delete_source_cleans_up_event_history() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("cleanup-events-source");
 
         // Add a source
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Record an event manually to simulate lifecycle
         manager
@@ -1032,8 +1066,7 @@ mod manager_tests {
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the source
-        manager
-            .delete_source(source_id.clone(), false)
+        delete_source(&manager, &graph, &source_id, false)
             .await
             .unwrap();
 
@@ -1047,7 +1080,7 @@ mod manager_tests {
     async fn test_delete_source_cleans_up_log_history() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Use unique ID to avoid conflicts with parallel tests
         let source_id = unique_id("cleanup-logs-source");
@@ -1055,7 +1088,7 @@ mod manager_tests {
 
         // Add a source
         let source = LoggingTestSource::new(&source_id).unwrap();
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Generate some logs using tracing within a component span (must include instance_id)
         let span = tracing::info_span!(
@@ -1080,8 +1113,7 @@ mod manager_tests {
         assert!(!logs.is_empty(), "Expected logs after emitting");
 
         // Delete the source
-        manager
-            .delete_source(source_id.clone(), false)
+        delete_source(&manager, &graph, &source_id, false)
             .await
             .unwrap();
 
@@ -1183,14 +1215,13 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_with_cleanup_calls_deprovision() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let (source, deprovision_flag) = DeprovisionTestSource::new("deprovision-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Delete with cleanup = true
-        manager
-            .delete_source("deprovision-source".to_string(), true)
+        delete_source(&manager, &graph, "deprovision-source", true)
             .await
             .unwrap();
 
@@ -1202,14 +1233,13 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_without_cleanup_skips_deprovision() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let (source, deprovision_flag) = DeprovisionTestSource::new("no-deprovision-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Delete with cleanup = false
-        manager
-            .delete_source("no-deprovision-source".to_string(), false)
+        delete_source(&manager, &graph, "no-deprovision-source", false)
             .await
             .unwrap();
 
@@ -1225,10 +1255,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_replaces_stopped_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Update while stopped by providing a new instance
         let new_source = DeprovisionTestSource::new_simple("reconfig-stopped-source");
@@ -1247,16 +1277,18 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_stops_and_restarts_running_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("reconfig-running-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Start the source first
         manager
             .start_source("reconfig-running-source".to_string())
             .await
             .unwrap();
+        // Allow async graph update to propagate
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_source_status("reconfig-running-source".to_string())
             .await
@@ -1270,7 +1302,8 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Should be running again
+        // Should be running again (allow async graph update to propagate)
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_source_status("reconfig-running-source".to_string())
             .await
@@ -1282,11 +1315,11 @@ mod manager_tests {
     async fn test_update_source_preserves_log_history() {
         use tracing::Instrument;
 
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source_id = unique_id("reconfig-logs-source");
         let source = DeprovisionTestSource::new_simple(&source_id);
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Generate some logs
         let span = tracing::info_span!(
@@ -1329,7 +1362,7 @@ mod manager_tests {
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DeprovisionTestSource::new_simple("reconfig-event-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Update
         let new_source = DeprovisionTestSource::new_simple("reconfig-event-source");
@@ -1363,10 +1396,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_source_rejects_mismatched_id() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let source = DeprovisionTestSource::new_simple("original-source");
-        manager.add_source(source).await.unwrap();
+        add_source(&manager, &graph, source).await.unwrap();
 
         // Try to update with a different ID
         let new_source = DeprovisionTestSource::new_simple("different-id");
@@ -1379,7 +1412,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_nonexistent_source() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let new_source = DeprovisionTestSource::new_simple("nonexistent");
         let result = manager

@@ -36,8 +36,7 @@ use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
 use crate::component_graph::{
-    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
-    RelationshipKind,
+    ComponentGraph, ComponentKind, ComponentUpdate, ComponentUpdateSender,
 };
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
@@ -1235,11 +1234,11 @@ impl QueryManager {
     }
 
     pub async fn add_query(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config).await
+        self.provision_query(config).await
     }
 
     pub async fn add_query_without_save(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config).await
+        self.provision_query(config).await
     }
 
     /// Add a pre-created query instance (for testing)
@@ -1256,37 +1255,14 @@ impl QueryManager {
         Ok(())
     }
 
-    async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
-        // Registry-first: register in the component graph before creating runtime state.
-        // The graph is the authoritative source of truth — if it rejects the add
-        // (duplicate ID), the runtime instance is never created.
-        {
-            let mut graph = self.graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("query".to_string(), config.query.clone());
-            let node = ComponentNode {
-                id: config.id.clone(),
-                kind: ComponentKind::Query,
-                status: ComponentStatus::Stopped,
-                metadata,
-            };
-            graph.add_component(node)?;
-
-            // Create bidirectional Feeds/SubscribesTo edges for each source subscription
-            for sub in &config.sources {
-                if graph.contains(&sub.source_id) {
-                    let _ =
-                        graph.add_relationship(&sub.source_id, &config.id, RelationshipKind::Feeds);
-                }
-            }
-        }
-        // Graph emits ComponentEvent(Added) automatically
-
+    /// Provision a query for runtime — create the DrasiQuery, initialize, and store it.
+    ///
+    /// This method handles runtime-only operations: creating the DrasiQuery instance,
+    /// initializing it with the runtime context, and storing it in the runtime map.
+    /// Graph registration (node creation, dependency edges) must be done by the caller
+    /// beforehand via `ComponentGraph::register_query()`.
+    pub async fn provision_query(&self, config: QueryConfig) -> Result<()> {
         // Create the query instance
-        let update_tx = {
-            let graph = self.graph.read().await;
-            graph.update_sender()
-        };
         let query = DrasiQuery::new(
             &self.instance_id,
             config.clone(),
@@ -1296,8 +1272,11 @@ impl QueryManager {
         )?;
 
         // Wire status handle to graph via context (same pattern as Source/Reaction)
-        let context =
-            crate::context::QueryRuntimeContext::new(&self.instance_id, &config.id, update_tx);
+        let context = crate::context::QueryRuntimeContext::new(
+            &self.instance_id,
+            &config.id,
+            self.update_tx.clone(),
+        );
         query.initialize(context).await;
 
         let query: Arc<dyn Query> = Arc::new(query);
@@ -1311,7 +1290,7 @@ impl QueryManager {
             queries.insert(config.id.clone(), query);
         }
 
-        info!("Added query: {} with bootstrap support", config.id);
+        info!("Provisioned query: {} with bootstrap support", config.id);
 
         // Note: Auto-start is handled by the caller (server.add_query)
         // which has access to the data router for subscriptions
@@ -1379,16 +1358,11 @@ impl QueryManager {
     }
 
     pub async fn get_query_status(&self, id: String) -> Result<ComponentStatus> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
-
-        if let Some(query) = query {
-            Ok(query.status().await)
-        } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
-        }
+        let graph = self.graph.read().await;
+        let node = graph
+            .get_component(&id)
+            .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
+        Ok(node.status.clone())
     }
 
     /// Get a query instance for subscription by reactions
@@ -1457,9 +1431,23 @@ impl QueryManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // For now, update means remove and re-add
-            self.delete_query(id.clone()).await?;
-            self.add_query(config).await?;
+            // Teardown runtime, deregister from graph, re-register, re-provision
+            self.teardown_query(id.clone()).await?;
+            {
+                let mut graph = self.graph.write().await;
+                let _ = graph.deregister(&id);
+            }
+
+            // Re-register + provision
+            {
+                let mut graph = self.graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("query".to_string(), config.query.clone());
+                let source_ids: Vec<String> =
+                    config.sources.iter().map(|s| s.source_id.clone()).collect();
+                graph.register_query(&config.id, metadata, &source_ids)?;
+            }
+            self.provision_query(config).await?;
 
             // If it was running, restart it
             if was_running {
@@ -1471,7 +1459,14 @@ impl QueryManager {
         Ok(())
     }
 
-    pub async fn delete_query(&self, id: String) -> Result<()> {
+    /// Teardown a query's runtime state — stop and remove from runtime map.
+    ///
+    /// This method handles runtime-only operations. Graph deregistration
+    /// (node removal, edge cleanup) must be done by the caller afterwards via
+    /// `ComponentGraph::deregister()`.
+    ///
+    /// The caller should validate dependencies via `graph.can_remove()` before calling this.
+    pub async fn teardown_query(&self, id: String) -> Result<()> {
         // First check if the query exists
         let query = {
             let queries = self.queries.read().await;
@@ -1483,10 +1478,10 @@ impl QueryManager {
 
             // If the query is running or starting, stop it first
             if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
-                info!("Stopping query '{id}' before deletion");
+                info!("Stopping query '{id}' before teardown");
                 if let Err(e) = query.stop().await {
                     warn!(
-                        "Failed to stop query '{id}' during deletion (may already be stopped): {e}"
+                        "Failed to stop query '{id}' during teardown (may already be stopped): {e}"
                     );
                 }
 
@@ -1499,26 +1494,21 @@ impl QueryManager {
                     new_status,
                     ComponentStatus::Stopped | ComponentStatus::Error
                 ) {
-                    warn!("Query '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
+                    warn!("Query '{id}' in unexpected state {new_status:?} after stop, proceeding with teardown");
                 }
             } else {
                 // Still validate the operation for non-running states
                 is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Now remove the query
+            // Now remove the query from runtime map
             self.queries.write().await.remove(&id);
-            // Remove from the component graph (emits Removed event automatically)
-            {
-                let mut graph = self.graph.write().await;
-                let _ = graph.remove_component(&id);
-            }
             // Clean up event history for this query
             self.event_history.write().await.remove_component(&id);
             // Clean up log resources for this query
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
-            info!("Deleted query: {id}");
+            info!("Teardown query: {id}");
 
             Ok(())
         } else {
@@ -1527,21 +1517,8 @@ impl QueryManager {
     }
 
     pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
-        let queries_snapshot = {
-            let queries = self.queries.read().await;
-            queries
-                .iter()
-                .map(|(id, query)| (id.clone(), Arc::clone(query)))
-                .collect::<Vec<_>>()
-        };
-
-        let mut result = Vec::new();
-        for (id, query) in queries_snapshot {
-            let status = query.status().await;
-            result.push((id, status));
-        }
-
-        result
+        let graph = self.graph.read().await;
+        graph.list_by_kind(&ComponentKind::Query)
     }
 
     pub async fn get_query_config(&self, id: &str) -> Option<QueryConfig> {

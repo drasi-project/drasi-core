@@ -18,6 +18,7 @@
 //! starting, and stopping sources.
 
 use futures::stream::Stream;
+use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
@@ -51,13 +52,30 @@ impl DrasiLib {
         // Capture auto_start and id before transferring ownership
         let should_auto_start = source.auto_start();
         let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
 
-        self.source_manager
-            .add_source(source)
-            .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add source: {e}")))?;
+        // Step 1: Register in the component graph (validates uniqueness, creates node + edges)
+        {
+            let mut graph = self.component_graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), should_auto_start.to_string());
+            graph
+                .register_source(&source_id, metadata)
+                .map_err(|e| DrasiError::provisioning(format!("Failed to register source: {e}")))?;
+        }
 
-        // If server is running and source wants auto-start, start it
+        // Step 2: Provision runtime (initialize + store)
+        if let Err(e) = self.source_manager.provision_source(source).await {
+            // Compensating rollback: remove from graph on runtime failure
+            let mut graph = self.component_graph.write().await;
+            let _ = graph.deregister(&source_id);
+            return Err(DrasiError::provisioning(format!(
+                "Failed to provision source: {e}"
+            )));
+        }
+
+        // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
             self.source_manager
                 .start_source(source_id)
@@ -83,25 +101,31 @@ impl DrasiLib {
     pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Stop if running
-        let status = self
-            .source_manager
-            .get_source_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("source", id))?;
-
-        if matches!(status, ComponentStatus::Running) {
-            self.source_manager
-                .stop_source(id.to_string())
-                .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop source: {e}")))?;
+        // Step 1: Validate no dependents
+        {
+            let graph = self.component_graph.read().await;
+            if let Err(dependent_ids) = graph.can_remove(id) {
+                return Err(DrasiError::provisioning(format!(
+                    "Cannot remove source '{}': depended on by: {}",
+                    id,
+                    dependent_ids.join(", ")
+                )));
+            }
         }
 
-        // Delete the source
+        // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
         self.source_manager
-            .delete_source(id.to_string(), cleanup)
+            .teardown_source(id.to_string(), cleanup)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete source: {e}")))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown source: {e}")))?;
+
+        // Step 3: Deregister from graph (remove node + edges, emit events)
+        {
+            let mut graph = self.component_graph.write().await;
+            graph.deregister(id).map_err(|e| {
+                DrasiError::provisioning(format!("Failed to deregister source: {e}"))
+            })?;
+        }
 
         Ok(())
     }

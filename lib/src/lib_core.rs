@@ -314,6 +314,7 @@ impl DrasiLib {
             source_manager.clone(),
             query_manager.clone(),
             reaction_manager.clone(),
+            component_graph.clone(),
         ));
 
         // Spawn the graph update loop — sole consumer of component status updates.

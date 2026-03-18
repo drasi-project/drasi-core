@@ -180,13 +180,51 @@ mod manager_tests {
         create_test_manager().await
     }
 
+    /// Helper: register a reaction in the graph, then provision it in the manager.
+    /// Registers placeholder query nodes for any referenced queries not already in the graph.
+    async fn add_reaction(
+        manager: &ReactionManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        reaction: impl crate::reactions::Reaction + 'static,
+    ) -> anyhow::Result<()> {
+        let reaction_id = reaction.id().to_string();
+        let reaction_type = reaction.type_name().to_string();
+        let query_ids = reaction.query_ids();
+        {
+            let mut g = graph.write().await;
+            // Ensure referenced queries exist as placeholder nodes
+            for qid in &query_ids {
+                if !g.contains(qid) {
+                    g.register_query(qid, HashMap::new(), &[])?;
+                }
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), reaction_type);
+            g.register_reaction(&reaction_id, metadata, &query_ids)?;
+        }
+        manager.provision_reaction(reaction).await
+    }
+
+    /// Helper: teardown a reaction in the manager, then deregister from the graph.
+    async fn delete_reaction(
+        manager: &ReactionManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        id: &str,
+        cleanup: bool,
+    ) -> anyhow::Result<()> {
+        manager.teardown_reaction(id.to_string(), cleanup).await?;
+        let mut g = graph.write().await;
+        g.deregister(id)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_add_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction =
             create_test_mock_reaction("test-reaction".to_string(), vec!["query1".to_string()]);
-        let result = manager.add_reaction(reaction).await;
+        let result = add_reaction(&manager, &graph, reaction).await;
 
         assert!(result.is_ok());
 
@@ -198,31 +236,29 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction1 = create_test_mock_reaction("test-reaction".to_string(), vec![]);
         let reaction2 = create_test_mock_reaction("test-reaction".to_string(), vec![]);
 
         // Add reaction first time
-        assert!(manager.add_reaction(reaction1).await.is_ok());
+        assert!(add_reaction(&manager, &graph, reaction1).await.is_ok());
 
         // Try to add same reaction again
-        let result = manager.add_reaction(reaction2).await;
+        let result = add_reaction(&manager, &graph, reaction2).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[tokio::test]
     async fn test_delete_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![]);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Delete the reaction
-        let result = manager
-            .delete_reaction("test-reaction".to_string(), false)
-            .await;
+        let result = delete_reaction(&manager, &graph, "test-reaction", false).await;
         assert!(result.is_ok());
 
         // Verify reaction was removed
@@ -232,22 +268,20 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_nonexistent_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
-        let result = manager
-            .delete_reaction("nonexistent".to_string(), false)
-            .await;
+        let result = delete_reaction(&manager, &graph, "nonexistent", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[tokio::test]
     async fn test_get_reaction_info() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction =
             create_test_mock_reaction("test-reaction".to_string(), vec!["query1".to_string()]);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let retrieved = manager.get_reaction("test-reaction".to_string()).await;
         assert!(retrieved.is_ok());
@@ -260,14 +294,14 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_list_reactions_with_status() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add multiple reactions
         let reaction1 = create_test_mock_reaction("reaction1".to_string(), vec![]);
         let reaction2 = create_test_mock_reaction("reaction2".to_string(), vec![]);
 
-        manager.add_reaction(reaction1).await.unwrap();
-        manager.add_reaction(reaction2).await.unwrap();
+        add_reaction(&manager, &graph, reaction1).await.unwrap();
+        add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         let reactions = manager.list_reactions().await;
         assert_eq!(reactions.len(), 2);
@@ -280,10 +314,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_reaction_status() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction = create_test_mock_reaction("test-reaction".to_string(), vec![]);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let status = manager
             .get_reaction_status("test-reaction".to_string())
@@ -294,7 +328,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_nonexistent_reaction_status() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let status = manager.get_reaction_status("nonexistent".to_string()).await;
         assert!(status.is_err());
@@ -306,15 +340,16 @@ mod manager_tests {
     /// This tests the TOCTOU fix where we use a single write lock for check-and-insert.
     #[tokio::test]
     async fn test_concurrent_add_reaction_same_id() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Spawn multiple tasks trying to add a reaction with the same ID concurrently
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
+            let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
                 let reaction = create_test_mock_reaction("same-reaction".to_string(), vec![]);
-                let result = manager_clone.add_reaction(reaction).await;
+                let result = add_reaction(&manager_clone, &graph_clone, reaction).await;
                 (i, result.is_ok())
             }));
         }
@@ -344,15 +379,16 @@ mod manager_tests {
     /// Test that concurrent add_reaction calls with different IDs all succeed.
     #[tokio::test]
     async fn test_concurrent_add_reaction_different_ids() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Spawn multiple tasks adding reactions with unique IDs
         let mut handles = Vec::new();
         for i in 0..10 {
             let manager_clone = manager.clone();
+            let graph_clone = graph.clone();
             handles.push(tokio::spawn(async move {
                 let reaction = create_test_mock_reaction(format!("reaction-{i}"), vec![]);
-                manager_clone.add_reaction(reaction).await
+                add_reaction(&manager_clone, &graph_clone, reaction).await
             }));
         }
 
@@ -377,17 +413,17 @@ mod manager_tests {
     /// Test that start_all only starts reactions with auto_start=true
     #[tokio::test]
     async fn test_start_all_respects_auto_start() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=true
         let reaction1 =
             TestMockReaction::with_auto_start("auto-start-reaction".to_string(), vec![], true);
-        manager.add_reaction(reaction1).await.unwrap();
+        add_reaction(&manager, &graph, reaction1).await.unwrap();
 
         // Add reaction with auto_start=false
         let reaction2 =
             TestMockReaction::with_auto_start("no-auto-start-reaction".to_string(), vec![], false);
-        manager.add_reaction(reaction2).await.unwrap();
+        add_reaction(&manager, &graph, reaction2).await.unwrap();
 
         // Start all reactions
         manager.start_all().await.unwrap();
@@ -418,7 +454,7 @@ mod manager_tests {
     /// Test that reaction auto_start defaults to true
     #[tokio::test]
     async fn test_reaction_auto_start_defaults_to_true() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Create reaction using default constructor (should have auto_start=true)
         let reaction = create_test_mock_reaction("default-reaction".to_string(), vec![]);
@@ -427,7 +463,7 @@ mod manager_tests {
         use crate::reactions::Reaction;
         assert!(reaction.auto_start(), "Default auto_start should be true");
 
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Start all should start this reaction
         manager.start_all().await.unwrap();
@@ -447,12 +483,12 @@ mod manager_tests {
     /// Test that reaction with auto_start=false can be manually started
     #[tokio::test]
     async fn test_reaction_auto_start_false_can_be_manually_started() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add reaction with auto_start=false
         let reaction =
             TestMockReaction::with_auto_start("manual-reaction".to_string(), vec![], false);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // start_all should not start it
         manager.start_all().await.unwrap();
@@ -493,11 +529,11 @@ mod manager_tests {
     /// Test that deleting a reaction cleans up its event history
     #[tokio::test]
     async fn test_delete_reaction_cleans_up_event_history() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add a reaction
         let reaction = create_test_mock_reaction("cleanup-events-reaction".to_string(), vec![]);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Record an event manually to simulate lifecycle
         manager
@@ -515,8 +551,7 @@ mod manager_tests {
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the reaction
-        manager
-            .delete_reaction("cleanup-events-reaction".to_string(), false)
+        delete_reaction(&manager, &graph, "cleanup-events-reaction", false)
             .await
             .unwrap();
 
@@ -528,19 +563,18 @@ mod manager_tests {
     /// Test that deleting a reaction cleans up its log history
     #[tokio::test]
     async fn test_delete_reaction_cleans_up_log_history() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         // Add a reaction
         let reaction = create_test_mock_reaction("cleanup-logs-reaction".to_string(), vec![]);
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         // Subscribe to create the channel
         let result = manager.subscribe_logs("cleanup-logs-reaction").await;
         assert!(result.is_some(), "Expected to subscribe to reaction logs");
 
         // Delete the reaction
-        manager
-            .delete_reaction("cleanup-logs-reaction".to_string(), false)
+        delete_reaction(&manager, &graph, "cleanup-logs-reaction", false)
             .await
             .unwrap();
 
@@ -642,13 +676,12 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_reaction_with_cleanup_calls_deprovision() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let (reaction, deprovision_flag) = DeprovisionTestReaction::new("deprovision-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        manager
-            .delete_reaction("deprovision-reaction".to_string(), true)
+        delete_reaction(&manager, &graph, "deprovision-reaction", true)
             .await
             .unwrap();
 
@@ -660,13 +693,12 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_delete_reaction_without_cleanup_skips_deprovision() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let (reaction, deprovision_flag) = DeprovisionTestReaction::new("no-deprovision-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
-        manager
-            .delete_reaction("no-deprovision-reaction".to_string(), false)
+        delete_reaction(&manager, &graph, "no-deprovision-reaction", false)
             .await
             .unwrap();
 
@@ -682,10 +714,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_reaction_replaces_stopped_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("reconfig-stopped-reaction");
         manager
@@ -702,15 +734,17 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_reaction_stops_and_restarts_running_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         manager
             .start_reaction("reconfig-running-reaction".to_string())
             .await
             .unwrap();
+        // Allow async graph update to propagate
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_reaction_status("reconfig-running-reaction".to_string())
             .await
@@ -723,6 +757,8 @@ mod manager_tests {
             .await
             .unwrap();
 
+        // Allow async graph update to propagate
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_reaction_status("reconfig-running-reaction".to_string())
             .await
@@ -738,7 +774,7 @@ mod manager_tests {
         let mut event_rx = graph.read().await.subscribe();
 
         let reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("reconfig-event-reaction");
         manager
@@ -770,10 +806,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_reaction_rejects_mismatched_id() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let reaction = DeprovisionTestReaction::new_simple("original-reaction");
-        manager.add_reaction(reaction).await.unwrap();
+        add_reaction(&manager, &graph, reaction).await.unwrap();
 
         let new_reaction = DeprovisionTestReaction::new_simple("different-id");
         let result = manager
@@ -785,7 +821,7 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_nonexistent_reaction() {
-        let (manager, _graph) = create_test_manager().await;
+        let (manager, graph) = create_test_manager().await;
 
         let new_reaction = DeprovisionTestReaction::new_simple("nonexistent");
         let result = manager

@@ -18,6 +18,7 @@
 //! starting, and stopping reactions.
 
 use futures::stream::Stream;
+use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_state_error;
@@ -51,13 +52,32 @@ impl DrasiLib {
         // Capture auto_start and id before transferring ownership
         let should_auto_start = reaction.auto_start();
         let reaction_id = reaction.id().to_string();
+        let reaction_type = reaction.type_name().to_string();
+        let query_ids = reaction.query_ids();
 
-        self.reaction_manager
-            .add_reaction(reaction)
-            .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {e}")))?;
+        // Step 1: Register in the component graph (validates queries exist, creates node + edges)
+        {
+            let mut graph = self.component_graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), reaction_type);
+            graph
+                .register_reaction(&reaction_id, metadata, &query_ids)
+                .map_err(|e| {
+                    DrasiError::provisioning(format!("Failed to register reaction: {e}"))
+                })?;
+        }
 
-        // If server is running and reaction wants auto-start, start it
+        // Step 2: Provision runtime (initialize + store)
+        if let Err(e) = self.reaction_manager.provision_reaction(reaction).await {
+            // Compensating rollback: remove from graph on runtime failure
+            let mut graph = self.component_graph.write().await;
+            let _ = graph.deregister(&reaction_id);
+            return Err(DrasiError::provisioning(format!(
+                "Failed to provision reaction: {e}"
+            )));
+        }
+
+        // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
             self.reaction_manager
                 .start_reaction(reaction_id)
@@ -83,25 +103,31 @@ impl DrasiLib {
     pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Stop if running
-        let status = self
-            .reaction_manager
-            .get_reaction_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("reaction", id))?;
-
-        if matches!(status, ComponentStatus::Running) {
-            self.reaction_manager
-                .stop_reaction(id.to_string())
-                .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop reaction: {e}")))?;
+        // Step 1: Validate no dependents
+        {
+            let graph = self.component_graph.read().await;
+            if let Err(dependent_ids) = graph.can_remove(id) {
+                return Err(DrasiError::provisioning(format!(
+                    "Cannot remove reaction '{}': depended on by: {}",
+                    id,
+                    dependent_ids.join(", ")
+                )));
+            }
         }
 
-        // Delete the reaction
+        // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
         self.reaction_manager
-            .delete_reaction(id.to_string(), cleanup)
+            .teardown_reaction(id.to_string(), cleanup)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {e}")))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown reaction: {e}")))?;
+
+        // Step 3: Deregister from graph (remove node + edges, emit events)
+        {
+            let mut graph = self.component_graph.write().await;
+            graph.deregister(id).map_err(|e| {
+                DrasiError::provisioning(format!("Failed to deregister reaction: {e}"))
+            })?;
+        }
 
         Ok(())
     }

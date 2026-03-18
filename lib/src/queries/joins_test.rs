@@ -106,7 +106,11 @@ mod query_joins_tests {
         }
     }
 
-    async fn create_test_environment() -> (Arc<QueryManager>, Arc<SourceManager>) {
+    async fn create_test_environment() -> (
+        Arc<QueryManager>,
+        Arc<SourceManager>,
+        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+    ) {
         // Use the global shared log registry for test isolation with tracing
         let log_registry = crate::managers::get_or_init_global_registry();
         let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
@@ -144,23 +148,69 @@ mod query_joins_tests {
             index_factory,
             middleware_registry,
             log_registry,
-            graph,
+            graph.clone(),
             update_tx,
         ));
 
-        (query_manager, source_manager)
+        (query_manager, source_manager, graph)
+    }
+
+    /// Helper: register a source in the graph, then provision it in the source manager.
+    async fn add_source(
+        source_manager: &SourceManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source: impl crate::sources::Source + 'static,
+    ) -> anyhow::Result<()> {
+        let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
+        let auto_start = source.auto_start();
+        {
+            let mut g = graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), auto_start.to_string());
+            g.register_source(&source_id, metadata)?;
+        }
+        source_manager.provision_source(source).await
+    }
+
+    /// Helper: register a query in the graph, then provision it in the query manager.
+    /// Registers placeholder source nodes for any referenced sources not already in the graph.
+    async fn add_query(
+        manager: &QueryManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        config: QueryConfig,
+    ) -> anyhow::Result<()> {
+        {
+            let mut g = graph.write().await;
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            for sid in &source_ids {
+                if !g.contains(sid) {
+                    g.register_source(sid, HashMap::new())?;
+                }
+            }
+            let mut metadata = HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            g.register_query(&config.id, metadata, &source_ids)?;
+        }
+        manager.provision_query(config).await
     }
 
     #[tokio::test]
     async fn test_basic_join_between_two_sources() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create two mock sources using instance-based approach
         let vehicles_source = create_test_mock_source("vehicles".to_string());
         let drivers_source = create_test_mock_source("drivers".to_string());
 
-        source_manager.add_source(vehicles_source).await.unwrap();
-        source_manager.add_source(drivers_source).await.unwrap();
+        add_source(&source_manager, &graph, vehicles_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, drivers_source)
+            .await
+            .unwrap();
 
         // Create a query with a join between Vehicle and Driver
         let join_config = create_query_join_config(
@@ -178,7 +228,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
 
         // Start the query - it will subscribe directly to sources
         query_manager
@@ -257,14 +309,18 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_dynamic_updates_with_joins() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Setup sources using instance-based approach
         let orders_source = create_test_mock_source("orders".to_string());
         let restaurants_source = create_test_mock_source("restaurants".to_string());
 
-        source_manager.add_source(orders_source).await.unwrap();
-        source_manager.add_source(restaurants_source).await.unwrap();
+        add_source(&source_manager, &graph, orders_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, restaurants_source)
+            .await
+            .unwrap();
 
         // Create join config
         let join_config = create_query_join_config(
@@ -282,7 +338,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("order-restaurant-query".to_string())
             .await
@@ -383,16 +441,22 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_multiple_joins_in_single_query() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create three sources using instance-based approach
         let orders_source = create_test_mock_source("orders".to_string());
         let drivers_source = create_test_mock_source("drivers".to_string());
         let restaurants_source = create_test_mock_source("restaurants".to_string());
 
-        source_manager.add_source(orders_source).await.unwrap();
-        source_manager.add_source(drivers_source).await.unwrap();
-        source_manager.add_source(restaurants_source).await.unwrap();
+        add_source(&source_manager, &graph, orders_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, drivers_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, restaurants_source)
+            .await
+            .unwrap();
 
         // Create multiple joins
         let restaurant_join = create_query_join_config(
@@ -418,7 +482,9 @@ mod query_joins_tests {
             vec![restaurant_join, driver_join],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("full-order-query".to_string())
             .await
@@ -505,14 +571,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_non_matching_properties() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create sources using instance-based approach
         let source1 = create_test_mock_source("source1".to_string());
         let source2 = create_test_mock_source("source2".to_string());
 
-        source_manager.add_source(source1).await.unwrap();
-        source_manager.add_source(source2).await.unwrap();
+        add_source(&source_manager, &graph, source1).await.unwrap();
+        add_source(&source_manager, &graph, source2).await.unwrap();
 
         let join_config = create_query_join_config(
             "TEST_JOIN",
@@ -529,7 +595,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("non-matching-query".to_string())
             .await
@@ -588,14 +656,14 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_null_properties() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create sources using instance-based approach
         let source1 = create_test_mock_source("source1".to_string());
         let source2 = create_test_mock_source("source2".to_string());
 
-        source_manager.add_source(source1).await.unwrap();
-        source_manager.add_source(source2).await.unwrap();
+        add_source(&source_manager, &graph, source1).await.unwrap();
+        add_source(&source_manager, &graph, source2).await.unwrap();
 
         let join_config = create_query_join_config(
             "NULL_TEST_JOIN",
@@ -612,7 +680,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("null-property-query".to_string())
             .await
@@ -671,14 +741,18 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_join_with_duplicate_keys() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create sources using instance-based approach
         let products_source = create_test_mock_source("products".to_string());
         let categories_source = create_test_mock_source("categories".to_string());
 
-        source_manager.add_source(products_source).await.unwrap();
-        source_manager.add_source(categories_source).await.unwrap();
+        add_source(&source_manager, &graph, products_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, categories_source)
+            .await
+            .unwrap();
 
         let join_config = create_query_join_config(
             "PRODUCT_CATEGORY",
@@ -695,7 +769,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("product-category-query".to_string())
             .await
@@ -760,14 +836,18 @@ mod query_joins_tests {
 
     #[tokio::test]
     async fn test_bootstrap_with_joins() {
-        let (query_manager, source_manager) = create_test_environment().await;
+        let (query_manager, source_manager, graph) = create_test_environment().await;
 
         // Create sources using instance-based approach
         let users_source = create_test_mock_source("users".to_string());
         let posts_source = create_test_mock_source("posts".to_string());
 
-        source_manager.add_source(users_source).await.unwrap();
-        source_manager.add_source(posts_source).await.unwrap();
+        add_source(&source_manager, &graph, users_source)
+            .await
+            .unwrap();
+        add_source(&source_manager, &graph, posts_source)
+            .await
+            .unwrap();
 
         // Create and start query with join FIRST
         let join_config = create_query_join_config(
@@ -785,7 +865,9 @@ mod query_joins_tests {
             vec![join_config],
         );
 
-        query_manager.add_query(query_config).await.unwrap();
+        add_query(&query_manager, &graph, query_config)
+            .await
+            .unwrap();
         query_manager
             .start_query("user-posts-query".to_string())
             .await

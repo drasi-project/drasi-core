@@ -142,12 +142,67 @@ mod manager_tests {
         create_test_manager().await
     }
 
+    /// Helper: register a source in the graph, then provision it in the source manager.
+    async fn add_source(
+        source_manager: &SourceManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source: impl crate::sources::Source + 'static,
+    ) -> anyhow::Result<()> {
+        let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
+        let auto_start = source.auto_start();
+        {
+            let mut g = graph.write().await;
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), auto_start.to_string());
+            g.register_source(&source_id, metadata)?;
+        }
+        source_manager.provision_source(source).await
+    }
+
+    /// Helper: register a query in the graph, then provision it in the query manager.
+    /// Registers placeholder source nodes for any referenced sources not already in the graph.
+    async fn add_query(
+        manager: &QueryManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        config: QueryConfig,
+    ) -> anyhow::Result<()> {
+        {
+            let mut g = graph.write().await;
+            // Ensure referenced sources exist as placeholder nodes
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            for sid in &source_ids {
+                if !g.contains(sid) {
+                    g.register_source(sid, std::collections::HashMap::new())?;
+                }
+            }
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            g.register_query(&config.id, metadata, &source_ids)?;
+        }
+        manager.provision_query(config).await
+    }
+
+    /// Helper: teardown a query in the manager, then deregister from the graph.
+    async fn delete_query(
+        manager: &QueryManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        id: &str,
+    ) -> anyhow::Result<()> {
+        manager.teardown_query(id.to_string()).await?;
+        let mut g = graph.write().await;
+        g.deregister(id)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_add_query() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        let result = manager.add_query(config.clone()).await;
+        let result = add_query(&manager, &graph, config.clone()).await;
 
         assert!(result.is_ok());
 
@@ -159,28 +214,28 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_duplicate_query() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
 
         // Add query first time
-        assert!(manager.add_query(config.clone()).await.is_ok());
+        assert!(add_query(&manager, &graph, config.clone()).await.is_ok());
 
         // Try to add same query again
-        let result = manager.add_query(config).await;
+        let result = add_query(&manager, &graph, config).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[tokio::test]
     async fn test_delete_query() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec![]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Delete the query
-        let result = manager.delete_query("test-query".to_string()).await;
+        let result = delete_query(&manager, &graph, "test-query").await;
         assert!(result.is_ok());
 
         // Verify query was removed
@@ -197,11 +252,11 @@ mod manager_tests {
 
         // Add a source first using instance-based approach
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a query
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_ok());
@@ -211,7 +266,11 @@ mod manager_tests {
             while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-query" {
                     // Skip the Stopped event emitted by add_query (with "added" message)
-                    if event.message.as_deref().map_or(false, |m| m.ends_with("added")) {
+                    if event
+                        .message
+                        .as_deref()
+                        .is_some_and(|m| m.ends_with("added"))
+                    {
                         continue;
                     }
                     assert!(
@@ -235,11 +294,11 @@ mod manager_tests {
 
         // Add a source using instance-based approach
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a query
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         manager.start_query("test-query".to_string()).await.unwrap();
 
@@ -270,11 +329,11 @@ mod manager_tests {
 
         // Add a source so subscriptions succeed using instance-based approach
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add the query and start it
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("test-query".to_string()).await.unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -304,21 +363,22 @@ mod manager_tests {
 
         // Add only source1 - source2 will be missing to trigger failure
         let source1 = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source1).await.unwrap();
+        add_source(&source_manager, &graph, source1).await.unwrap();
 
         // Create query that subscribes to TWO sources - source2 is missing
         let config = create_test_query_config(
             "test-query",
             vec!["source1".to_string(), "source2".to_string()],
         );
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Starting should fail because source2 doesn't exist
         let result = manager.start_query("test-query".to_string()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("source2"));
 
-        // Query should be in Error state
+        // Query should be in Error state (allow async graph update to propagate)
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
@@ -343,10 +403,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_add_gql_query() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
-        let result = manager.add_query(config.clone()).await;
+        let result = add_query(&manager, &graph, config.clone()).await;
 
         assert!(result.is_ok());
 
@@ -365,11 +425,11 @@ mod manager_tests {
 
         // Add a source first using instance-based approach
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add and start a GQL query
         let config = create_test_gql_query_config("test-gql-query", vec!["source1".to_string()]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         let result = manager.start_query("test-gql-query".to_string()).await;
         assert!(result.is_ok());
@@ -379,7 +439,11 @@ mod manager_tests {
             while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-gql-query" {
                     // Skip the Stopped event emitted by add_query (with "added" message)
-                    if event.message.as_deref().map_or(false, |m| m.ends_with("added")) {
+                    if event
+                        .message
+                        .as_deref()
+                        .is_some_and(|m| m.ends_with("added"))
+                    {
                         continue;
                     }
                     assert!(
@@ -396,15 +460,15 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_mixed_language_queries() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         // Add a Cypher query
         let cypher_config = create_test_query_config("cypher-query", vec!["source1".to_string()]);
-        assert!(manager.add_query(cypher_config).await.is_ok());
+        assert!(add_query(&manager, &graph, cypher_config).await.is_ok());
 
         // Add a GQL query
         let gql_config = create_test_gql_query_config("gql-query", vec!["source1".to_string()]);
-        assert!(manager.add_query(gql_config).await.is_ok());
+        assert!(add_query(&manager, &graph, gql_config).await.is_ok());
 
         // Verify both queries were added
         let queries = manager.list_queries().await;
@@ -417,10 +481,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_get_query_config() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(config.clone()).await.unwrap();
+        add_query(&manager, &graph, config.clone()).await.unwrap();
 
         let retrieved = manager.get_query_config("test-query").await;
         assert!(retrieved.is_some());
@@ -433,10 +497,10 @@ mod manager_tests {
 
     #[tokio::test]
     async fn test_update_query() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         let mut config = create_test_query_config("test-query", vec![]);
-        manager.add_query(config.clone()).await.unwrap();
+        add_query(&manager, &graph, config.clone()).await.unwrap();
 
         // Update config
         config.query = "MATCH (n:Updated) RETURN n".to_string();
@@ -457,11 +521,11 @@ mod manager_tests {
 
         // Add a source using instance-based approach
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add a query that subscribes to the source
         let query_config = create_test_query_config("test-query", vec!["source1".to_string()]);
-        manager.add_query(query_config).await.unwrap();
+        add_query(&manager, &graph, query_config).await.unwrap();
 
         // Verify query is in stopped state
         let status = manager
@@ -484,7 +548,8 @@ mod manager_tests {
         // Stop the query
         manager.stop_query("test-query".to_string()).await.unwrap();
 
-        // Verify query is stopped
+        // Verify query is stopped (allow async graph update to propagate)
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
@@ -507,11 +572,11 @@ mod manager_tests {
     /// Test that query with auto_start=false can be added and remains stopped
     #[tokio::test]
     async fn test_query_auto_start_false_not_started_on_add() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false (no sources needed since we won't start it)
         let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Query should be in stopped state
         let status = manager
@@ -531,7 +596,7 @@ mod manager_tests {
 
         // Add a source
         let source = create_test_mock_source("source1".to_string());
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add query with auto_start=false
         let config = create_test_query_config_with_auto_start(
@@ -539,7 +604,7 @@ mod manager_tests {
             vec!["source1".to_string()],
             false,
         );
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Query should be in stopped state initially
         let status = manager
@@ -573,11 +638,11 @@ mod manager_tests {
     /// Test that get_query_config preserves auto_start value
     #[tokio::test]
     async fn test_query_config_preserves_auto_start() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         // Add query with auto_start=false
         let config = create_test_query_config_with_auto_start("test-query", vec![], false);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Retrieve config and verify auto_start is preserved
         let retrieved = manager.get_query_config("test-query").await.unwrap();
@@ -588,7 +653,7 @@ mod manager_tests {
 
         // Add another query with auto_start=true
         let config2 = create_test_query_config_with_auto_start("test-query-2", vec![], true);
-        manager.add_query(config2).await.unwrap();
+        add_query(&manager, &graph, config2).await.unwrap();
 
         let retrieved2 = manager.get_query_config("test-query-2").await.unwrap();
         assert!(
@@ -604,11 +669,11 @@ mod manager_tests {
     /// Test that deleting a query cleans up its event history
     #[tokio::test]
     async fn test_delete_query_cleans_up_event_history() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-events-query", vec![]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Record an event manually to simulate lifecycle
         manager
@@ -626,8 +691,7 @@ mod manager_tests {
         assert!(!events.is_empty(), "Expected events after recording");
 
         // Delete the query
-        manager
-            .delete_query("cleanup-events-query".to_string())
+        delete_query(&manager, &graph, "cleanup-events-query")
             .await
             .unwrap();
 
@@ -654,11 +718,11 @@ mod manager_tests {
 
         // Add a source that provides the bootstrap channel
         let source = create_test_bootstrap_mock_source("bs-source".to_string(), bootstrap_rx);
-        source_manager.add_source(source).await.unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
 
         // Add a query subscribed to this source
         let config = create_test_query_config("bs-query", vec!["bs-source".to_string()]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Start the query
         manager.start_query("bs-query".to_string()).await.unwrap();
@@ -719,11 +783,11 @@ mod manager_tests {
     /// Test that deleting a query cleans up its log history
     #[tokio::test]
     async fn test_delete_query_cleans_up_log_history() {
-        let (manager, _source_manager, _graph) = create_test_manager().await;
+        let (manager, source_manager, graph) = create_test_manager().await;
 
         // Add a query
         let config = create_test_query_config("cleanup-logs-query", vec![]);
-        manager.add_query(config).await.unwrap();
+        add_query(&manager, &graph, config).await.unwrap();
 
         // Generate a log via subscribe (which creates the channel) then check
         // First subscribe to create the channel
@@ -731,8 +795,7 @@ mod manager_tests {
         assert!(result.is_some(), "Expected to subscribe to query logs");
 
         // Delete the query
-        manager
-            .delete_query("cleanup-logs-query".to_string())
+        delete_query(&manager, &graph, "cleanup-logs-query")
             .await
             .unwrap();
 

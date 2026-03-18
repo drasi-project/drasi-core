@@ -308,12 +308,30 @@ impl DrasiLibBuilder {
             .map_err(|e| {
                 DrasiError::provisioning(format!("Failed to create component graph source: {e}"))
             })?;
+
+            // Register in graph first, then provision
+            let source_id = graph_source.id().to_string();
+            let source_type = graph_source.type_name().to_string();
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), source_type);
+                metadata.insert(
+                    "autoStart".to_string(),
+                    graph_source.auto_start().to_string(),
+                );
+                graph.register_source(&source_id, metadata).map_err(|e| {
+                    DrasiError::provisioning(format!(
+                        "Failed to register component graph source: {e}"
+                    ))
+                })?;
+            }
             core.source_manager
-                .add_source(graph_source)
+                .provision_source(graph_source)
                 .await
                 .map_err(|e| {
                     DrasiError::provisioning(format!(
-                        "Failed to register component graph source: {e}"
+                        "Failed to provision component graph source: {e}"
                     ))
                 })?;
         }
@@ -321,22 +339,56 @@ impl DrasiLibBuilder {
         // Inject pre-built source instances
         for source in self.source_instances {
             let source_id = source.id().to_string();
-            core.source_manager.add_source(source).await.map_err(|e| {
-                DrasiError::provisioning(format!(
-                    "Failed to add source instance '{source_id}': {e}"
-                ))
-            })?;
+            let source_type = source.type_name().to_string();
+            let auto_start = source.auto_start();
+
+            // Register in graph first, then provision
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), source_type);
+                metadata.insert("autoStart".to_string(), auto_start.to_string());
+                graph.register_source(&source_id, metadata).map_err(|e| {
+                    DrasiError::provisioning(format!(
+                        "Failed to register source instance '{source_id}': {e}"
+                    ))
+                })?;
+            }
+            core.source_manager
+                .provision_source(source)
+                .await
+                .map_err(|e| {
+                    DrasiError::provisioning(format!(
+                        "Failed to provision source instance '{source_id}': {e}"
+                    ))
+                })?;
         }
 
         // Inject pre-built reaction instances
         for reaction in self.reaction_instances {
             let reaction_id = reaction.id().to_string();
+            let reaction_type = reaction.type_name().to_string();
+            let query_ids = reaction.query_ids();
+
+            // Register in graph first, then provision
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), reaction_type);
+                graph
+                    .register_reaction(&reaction_id, metadata, &query_ids)
+                    .map_err(|e| {
+                        DrasiError::provisioning(format!(
+                            "Failed to register reaction instance '{reaction_id}': {e}"
+                        ))
+                    })?;
+            }
             core.reaction_manager
-                .add_reaction(reaction)
+                .provision_reaction(reaction)
                 .await
                 .map_err(|e| {
                     DrasiError::provisioning(format!(
-                        "Failed to add reaction instance '{reaction_id}': {e}"
+                        "Failed to provision reaction instance '{reaction_id}': {e}"
                     ))
                 })?;
         }

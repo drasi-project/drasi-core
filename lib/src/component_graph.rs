@@ -44,7 +44,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use petgraph::stable_graph::{NodeIndex, StableGraph};
+use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
@@ -495,6 +495,20 @@ impl ComponentGraph {
     ///
     /// Returns an error if a component with the same ID already exists.
     pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
+        let (node_idx, event) = self.add_component_internal(node)?;
+        if let Some(event) = event {
+            let _ = self.event_tx.send(event);
+        }
+        Ok(node_idx)
+    }
+
+    /// Internal: adds a component and returns the event without emitting it.
+    /// Used by both `add_component()` (emits immediately) and `GraphTransaction`
+    /// (defers emission to commit).
+    fn add_component_internal(
+        &mut self,
+        node: ComponentNode,
+    ) -> anyhow::Result<(NodeIndex, Option<ComponentEvent>)> {
         if self.index.contains_key(&node.id) {
             return Err(anyhow::anyhow!(
                 "{} '{}' already exists in the graph",
@@ -515,14 +529,22 @@ impl ComponentGraph {
         self.graph
             .add_edge(node_idx, self.instance_idx, RelationshipKind::OwnedBy);
 
-        self.emit_event(&id, &kind, status, Some(format!("{kind} added")));
+        let event = kind
+            .to_component_type()
+            .map(|component_type| ComponentEvent {
+                component_id: id,
+                component_type,
+                status,
+                timestamp: chrono::Utc::now(),
+                message: Some(format!("{kind} added")),
+            });
 
-        Ok(node_idx)
+        Ok((node_idx, event))
     }
 
     /// Remove a component node and all its edges from the graph.
     ///
-    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Removed`] to all
+    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Stopped`] to all
     /// subscribers. Returns the removed node data, or an error if the component
     /// doesn't exist. The instance root node cannot be removed.
     pub fn remove_component(&mut self, id: &str) -> anyhow::Result<ComponentNode> {
@@ -612,6 +634,22 @@ impl ComponentGraph {
             .get_component_mut(id)
             .ok_or_else(|| anyhow::anyhow!("Component '{id}' not found in graph"))?;
         let kind = node.kind.clone();
+
+        // Same-state updates are idempotent no-ops (no event, no warning)
+        if node.status == status {
+            return Ok(None);
+        }
+
+        if !is_valid_transition(&node.status, &status) {
+            tracing::warn!(
+                "Invalid state transition for component '{}': {:?} → {:?}, ignoring update",
+                id,
+                node.status,
+                status
+            );
+            return Ok(None);
+        }
+
         node.status = status.clone();
 
         Ok(self.emit_event(id, &kind, status, message))
@@ -621,15 +659,70 @@ impl ComponentGraph {
     // Edge Operations
     // ========================================================================
 
-    /// Add a bidirectional relationship between two components.
+    /// Add a bidirectional relationship between two components (idempotent).
     ///
     /// Creates both the forward edge (from → to with `forward` relationship) and
     /// the reverse edge (to → from with the reverse of `forward`).
+    /// If the relationship already exists, this is a no-op and returns `Ok(())`.
     ///
     /// # Errors
     ///
     /// Returns an error if either component doesn't exist.
     pub fn add_relationship(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        forward: RelationshipKind,
+    ) -> anyhow::Result<()> {
+        let (_, _) = self.add_relationship_internal(from_id, to_id, forward)?;
+        Ok(())
+    }
+
+    /// Internal: adds a relationship and returns the edge indices for rollback.
+    /// Returns `(None, None)` if the relationship already exists (idempotent).
+    fn add_relationship_internal(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        forward: RelationshipKind,
+    ) -> anyhow::Result<(Option<EdgeIndex>, Option<EdgeIndex>)> {
+        let from_idx = self
+            .index
+            .get(from_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Component '{from_id}' not found in graph"))?;
+        let to_idx = self
+            .index
+            .get(to_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Component '{to_id}' not found in graph"))?;
+
+        // Idempotency: check if the forward edge already exists
+        let already_exists = self
+            .graph
+            .edges_directed(from_idx, Direction::Outgoing)
+            .any(|e| e.target() == to_idx && e.weight() == &forward);
+        if already_exists {
+            return Ok((None, None));
+        }
+
+        let reverse = forward.reverse();
+        let fwd_edge = self.graph.add_edge(from_idx, to_idx, forward);
+        let rev_edge = self.graph.add_edge(to_idx, from_idx, reverse);
+
+        Ok((Some(fwd_edge), Some(rev_edge)))
+    }
+
+    /// Remove a bidirectional relationship between two components.
+    ///
+    /// Removes both the forward edge (from → to with `forward` relationship) and
+    /// the reverse edge (to → from with the reverse of `forward`).
+    /// If the relationship doesn't exist, this is a no-op and returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either component doesn't exist in the graph.
+    pub fn remove_relationship(
         &mut self,
         from_id: &str,
         to_id: &str,
@@ -647,8 +740,26 @@ impl ComponentGraph {
             .ok_or_else(|| anyhow::anyhow!("Component '{to_id}' not found in graph"))?;
 
         let reverse = forward.reverse();
-        self.graph.add_edge(from_idx, to_idx, forward);
-        self.graph.add_edge(to_idx, from_idx, reverse);
+
+        // Find and remove forward edge
+        let forward_edge = self
+            .graph
+            .edges_directed(from_idx, Direction::Outgoing)
+            .find(|e| e.target() == to_idx && e.weight() == &forward)
+            .map(|e| e.id());
+        if let Some(edge_id) = forward_edge {
+            self.graph.remove_edge(edge_id);
+        }
+
+        // Find and remove reverse edge
+        let reverse_edge = self
+            .graph
+            .edges_directed(to_idx, Direction::Outgoing)
+            .find(|e| e.target() == from_idx && e.weight() == &reverse)
+            .map(|e| e.id());
+        if let Some(edge_id) = reverse_edge {
+            self.graph.remove_edge(edge_id);
+        }
 
         Ok(())
     }
@@ -812,6 +923,354 @@ impl ComponentGraph {
     /// Get the total number of edges.
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    // ========================================================================
+    // High-Level Registration (Source of Truth)
+    // ========================================================================
+
+    /// Register a source component in the graph.
+    ///
+    /// Creates the node and bidirectional ownership edges transactionally.
+    /// Events are emitted only on successful commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a component with the same ID already exists.
+    pub fn register_source(
+        &mut self,
+        id: &str,
+        metadata: HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let node = ComponentNode {
+            id: id.to_string(),
+            kind: ComponentKind::Source,
+            status: ComponentStatus::Stopped,
+            metadata,
+        };
+        let mut txn = self.begin();
+        txn.add_component(node)?;
+        txn.commit();
+        Ok(())
+    }
+
+    /// Register a query component with its source dependencies.
+    ///
+    /// Creates the node, ownership edges, and `Feeds` edges from each source.
+    /// All operations are transactional — if any dependency is missing or any
+    /// step fails, the entire registration is rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A component with the same ID already exists
+    /// - Any referenced source does not exist in the graph
+    pub fn register_query(
+        &mut self,
+        id: &str,
+        metadata: HashMap<String, String>,
+        source_ids: &[String],
+    ) -> anyhow::Result<()> {
+        // Validate all dependencies exist before starting the transaction
+        for source_id in source_ids {
+            if !self.contains(source_id) {
+                return Err(anyhow::anyhow!(
+                    "Cannot register query '{id}': referenced source '{source_id}' does not exist in the graph"
+                ));
+            }
+        }
+
+        let node = ComponentNode {
+            id: id.to_string(),
+            kind: ComponentKind::Query,
+            status: ComponentStatus::Stopped,
+            metadata,
+        };
+        let mut txn = self.begin();
+        txn.add_component(node)?;
+        for source_id in source_ids {
+            txn.add_relationship(source_id, id, RelationshipKind::Feeds)?;
+        }
+        txn.commit();
+        Ok(())
+    }
+
+    /// Register a reaction component with its query dependencies.
+    ///
+    /// Creates the node, ownership edges, and `Feeds` edges from each query.
+    /// All operations are transactional — if any dependency is missing or any
+    /// step fails, the entire registration is rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A component with the same ID already exists
+    /// - Any referenced query does not exist in the graph
+    pub fn register_reaction(
+        &mut self,
+        id: &str,
+        metadata: HashMap<String, String>,
+        query_ids: &[String],
+    ) -> anyhow::Result<()> {
+        // Validate all dependencies exist before starting the transaction
+        for query_id in query_ids {
+            if !self.contains(query_id) {
+                return Err(anyhow::anyhow!(
+                    "Cannot register reaction '{id}': referenced query '{query_id}' does not exist in the graph"
+                ));
+            }
+        }
+
+        let node = ComponentNode {
+            id: id.to_string(),
+            kind: ComponentKind::Reaction,
+            status: ComponentStatus::Stopped,
+            metadata,
+        };
+        let mut txn = self.begin();
+        txn.add_component(node)?;
+        for query_id in query_ids {
+            txn.add_relationship(query_id, id, RelationshipKind::Feeds)?;
+        }
+        txn.commit();
+        Ok(())
+    }
+
+    /// Deregister a component and all its edges from the graph.
+    ///
+    /// Validates that the component exists and has no dependents before removal.
+    /// The instance root node cannot be deregistered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The component does not exist
+    /// - The component has dependents (use `can_remove()` to check first)
+    /// - The component is the instance root node
+    pub fn deregister(&mut self, id: &str) -> anyhow::Result<ComponentNode> {
+        // Validate no dependents
+        if let Err(dependent_ids) = self.can_remove(id) {
+            return Err(anyhow::anyhow!(
+                "Cannot deregister '{}': depended on by: {}",
+                id,
+                dependent_ids.join(", ")
+            ));
+        }
+        self.remove_component(id)
+    }
+
+    // ========================================================================
+    // Transactions
+    // ========================================================================
+
+    /// Begin a transactional mutation of the graph.
+    ///
+    /// Returns a [`GraphTransaction`] that collects mutations (nodes, edges)
+    /// and defers event emission until [`commit()`](GraphTransaction::commit).
+    /// If the transaction is dropped without being committed, all added nodes
+    /// and edges are rolled back automatically.
+    ///
+    /// The `&mut self` borrow ensures compile-time exclusivity — no other code
+    /// can access the graph while a transaction is in progress.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut graph = self.graph.write().await;
+    /// let mut txn = graph.begin();
+    /// txn.add_component(source_node)?;
+    /// txn.add_relationship("source-1", "query-1", RelationshipKind::Feeds)?;
+    /// txn.commit(); // events emitted here; if this line is not reached, rollback on drop
+    /// ```
+    pub fn begin(&mut self) -> GraphTransaction<'_> {
+        GraphTransaction {
+            graph: self,
+            added_nodes: Vec::new(),
+            added_edges: Vec::new(),
+            pending_events: Vec::new(),
+            committed: false,
+        }
+    }
+}
+
+// ============================================================================
+// State Transition Validation
+// ============================================================================
+
+/// Check if a status transition is valid according to the component lifecycle state machine.
+///
+/// ```text
+/// Stopped ──→ Starting ──→ Running ──→ Stopping ──→ Stopped
+///    │            │            │            │
+///    │            ↓            ↓            ↓
+///    │          Error        Error        Error
+///    │            │
+///    │            ↓
+///    │         Stopped (aborted start)
+///    │
+///    ↓
+/// Reconfiguring ──→ Stopped | Starting | Error
+///
+/// Error ──→ Starting (retry) | Stopped (reset)
+/// ```
+fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
+    use ComponentStatus::*;
+    matches!(
+        (from, to),
+        // Normal lifecycle
+        (Stopped, Starting)
+            | (Starting, Running)
+            | (Starting, Error)
+            | (Starting, Stopped) // aborted start
+            | (Running, Stopping)
+            | (Running, Error)
+            | (Stopping, Stopped)
+            | (Stopping, Error)
+            // Error recovery
+            | (Error, Starting) // retry
+            | (Error, Stopped) // reset
+            // Reconfiguration (from any stable state)
+            | (Stopped, Reconfiguring)
+            | (Running, Reconfiguring)
+            | (Error, Reconfiguring)
+            | (Reconfiguring, Stopped)
+            | (Reconfiguring, Starting)
+            | (Reconfiguring, Error)
+    )
+}
+
+// ============================================================================
+// Graph Transaction
+// ============================================================================
+
+/// A transactional wrapper for batching graph mutations.
+///
+/// Collects added nodes and edges, deferring event emission until [`commit()`](Self::commit).
+/// If dropped without commit, all additions are rolled back (nodes and edges removed).
+///
+/// The `&'g mut ComponentGraph` borrow ensures Rust's borrow checker prevents
+/// any concurrent access to the graph during the transaction — zero-cost safety.
+///
+/// # Cross-system usage
+///
+/// For operations that span the graph and external systems (runtime initialization,
+/// HashMap insertion), use this pattern:
+///
+/// ```ignore
+/// // Phase 1: Graph transaction
+/// {
+///     let mut graph = self.graph.write().await;
+///     let mut txn = graph.begin();
+///     txn.add_component(node)?;
+///     txn.commit(); // graph is consistent
+/// }
+///
+/// // Phase 2: Runtime init (no graph lock)
+/// let instance = match RuntimeType::new(...) {
+///     Ok(i) => i,
+///     Err(e) => {
+///         // Compensating rollback
+///         let mut graph = self.graph.write().await;
+///         let _ = graph.remove_component(&id);
+///         return Err(e);
+///     }
+/// };
+/// ```
+pub struct GraphTransaction<'g> {
+    graph: &'g mut ComponentGraph,
+    added_nodes: Vec<(NodeIndex, String)>,
+    added_edges: Vec<EdgeIndex>,
+    pending_events: Vec<ComponentEvent>,
+    committed: bool,
+}
+
+impl<'g> GraphTransaction<'g> {
+    /// Add a component node to the graph within this transaction.
+    ///
+    /// The node is added immediately (so subsequent `add_relationship` calls
+    /// can reference it), but the event is deferred until `commit()`.
+    /// On rollback (drop without commit), the node and its ownership edges
+    /// are removed.
+    pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
+        let id = node.id.clone();
+        let (node_idx, event) = self.graph.add_component_internal(node)?;
+        self.added_nodes.push((node_idx, id));
+
+        // Record the ownership edges for rollback
+        // add_component_internal creates exactly 2 edges: Owns and OwnedBy
+        // They are the last 2 edges added to the graph
+        let edge_count = self.graph.graph.edge_count();
+        for edge_ref in self.graph.graph.edge_indices() {
+            // Track edges that belong to the newly added node
+            let endpoints = self.graph.graph.edge_endpoints(edge_ref);
+            if let Some((from, to)) = endpoints {
+                if from == node_idx || to == node_idx {
+                    self.added_edges.push(edge_ref);
+                }
+            }
+        }
+        // Deduplicate (the node might have edges from prior transaction steps)
+        self.added_edges.sort();
+        self.added_edges.dedup();
+
+        if let Some(event) = event {
+            self.pending_events.push(event);
+        }
+
+        Ok(node_idx)
+    }
+
+    /// Add a bidirectional relationship within this transaction.
+    ///
+    /// The edges are added immediately; on rollback they are removed.
+    /// Idempotent: if the relationship already exists, this is a no-op.
+    pub fn add_relationship(
+        &mut self,
+        from_id: &str,
+        to_id: &str,
+        forward: RelationshipKind,
+    ) -> anyhow::Result<()> {
+        let (fwd, rev) = self
+            .graph
+            .add_relationship_internal(from_id, to_id, forward)?;
+        if let Some(e) = fwd {
+            self.added_edges.push(e);
+        }
+        if let Some(e) = rev {
+            self.added_edges.push(e);
+        }
+        Ok(())
+    }
+
+    /// Commit the transaction: emit all deferred events.
+    ///
+    /// After commit, the mutations are permanent and cannot be rolled back
+    /// through this transaction. For cross-system rollback, use compensating
+    /// actions (e.g., `graph.remove_component()`).
+    pub fn commit(mut self) {
+        self.committed = true;
+        for event in &self.pending_events {
+            let _ = self.graph.event_tx.send(event.clone());
+        }
+    }
+}
+
+impl<'g> Drop for GraphTransaction<'g> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        // Rollback: remove all added edges first (reverse order to maintain index stability)
+        for &edge_idx in self.added_edges.iter().rev() {
+            self.graph.graph.remove_edge(edge_idx);
+        }
+
+        // Remove all added nodes (reverse order)
+        for (node_idx, ref id) in self.added_nodes.iter().rev() {
+            self.graph.index.remove(id.as_str());
+            self.graph.graph.remove_node(*node_idx);
+        }
     }
 }
 
@@ -1011,6 +1470,16 @@ mod tests {
             ComponentStatus::Stopped
         );
 
+        // Follow valid transitions: Stopped → Starting → Running
+        graph
+            .update_status("source-1", ComponentStatus::Starting)
+            .unwrap();
+
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Starting
+        );
+
         graph
             .update_status("source-1", ComponentStatus::Running)
             .unwrap();
@@ -1161,5 +1630,364 @@ mod tests {
 
         // Source no longer has any dependents
         assert!(graph.get_dependents("source-1").is_empty());
+    }
+
+    // ====================================================================
+    // Duplicate edge prevention tests
+    // ====================================================================
+
+    #[test]
+    fn test_add_duplicate_relationship_is_idempotent() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+
+        // First add: creates 2 new edges (Feeds + SubscribesTo)
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        assert_eq!(graph.edge_count(), 6); // 4 Owns/OwnedBy + 2 Feeds/SubscribesTo
+
+        // Second add: no-op
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        assert_eq!(graph.edge_count(), 6); // unchanged
+    }
+
+    // ====================================================================
+    // Remove relationship tests
+    // ====================================================================
+
+    #[test]
+    fn test_remove_relationship() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        assert_eq!(graph.edge_count(), 6);
+
+        // Remove the Feeds/SubscribesTo relationship
+        graph
+            .remove_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        // Only 4 Owns/OwnedBy edges remain
+        assert_eq!(graph.edge_count(), 4);
+
+        // No more dependents
+        assert!(graph.get_dependents("source-1").is_empty());
+        assert!(graph.get_dependencies("query-1").is_empty());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_relationship_is_noop() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+        // No relationship added — removal should succeed as no-op
+        graph
+            .remove_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        assert_eq!(graph.edge_count(), 4);
+    }
+
+    // ====================================================================
+    // Transaction tests
+    // ====================================================================
+
+    #[test]
+    fn test_transaction_commit_emits_events() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut event_rx = graph.subscribe();
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(source_node("source-1")).unwrap();
+            txn.add_component(query_node("query-1")).unwrap();
+            txn.add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+                .unwrap();
+            // Events not yet emitted
+            assert!(event_rx.try_recv().is_err());
+            txn.commit();
+        }
+
+        // After commit, events are emitted
+        let e1 = event_rx.try_recv().unwrap();
+        assert_eq!(e1.component_id, "source-1");
+        let e2 = event_rx.try_recv().unwrap();
+        assert_eq!(e2.component_id, "query-1");
+
+        // Graph has the components
+        assert!(graph.contains("source-1"));
+        assert!(graph.contains("query-1"));
+        assert_eq!(graph.get_dependents("source-1").len(), 1);
+    }
+
+    #[test]
+    fn test_transaction_rollback_on_drop() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(source_node("source-1")).unwrap();
+            txn.add_component(query_node("query-1")).unwrap();
+            txn.add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+                .unwrap();
+            // Drop without commit — rollback
+        }
+
+        // Components should not exist
+        assert!(!graph.contains("source-1"));
+        assert!(!graph.contains("query-1"));
+        assert_eq!(graph.node_count(), 1); // only instance root
+        assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_partial_failure_rollback() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        // Pre-add a source outside the transaction
+        graph.add_component(source_node("source-1")).unwrap();
+        assert_eq!(graph.node_count(), 2);
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(query_node("query-1")).unwrap();
+            // Try to add duplicate — this fails
+            let result = txn.add_component(source_node("source-1"));
+            assert!(result.is_err());
+            // Drop without commit — query-1 should be rolled back
+        }
+
+        // source-1 still exists (added before transaction), query-1 does not
+        assert!(graph.contains("source-1"));
+        assert!(!graph.contains("query-1"));
+        assert_eq!(graph.node_count(), 2);
+    }
+
+    #[test]
+    fn test_valid_state_transitions() {
+        assert!(is_valid_transition(
+            &ComponentStatus::Stopped,
+            &ComponentStatus::Starting
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Starting,
+            &ComponentStatus::Running
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Running,
+            &ComponentStatus::Stopping
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Stopping,
+            &ComponentStatus::Stopped
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Starting,
+            &ComponentStatus::Error
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Running,
+            &ComponentStatus::Error
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Error,
+            &ComponentStatus::Starting
+        ));
+        assert!(is_valid_transition(
+            &ComponentStatus::Error,
+            &ComponentStatus::Stopped
+        ));
+    }
+
+    #[test]
+    fn test_invalid_state_transitions() {
+        assert!(!is_valid_transition(
+            &ComponentStatus::Stopped,
+            &ComponentStatus::Running
+        ));
+        assert!(!is_valid_transition(
+            &ComponentStatus::Stopped,
+            &ComponentStatus::Stopping
+        ));
+        assert!(!is_valid_transition(
+            &ComponentStatus::Running,
+            &ComponentStatus::Starting
+        ));
+        assert!(!is_valid_transition(
+            &ComponentStatus::Starting,
+            &ComponentStatus::Stopping
+        ));
+    }
+
+    #[test]
+    fn test_update_status_rejects_invalid_transition() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        // source-1 starts as Stopped
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+
+        // Invalid: Stopped → Running (must go through Starting)
+        let result = graph.update_status("source-1", ComponentStatus::Running);
+        assert!(result.is_ok());
+        // The update should return None (skipped) and status should remain Stopped
+        assert!(result.unwrap().is_none());
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+
+        // Valid: Stopped → Starting
+        let result = graph.update_status("source-1", ComponentStatus::Starting);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Starting
+        );
+    }
+
+    // ====================================================================
+    // Registration method tests
+    // ====================================================================
+
+    #[test]
+    fn test_register_source() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+
+        assert!(graph.contains("source-1"));
+        assert_eq!(
+            graph.get_component("source-1").unwrap().kind,
+            ComponentKind::Source
+        );
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+        // 2 ownership edges
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_register_source_duplicate_fails() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        let result = graph.register_source("source-1", HashMap::new());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_register_query_with_sources() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        graph.register_source("source-2", HashMap::new()).unwrap();
+
+        graph
+            .register_query(
+                "query-1",
+                HashMap::new(),
+                &["source-1".to_string(), "source-2".to_string()],
+            )
+            .unwrap();
+
+        assert!(graph.contains("query-1"));
+        let deps = graph.get_dependencies("query-1");
+        assert_eq!(deps.len(), 2);
+        assert_eq!(graph.get_dependents("source-1").len(), 1);
+        assert_eq!(graph.get_dependents("source-2").len(), 1);
+    }
+
+    #[test]
+    fn test_register_query_missing_source_fails() {
+        let mut graph = create_test_graph();
+        let result = graph.register_query("query-1", HashMap::new(), &["source-1".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(!graph.contains("query-1"));
+    }
+
+    #[test]
+    fn test_register_reaction_with_queries() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        graph
+            .register_query("query-1", HashMap::new(), &["source-1".to_string()])
+            .unwrap();
+
+        graph
+            .register_reaction("reaction-1", HashMap::new(), &["query-1".to_string()])
+            .unwrap();
+
+        assert!(graph.contains("reaction-1"));
+        assert_eq!(graph.get_dependents("query-1").len(), 1);
+        assert_eq!(graph.get_dependencies("reaction-1").len(), 1);
+    }
+
+    #[test]
+    fn test_register_reaction_missing_query_fails() {
+        let mut graph = create_test_graph();
+        let result = graph.register_reaction(
+            "reaction-1",
+            HashMap::new(),
+            &["nonexistent-query".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(!graph.contains("reaction-1"));
+    }
+
+    #[test]
+    fn test_deregister_succeeds_no_dependents() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        let removed = graph.deregister("source-1").unwrap();
+        assert_eq!(removed.id, "source-1");
+        assert!(!graph.contains("source-1"));
+    }
+
+    #[test]
+    fn test_deregister_fails_with_dependents() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        graph
+            .register_query("query-1", HashMap::new(), &["source-1".to_string()])
+            .unwrap();
+
+        let result = graph.deregister("source-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("depended on by"));
+        assert!(graph.contains("source-1"));
+    }
+
+    #[test]
+    fn test_full_pipeline_registration() {
+        let mut graph = create_test_graph();
+        graph.register_source("src", HashMap::new()).unwrap();
+        graph
+            .register_query("qry", HashMap::new(), &["src".to_string()])
+            .unwrap();
+        graph
+            .register_reaction("rxn", HashMap::new(), &["qry".to_string()])
+            .unwrap();
+
+        assert_eq!(graph.get_dependents("src").len(), 1);
+        assert_eq!(graph.get_dependents("qry").len(), 1);
+        assert!(graph.get_dependents("rxn").is_empty());
+
+        assert!(graph.deregister("src").is_err());
+        graph.deregister("rxn").unwrap();
+        graph.deregister("qry").unwrap();
+        graph.deregister("src").unwrap();
+
+        assert_eq!(graph.node_count(), 1);
     }
 }

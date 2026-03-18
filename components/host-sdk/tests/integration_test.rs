@@ -1037,8 +1037,8 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     // Verify we got at least Starting and Started (from start)
     let statuses: Vec<_> = our_events
         .iter()
-        .filter_map(|e| match e {
-            ComponentUpdate::Status { status, .. } => Some(status),
+        .map(|e| match e {
+            ComponentUpdate::Status { status, .. } => status,
         })
         .collect();
     assert!(
@@ -1959,7 +1959,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Connect SSE client and collect events
-    let sse_url = format!("http://127.0.0.1:{}/events", sse_port);
+    let sse_url = format!("http://127.0.0.1:{sse_port}/events");
     let collected = collect_sse_events(&sse_url, 5, std::time::Duration::from_secs(10)).await;
 
     assert!(

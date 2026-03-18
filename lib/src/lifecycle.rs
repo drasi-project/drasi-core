@@ -14,9 +14,12 @@
 
 use anyhow::Result;
 use log::info;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::channels::ComponentStatus;
+use crate::component_graph::ComponentGraph;
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -37,6 +40,7 @@ pub(crate) struct LifecycleManager {
     source_manager: Arc<SourceManager>,
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
+    graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl LifecycleManager {
@@ -46,12 +50,14 @@ impl LifecycleManager {
         source_manager: Arc<SourceManager>,
         query_manager: Arc<QueryManager>,
         reaction_manager: Arc<ReactionManager>,
+        graph: Arc<RwLock<ComponentGraph>>,
     ) -> Self {
         Self {
             config,
             source_manager,
             query_manager,
             reaction_manager,
+            graph,
         }
     }
 
@@ -65,7 +71,27 @@ impl LifecycleManager {
         // Load queries (only queries use config-based creation)
         for query_config in &self.config.queries {
             let config = query_config.clone();
-            self.query_manager.add_query_without_save(config).await?;
+
+            // Step 1: Register in the component graph
+            {
+                let mut graph = self.graph.write().await;
+                let mut metadata = HashMap::new();
+                metadata.insert("query".to_string(), config.query.clone());
+                let source_ids: Vec<String> =
+                    config.sources.iter().map(|s| s.source_id.clone()).collect();
+                // Ensure referenced sources exist as placeholder nodes.
+                // Sources may be injected later (e.g. by the builder) so we
+                // create minimal graph nodes to satisfy the reference check.
+                for sid in &source_ids {
+                    if !graph.contains(sid) {
+                        graph.register_source(sid, HashMap::new())?;
+                    }
+                }
+                graph.register_query(&config.id, metadata, &source_ids)?;
+            }
+
+            // Step 2: Provision runtime
+            self.query_manager.provision_query(config).await?;
         }
 
         info!("Configuration loaded successfully");

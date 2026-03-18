@@ -19,6 +19,7 @@
 
 use anyhow::Result as AnyhowResult;
 use futures::stream::Stream;
+use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_state_error;
@@ -68,25 +69,31 @@ impl DrasiLib {
     pub async fn remove_query(&self, id: &str) -> Result<()> {
         self.state_guard.require_initialized().await?;
 
-        // Stop if running
-        let status = self
-            .query_manager
-            .get_query_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("query", id))?;
-
-        if matches!(status, ComponentStatus::Running) {
-            self.query_manager
-                .stop_query(id.to_string())
-                .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop query: {e}")))?;
+        // Step 1: Validate no dependents
+        {
+            let graph = self.component_graph.read().await;
+            if let Err(dependent_ids) = graph.can_remove(id) {
+                return Err(DrasiError::provisioning(format!(
+                    "Cannot remove query '{}': depended on by: {}",
+                    id,
+                    dependent_ids.join(", ")
+                )));
+            }
         }
 
-        // Delete the query
+        // Step 2: Teardown runtime (stop, remove from runtime map)
         self.query_manager
-            .delete_query(id.to_string())
+            .teardown_query(id.to_string())
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete query: {e}")))?;
+            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown query: {e}")))?;
+
+        // Step 3: Deregister from graph (remove node + edges, emit events)
+        {
+            let mut graph = self.component_graph.write().await;
+            graph.deregister(id).map_err(|e| {
+                DrasiError::provisioning(format!("Failed to deregister query: {e}"))
+            })?;
+        }
 
         Ok(())
     }
@@ -324,10 +331,25 @@ impl DrasiLib {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        // Add the query (without saving during initialization)
-        self.query_manager.add_query_without_save(config).await?;
+        // Step 1: Register in the component graph (validates sources exist, creates node + edges)
+        {
+            let mut graph = self.component_graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            graph.register_query(&config.id, metadata, &source_ids)?;
+        }
 
-        // Start if auto-start is enabled and allowed
+        // Step 2: Provision runtime (create DrasiQuery, initialize, store)
+        if let Err(e) = self.query_manager.provision_query(config).await {
+            // Compensating rollback: remove from graph on runtime failure
+            let mut graph = self.component_graph.write().await;
+            let _ = graph.deregister(&query_id);
+            return Err(e);
+        }
+
+        // Step 3: Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
             self.query_manager.start_query(query_id).await?;
         }

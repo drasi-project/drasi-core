@@ -21,8 +21,7 @@ use tracing::Instrument;
 
 use crate::channels::*;
 use crate::component_graph::{
-    ComponentGraph, ComponentKind, ComponentNode, ComponentUpdate, ComponentUpdateSender,
-    RelationshipKind,
+    ComponentGraph, ComponentKind, ComponentUpdate, ComponentUpdateSender,
 };
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
@@ -95,66 +94,29 @@ impl ReactionManager {
         *self.state_store.write().await = Some(state_store);
     }
 
-    /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
+    /// Provision a reaction instance for runtime — initialize and store it.
+    ///
+    /// This method handles runtime-only operations: creating the runtime context,
+    /// initializing the reaction, and storing it in the runtime map. Graph registration
+    /// (node creation, dependency edges) must be done by the caller beforehand via
+    /// `ComponentGraph::register_reaction()`.
     ///
     /// # Parameters
-    /// - `reaction`: The reaction instance to add (ownership is transferred)
-    ///
-    /// # Returns
-    /// - `Ok(())` if the reaction was added successfully
-    /// - `Err` if a reaction with the same ID already exists, or if query subscriber not injected
+    /// - `reaction`: The reaction instance to provision (ownership is transferred)
     ///
     /// # Note
     /// The reaction will NOT be auto-started. Call `start_reaction` separately
     /// if you need to start it after adding.
-    ///
-    /// The reaction is automatically initialized with the runtime context before
-    /// it is stored.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let reaction = MyReaction::new("my-reaction", vec!["query1".into()]);
-    /// manager.add_reaction(reaction).await?;  // Ownership transferred
-    /// ```
-    pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
+    pub async fn provision_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
-        // Registry-first: register in the component graph before creating runtime state.
-        // The graph is the authoritative source of truth — if it rejects the add
-        // (duplicate ID), the runtime instance is never created.
-        {
-            let mut graph = self.graph.write().await;
-            let mut metadata = HashMap::new();
-            metadata.insert("kind".to_string(), reaction.type_name().to_string());
-            let node = ComponentNode {
-                id: reaction_id.clone(),
-                kind: ComponentKind::Reaction,
-                status: ComponentStatus::Stopped,
-                metadata,
-            };
-            graph.add_component(node)?;
-
-            // Create bidirectional Feeds/SubscribesTo edges for each subscribed query
-            for query_id in reaction.query_ids() {
-                if graph.contains(&query_id) {
-                    let _ =
-                        graph.add_relationship(&query_id, &reaction_id, RelationshipKind::Feeds);
-                }
-            }
-        }
-        // Graph emits ComponentEvent(Added) automatically
-
         // Construct runtime context for this reaction
-        let update_tx = {
-            let graph = self.graph.read().await;
-            graph.update_sender()
-        };
         let context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
             self.state_store.read().await.clone(),
-            update_tx,
+            self.update_tx.clone(),
             None,
         );
 
@@ -167,7 +129,7 @@ impl ReactionManager {
             reactions.insert(reaction_id.clone(), reaction.clone());
         }
 
-        info!("Added reaction: {reaction_id}");
+        info!("Provisioned reaction: {reaction_id}");
 
         Ok(())
     }
@@ -241,16 +203,11 @@ impl ReactionManager {
     }
 
     pub async fn get_reaction_status(&self, id: String) -> Result<ComponentStatus> {
-        let reaction = {
-            let reactions = self.reactions.read().await;
-            reactions.get(&id).cloned()
-        };
-
-        if let Some(reaction) = reaction {
-            Ok(reaction.status().await)
-        } else {
-            Err(anyhow::anyhow!("Reaction not found: {id}"))
-        }
+        let graph = self.graph.read().await;
+        let node = graph
+            .get_component(&id)
+            .ok_or_else(|| anyhow::anyhow!("Reaction not found: {id}"))?;
+        Ok(node.status.clone())
     }
 
     pub async fn get_reaction(&self, id: String) -> Result<ReactionRuntime> {
@@ -260,7 +217,14 @@ impl ReactionManager {
         };
 
         if let Some(reaction) = reaction {
-            let status = reaction.status().await;
+            // Read status from the graph (source of truth)
+            let status = {
+                let graph = self.graph.read().await;
+                graph
+                    .get_component(&id)
+                    .map(|n| n.status.clone())
+                    .unwrap_or(ComponentStatus::Stopped)
+            };
             let error_message = match &status {
                 ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
                 _ => None,
@@ -268,7 +232,7 @@ impl ReactionManager {
             let runtime = ReactionRuntime {
                 id: reaction.id().to_string(),
                 reaction_type: reaction.type_name().to_string(),
-                status: status.clone(),
+                status,
                 error_message,
                 queries: reaction.query_ids(),
                 properties: reaction.properties(),
@@ -279,7 +243,14 @@ impl ReactionManager {
         }
     }
 
-    pub async fn delete_reaction(&self, id: String, cleanup: bool) -> Result<()> {
+    /// Teardown a reaction's runtime state — stop, deprovision, and remove from runtime map.
+    ///
+    /// This method handles runtime-only operations. Graph deregistration
+    /// (node removal, edge cleanup) must be done by the caller afterwards via
+    /// `ComponentGraph::deregister()`.
+    ///
+    /// The caller should validate dependencies via `graph.can_remove()` before calling this.
+    pub async fn teardown_reaction(&self, id: String, cleanup: bool) -> Result<()> {
         // First check if the reaction exists
         let reaction = {
             let reactions = self.reactions.read().await;
@@ -291,11 +262,11 @@ impl ReactionManager {
 
             // If the reaction is running or starting, stop it first
             if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
-                info!("Stopping reaction '{id}' before deletion");
+                info!("Stopping reaction '{id}' before teardown");
                 // Abort subscription forwarder tasks
                 self.abort_subscription_tasks(&id).await;
                 if let Err(e) = reaction.stop().await {
-                    warn!("Failed to stop reaction '{id}' during deletion (may already be stopped): {e}");
+                    warn!("Failed to stop reaction '{id}' during teardown (may already be stopped): {e}");
                 }
 
                 // Wait a bit to ensure the reaction has fully stopped
@@ -307,7 +278,7 @@ impl ReactionManager {
                     new_status,
                     ComponentStatus::Stopped | ComponentStatus::Error
                 ) {
-                    warn!("Reaction '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
+                    warn!("Reaction '{id}' in unexpected state {new_status:?} after stop, proceeding with teardown");
                 }
             } else {
                 // Still validate the operation for non-running states
@@ -321,20 +292,15 @@ impl ReactionManager {
                 }
             }
 
-            // Now remove the reaction
+            // Now remove the reaction from runtime map
             self.reactions.write().await.remove(&id);
             self.abort_subscription_tasks(&id).await;
-            // Remove from the component graph (emits Removed event automatically)
-            {
-                let mut graph = self.graph.write().await;
-                let _ = graph.remove_component(&id);
-            }
             // Clean up event history for this reaction
             self.event_history.write().await.remove_component(&id);
             // Clean up log registry for this reaction
             let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Reaction, &id);
             self.log_registry.remove_component_by_key(&log_key).await;
-            info!("Deleted reaction: {id}");
+            info!("Teardown reaction: {id}");
 
             Ok(())
         } else {
@@ -379,15 +345,19 @@ impl ReactionManager {
                 is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
             }
 
-            // Route transitional state through the graph update loop
-            let _ = self
-                .update_tx
-                .send(ComponentUpdate::Status {
+            // Update graph status directly (cold path — reconfiguration is a manager-driven
+            // operation, not a component-reported status change).
+            // Also record the event in history so subscribers see it.
+            {
+                let mut graph = self.graph.write().await;
+                if let Some(event) = graph.apply_update(ComponentUpdate::Status {
                     component_id: id.clone(),
                     status: ComponentStatus::Reconfiguring,
                     message: Some("Reconfiguring reaction".to_string()),
-                })
-                .await;
+                }) {
+                    self.event_history.write().await.record_event(event);
+                }
+            }
 
             // If running or starting, stop first then validate
             if was_running {
@@ -416,15 +386,11 @@ impl ReactionManager {
 
             // Initialize the new reaction with runtime context
             let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let update_tx = {
-                let graph = self.graph.read().await;
-                graph.update_sender()
-            };
             let context = ReactionRuntimeContext::new(
                 &self.instance_id,
                 &id,
                 self.state_store.read().await.clone(),
-                update_tx,
+                self.update_tx.clone(),
                 None,
             );
             new_reaction.initialize(context).await;
@@ -443,9 +409,19 @@ impl ReactionManager {
 
             info!("Reconfigured reaction '{id}'");
 
-            // Restart if it was running before
+            // Restart if it was running before, otherwise transition back to Stopped
             if was_running {
                 self.start_reaction(id).await?;
+            } else {
+                let mut graph = self.graph.write().await;
+                if let Some(event) = graph.apply_update(ComponentUpdate::Status {
+                    component_id: id.clone(),
+                    status: ComponentStatus::Stopped,
+                    message: Some("Reconfiguration complete".to_string()),
+                }) {
+                    drop(graph);
+                    self.event_history.write().await.record_event(event);
+                }
             }
 
             Ok(())
@@ -455,21 +431,8 @@ impl ReactionManager {
     }
 
     pub async fn list_reactions(&self) -> Vec<(String, ComponentStatus)> {
-        let reactions_snapshot = {
-            let reactions = self.reactions.read().await;
-            reactions
-                .iter()
-                .map(|(id, r)| (id.clone(), r.clone()))
-                .collect::<Vec<_>>()
-        };
-
-        let mut result = Vec::new();
-        for (id, reaction) in reactions_snapshot {
-            let status = reaction.status().await;
-            result.push((id, status));
-        }
-
-        result
+        let graph = self.graph.read().await;
+        graph.list_by_kind(&ComponentKind::Reaction)
     }
 
     /// Start all reactions that have `auto_start` enabled.
