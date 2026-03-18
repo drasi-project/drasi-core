@@ -164,10 +164,6 @@ pub enum ComponentStatus {
     Stopped,
     Reconfiguring,
     Error,
-    /// Component was added to the system
-    Added,
-    /// Component was removed from the system
-    Removed,
 }
 
 #[derive(Debug, Clone)]

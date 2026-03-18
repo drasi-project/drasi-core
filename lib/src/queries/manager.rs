@@ -1267,7 +1267,7 @@ impl QueryManager {
             let node = ComponentNode {
                 id: config.id.clone(),
                 kind: ComponentKind::Query,
-                status: ComponentStatus::Added,
+                status: ComponentStatus::Stopped,
                 metadata,
             };
             graph.add_component(node)?;

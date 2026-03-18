@@ -482,8 +482,8 @@ mod manager_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while let Ok(event) = event_rx.recv().await {
                 if event.component_id == "test-source" {
-                    // Skip the Added event emitted by add_source
-                    if matches!(event.status, ComponentStatus::Added) {
+                    // Skip the Stopped event emitted by add_source (with "added" message)
+                    if event.message.as_deref().map_or(false, |m| m.ends_with("added")) {
                         continue;
                     }
                     assert!(

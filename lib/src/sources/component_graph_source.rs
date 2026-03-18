@@ -127,8 +127,6 @@ fn status_str(status: &ComponentStatus) -> &'static str {
         ComponentStatus::Stopping => "Stopping",
         ComponentStatus::Reconfiguring => "Reconfiguring",
         ComponentStatus::Error => "Error",
-        ComponentStatus::Added => "Added",
-        ComponentStatus::Removed => "Removed",
     }
 }
 
@@ -317,9 +315,9 @@ async fn handle_component_event(
         return Ok(());
     }
 
-    let changes = match event.status {
-        ComponentStatus::Added => build_added_changes(instance_id, event),
-        ComponentStatus::Removed => build_removed_changes(instance_id, event),
+    let changes = match event.message.as_deref() {
+        Some(msg) if msg.ends_with("added") => build_added_changes(instance_id, event),
+        Some(msg) if msg.ends_with("removed") => build_removed_changes(instance_id, event),
         _ => build_status_update_changes(event),
     };
 

@@ -549,7 +549,7 @@ impl ComponentGraph {
         self.emit_event(
             id,
             &kind,
-            ComponentStatus::Removed,
+            ComponentStatus::Stopped,
             Some(format!("{kind} removed")),
         );
 

@@ -260,7 +260,5 @@ fn status_str(status: &ComponentStatus) -> &'static str {
         ComponentStatus::Stopping => "Stopping",
         ComponentStatus::Reconfiguring => "Reconfiguring",
         ComponentStatus::Error => "Error",
-        ComponentStatus::Added => "Added",
-        ComponentStatus::Removed => "Removed",
     }
 }

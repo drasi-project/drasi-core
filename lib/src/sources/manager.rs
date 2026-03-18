@@ -166,7 +166,7 @@ impl SourceManager {
             let node = ComponentNode {
                 id: source_id.clone(),
                 kind: ComponentKind::Source,
-                status: ComponentStatus::Added,
+                status: ComponentStatus::Stopped,
                 metadata,
             };
             graph.add_component(node)?;

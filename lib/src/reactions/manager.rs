@@ -130,7 +130,7 @@ impl ReactionManager {
             let node = ComponentNode {
                 id: reaction_id.clone(),
                 kind: ComponentKind::Reaction,
-                status: ComponentStatus::Added,
+                status: ComponentStatus::Stopped,
                 metadata,
             };
             graph.add_component(node)?;

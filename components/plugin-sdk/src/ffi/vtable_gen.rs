@@ -107,8 +107,6 @@ fn component_status_to_ffi(s: ComponentStatus) -> FfiComponentStatus {
         ComponentStatus::Stopping => FfiComponentStatus::Stopping,
         ComponentStatus::Reconfiguring => FfiComponentStatus::Reconfiguring,
         ComponentStatus::Error => FfiComponentStatus::Error,
-        ComponentStatus::Added => FfiComponentStatus::Stopped,
-        ComponentStatus::Removed => FfiComponentStatus::Stopped,
     }
 }
 
