@@ -160,11 +160,8 @@ impl Source for SourceProxy {
         let relations_ffi = FfiStr::from_str(&relations_json);
         let enable_bootstrap = settings.enable_bootstrap;
 
-        let state = self.vtable.state;
-        let subscribe_fn = self.vtable.subscribe_fn;
-
-        let resp_ptr = (subscribe_fn)(
-            state,
+        let resp_ptr = (self.vtable.subscribe_fn)(
+            self.vtable.state,
             source_id_ffi,
             enable_bootstrap,
             query_id_ffi,
@@ -184,7 +181,14 @@ impl Source for SourceProxy {
             return Err(anyhow::anyhow!("Subscribe returned null receiver"));
         } else {
             let ffi_cr = unsafe { *Box::from_raw(ffi_resp.receiver) };
-            Box::new(ChangeReceiverProxy::new(ffi_cr))
+            // Run on a dedicated thread to avoid initializing plugin TLS
+            // on the caller's thread. On macOS, plugin TLS destructors
+            // can deadlock with the still-running plugin runtime during
+            // thread exit.
+            let proxy = std::thread::spawn(move || ChangeReceiverProxy::new(ffi_cr))
+                .join()
+                .map_err(|_| anyhow::anyhow!("ChangeReceiverProxy::new thread panicked"))?;
+            Box::new(proxy)
                 as Box<
                     dyn drasi_lib::channels::ChangeReceiver<
                         drasi_lib::channels::events::SourceEventWrapper,
@@ -196,7 +200,11 @@ impl Source for SourceProxy {
             None
         } else {
             let ffi_br = unsafe { *Box::from_raw(ffi_resp.bootstrap_receiver) };
-            Some(BootstrapReceiverProxy::new(ffi_br).into_mpsc_receiver())
+            // Same thread isolation for bootstrap receiver
+            let proxy = std::thread::spawn(move || BootstrapReceiverProxy::new(ffi_br))
+                .join()
+                .map_err(|_| anyhow::anyhow!("BootstrapReceiverProxy::new thread panicked"))?;
+            Some(proxy.into_mpsc_receiver())
         };
 
         Ok(SubscriptionResponse {
@@ -246,7 +254,10 @@ impl Source for SourceProxy {
             event_tx: context.status_tx.clone(),
         });
 
-        let ctx_ptr = crate::callbacks::InstanceCallbackContext::into_raw(per_instance_ctx.clone());
+        // Use as_ptr (no refcount increment) — the Arc in _callback_ctx keeps
+        // the context alive for the proxy's lifetime. This avoids the memory
+        // leak that Arc::into_raw would cause (no matching from_raw).
+        let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
 
         // Store the Arc so it stays alive as long as this proxy
         if let Ok(mut guard) = self._callback_ctx.lock() {
@@ -289,7 +300,11 @@ impl Source for SourceProxy {
 
 impl Drop for SourceProxy {
     fn drop(&mut self) {
-        (self.vtable.drop_fn)(self.vtable.state);
+        // Run plugin drop on a dedicated thread to avoid initializing
+        // plugin TLS on the caller's thread (macOS TLS cleanup deadlock).
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 
@@ -375,6 +390,8 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
 impl Drop for SourcePluginProxy {
     fn drop(&mut self) {
-        (self.vtable.drop_fn)(self.vtable.state);
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }

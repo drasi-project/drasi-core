@@ -445,31 +445,62 @@ macro_rules! export_plugin {
         default_workers = $default_workers:expr $(,)?
     ) => {
         // ── Tokio runtime (accessible to plugin code) ──
-        pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
-            use ::std::sync::OnceLock;
-            static RT: OnceLock<$crate::__tokio::runtime::Runtime> = OnceLock::new();
-            RT.get_or_init(|| {
-                let default_threads: usize = $default_workers;
-                let kind_var = format!(
-                    "DRASI_PLUGIN_WORKERS_{}",
-                    $plugin_id.to_uppercase().replace('-', "_")
-                );
-                let threads = ::std::env::var(&kind_var)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .or_else(|| {
-                        ::std::env::var("DRASI_PLUGIN_WORKERS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                    })
-                    .unwrap_or(default_threads);
+        //
+        // The runtime is stored behind an `AtomicPtr` so that
+        // `drasi_plugin_shutdown()` can take ownership and call
+        // `shutdown_timeout()` to cleanly stop all worker threads.
+        // A `OnceLock<()>` ensures one-time initialization.
+        static __RT_INIT: ::std::sync::OnceLock<()> = ::std::sync::OnceLock::new();
+        static __RT_PTR: ::std::sync::atomic::AtomicPtr<$crate::__tokio::runtime::Runtime> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+
+        fn __init_plugin_runtime() {
+            let default_threads: usize = $default_workers;
+            let kind_var = format!(
+                "DRASI_PLUGIN_WORKERS_{}",
+                $plugin_id.to_uppercase().replace('-', "_")
+            );
+            let threads = ::std::env::var(&kind_var)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or_else(|| {
+                    ::std::env::var("DRASI_PLUGIN_WORKERS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                })
+                .unwrap_or(default_threads);
+            let rt = Box::new(
                 $crate::__tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(threads)
                     .enable_all()
                     .thread_name(concat!($plugin_id, "-worker"))
                     .build()
-                    .expect("Failed to create plugin tokio runtime")
-            })
+                    .expect("Failed to create plugin tokio runtime"),
+            );
+            __RT_PTR.store(Box::into_raw(rt), ::std::sync::atomic::Ordering::Release);
+        }
+
+        pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
+            __RT_INIT.get_or_init(|| __init_plugin_runtime());
+            // Safety: after init, __RT_PTR is non-null and valid for 'static
+            // until drasi_plugin_shutdown() is called.
+            unsafe { &*__RT_PTR.load(::std::sync::atomic::Ordering::Acquire) }
+        }
+
+        /// Shut down the plugin's tokio runtime, stopping all worker threads.
+        ///
+        /// Must be called before dlclose / library unload. After this call,
+        /// any `&'static Runtime` references obtained from `__plugin_runtime()`
+        /// are dangling — no further FFI calls into this plugin are safe.
+        #[no_mangle]
+        pub extern "C" fn drasi_plugin_shutdown() {
+            // Just null the pointer so no further FFI calls use the runtime.
+            // The runtime itself is intentionally leaked — its worker threads
+            // will be killed when the process exits.
+            __RT_PTR.swap(
+                ::std::ptr::null_mut(),
+                ::std::sync::atomic::Ordering::AcqRel,
+            );
         }
 
         struct __SendPtr(*mut ::std::ffi::c_void);

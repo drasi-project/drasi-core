@@ -54,6 +54,28 @@ pub struct LoadedPlugin {
     _library: Arc<Library>,
 }
 
+impl Drop for LoadedPlugin {
+    fn drop(&mut self) {
+        // 1. Drop all plugin proxies (calls FFI drop functions on plugin state).
+        self.source_plugins.clear();
+        self.reaction_plugins.clear();
+        self.bootstrap_plugins.clear();
+
+        // 2. Leak the library so dlclose is never called.
+        //    Plugin runtime worker threads may still be executing library code;
+        //    calling dlclose while worker threads run is UB on macOS.
+        //    Bumping the Arc refcount prevents Library::drop → dlclose when
+        //    Rust drops the `_library` field after this method returns.
+        //
+        //    Note: we intentionally do NOT call drasi_plugin_shutdown() because
+        //    dlopen returns the same library handle for the same dylib path,
+        //    so all LoadedPlugin instances share the same process-global statics.
+        //    Calling shutdown() from one instance would null the runtime pointer
+        //    for all instances, causing null pointer dereferences.
+        std::mem::forget(self._library.clone());
+    }
+}
+
 /// Loads cdylib plugins from a directory.
 pub struct PluginLoader {
     config: PluginLoaderConfig,
