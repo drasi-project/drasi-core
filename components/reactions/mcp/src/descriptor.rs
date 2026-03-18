@@ -138,9 +138,8 @@ where
                 )));
             }
             // Normal object → deserialize directly
-            _ => serde_json::from_value::<McpQueryConfigDto>(value).map_err(|e| {
-                D::Error::custom(format!("invalid route config for '{key}': {e}"))
-            })?,
+            _ => serde_json::from_value::<McpQueryConfigDto>(value)
+                .map_err(|e| D::Error::custom(format!("invalid route config for '{key}': {e}")))?,
         };
         result.insert(key, dto);
     }
