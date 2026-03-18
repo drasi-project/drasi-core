@@ -499,7 +499,10 @@ impl Reaction for LokiReaction {
                     query_result.results.len()
                 );
                 if query_result.results.is_empty() {
-                    debug!("[{reaction_name}] skipping empty result for query '{}'", query_result.query_id);
+                    debug!(
+                        "[{reaction_name}] skipping empty result for query '{}'",
+                        query_result.query_id
+                    );
                     continue;
                 }
 
@@ -563,11 +566,16 @@ impl Reaction for LokiReaction {
                         values: Vec::new(),
                     });
                     stream.values.push((timestamp_ns.clone(), log_line));
-                    debug!("[{reaction_name}] streams buffered so far: {}", streams.len());
+                    debug!(
+                        "[{reaction_name}] streams buffered so far: {}",
+                        streams.len()
+                    );
                 }
 
                 if streams.is_empty() {
-                    debug!("[{reaction_name}] no streams to push for query '{query_name}', skipping");
+                    debug!(
+                        "[{reaction_name}] no streams to push for query '{query_name}', skipping"
+                    );
                     continue;
                 }
 
@@ -634,7 +642,10 @@ impl Reaction for LokiReaction {
     }
 
     async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
-        debug!("[{}] enqueueing result for query '{}'", self.base.id, result.query_id);
+        debug!(
+            "[{}] enqueueing result for query '{}'",
+            self.base.id, result.query_id
+        );
         self.base.enqueue_query_result(result).await
     }
 }
