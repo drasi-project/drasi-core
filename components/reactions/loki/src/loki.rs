@@ -341,7 +341,8 @@ impl LokiReaction {
         payload: &LokiPushPayload,
     ) -> Result<()> {
         let push_endpoint = Self::push_endpoint(endpoint);
-        let mut request = client.post(push_endpoint).json(payload);
+        debug!("push_to_loki - calling endpoint: {push_endpoint}");
+        let mut request = client.post(&push_endpoint).json(payload);
 
         if let Some(token) = token {
             request = request.bearer_auth(token);
@@ -354,6 +355,7 @@ impl LokiReaction {
         }
 
         let response = request.send().await?;
+        debug!("push_to_loki - response status: {}", response.status());
         if !response.status().is_success() {
             let status = response.status();
             let body = match response.text().await {
@@ -454,6 +456,23 @@ impl Reaction for LokiReaction {
                 }
             };
 
+            info!(
+                "[{reaction_name}] config - endpoint: {endpoint}, timeout_ms: {timeout_ms}, labels: {}, routes: {}, token: {}, basic_auth: {}, tenant_id: {}",
+                labels.len(),
+                routes.len(),
+                token.is_some(),
+                basic_auth.is_some(),
+                tenant_id.is_some()
+            );
+            debug!(
+                "[{reaction_name}] configured label keys: {:?}",
+                labels.keys().collect::<Vec<_>>()
+            );
+            debug!(
+                "[{reaction_name}] configured route query IDs: {:?}",
+                routes.keys().collect::<Vec<_>>()
+            );
+
             let mut handlebars = Handlebars::new();
             Self::register_json_helper(&mut handlebars);
 
@@ -474,7 +493,13 @@ impl Reaction for LokiReaction {
                 }
 
                 let query_result = query_result_arc.as_ref();
+                debug!(
+                    "[{reaction_name}] received result for query '{}' with {} results",
+                    query_result.query_id,
+                    query_result.results.len()
+                );
                 if query_result.results.is_empty() {
+                    debug!("[{reaction_name}] skipping empty result for query '{}'", query_result.query_id);
                     continue;
                 }
 
@@ -493,6 +518,7 @@ impl Reaction for LokiReaction {
                         Some(op) => op,
                         None => continue,
                     };
+                    debug!("[{reaction_name}] processing diff - query: '{query_name}', operation: {operation}");
 
                     let context =
                         Self::build_context(query_name, operation, result, query_result.timestamp);
@@ -508,7 +534,11 @@ impl Reaction for LokiReaction {
                         result,
                         &context,
                     ) {
-                        Ok(Some(line)) => line,
+                        Ok(Some(line)) => {
+                            let truncated: String = line.chars().take(200).collect();
+                            debug!("[{reaction_name}] rendered log line: {truncated}");
+                            line
+                        }
                         Ok(None) => continue,
                         Err(e) => {
                             warn!(
@@ -533,9 +563,11 @@ impl Reaction for LokiReaction {
                         values: Vec::new(),
                     });
                     stream.values.push((timestamp_ns.clone(), log_line));
+                    debug!("[{reaction_name}] streams buffered so far: {}", streams.len());
                 }
 
                 if streams.is_empty() {
+                    debug!("[{reaction_name}] no streams to push for query '{query_name}', skipping");
                     continue;
                 }
 
@@ -549,6 +581,12 @@ impl Reaction for LokiReaction {
                         .collect(),
                 };
 
+                let total_values: usize = payload.streams.iter().map(|s| s.values.len()).sum();
+                debug!(
+                    "[{reaction_name}] pushing to Loki - streams: {}, total values: {total_values}",
+                    payload.streams.len()
+                );
+
                 if let Err(e) = Self::push_to_loki(
                     &client,
                     &endpoint,
@@ -559,7 +597,15 @@ impl Reaction for LokiReaction {
                 )
                 .await
                 {
-                    warn!("[{reaction_name}] failed to push query '{query_name}' results to Loki: {e}");
+                    warn!(
+                        "[{reaction_name}] failed to push query '{query_name}' results to Loki (streams: {}, values: {total_values}): {e}",
+                        payload.streams.len()
+                    );
+                } else {
+                    info!(
+                        "[{reaction_name}] pushed query '{query_name}' to Loki - streams: {}",
+                        payload.streams.len()
+                    );
                 }
             }
 
@@ -572,6 +618,7 @@ impl Reaction for LokiReaction {
     }
 
     async fn stop(&self) -> Result<()> {
+        info!("[{}] stopping Loki reaction", self.base.id);
         self.base.stop_common().await?;
         self.base
             .set_status_with_event(
@@ -587,6 +634,7 @@ impl Reaction for LokiReaction {
     }
 
     async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
+        debug!("[{}] enqueueing result for query '{}'", self.base.id, result.query_id);
         self.base.enqueue_query_result(result).await
     }
 }

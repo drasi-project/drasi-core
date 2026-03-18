@@ -16,6 +16,7 @@
 
 use drasi_lib::reactions::Reaction;
 use drasi_plugin_sdk::prelude::*;
+use log::{debug, info};
 use std::collections::HashMap;
 use utoipa::OpenApi;
 
@@ -165,6 +166,10 @@ impl ReactionPluginDescriptor for LokiReactionDescriptor {
         config_json: &serde_json::Value,
         auto_start: bool,
     ) -> anyhow::Result<Box<dyn Reaction>> {
+        debug!(
+            "[{id}] creating Loki reaction - queries: {}, auto_start: {auto_start}",
+            query_ids.len()
+        );
         let dto: LokiReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
@@ -204,7 +209,15 @@ impl ReactionPluginDescriptor for LokiReactionDescriptor {
             builder = builder.with_default_template(map_query_config(default_template));
         }
 
+        debug!(
+            "[{id}] config parsed - endpoint: (configured), labels: {}, routes: {}, auth_configured: {}",
+            dto.labels.len(),
+            dto.routes.len(),
+            dto.token.is_some() || dto.basic_auth.is_some()
+        );
+
         let reaction = builder.build()?;
+        info!("[{id}] Loki reaction created successfully");
         Ok(Box::new(reaction))
     }
 }
