@@ -1008,23 +1008,22 @@ async fn handle_single_request(
             // Protocol version negotiation per MCP spec:
             // echo back the client's version if supported, otherwise respond with our latest.
             const SUPPORTED_VERSIONS: &[&str] = &["2025-03-26", "2024-11-05"];
-            let negotiated_version = if SUPPORTED_VERSIONS
-                .contains(&init_request.protocol_version.as_str())
-            {
-                info!(
-                    "[{}] Negotiated protocol version: {}",
-                    state.reaction_id, init_request.protocol_version
-                );
-                init_request.protocol_version.clone()
-            } else {
-                warn!(
+            let negotiated_version =
+                if SUPPORTED_VERSIONS.contains(&init_request.protocol_version.as_str()) {
+                    info!(
+                        "[{}] Negotiated protocol version: {}",
+                        state.reaction_id, init_request.protocol_version
+                    );
+                    init_request.protocol_version.clone()
+                } else {
+                    warn!(
                     "[{}] Client requested unsupported protocol version '{}', responding with {}",
                     state.reaction_id,
                     init_request.protocol_version,
                     LATEST_PROTOCOL_VERSION.as_str()
                 );
-                LATEST_PROTOCOL_VERSION.as_str().to_string()
-            };
+                    LATEST_PROTOCOL_VERSION.as_str().to_string()
+                };
 
             let new_session_id = match session_id {
                 Some(id) if state.sessions.read().await.contains_key(id) => id.clone(),
