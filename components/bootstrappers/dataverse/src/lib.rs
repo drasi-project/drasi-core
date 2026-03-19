@@ -66,6 +66,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use log::{debug, info, warn};
+use url::Url;
 
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
@@ -162,7 +163,16 @@ impl DataverseBootstrapProvider {
             self.config.tenant_id
         );
 
-        let scope = format!("{}/.default", self.config.environment_url);
+        // Derive the resource as scheme://host (e.g., https://org.crm.dynamics.com)
+        // to avoid issues with trailing slashes or paths when building the scope.
+        let resource = Url::parse(&self.config.environment_url)
+            .map(|u| {
+                let host = u.host_str().unwrap_or_default();
+                format!("{}://{}", u.scheme(), host)
+            })
+            .unwrap_or_else(|_| self.config.environment_url.trim_end_matches('/').to_string());
+
+        let scope = format!("{}/.default", resource);
 
         let params = [
             ("grant_type", "client_credentials"),
