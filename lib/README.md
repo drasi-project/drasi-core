@@ -122,16 +122,14 @@ drasi-identity-aws = "0.1"
 use drasi_identity_aws::AwsIdentityProvider;
 
 // Region from environment
-let identity = AwsIdentityProvider::new("mydbuser", "mydb.rds.amazonaws.com", 5432).await?;
+let identity = AwsIdentityProvider::new("mydbuser").await?;
 
 // Explicit region
-let identity = AwsIdentityProvider::with_region(
-    "mydbuser", "mydb.rds.amazonaws.com", 5432, "us-west-2"
-).await?;
+let identity = AwsIdentityProvider::with_region("mydbuser", "us-west-2").await?;
 
 // Assumed role
 let identity = AwsIdentityProvider::with_assumed_role(
-    "mydbuser", "mydb.rds.amazonaws.com", 5432,
+    "mydbuser",
     "arn:aws:iam::123456789012:role/my-role", None
 ).await?;
 ```

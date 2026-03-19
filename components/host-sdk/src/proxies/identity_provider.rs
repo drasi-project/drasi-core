@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -75,6 +75,7 @@ impl IdentityProvider for HostIdentityProviderProxy {
     }
 
     fn clone_box(&self) -> Box<dyn IdentityProvider> {
+        assert!(!self.vtable.state.is_null(), "IdentityProvider state is null during clone");
         let cloned_state = (self.vtable.clone_fn)(self.vtable.state as *const c_void);
         let cloned_vtable = drasi_plugin_sdk::ffi::identity::IdentityProviderVtable {
             state: cloned_state,
@@ -167,6 +168,8 @@ impl IdentityProviderPluginDescriptor for IdentityProviderPluginProxy {
             ));
         }
 
+        // Safety: vtable_ptr is non-null (checked above) and was allocated
+        // by Box::into_raw in the plugin's create_identity_provider_fn.
         let vtable = unsafe { *Box::from_raw(vtable_ptr) };
         Ok(Box::new(HostIdentityProviderProxy::new(
             vtable,

@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -131,6 +131,17 @@ impl IdentityProvider for AzureIdentityProvider {
 mod tests {
     use super::*;
 
+    // ---- Construction tests ----
+
+    #[test]
+    fn test_new_creates_system_assigned_managed_identity() {
+        let result = AzureIdentityProvider::new("user@myserver");
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.identity_name, "user@myserver");
+        assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
+    }
+
     #[test]
     fn test_with_managed_identity_accepts_client_id() {
         let provider = AzureIdentityProvider::with_managed_identity(
@@ -143,6 +154,23 @@ mod tests {
     }
 
     #[test]
+    fn test_with_default_credentials_creates_provider() {
+        let result = AzureIdentityProvider::with_default_credentials("devuser@tenant.onmicrosoft.com");
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.identity_name, "devuser@tenant.onmicrosoft.com");
+        assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
+    }
+
+    #[test]
+    fn test_with_workload_identity_creates_provider() {
+        // WorkloadIdentityCredential may fail without AKS env vars, but should not panic.
+        let _result = AzureIdentityProvider::with_workload_identity("workload@tenant.onmicrosoft.com");
+    }
+
+    // ---- Scope tests ----
+
+    #[test]
     fn test_with_scope_overrides_default() {
         let provider = AzureIdentityProvider::with_managed_identity(
             "user@tenant.onmicrosoft.com",
@@ -152,6 +180,22 @@ mod tests {
         .with_scope("https://custom.scope/.default");
         assert_eq!(provider.scope, "https://custom.scope/.default");
     }
+
+    #[test]
+    fn test_multiple_providers_with_different_scopes() {
+        let provider_a = AzureIdentityProvider::new("user_a@server")
+            .unwrap()
+            .with_scope("https://scope-a/.default");
+        let provider_b = AzureIdentityProvider::with_managed_identity("user_b@server", "client-id")
+            .unwrap()
+            .with_scope("https://scope-b/.default");
+
+        assert_eq!(provider_a.scope, "https://scope-a/.default");
+        assert_eq!(provider_b.scope, "https://scope-b/.default");
+        assert_ne!(provider_a.identity_name, provider_b.identity_name);
+    }
+
+    // ---- Clone & trait object tests ----
 
     #[test]
     fn test_provider_is_cloneable() {
@@ -166,8 +210,36 @@ mod tests {
     }
 
     #[test]
+    fn test_clone_box_returns_valid_trait_object() {
+        let provider = AzureIdentityProvider::new("user@myserver").unwrap();
+        let boxed: Box<dyn IdentityProvider> = provider.clone_box();
+        // Cloned trait object should also be cloneable
+        let _boxed2: Box<dyn IdentityProvider> = boxed.clone_box();
+    }
+
+    #[test]
+    fn test_provider_as_trait_object() {
+        let provider = AzureIdentityProvider::new("user@myserver").unwrap();
+        let _trait_obj: Box<dyn IdentityProvider> = Box::new(provider);
+    }
+
+    #[test]
     fn test_provider_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AzureIdentityProvider>();
+    }
+
+    // ---- Identity name format tests ----
+
+    #[test]
+    fn test_identity_name_user_at_server_format() {
+        let provider = AzureIdentityProvider::new("myuser@myserver").unwrap();
+        assert_eq!(provider.identity_name, "myuser@myserver");
+    }
+
+    #[test]
+    fn test_identity_name_aad_principal_format() {
+        let provider = AzureIdentityProvider::new("admin@contoso.onmicrosoft.com").unwrap();
+        assert_eq!(provider.identity_name, "admin@contoso.onmicrosoft.com");
     }
 }

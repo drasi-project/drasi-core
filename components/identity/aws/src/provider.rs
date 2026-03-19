@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -171,6 +171,16 @@ impl IdentityProvider for AwsIdentityProvider {
 mod tests {
     use super::*;
 
+    // ---- Construction tests ----
+
+    #[tokio::test]
+    async fn test_new_creates_provider_from_environment() {
+        // new() loads region from environment; without AWS_REGION set it may fail,
+        // but the code path itself should not panic.
+        let _result = AwsIdentityProvider::new("mydbuser").await;
+        // We cannot assert Ok because CI may lack AWS_REGION, but the call must not panic.
+    }
+
     #[tokio::test]
     async fn test_with_region_creates_provider() {
         let result = AwsIdentityProvider::with_region("mydbuser", "us-west-2").await;
@@ -188,9 +198,104 @@ mod tests {
         assert_eq!(provider.region, "eu-west-1");
     }
 
+    #[tokio::test]
+    async fn test_with_assumed_role_requires_credentials() {
+        // with_assumed_role needs base credentials; without them it should return an error.
+        let result = AwsIdentityProvider::with_assumed_role(
+            "mydbuser",
+            "arn:aws:iam::123456789012:role/my-role",
+            None,
+        )
+        .await;
+        // In CI without AWS credentials this will fail — that's the expected behavior.
+        // We just verify it doesn't panic.
+        let _ = result;
+    }
+
+    // ---- Trait object & cloning tests ----
+
     #[test]
     fn test_provider_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AwsIdentityProvider>();
+    }
+
+    #[test]
+    fn test_clone_box_returns_valid_trait_object() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+        let boxed: Box<dyn IdentityProvider> = provider.clone_box();
+        // Cloned trait object should also be cloneable
+        let _boxed2: Box<dyn IdentityProvider> = boxed.clone_box();
+    }
+
+    #[test]
+    fn test_provider_as_trait_object() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+        let _trait_obj: Box<dyn IdentityProvider> = Box::new(provider);
+    }
+
+    // ---- get_credentials error-path tests ----
+
+    #[tokio::test]
+    async fn test_get_credentials_missing_hostname() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+
+        let context = CredentialContext::new().with_property("port", "5432");
+
+        let result = provider.get_credentials(&context).await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("hostname"),
+            "Expected error about missing hostname, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_missing_port() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+
+        let context = CredentialContext::new()
+            .with_property("hostname", "mydb.cluster-xxx.us-east-1.rds.amazonaws.com");
+
+        let result = provider.get_credentials(&context).await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("port"),
+            "Expected error about missing port, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_invalid_port() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+
+        let context = CredentialContext::new()
+            .with_property("hostname", "mydb.cluster-xxx.us-east-1.rds.amazonaws.com")
+            .with_property("port", "not-a-number");
+
+        let result = provider.get_credentials(&context).await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("Invalid port"),
+            "Expected error about invalid port, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_empty_context() {
+        let config = SdkConfig::builder().build();
+        let provider = AwsIdentityProvider::with_config(config, "testuser", "us-east-1");
+
+        let context = CredentialContext::default();
+        let result = provider.get_credentials(&context).await;
+        assert!(result.is_err(), "Empty context should produce an error");
     }
 }

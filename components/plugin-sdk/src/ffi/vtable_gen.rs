@@ -2219,8 +2219,13 @@ pub fn build_identity_provider_vtable_from_boxed(
         } else {
             let json_bytes = unsafe { std::slice::from_raw_parts(context_json, context_len) };
             let json_str = std::str::from_utf8(json_bytes).unwrap_or("{}");
-            let properties: std::collections::HashMap<String, String> =
-                serde_json::from_str(json_str).unwrap_or_default();
+            let properties: std::collections::HashMap<String, String> = match serde_json::from_str(json_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("Failed to deserialize credential context JSON: {e}");
+                    std::collections::HashMap::new()
+                }
+            };
             drasi_lib::identity::CredentialContext { properties }
         };
 
