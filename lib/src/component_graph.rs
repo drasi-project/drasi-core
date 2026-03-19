@@ -41,6 +41,7 @@
 //! command-initiated transitions (`Starting`, `Stopping`) are applied directly by
 //! managers, which hold the graph write lock on the cold path.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,11 +49,12 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableGraph};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Notify, RwLock};
 
 use crate::channels::{
     ComponentEvent, ComponentEventBroadcastReceiver, ComponentStatus, ComponentType,
 };
+use crate::managers::ComponentEventHistory;
 
 // ============================================================================
 // Component Update Messages (mpsc fan-in from components to graph)
@@ -119,7 +121,7 @@ pub type ComponentUpdateReceiver = mpsc::Receiver<ComponentUpdate>;
 pub struct ComponentStatusHandle {
     component_id: String,
     status: Arc<RwLock<ComponentStatus>>,
-    update_tx: Arc<RwLock<Option<ComponentUpdateSender>>>,
+    update_tx: Arc<tokio::sync::OnceCell<ComponentUpdateSender>>,
 }
 
 impl ComponentStatusHandle {
@@ -131,7 +133,7 @@ impl ComponentStatusHandle {
         Self {
             component_id: component_id.into(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            update_tx: Arc::new(RwLock::new(None)),
+            update_tx: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -140,10 +142,12 @@ impl ComponentStatusHandle {
     /// Use this when the update channel is available at construction time
     /// (e.g., in `QueryManager` where queries are created with full context).
     pub fn new_wired(component_id: impl Into<String>, update_tx: ComponentUpdateSender) -> Self {
+        let cell = tokio::sync::OnceCell::new();
+        let _ = cell.set(update_tx);
         Self {
             component_id: component_id.into(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            update_tx: Arc::new(RwLock::new(Some(update_tx))),
+            update_tx: Arc::new(cell),
         }
     }
 
@@ -152,7 +156,7 @@ impl ComponentStatusHandle {
     /// After wiring, every [`set_status`](Self::set_status) call will also
     /// send a fire-and-forget notification to the graph.
     pub async fn wire(&self, update_tx: ComponentUpdateSender) {
-        *self.update_tx.write().await = Some(update_tx);
+        let _ = self.update_tx.set(update_tx);
     }
 
     /// Set the component's status — updates local state AND notifies the graph.
@@ -161,8 +165,8 @@ impl ComponentStatusHandle {
     /// to the local `Arc<RwLock<ComponentStatus>>` and sends a fire-and-forget
     /// update to the graph update loop (if wired).
     pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
-        *self.status.write().await = status.clone();
-        if let Some(ref tx) = *self.update_tx.read().await {
+        *self.status.write().await = status;
+        if let Some(tx) = self.update_tx.get() {
             let _ = tx.try_send(ComponentUpdate::Status {
                 component_id: self.component_id.clone(),
                 status,
@@ -173,7 +177,7 @@ impl ComponentStatusHandle {
 
     /// Read the current status.
     pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        *self.status.read().await
     }
 }
 
@@ -214,14 +218,16 @@ impl std::fmt::Display for ComponentKind {
 impl ComponentKind {
     /// Convert to [`ComponentType`] for event emission.
     ///
-    /// Returns `None` for kinds that don't have a corresponding event type
-    /// (Instance, BootstrapProvider, IdentityProvider).
+    /// Returns `None` only for the Instance kind (the root node), which has no
+    /// corresponding event type. All other component kinds map to a `ComponentType`.
     pub fn to_component_type(&self) -> Option<ComponentType> {
         match self {
             ComponentKind::Source => Some(ComponentType::Source),
             ComponentKind::Query => Some(ComponentType::Query),
             ComponentKind::Reaction => Some(ComponentType::Reaction),
-            _ => None,
+            ComponentKind::BootstrapProvider => Some(ComponentType::BootstrapProvider),
+            ComponentKind::IdentityProvider => Some(ComponentType::IdentityProvider),
+            ComponentKind::Instance => None,
         }
     }
 }
@@ -339,7 +345,9 @@ pub struct GraphEdge {
 ///
 /// # Thread Safety
 ///
-/// Wrap in `Arc<RwLock<ComponentGraph>>` for multi-threaded access.
+/// `ComponentGraph` is NOT `Send`/`Sync` by itself due to the underlying `StableGraph`.
+/// It must be wrapped in `Arc<RwLock<ComponentGraph>>` for multi-threaded access.
+/// All public APIs in `DrasiLib` handle this wrapping automatically.
 ///
 /// # Instance Root
 ///
@@ -360,6 +368,26 @@ pub struct ComponentGraph {
     /// Cloned and given to each component's Base struct. The graph update loop
     /// owns the corresponding receiver.
     update_tx: mpsc::Sender<ComponentUpdate>,
+    /// Notifies waiters when any component's status changes.
+    /// Used by `wait_for_status()` to replace polling loops with event-driven waits.
+    /// Follows the same pattern as `PriorityQueue::notify`.
+    status_notify: Arc<Notify>,
+    /// Type-erased runtime instances, keyed by component ID.
+    ///
+    /// Managers store their `Arc<dyn Source>`, `Arc<dyn Query>`, `Arc<dyn Reaction>`, etc.
+    /// here during provisioning. This eliminates the dual-registry pattern where each
+    /// manager maintained its own HashMap — the graph is now the single store for both
+    /// metadata (in the petgraph node) and runtime instances (here).
+    ///
+    /// Access via typed helpers: [`set_runtime()`], [`get_runtime()`], [`take_runtime()`].
+    runtimes: HashMap<String, Box<dyn Any + Send + Sync>>,
+    /// Centralized event history for all components.
+    ///
+    /// Stores lifecycle events (Starting, Running, Error, Stopped, etc.) for every
+    /// component in the graph. Events are recorded by [`apply_update()`] and
+    /// [`remove_component()`]. Managers delegate event queries here rather than
+    /// maintaining their own per-manager histories.
+    event_history: ComponentEventHistory,
 }
 
 /// Default broadcast channel capacity for component events.
@@ -395,6 +423,9 @@ impl ComponentGraph {
                 instance_idx,
                 event_tx,
                 update_tx,
+                status_notify: Arc::new(Notify::new()),
+                runtimes: HashMap::new(),
+                event_history: ComponentEventHistory::new(),
             },
             update_rx,
         )
@@ -425,11 +456,30 @@ impl ComponentGraph {
         self.update_tx.clone()
     }
 
+    /// Get a clone of the status change notifier.
+    ///
+    /// This `Notify` is signalled whenever any component's status changes in the graph.
+    /// Use it with [`wait_for_status`] or build custom wait loops that avoid polling
+    /// with sleep.
+    ///
+    /// # Pattern
+    ///
+    /// ```ignore
+    /// let notify = graph.status_notifier();
+    /// // Register interest BEFORE releasing the graph lock
+    /// let notified = notify.notified();
+    /// drop(graph); // release lock
+    /// notified.await; // woken when any status changes
+    /// ```
+    pub fn status_notifier(&self) -> Arc<Notify> {
+        self.status_notify.clone()
+    }
+
     /// Apply a [`ComponentUpdate`] received from the mpsc channel.
     ///
     /// Called by the graph update loop task. Updates the graph, emits a
-    /// broadcast event, and returns the event so the loop can record it
-    /// in the appropriate manager's [`ComponentEventHistory`].
+    /// broadcast event, and records the event in the centralized event history.
+    /// Returns the event for external logging/processing.
     pub fn apply_update(&mut self, update: ComponentUpdate) -> Option<ComponentEvent> {
         match update {
             ComponentUpdate::Status {
@@ -482,6 +532,113 @@ impl ComponentGraph {
     }
 
     // ========================================================================
+    // Runtime Instance Store
+    // ========================================================================
+
+    /// Store a runtime instance for a component.
+    ///
+    /// The component must already exist in the graph (registered via `add_component`
+    /// or one of the `register_*` methods). The runtime instance is stored in a
+    /// type-erased map keyed by component ID.
+    ///
+    /// Managers call this during provisioning after creating the runtime instance:
+    /// ```ignore
+    /// let source: Arc<dyn Source> = Arc::new(my_source);
+    /// source.initialize(context).await;
+    /// graph.set_runtime("source-1", Box::new(source))?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component ID is not present in the graph.
+    pub fn set_runtime(
+        &mut self,
+        id: &str,
+        runtime: Box<dyn Any + Send + Sync>,
+    ) -> anyhow::Result<()> {
+        if !self.index.contains_key(id) {
+            return Err(anyhow::anyhow!(
+                "set_runtime called for component '{id}' which is not in the graph"
+            ));
+        }
+
+        // Warn if the runtime type doesn't match the component kind.
+        // This catches type mismatches during development. Uses a warning rather
+        // than a hard assert to avoid breaking unit tests that use substitute types.
+        #[cfg(debug_assertions)]
+        if let Some(node) = self.get_component(id) {
+            let kind = &node.kind;
+            let type_ok = match kind {
+                ComponentKind::Source => runtime
+                    .downcast_ref::<std::sync::Arc<dyn crate::sources::Source>>()
+                    .is_some(),
+                ComponentKind::Query => runtime
+                    .downcast_ref::<std::sync::Arc<dyn crate::queries::manager::Query>>()
+                    .is_some(),
+                ComponentKind::Reaction => runtime
+                    .downcast_ref::<std::sync::Arc<dyn crate::reactions::Reaction>>()
+                    .is_some(),
+                _ => true,
+            };
+            if !type_ok {
+                tracing::warn!(
+                    "set_runtime: possible type mismatch for component '{id}' (kind={kind})"
+                );
+            }
+        }
+
+        self.runtimes.insert(id.to_string(), runtime);
+        Ok(())
+    }
+
+    /// Retrieve a reference to a component's runtime instance, downcasting to `T`.
+    ///
+    /// Returns `None` if the component has no runtime instance or if the stored
+    /// type doesn't match `T`.
+    ///
+    /// # Type Parameter
+    ///
+    /// `T` is typically `Arc<dyn Source>`, `Arc<dyn Query>`, or `Arc<dyn Reaction>`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source: &Arc<dyn Source> = graph.get_runtime::<Arc<dyn Source>>("source-1")
+    ///     .ok_or_else(|| anyhow!("Source not found"))?;
+    /// let source = source.clone(); // Clone the Arc for use outside the lock
+    /// ```
+    pub fn get_runtime<T: 'static>(&self, id: &str) -> Option<&T> {
+        self.runtimes.get(id).and_then(|r| r.downcast_ref::<T>())
+    }
+
+    /// Remove and return a component's runtime instance, downcasting to `T`.
+    ///
+    /// Returns `None` if the component has no runtime instance or if the stored
+    /// type doesn't match `T`. On type mismatch, the runtime is **put back** into
+    /// the store (not lost) and an error is logged.
+    ///
+    /// Used during teardown when the manager needs ownership of the instance
+    /// (e.g., to call `deprovision()`).
+    pub fn take_runtime<T: 'static>(&mut self, id: &str) -> Option<T> {
+        let runtime = self.runtimes.remove(id)?;
+        match runtime.downcast::<T>() {
+            Ok(boxed) => Some(*boxed),
+            Err(runtime) => {
+                tracing::error!(
+                    "take_runtime: type mismatch for component '{id}', putting runtime back"
+                );
+                self.runtimes.insert(id.to_string(), runtime);
+                None
+            }
+        }
+    }
+
+    /// Check if a component has a runtime instance stored.
+    pub fn has_runtime(&self, id: &str) -> bool {
+        self.runtimes.contains_key(id)
+    }
+
+    // ========================================================================
     // Node Operations
     // ========================================================================
 
@@ -495,7 +652,7 @@ impl ComponentGraph {
     ///
     /// Returns an error if a component with the same ID already exists.
     pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
-        let (node_idx, event) = self.add_component_internal(node)?;
+        let (node_idx, event, _, _) = self.add_component_internal(node)?;
         if let Some(event) = event {
             let _ = self.event_tx.send(event);
         }
@@ -508,7 +665,7 @@ impl ComponentGraph {
     fn add_component_internal(
         &mut self,
         node: ComponentNode,
-    ) -> anyhow::Result<(NodeIndex, Option<ComponentEvent>)> {
+    ) -> anyhow::Result<(NodeIndex, Option<ComponentEvent>, EdgeIndex, EdgeIndex)> {
         if self.index.contains_key(&node.id) {
             return Err(anyhow::anyhow!(
                 "{} '{}' already exists in the graph",
@@ -519,15 +676,17 @@ impl ComponentGraph {
 
         let id = node.id.clone();
         let kind = node.kind.clone();
-        let status = node.status.clone();
+        let status = node.status;
         let node_idx = self.graph.add_node(node);
         self.index.insert(id.clone(), node_idx);
 
         // Create bidirectional ownership edges (Instance ↔ Component)
-        self.graph
+        let owns_edge = self
+            .graph
             .add_edge(self.instance_idx, node_idx, RelationshipKind::Owns);
-        self.graph
-            .add_edge(node_idx, self.instance_idx, RelationshipKind::OwnedBy);
+        let owned_by_edge =
+            self.graph
+                .add_edge(node_idx, self.instance_idx, RelationshipKind::OwnedBy);
 
         let event = kind
             .to_component_type()
@@ -539,7 +698,7 @@ impl ComponentGraph {
                 message: Some(format!("{kind} added")),
             });
 
-        Ok((node_idx, event))
+        Ok((node_idx, event, owns_edge, owned_by_edge))
     }
 
     /// Remove a component node and all its edges from the graph.
@@ -562,6 +721,10 @@ impl ComponentGraph {
         let kind = self.graph[node_idx].kind.clone();
 
         self.index.remove(id);
+        // Remove runtime instance if present (atomic with node removal)
+        self.runtimes.remove(id);
+        // Remove event history for this component
+        self.event_history.remove_component(id);
         // StableGraph::remove_node automatically removes all edges connected to this node
         let removed = self
             .graph
@@ -603,7 +766,7 @@ impl ComponentGraph {
         self.graph
             .node_weights()
             .filter(|node| &node.kind == kind)
-            .map(|node| (node.id.clone(), node.status.clone()))
+            .map(|node| (node.id.clone(), node.status))
             .collect()
     }
 
@@ -621,9 +784,13 @@ impl ComponentGraph {
 
     /// Update a component's status with an optional message.
     ///
-    /// Emits a [`ComponentEvent`] with the new status and message to all subscribers.
-    /// Called by [`apply_update`] in the graph update loop — the single funnel for
-    /// all status mutations.
+    /// Emits a [`ComponentEvent`] with the new status and message to all broadcast
+    /// subscribers AND records it in the centralized event history. This ensures
+    /// events are visible to both global subscribers (via broadcast) and per-component
+    /// subscribers (via event history channels).
+    ///
+    /// Called by [`apply_update`] in the graph update loop and by
+    /// [`validate_and_transition`] for command-initiated transitions.
     fn update_status_with_message(
         &mut self,
         id: &str,
@@ -650,9 +817,16 @@ impl ComponentGraph {
             return Ok(None);
         }
 
-        node.status = status.clone();
+        node.status = status;
 
-        Ok(self.emit_event(id, &kind, status, message))
+        // Wake up any waiters blocking on status changes (e.g., wait_for_status)
+        self.status_notify.notify_waiters();
+
+        let event = self.emit_event(id, &kind, status, message);
+        if let Some(ref event) = event {
+            self.event_history.record_event(event.clone());
+        }
+        Ok(event)
     }
 
     // ========================================================================
@@ -696,6 +870,15 @@ impl ComponentGraph {
             .get(to_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("Component '{to_id}' not found in graph"))?;
+
+        // Validate the relationship is semantically valid for the node kinds
+        let from_kind = &self.graph[from_idx].kind;
+        let to_kind = &self.graph[to_idx].kind;
+        if !is_valid_relationship(from_kind, to_kind, &forward) {
+            return Err(anyhow::anyhow!(
+                "Invalid relationship: {forward:?} from {from_kind} '{from_id}' to {to_kind} '{to_id}'"
+            ));
+        }
 
         // Idempotency: check if the forward edge already exists
         let already_exists = self
@@ -829,6 +1012,57 @@ impl ComponentGraph {
     // ========================================================================
     // Lifecycle
     // ========================================================================
+
+    /// Atomically validate and apply a commanded status transition.
+    ///
+    /// This is the **single canonical way** for managers to change a component's
+    /// status for command-initiated transitions (`Starting`, `Stopping`,
+    /// `Reconfiguring`). It combines validation and mutation under a single
+    /// `&mut self` borrow, eliminating the TOCTOU gap between checking status
+    /// and updating it.
+    ///
+    /// Components still report runtime-initiated transitions (`Running`,
+    /// `Stopped`, `Error`) via the mpsc channel → [`apply_update`].
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(event))` — transition applied, event emitted to broadcast subscribers
+    /// - `Ok(None)` — same-state no-op (component already in `target_status`)
+    /// - `Err(...)` — component not found or transition not valid from current state
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut graph = self.graph.write().await;
+    /// graph.validate_and_transition("source-1", ComponentStatus::Starting, Some("Starting source"))?;
+    /// drop(graph); // release lock before calling source.start()
+    /// source.start().await?;
+    /// ```
+    pub fn validate_and_transition(
+        &mut self,
+        id: &str,
+        target_status: ComponentStatus,
+        message: Option<String>,
+    ) -> anyhow::Result<Option<ComponentEvent>> {
+        let node = self
+            .get_component(id)
+            .ok_or_else(|| anyhow::anyhow!("Component '{id}' not found in graph"))?;
+        let current = node.status;
+
+        // Same-state is an idempotent no-op
+        if current == target_status {
+            return Ok(None);
+        }
+
+        // Produce a descriptive error message for invalid transitions
+        if !is_valid_transition(&current, &target_status) {
+            let reason = describe_invalid_transition(id, &current, &target_status);
+            return Err(anyhow::anyhow!(reason));
+        }
+
+        // Transition is valid — apply it
+        self.update_status_with_message(id, target_status, message)
+    }
 
     /// Get a topological ordering of components for lifecycle operations.
     ///
@@ -1059,6 +1293,104 @@ impl ComponentGraph {
         self.remove_component(id)
     }
 
+    /// Register a bootstrap provider in the graph for topology visibility.
+    ///
+    /// Creates the node and bidirectional ownership edges transactionally.
+    /// Optionally links the provider to its target source via `Bootstraps` edges.
+    ///
+    /// # Usage
+    ///
+    /// Bootstrap providers are managed internally by source plugins (set via
+    /// `Source::set_bootstrap_provider()`). Call this method to make a bootstrap
+    /// provider visible in the component graph for topology visualization and
+    /// dependency tracking.
+    ///
+    /// ```ignore
+    /// // After adding a source with a bootstrap provider:
+    /// let mut graph = core.component_graph().write().await;
+    /// graph.register_bootstrap_provider("my-bootstrap", metadata, &["my-source".into()])?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A component with the same ID already exists
+    /// - Any referenced source does not exist in the graph
+    pub fn register_bootstrap_provider(
+        &mut self,
+        id: &str,
+        metadata: HashMap<String, String>,
+        source_ids: &[String],
+    ) -> anyhow::Result<()> {
+        for source_id in source_ids {
+            if !self.contains(source_id) {
+                return Err(anyhow::anyhow!(
+                    "Cannot register bootstrap provider '{id}': referenced source '{source_id}' does not exist in the graph"
+                ));
+            }
+        }
+
+        let node = ComponentNode {
+            id: id.to_string(),
+            kind: ComponentKind::BootstrapProvider,
+            status: ComponentStatus::Stopped,
+            metadata,
+        };
+        let mut txn = self.begin();
+        txn.add_component(node)?;
+        for source_id in source_ids {
+            txn.add_relationship(id, source_id, RelationshipKind::Bootstraps)?;
+        }
+        txn.commit();
+        Ok(())
+    }
+
+    /// Register an identity provider in the graph for topology visibility.
+    ///
+    /// Creates the node and bidirectional ownership edges transactionally.
+    /// Optionally links the provider to components it authenticates via
+    /// `Authenticates` edges.
+    ///
+    /// # Current Status
+    ///
+    /// This method is **reserved for future use**. Identity provider support
+    /// is not yet implemented in the component lifecycle. The registration
+    /// infrastructure is in place for when authentication integration is added.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A component with the same ID already exists
+    /// - Any referenced component does not exist in the graph
+    pub fn register_identity_provider(
+        &mut self,
+        id: &str,
+        metadata: HashMap<String, String>,
+        component_ids: &[String],
+    ) -> anyhow::Result<()> {
+        for component_id in component_ids {
+            if !self.contains(component_id) {
+                return Err(anyhow::anyhow!(
+                    "Cannot register identity provider '{id}': referenced component '{component_id}' does not exist in the graph"
+                ));
+            }
+        }
+
+        let node = ComponentNode {
+            id: id.to_string(),
+            kind: ComponentKind::IdentityProvider,
+            status: ComponentStatus::Stopped,
+            metadata,
+        };
+        let mut txn = self.begin();
+        txn.add_component(node)?;
+        for component_id in component_ids {
+            txn.add_relationship(id, component_id, RelationshipKind::Authenticates)?;
+        }
+        txn.commit();
+        Ok(())
+    }
+
     // ========================================================================
     // Transactions
     // ========================================================================
@@ -1091,6 +1423,165 @@ impl ComponentGraph {
             committed: false,
         }
     }
+
+    // ========================================================================
+    // Event History (centralized)
+    // ========================================================================
+
+    /// Record a component event in the centralized history.
+    ///
+    /// Called internally by [`apply_update()`]. Managers should NOT call this
+    /// directly — status updates flow through the mpsc channel and are recorded
+    /// automatically.
+    pub fn record_event(&mut self, event: ComponentEvent) {
+        self.event_history.record_event(event);
+    }
+
+    /// Get all lifecycle events for a specific component.
+    ///
+    /// Returns events in chronological order (oldest first).
+    /// Up to 100 most recent events are retained per component.
+    pub fn get_events(&self, component_id: &str) -> Vec<ComponentEvent> {
+        self.event_history.get_events(component_id)
+    }
+
+    /// Get all lifecycle events across all components.
+    ///
+    /// Returns events sorted by timestamp (oldest first).
+    pub fn get_all_events(&self) -> Vec<ComponentEvent> {
+        self.event_history.get_all_events()
+    }
+
+    /// Get the most recent error message for a component.
+    pub fn get_last_error(&self, component_id: &str) -> Option<String> {
+        self.event_history.get_last_error(component_id)
+    }
+
+    /// Subscribe to live lifecycle events for a component.
+    ///
+    /// Returns the current history and a broadcast receiver for new events.
+    /// Creates the component's event channel if it doesn't exist.
+    pub fn subscribe_events(
+        &mut self,
+        component_id: &str,
+    ) -> (Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>) {
+        self.event_history.subscribe(component_id)
+    }
+}
+
+// ============================================================================
+// Async Status Waiter
+// ============================================================================
+
+/// Wait for a component to reach one of the target statuses, with a timeout.
+///
+/// This replaces polling loops that use `sleep()` + status check. It uses the
+/// graph's [`Notify`] to wake up only when a status actually changes, avoiding
+/// busy-waiting.
+///
+/// # Pattern
+///
+/// Uses the same register-before-check pattern as `PriorityQueue::enqueue_wait()`:
+/// 1. Register `notified()` interest
+/// 2. Acquire read lock, check condition
+/// 3. If not met, release lock and await notification
+/// 4. Repeat until condition met or timeout
+///
+/// # Arguments
+///
+/// * `graph` — The shared graph handle
+/// * `component_id` — ID of the component to watch
+/// * `target_statuses` — One or more acceptable statuses to wait for
+/// * `timeout` — Maximum time to wait before returning an error
+///
+/// # Errors
+///
+/// Returns an error if the timeout expires before the component reaches any
+/// target status, or if the component is not found in the graph.
+pub async fn wait_for_status(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    component_id: &str,
+    target_statuses: &[ComponentStatus],
+    timeout: std::time::Duration,
+) -> anyhow::Result<ComponentStatus> {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    // Get the Notify handle once (doesn't require holding the lock)
+    let notify = {
+        let g = graph.read().await;
+        g.status_notifier()
+    };
+
+    loop {
+        // Register interest BEFORE checking condition (avoid race)
+        let notified = notify.notified();
+
+        // Check current status under read lock
+        {
+            let g = graph.read().await;
+            if let Some(node) = g.get_component(component_id) {
+                if target_statuses.contains(&node.status) {
+                    return Ok(node.status);
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Component '{component_id}' not found in graph"
+                ));
+            }
+        }
+        // Lock released
+
+        // Wait for a status change or timeout
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "Timed out waiting for component '{component_id}' to reach {target_statuses:?}",
+            ));
+        }
+
+        tokio::select! {
+            _ = notified => {
+                // A status changed somewhere — loop back and re-check
+            }
+            _ = tokio::time::sleep(remaining) => {
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for component '{component_id}' to reach {target_statuses:?}",
+                ));
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Relationship Validation
+// ============================================================================
+
+/// Check if a relationship kind is semantically valid between two component kinds.
+///
+/// This enforces the graph topology rules:
+/// - **Feeds**: Source → Query, or Query → Reaction
+/// - **Owns/OwnedBy**: Instance ↔ any component (created automatically)
+/// - **Bootstraps**: BootstrapProvider → Source
+/// - **Authenticates**: IdentityProvider → any component
+fn is_valid_relationship(
+    from_kind: &ComponentKind,
+    to_kind: &ComponentKind,
+    relationship: &RelationshipKind,
+) -> bool {
+    use ComponentKind::*;
+    use RelationshipKind::*;
+    matches!(
+        (from_kind, to_kind, relationship),
+        // Data flow
+        (Source, Query, Feeds)
+            | (Query, Reaction, Feeds)
+            // Ownership (auto-created by add_component_internal)
+            | (Instance, _, Owns)
+            // Bootstrap
+            | (BootstrapProvider, Source, Bootstraps)
+            // Authentication
+            | (IdentityProvider, _, Authenticates)
+    )
 }
 
 // ============================================================================
@@ -1123,6 +1614,7 @@ fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
             | (Starting, Error)
             | (Starting, Stopped) // aborted start
             | (Running, Stopping)
+            | (Running, Stopped) // direct stop (async channel may skip Stopping)
             | (Running, Error)
             | (Stopping, Stopped)
             | (Stopping, Error)
@@ -1137,6 +1629,47 @@ fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
             | (Reconfiguring, Starting)
             | (Reconfiguring, Error)
     )
+}
+
+/// Produce a human-readable error message for an invalid transition.
+///
+/// These messages provide actionable feedback (e.g., "Component is already running"
+/// instead of just "invalid transition").
+fn describe_invalid_transition(id: &str, from: &ComponentStatus, to: &ComponentStatus) -> String {
+    use ComponentStatus::*;
+    match (from, to) {
+        // Trying to start something that's already starting/running
+        (Starting, Starting) => format!("Component '{id}' is already starting"),
+        (Running, Starting) => format!("Component '{id}' is already running"),
+        (Stopping, Starting) => {
+            format!("Cannot start component '{id}' while it is stopping")
+        }
+        (Reconfiguring, Starting) => {
+            // Reconfiguring → Starting is actually valid, so this shouldn't be reached,
+            // but kept for safety
+            format!("Cannot start component '{id}' while it is reconfiguring")
+        }
+        // Trying to stop something that's already stopped/stopping
+        (Stopped, Stopping) => {
+            format!("Cannot stop component '{id}': it is already stopped")
+        }
+        (Stopping, Stopping) => format!("Component '{id}' is already stopping"),
+        (Error, Stopping) => {
+            format!("Cannot stop component '{id}': it is in error state")
+        }
+        // Trying to reconfigure during a transition
+        (Starting, Reconfiguring) => {
+            format!("Cannot reconfigure component '{id}' while it is starting")
+        }
+        (Stopping, Reconfiguring) => {
+            format!("Cannot reconfigure component '{id}' while it is stopping")
+        }
+        (Reconfiguring, Reconfiguring) => {
+            format!("Component '{id}' is already reconfiguring")
+        }
+        // Generic fallback
+        _ => format!("Invalid state transition for component '{id}': {from:?} → {to:?}"),
+    }
 }
 
 // ============================================================================
@@ -1193,25 +1726,13 @@ impl<'g> GraphTransaction<'g> {
     /// are removed.
     pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
         let id = node.id.clone();
-        let (node_idx, event) = self.graph.add_component_internal(node)?;
+        let (node_idx, event, owns_edge, owned_by_edge) =
+            self.graph.add_component_internal(node)?;
         self.added_nodes.push((node_idx, id));
 
         // Record the ownership edges for rollback
-        // add_component_internal creates exactly 2 edges: Owns and OwnedBy
-        // They are the last 2 edges added to the graph
-        let edge_count = self.graph.graph.edge_count();
-        for edge_ref in self.graph.graph.edge_indices() {
-            // Track edges that belong to the newly added node
-            let endpoints = self.graph.graph.edge_endpoints(edge_ref);
-            if let Some((from, to)) = endpoints {
-                if from == node_idx || to == node_idx {
-                    self.added_edges.push(edge_ref);
-                }
-            }
-        }
-        // Deduplicate (the node might have edges from prior transaction steps)
-        self.added_edges.sort();
-        self.added_edges.dedup();
+        self.added_edges.push(owns_edge);
+        self.added_edges.push(owned_by_edge);
 
         if let Some(event) = event {
             self.pending_events.push(event);
@@ -1989,5 +2510,478 @@ mod tests {
         graph.deregister("src").unwrap();
 
         assert_eq!(graph.node_count(), 1);
+    }
+
+    // ========================================================================
+    // validate_and_transition tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_and_transition_stopped_to_starting() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+
+        let result = graph.validate_and_transition(
+            "s1",
+            ComponentStatus::Starting,
+            Some("Starting source".into()),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some()); // event emitted
+        assert_eq!(
+            graph.get_component("s1").unwrap().status,
+            ComponentStatus::Starting
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_running_to_stopping() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+        // Move to Running first
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Running, None)
+            .unwrap();
+
+        let result = graph.validate_and_transition(
+            "s1",
+            ComponentStatus::Stopping,
+            Some("Stopping source".into()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            graph.get_component("s1").unwrap().status,
+            ComponentStatus::Stopping
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_idempotent_same_state() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+
+        let result = graph.validate_and_transition("s1", ComponentStatus::Stopped, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // no event for same-state
+    }
+
+    #[test]
+    fn test_validate_and_transition_invalid_start_while_running() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Running, None)
+            .unwrap();
+
+        let result = graph.validate_and_transition("s1", ComponentStatus::Starting, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already running"),
+            "Expected 'already running' in: {err_msg}"
+        );
+        // Status unchanged
+        assert_eq!(
+            graph.get_component("s1").unwrap().status,
+            ComponentStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_invalid_stop_while_stopped() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+
+        let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already stopped"),
+            "Expected 'already stopped' in: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_error_recovery() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Error, None)
+            .unwrap();
+
+        // Error → Starting (retry) should work
+        let result = graph.validate_and_transition("s1", ComponentStatus::Starting, None);
+        assert!(result.is_ok());
+        assert_eq!(
+            graph.get_component("s1").unwrap().status,
+            ComponentStatus::Starting
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_reconfiguring() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+
+        // Stopped → Reconfiguring should work
+        let result = graph.validate_and_transition("s1", ComponentStatus::Reconfiguring, None);
+        assert!(result.is_ok());
+        assert_eq!(
+            graph.get_component("s1").unwrap().status,
+            ComponentStatus::Reconfiguring
+        );
+
+        // Reconfiguring → Stopped should work
+        let result = graph.validate_and_transition("s1", ComponentStatus::Stopped, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_and_transition_invalid_reconfig_while_stopping() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Running, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Stopping, None)
+            .unwrap();
+
+        let result = graph.validate_and_transition("s1", ComponentStatus::Reconfiguring, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("stopping"),
+            "Expected 'stopping' in: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_and_transition_nonexistent_component() {
+        let mut graph = create_test_graph();
+
+        let result = graph.validate_and_transition("nonexistent", ComponentStatus::Starting, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_validate_and_transition_cannot_stop_error_state() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("s1")).unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Starting, None)
+            .unwrap();
+        graph
+            .validate_and_transition("s1", ComponentStatus::Error, None)
+            .unwrap();
+
+        let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("error state"),
+            "Expected 'error state' in: {err_msg}"
+        );
+    }
+
+    // ========================================================================
+    // register_bootstrap_provider tests
+    // ========================================================================
+
+    #[test]
+    fn test_register_bootstrap_provider_standalone() {
+        let mut graph = create_test_graph();
+        graph
+            .register_bootstrap_provider("bp-1", HashMap::new(), &[])
+            .unwrap();
+
+        assert!(graph.contains("bp-1"));
+        assert_eq!(
+            graph.get_component("bp-1").unwrap().kind,
+            ComponentKind::BootstrapProvider
+        );
+        assert_eq!(
+            graph.get_component("bp-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+        // 2 ownership edges (Owns + OwnedBy)
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_register_bootstrap_provider_with_source() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        graph
+            .register_bootstrap_provider("bp-1", HashMap::new(), &["source-1".to_string()])
+            .unwrap();
+
+        assert!(graph.contains("bp-1"));
+        // 2 ownership edges for source + 2 ownership edges for bp + 2 Bootstraps/BootstrappedBy edges
+        assert_eq!(graph.edge_count(), 6);
+    }
+
+    #[test]
+    fn test_register_bootstrap_provider_duplicate_fails() {
+        let mut graph = create_test_graph();
+        graph
+            .register_bootstrap_provider("bp-1", HashMap::new(), &[])
+            .unwrap();
+        let result = graph.register_bootstrap_provider("bp-1", HashMap::new(), &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_register_bootstrap_provider_missing_source_fails() {
+        let mut graph = create_test_graph();
+        let result = graph.register_bootstrap_provider(
+            "bp-1",
+            HashMap::new(),
+            &["nonexistent-source".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(!graph.contains("bp-1"));
+    }
+
+    // ========================================================================
+    // register_identity_provider tests
+    // ========================================================================
+
+    #[test]
+    fn test_register_identity_provider_standalone() {
+        let mut graph = create_test_graph();
+        graph
+            .register_identity_provider("ip-1", HashMap::new(), &[])
+            .unwrap();
+
+        assert!(graph.contains("ip-1"));
+        assert_eq!(
+            graph.get_component("ip-1").unwrap().kind,
+            ComponentKind::IdentityProvider
+        );
+        assert_eq!(
+            graph.get_component("ip-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+        // 2 ownership edges (Owns + OwnedBy)
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn test_register_identity_provider_with_components() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+        graph
+            .register_identity_provider("ip-1", HashMap::new(), &["source-1".to_string()])
+            .unwrap();
+
+        assert!(graph.contains("ip-1"));
+        // 2 ownership edges for source + 2 ownership edges for ip + 2 Authenticates/AuthenticatedBy edges
+        assert_eq!(graph.edge_count(), 6);
+    }
+
+    #[test]
+    fn test_register_identity_provider_duplicate_fails() {
+        let mut graph = create_test_graph();
+        graph
+            .register_identity_provider("ip-1", HashMap::new(), &[])
+            .unwrap();
+        let result = graph.register_identity_provider("ip-1", HashMap::new(), &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_register_identity_provider_missing_component_fails() {
+        let mut graph = create_test_graph();
+        let result = graph.register_identity_provider(
+            "ip-1",
+            HashMap::new(),
+            &["nonexistent-source".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+        assert!(!graph.contains("ip-1"));
+    }
+
+    #[test]
+    fn test_full_pipeline_with_providers() {
+        let mut graph = create_test_graph();
+
+        // Register providers first
+        graph
+            .register_bootstrap_provider("bp-1", HashMap::new(), &[])
+            .unwrap();
+        graph
+            .register_identity_provider("ip-1", HashMap::new(), &[])
+            .unwrap();
+
+        // Register source with bootstrap and identity links
+        graph.register_source("src", HashMap::new()).unwrap();
+        graph
+            .add_relationship("bp-1", "src", RelationshipKind::Bootstraps)
+            .unwrap();
+        graph
+            .add_relationship("ip-1", "src", RelationshipKind::Authenticates)
+            .unwrap();
+
+        // Register query and reaction
+        graph
+            .register_query("qry", HashMap::new(), &["src".to_string()])
+            .unwrap();
+        graph
+            .register_reaction("rxn", HashMap::new(), &["qry".to_string()])
+            .unwrap();
+
+        // Verify topology
+        assert_eq!(graph.node_count(), 6); // instance + bp + ip + src + qry + rxn
+
+        // List by kind
+        assert_eq!(
+            graph.list_by_kind(&ComponentKind::BootstrapProvider).len(),
+            1
+        );
+        assert_eq!(
+            graph.list_by_kind(&ComponentKind::IdentityProvider).len(),
+            1
+        );
+
+        // Teardown in reverse order
+        graph.deregister("rxn").unwrap();
+        graph.deregister("qry").unwrap();
+        graph.deregister("src").unwrap();
+        graph.deregister("ip-1").unwrap();
+        graph.deregister("bp-1").unwrap();
+
+        assert_eq!(graph.node_count(), 1); // only instance remains
+    }
+
+    // ========================================================================
+    // Runtime store tests
+    // ========================================================================
+
+    #[test]
+    fn test_set_and_get_runtime() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        // Store an Arc<String> as a stand-in for Arc<dyn Source>
+        let runtime: Arc<String> = Arc::new("test-runtime".to_string());
+        graph
+            .set_runtime("source-1", Box::new(runtime.clone()))
+            .unwrap();
+
+        // Retrieve it
+        let retrieved = graph.get_runtime::<Arc<String>>("source-1");
+        assert!(retrieved.is_some());
+        assert_eq!(**retrieved.unwrap(), "test-runtime");
+    }
+
+    #[test]
+    fn test_get_runtime_wrong_type_returns_none() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        let runtime: Arc<String> = Arc::new("test".to_string());
+        graph.set_runtime("source-1", Box::new(runtime)).unwrap();
+
+        // Wrong type returns None
+        let retrieved = graph.get_runtime::<Arc<i32>>("source-1");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_get_runtime_nonexistent_returns_none() {
+        let graph = create_test_graph();
+        let retrieved = graph.get_runtime::<Arc<String>>("nonexistent");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_take_runtime() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        let runtime: Arc<String> = Arc::new("take-me".to_string());
+        graph.set_runtime("source-1", Box::new(runtime)).unwrap();
+
+        // Take removes it
+        let taken = graph.take_runtime::<Arc<String>>("source-1");
+        assert!(taken.is_some());
+        assert_eq!(*taken.unwrap(), "take-me");
+
+        // Now it's gone
+        assert!(!graph.has_runtime("source-1"));
+        assert!(graph.get_runtime::<Arc<String>>("source-1").is_none());
+    }
+
+    #[test]
+    fn test_has_runtime() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        assert!(!graph.has_runtime("source-1"));
+
+        graph.set_runtime("source-1", Box::new(42i32)).unwrap();
+        assert!(graph.has_runtime("source-1"));
+    }
+
+    #[test]
+    fn test_remove_component_removes_runtime() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        graph
+            .set_runtime("source-1", Box::new(Arc::new("runtime".to_string())))
+            .unwrap();
+        assert!(graph.has_runtime("source-1"));
+
+        graph.remove_component("source-1").unwrap();
+        assert!(!graph.has_runtime("source-1"));
+    }
+
+    #[test]
+    fn test_deregister_removes_runtime() {
+        let mut graph = create_test_graph();
+        graph.register_source("source-1", HashMap::new()).unwrap();
+
+        graph
+            .set_runtime("source-1", Box::new(Arc::new("runtime".to_string())))
+            .unwrap();
+        assert!(graph.has_runtime("source-1"));
+
+        graph.deregister("source-1").unwrap();
+        assert!(!graph.has_runtime("source-1"));
+    }
+
+    #[test]
+    fn test_set_runtime_replaces_existing() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        graph
+            .set_runtime("source-1", Box::new(Arc::new("first".to_string())))
+            .unwrap();
+        graph
+            .set_runtime("source-1", Box::new(Arc::new("second".to_string())))
+            .unwrap();
+
+        let retrieved = graph.get_runtime::<Arc<String>>("source-1");
+        assert_eq!(**retrieved.unwrap(), "second");
     }
 }

@@ -50,7 +50,7 @@ impl StateGuard {
     /// This should be called once during server initialization.
     /// Uses Release ordering to ensure all prior writes are visible
     /// to threads that subsequently observe the initialized state.
-    pub async fn mark_initialized(&self) {
+    pub fn mark_initialized(&self) {
         self.initialized.store(true, Ordering::Release);
     }
 
@@ -60,7 +60,7 @@ impl StateGuard {
     ///
     /// Returns `true` if the server has been initialized, `false` otherwise.
     /// Uses Acquire ordering to synchronize with the Release in mark_initialized.
-    pub async fn is_initialized(&self) -> bool {
+    pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)
     }
 
@@ -77,12 +77,12 @@ impl StateGuard {
     ///
     /// ```ignore
     /// pub async fn some_operation(&self) -> crate::error::Result<()> {
-    ///     self.state_guard.require_initialized().await?;
+    ///     self.state_guard.require_initialized()?;
     ///     // ... perform operation ...
     ///     Ok(())
     /// }
     /// ```
-    pub async fn require_initialized(&self) -> crate::error::Result<()> {
+    pub fn require_initialized(&self) -> crate::error::Result<()> {
         if !self.initialized.load(Ordering::Acquire) {
             return Err(DrasiError::invalid_state(
                 "Server must be initialized before this operation",
@@ -105,20 +105,20 @@ mod tests {
     #[tokio::test]
     async fn test_initial_state_not_initialized() {
         let guard = StateGuard::new();
-        assert!(!guard.is_initialized().await);
+        assert!(!guard.is_initialized());
     }
 
     #[tokio::test]
     async fn test_mark_initialized() {
         let guard = StateGuard::new();
-        guard.mark_initialized().await;
-        assert!(guard.is_initialized().await);
+        guard.mark_initialized();
+        assert!(guard.is_initialized());
     }
 
     #[tokio::test]
     async fn test_require_initialized_fails_when_not_initialized() {
         let guard = StateGuard::new();
-        let result = guard.require_initialized().await;
+        let result = guard.require_initialized();
         assert!(result.is_err());
         match result {
             Err(DrasiError::InvalidState { message }) => {
@@ -131,8 +131,8 @@ mod tests {
     #[tokio::test]
     async fn test_require_initialized_succeeds_when_initialized() {
         let guard = StateGuard::new();
-        guard.mark_initialized().await;
-        let result = guard.require_initialized().await;
+        guard.mark_initialized();
+        let result = guard.require_initialized();
         assert!(result.is_ok());
     }
 
@@ -141,10 +141,10 @@ mod tests {
         let guard1 = StateGuard::new();
         let guard2 = guard1.clone();
 
-        guard1.mark_initialized().await;
+        guard1.mark_initialized();
 
-        assert!(guard1.is_initialized().await);
-        assert!(guard2.is_initialized().await);
+        assert!(guard1.is_initialized());
+        assert!(guard2.is_initialized());
     }
 
     /// Test that concurrent reads of initialization state are safe and consistent.
@@ -152,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_reads() {
         let guard = StateGuard::new();
-        guard.mark_initialized().await;
+        guard.mark_initialized();
 
         // Spawn many concurrent readers
         let mut handles = Vec::new();
@@ -161,8 +161,8 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 // Each reader checks initialization status multiple times
                 for _ in 0..100 {
-                    assert!(guard_clone.is_initialized().await);
-                    assert!(guard_clone.require_initialized().await.is_ok());
+                    assert!(guard_clone.is_initialized());
+                    assert!(guard_clone.require_initialized().is_ok());
                 }
             }));
         }
@@ -180,7 +180,7 @@ mod tests {
         let guard = StateGuard::new();
 
         // Verify not initialized initially
-        assert!(!guard.is_initialized().await);
+        assert!(!guard.is_initialized());
 
         // Spawn readers that will spin until initialized
         let mut handles = Vec::new();
@@ -189,14 +189,14 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 // Wait for initialization (with timeout to prevent infinite loop)
                 let start = std::time::Instant::now();
-                while !guard_clone.is_initialized().await {
+                while !guard_clone.is_initialized() {
                     if start.elapsed() > std::time::Duration::from_secs(5) {
                         panic!("Timeout waiting for initialization to be visible");
                     }
                     tokio::task::yield_now().await;
                 }
                 // Once we see initialized, require_initialized should also succeed
-                guard_clone.require_initialized().await.unwrap();
+                guard_clone.require_initialized().unwrap();
             }));
         }
 
@@ -204,7 +204,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         // Now mark as initialized - all waiting tasks should see this
-        guard.mark_initialized().await;
+        guard.mark_initialized();
 
         // Wait for all tasks to complete (they should all succeed)
         for handle in handles {

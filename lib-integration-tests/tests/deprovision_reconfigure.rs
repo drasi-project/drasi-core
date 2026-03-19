@@ -37,38 +37,52 @@ use tracing::Instrument;
 // Helpers
 // ============================================================================
 
-/// Poll until a source reaches the expected status (with timeout).
+/// Wait for a source to reach the expected status via event notification.
 async fn wait_for_source_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(status) = drasi.get_source_status(id).await {
-            if status == expected {
-                return;
+    // Subscribe BEFORE checking to avoid missing events
+    let mut rx = drasi.subscribe_all_component_events();
+    if drasi.get_source_status(id).await.ok() == Some(expected) {
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event) if event.component_id == id && event.status == expected => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for source '{id}'");
+                }
+                _ => continue,
             }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Timed out waiting for source '{id}' to reach {expected:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("Timed out waiting for source '{id}' to reach {expected:?}");
+    });
 }
 
-/// Poll until a reaction reaches the expected status (with timeout).
+/// Wait for a reaction to reach the expected status via event notification.
 async fn wait_for_reaction_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(status) = drasi.get_reaction_status(id).await {
-            if status == expected {
-                return;
+    // Subscribe BEFORE checking to avoid missing events
+    let mut rx = drasi.subscribe_all_component_events();
+    if drasi.get_reaction_status(id).await.ok() == Some(expected) {
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event) if event.component_id == id && event.status == expected => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for reaction '{id}'");
+                }
+                _ => continue,
             }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Timed out waiting for reaction '{id}' to reach {expected:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("Timed out waiting for reaction '{id}' to reach {expected:?}");
+    });
 }
 
 // ============================================================================
@@ -788,11 +802,19 @@ async fn test_source_update_preserves_log_history() {
         .await
         .unwrap();
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("reconfig-log-src")
+        .await
+        .unwrap();
+
     drasi.start().await.unwrap();
     wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
 
-    // Give the source a moment to emit logs after reaching Running status
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for at least one log to arrive (event-based instead of sleep)
+    let _ = timeout(Duration::from_secs(5), log_rx.recv())
+        .await
+        .expect("Timed out waiting for source logs to arrive");
 
     // Capture pre-update log count
     let (pre_logs, _) = drasi

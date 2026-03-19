@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::ComponentStatus;
-use crate::component_graph::ComponentGraph;
+use crate::component_graph::{ComponentGraph, ComponentKind};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -72,26 +72,23 @@ impl LifecycleManager {
         for query_config in &self.config.queries {
             let config = query_config.clone();
 
-            // Step 1: Register in the component graph
+            // Step 1: Register in the component graph (sources must already exist)
             {
                 let mut graph = self.graph.write().await;
                 let mut metadata = HashMap::new();
                 metadata.insert("query".to_string(), config.query.clone());
                 let source_ids: Vec<String> =
                     config.sources.iter().map(|s| s.source_id.clone()).collect();
-                // Ensure referenced sources exist as placeholder nodes.
-                // Sources may be injected later (e.g. by the builder) so we
-                // create minimal graph nodes to satisfy the reference check.
-                for sid in &source_ids {
-                    if !graph.contains(sid) {
-                        graph.register_source(sid, HashMap::new())?;
-                    }
-                }
                 graph.register_query(&config.id, metadata, &source_ids)?;
             }
 
-            // Step 2: Provision runtime
-            self.query_manager.provision_query(config).await?;
+            // Step 2: Provision runtime (with rollback on failure)
+            let query_id = config.id.clone();
+            if let Err(e) = self.query_manager.provision_query(config).await {
+                let mut graph = self.graph.write().await;
+                let _ = graph.deregister(&query_id);
+                return Err(e);
+            }
         }
 
         info!("Configuration loaded successfully");
@@ -111,27 +108,9 @@ impl LifecycleManager {
         info!("All auto-start sources started successfully");
 
         // Start queries after sources
+        // QueryManager.start_all() reads from graph and checks auto_start internally
         info!("Starting auto-start queries");
-        for query_config in &self.config.queries {
-            let id = &query_config.id;
-
-            if query_config.auto_start {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting query '{}' (auto_start={})",
-                        id, query_config.auto_start
-                    );
-                    self.query_manager.start_query(id.clone()).await?;
-                    info!("Query '{id}' started successfully");
-                } else {
-                    info!("Query '{id}' already started or starting, status: {status:?}");
-                }
-            } else {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                info!("Skipping query '{id}' (auto_start=false), status: {status:?}");
-            }
-        }
+        self.query_manager.start_all().await?;
         info!("All auto-start queries started successfully");
 
         // Start reactions after queries
@@ -147,76 +126,62 @@ impl LifecycleManager {
 
     /// Stop all running components
     ///
-    /// Components are stopped in reverse dependency order: Reactions → Queries → Sources
+    /// Components are stopped in reverse dependency order using the graph's
+    /// topological ordering: Reactions → Queries → Sources.
     /// Errors during shutdown are logged but don't prevent other components from stopping.
     pub async fn stop_all_components(&self) -> Result<()> {
         use log::error;
 
-        // Stop all reactions first (reverse order)
-        info!("Stopping all reactions");
-        let reaction_ids: Vec<String> = self
-            .reaction_manager
-            .list_reactions()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in reaction_ids {
-            let status = self.reaction_manager.get_reaction_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
-                    error!("Error stopping reaction {id}: {e}");
+        // Get a single consistent snapshot of components in reverse dependency order
+        let shutdown_order: Vec<(String, ComponentKind, ComponentStatus)> = {
+            let graph = self.graph.read().await;
+            match graph.topological_order() {
+                Ok(order) => order
+                    .into_iter()
+                    .rev()
+                    .map(|n| (n.id.clone(), n.kind.clone(), n.status))
+                    .collect(),
+                Err(e) => {
+                    error!("Failed to compute topological order: {e}, falling back to kind-based ordering");
+                    // Fallback: list by kind in reverse order
+                    let mut all = Vec::new();
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Reaction) {
+                        all.push((id, ComponentKind::Reaction, status));
+                    }
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Query) {
+                        all.push((id, ComponentKind::Query, status));
+                    }
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Source) {
+                        all.push((id, ComponentKind::Source, status));
+                    }
+                    all
                 }
-                // Subscriptions are managed by the reaction itself - no router cleanup needed
             }
-        }
+        };
 
-        // Stop all queries
-        info!("Stopping all queries");
-        let query_ids: Vec<String> = self
-            .query_manager
-            .list_queries()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in query_ids {
-            let status = self.query_manager.get_query_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.query_manager.stop_query(id.clone()).await {
-                    error!("Error stopping query {id}: {e}");
-                }
-                // Query unsubscribes from sources automatically when stopped
+        for (id, kind, status) in shutdown_order {
+            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+                continue;
             }
-        }
 
-        // Stop all sources
-        info!("Stopping all sources");
-        let source_ids: Vec<String> = self
-            .source_manager
-            .list_sources()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in source_ids {
-            let status = self.source_manager.get_source_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.source_manager.stop_source(id.clone()).await {
-                    error!("Error stopping source {id}: {e}");
+            let result = match kind {
+                ComponentKind::Reaction => {
+                    info!("Stopping reaction '{id}'");
+                    self.reaction_manager.stop_reaction(id.clone()).await
                 }
+                ComponentKind::Query => {
+                    info!("Stopping query '{id}'");
+                    self.query_manager.stop_query(id.clone()).await
+                }
+                ComponentKind::Source => {
+                    info!("Stopping source '{id}'");
+                    self.source_manager.stop_source(id.clone()).await
+                }
+                _ => continue,
+            };
+
+            if let Err(e) = result {
+                error!("Error stopping {kind} {id}: {e}");
             }
         }
 

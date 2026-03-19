@@ -347,11 +347,15 @@ fn build_added_changes(instance_id: &str, event: &ComponentEvent) -> Vec<SourceC
         ComponentType::Source => "HAS_SOURCE",
         ComponentType::Query => "HAS_QUERY",
         ComponentType::Reaction => "HAS_REACTION",
+        ComponentType::BootstrapProvider => "HAS_BOOTSTRAP_PROVIDER",
+        ComponentType::IdentityProvider => "HAS_IDENTITY_PROVIDER",
     };
     let rel_prefix = match event.component_type {
         ComponentType::Source => "has_source",
         ComponentType::Query => "has_query",
         ComponentType::Reaction => "has_reaction",
+        ComponentType::BootstrapProvider => "has_bootstrap_provider",
+        ComponentType::IdentityProvider => "has_identity_provider",
     };
     let rel_id = format!("rel:{rel_prefix}:{instance_id}:{}", event.component_id);
     let rel = make_relation(
@@ -376,11 +380,15 @@ fn build_removed_changes(instance_id: &str, event: &ComponentEvent) -> Vec<Sourc
         ComponentType::Source => "has_source",
         ComponentType::Query => "has_query",
         ComponentType::Reaction => "has_reaction",
+        ComponentType::BootstrapProvider => "has_bootstrap_provider",
+        ComponentType::IdentityProvider => "has_identity_provider",
     };
     let has_label = match event.component_type {
         ComponentType::Source => "HAS_SOURCE",
         ComponentType::Query => "HAS_QUERY",
         ComponentType::Reaction => "HAS_REACTION",
+        ComponentType::BootstrapProvider => "HAS_BOOTSTRAP_PROVIDER",
+        ComponentType::IdentityProvider => "HAS_IDENTITY_PROVIDER",
     };
     let rel_id = format!("rel:{rel_prefix}:{instance_id}:{}", event.component_id);
     changes.push(SourceChange::Delete {
@@ -420,5 +428,7 @@ fn component_label_prefix(ct: &ComponentType) -> (&'static str, &'static str) {
         ComponentType::Source => ("Source", "source"),
         ComponentType::Query => ("Query", "query"),
         ComponentType::Reaction => ("Reaction", "reaction"),
+        ComponentType::BootstrapProvider => ("BootstrapProvider", "bootstrap_provider"),
+        ComponentType::IdentityProvider => ("IdentityProvider", "identity_provider"),
     }
 }

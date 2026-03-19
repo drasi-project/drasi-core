@@ -337,8 +337,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
-
     #[derive(Clone, Debug, PartialEq)]
     struct TestMessage {
         id: u32,
@@ -478,7 +476,7 @@ mod tests {
         }
 
         // Give some time for messages to accumulate
-        sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
 
         // Try to receive - should handle lag and continue
         let result = receiver.recv().await;

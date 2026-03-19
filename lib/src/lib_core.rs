@@ -22,7 +22,7 @@ use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
-use crate::managers::{ComponentEventHistory, ComponentLogRegistry};
+use crate::managers::ComponentLogRegistry;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
@@ -179,6 +179,8 @@ pub struct DrasiLib {
     /// All managers share this graph via `Arc<RwLock<>>`. The graph is updated atomically
     /// alongside the manager HashMaps when components are added, removed, or updated.
     pub(crate) component_graph: Arc<RwLock<ComponentGraph>>,
+    /// Handle to the graph update loop task for clean shutdown.
+    pub(crate) graph_update_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Clone for DrasiLib {
@@ -196,6 +198,7 @@ impl Clone for DrasiLib {
             log_registry: Arc::clone(&self.log_registry),
             component_event_broadcast_tx: self.component_event_broadcast_tx.clone(),
             component_graph: Arc::clone(&self.component_graph),
+            graph_update_handle: Arc::clone(&self.graph_update_handle),
         }
     }
 }
@@ -210,7 +213,7 @@ impl DrasiLib {
     /// Since DrasiLib contains all Arc-wrapped fields, cloning is cheap
     /// (just increments ref counts), but this helper makes the intent clearer
     /// and provides a single place to document this pattern.
-    pub(crate) fn as_arc(&self) -> Arc<Self> {
+    pub(crate) fn to_arc(&self) -> Arc<Self> {
         Arc::new(self.clone())
     }
 
@@ -319,21 +322,36 @@ impl DrasiLib {
 
         // Spawn the graph update loop — sole consumer of component status updates.
         // Components send status changes via the mpsc update channel (fire-and-forget),
-        // and this loop applies them to the graph, emits broadcast events, and records
-        // events in each manager's ComponentEventHistory.
-        {
+        // and this loop applies them to the graph. Events are recorded in the graph's
+        // centralized ComponentEventHistory during apply_update().
+        //
+        // Batch optimization: drains all available updates under a single write lock
+        // acquisition, reducing lock contention when multiple components report status
+        // simultaneously (e.g., during start_all / stop_all).
+        let graph_update_handle = {
             let graph = component_graph.clone();
-            let sm = source_manager.clone();
-            let qm = query_manager.clone();
-            let rm = reaction_manager.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let mut update_rx = update_rx;
-                while let Some(update) = update_rx.recv().await {
-                    let mut g = graph.write().await;
-                    let event = g.apply_update(update);
-                    drop(g); // release lock before async record_event
+                while let Some(first) = update_rx.recv().await {
+                    // Drain all immediately available updates into a batch
+                    let mut batch = vec![first];
+                    while let Ok(update) = update_rx.try_recv() {
+                        batch.push(update);
+                    }
 
-                    if let Some(event) = event {
+                    // Apply entire batch under a single write lock.
+                    // Events are recorded in the graph's centralized event history
+                    // inside apply_update(), eliminating per-manager dispatch.
+                    let events: Vec<_> = {
+                        let mut g = graph.write().await;
+                        batch
+                            .into_iter()
+                            .filter_map(|update| g.apply_update(update))
+                            .collect()
+                    };
+                    // Lock released — log events outside the lock
+
+                    for event in events {
                         log::info!(
                             "Component Event - {:?} {}: {:?} - {}",
                             event.component_type,
@@ -341,17 +359,12 @@ impl DrasiLib {
                             event.status,
                             event.message.clone().unwrap_or_default()
                         );
-
-                        match event.component_type {
-                            ComponentType::Source => sm.record_event(event).await,
-                            ComponentType::Query => qm.record_event(event).await,
-                            ComponentType::Reaction => rm.record_event(event).await,
-                        }
                     }
                 }
                 tracing::debug!("Graph update loop exited — all senders dropped");
             });
-        }
+            Arc::new(tokio::sync::Mutex::new(Some(handle)))
+        };
 
         Self {
             config,
@@ -366,13 +379,14 @@ impl DrasiLib {
             log_registry,
             component_event_broadcast_tx,
             component_graph,
+            graph_update_handle,
         }
     }
 
     /// Internal initialization - performs one-time setup
     /// This is called internally by builder and config loaders
     pub(crate) async fn initialize(&mut self) -> Result<()> {
-        let already_initialized = self.state_guard.is_initialized().await;
+        let already_initialized = self.state_guard.is_initialized();
         if already_initialized {
             info!("Server already initialized, skipping initialization");
             return Ok(());
@@ -399,7 +413,7 @@ impl DrasiLib {
         // Load configuration
         self.lifecycle.load_configuration().await?;
 
-        self.state_guard.mark_initialized().await;
+        self.state_guard.mark_initialized();
         info!("Drasi Server Core initialized successfully");
         Ok(())
     }
@@ -449,7 +463,7 @@ impl DrasiLib {
         info!("Starting Drasi Server Core");
 
         // Ensure initialized
-        if !self.state_guard.is_initialized().await {
+        if !self.state_guard.is_initialized() {
             return Err(anyhow!("Server must be initialized before starting"));
         }
 
@@ -562,20 +576,14 @@ impl DrasiLib {
         Arc::clone(&self.log_registry)
     }
 
-    /// Get access to the source event history.
+    /// Get access to the component graph for event history queries.
     ///
-    /// Contains lifecycle events (starting, running, stopped, error) for sources.
-    /// Used by the REST API to report source status and by dynamic plugin loading
-    /// to wire plugin lifecycle events into the same history.
-    pub fn source_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
-        self.source_manager.event_history()
-    }
-
-    /// Get access to the reaction event history.
+    /// The graph centralizes all component event history. Use `graph.read().await.get_events(id)`
+    /// to query events for specific components, or `graph.read().await.get_all_events()` for all.
     ///
-    /// Contains lifecycle events (starting, running, stopped, error) for reactions.
-    pub fn reaction_event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
-        self.reaction_manager.event_history()
+    /// For recording events from external plugins, use `graph.write().await.record_event(event)`.
+    pub fn component_graph(&self) -> Arc<RwLock<ComponentGraph>> {
+        Arc::clone(&self.component_graph)
     }
 
     // ============================================================================

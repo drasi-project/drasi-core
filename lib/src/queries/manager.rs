@@ -35,14 +35,12 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
-use crate::component_graph::{
-    ComponentGraph, ComponentKind, ComponentUpdate, ComponentUpdateSender,
-};
+use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
-    is_operation_valid, log_component_error, log_component_start, log_component_stop,
-    ComponentEventHistory, ComponentLogKey, ComponentLogRegistry, Operation,
+    log_component_error, log_component_start, log_component_stop, ComponentLogKey,
+    ComponentLogRegistry,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
@@ -328,6 +326,22 @@ impl Query for DrasiQuery {
 
         self.bootstrap_state.write().await.clear();
 
+        // Set Starting on the local status handle. The manager has already validated
+        // and applied the Starting transition on the graph via validate_and_transition().
+        // This local update is needed because internal query logic (e.g., the bootstrap
+        // completion check at line ~983) reads the handle's local status to decide
+        // whether to transition to Running.
+        //
+        // INVARIANT: The graph must already be in Starting state before this point.
+        // The idempotency check in update_status_with_message() ensures the duplicate
+        // Starting update sent via mpsc is safely ignored.
+        debug_assert!(
+            matches!(
+                self.base.status_handle().get_status().await,
+                ComponentStatus::Stopped | ComponentStatus::Error | ComponentStatus::Starting
+            ),
+            "DrasiQuery::start() called but local handle is not in expected pre-start state"
+        );
         self.base
             .set_status(
                 ComponentStatus::Starting,
@@ -1128,6 +1142,19 @@ impl Query for DrasiQuery {
     async fn stop(&self) -> Result<()> {
         log_component_stop("Query", &self.base.config.id);
 
+        // Set Stopping on the local status handle. The manager has already validated
+        // and applied the Stopping transition on the graph via validate_and_transition().
+        // This local update is needed because the event processing loop checks the
+        // handle's local status to decide when to exit.
+        //
+        // INVARIANT: The graph must already be in Stopping state before this point.
+        debug_assert!(
+            matches!(
+                self.base.status_handle().get_status().await,
+                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
+            ),
+            "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
+        );
         self.base
             .set_status(
                 ComponentStatus::Stopping,
@@ -1196,13 +1223,12 @@ impl Query for DrasiQuery {
 
 pub struct QueryManager {
     instance_id: String,
-    queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
     source_manager: Arc<SourceManager>,
     index_factory: Arc<crate::indexes::IndexFactory>,
     middleware_registry: Arc<MiddlewareTypeRegistry>,
-    event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
-    /// Shared component graph — the authoritative registry for component state and events
+    /// Shared component graph — the single source of truth for component metadata,
+    /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
     /// Channel sender for routing status updates through the graph update loop.
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
@@ -1222,11 +1248,9 @@ impl QueryManager {
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            queries: Arc::new(RwLock::new(HashMap::new())),
             source_manager,
             index_factory,
             middleware_registry,
-            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             graph,
             update_tx,
@@ -1245,13 +1269,11 @@ impl QueryManager {
     pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
         let query_id = query.get_config().id.clone();
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
-        let mut queries = self.queries.write().await;
-        if queries.contains_key(&query_id) {
+        let mut graph = self.graph.write().await;
+        if graph.has_runtime(&query_id) {
             return Err(anyhow::anyhow!("Query with id '{query_id}' already exists"));
         }
-        queries.insert(query_id, query);
+        graph.set_runtime(&query_id, Box::new(query))?;
         Ok(())
     }
 
@@ -1284,10 +1306,10 @@ impl QueryManager {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        // Store the runtime instance for fast lookups
+        // Store the runtime instance in the graph
         {
-            let mut queries = self.queries.write().await;
-            queries.insert(config.id.clone(), query);
+            let mut graph = self.graph.write().await;
+            graph.set_runtime(&config.id, Box::new(query))?;
         }
 
         info!("Provisioned query: {} with bootstrap support", config.id);
@@ -1302,74 +1324,32 @@ impl QueryManager {
     }
 
     pub async fn start_query(&self, id: String) -> Result<()> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let query =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
 
-        if let Some(query) = query {
-            let status = query.status().await;
-            is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-
-            // Route transitional state through the graph update loop
-            let _ = self
-                .update_tx
-                .send(ComponentUpdate::Status {
-                    component_id: id.clone(),
-                    status: ComponentStatus::Starting,
-                    message: Some("Starting query".to_string()),
-                })
-                .await;
-
-            query.start().await?;
-        } else {
-            return Err(anyhow::anyhow!("Query not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
     pub async fn stop_query(&self, id: String) -> Result<()> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let query =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
 
-        if let Some(query) = query {
-            let status = query.status().await;
-            is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
-
-            // Route transitional state through the graph update loop
-            let _ = self
-                .update_tx
-                .send(ComponentUpdate::Status {
-                    component_id: id.clone(),
-                    status: ComponentStatus::Stopping,
-                    message: Some("Stopping query".to_string()),
-                })
-                .await;
-
-            query.stop().await?;
-        } else {
-            return Err(anyhow::anyhow!("Query not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "query", &query).await
     }
 
     pub async fn get_query_status(&self, id: String) -> Result<ComponentStatus> {
-        let graph = self.graph.read().await;
-        let node = graph
-            .get_component(&id)
-            .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
-        Ok(node.status.clone())
+        crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Query").await
     }
 
     /// Get a query instance for subscription by reactions
     /// Returns Arc<dyn Query> which reactions can use to subscribe to query results
     pub async fn get_query_instance(&self, query_id: &str) -> Result<Arc<dyn Query>, String> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(query_id) {
+        let graph = self.graph.read().await;
+        if let Some(query) = graph.get_runtime::<Arc<dyn Query>>(query_id) {
             Ok(Arc::clone(query))
         } else {
             Err(format!(
@@ -1379,22 +1359,24 @@ impl QueryManager {
     }
 
     pub async fn get_query(&self, id: String) -> Result<QueryRuntime> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let graph = self.graph.read().await;
+        let query = graph.get_runtime::<Arc<dyn Query>>(&id).cloned();
 
         if let Some(query) = query {
-            let status = query.status().await;
+            let status = graph
+                .get_component(&id)
+                .map(|n| n.status)
+                .unwrap_or(ComponentStatus::Stopped);
             let config = query.get_config();
             let error_message = match &status {
-                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                ComponentStatus::Error => graph.get_last_error(&id),
                 _ => None,
             };
+            drop(graph);
             let runtime = QueryRuntime {
                 id: config.id.clone(),
                 query: config.query.clone(),
-                status: status.clone(),
+                status,
                 error_message,
                 source_subscriptions: config.sources.clone(),
                 joins: config.joins.clone(),
@@ -1405,58 +1387,96 @@ impl QueryManager {
         }
     }
 
-    pub async fn update_query(&self, id: String, config: QueryConfig) -> Result<()> {
-        let (query, was_running) = {
-            let queries = self.queries.read().await;
-            let query = queries.get(&id).cloned();
-            if let Some(ref q) = query {
-                let status = q.status().await;
-                let was_running =
-                    matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
-                (query, was_running)
-            } else {
-                return Err(anyhow::anyhow!("Query not found: {id}"));
-            }
+    /// Update a query by replacing it with a new configuration.
+    ///
+    /// Flow: validate exists → validate status → set Reconfiguring via graph →
+    /// stop if running/starting → wait for stopped → provision new →
+    /// replace runtime (if still exists) → restart if was running.
+    /// Graph node, edges, and event history are preserved.
+    pub async fn update_query(&self, id: String, new_config: QueryConfig) -> Result<()> {
+        let old_query = {
+            let graph = self.graph.read().await;
+            graph.get_runtime::<Arc<dyn Query>>(&id).cloned()
         };
 
-        if let Some(query) = query {
-            // If running, we need to stop it first
-            if was_running {
-                self.stop_query(id.clone()).await?;
-                // Validate the operation after stop
-                let status = query.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            } else {
-                let status = query.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(old_query) = old_query {
+            // Verify the new config has the same ID
+            if new_config.id != id {
+                return Err(anyhow::anyhow!(
+                    "New query ID '{}' does not match existing query ID '{}'",
+                    new_config.id,
+                    id
+                ));
             }
 
-            // Teardown runtime, deregister from graph, re-register, re-provision
-            self.teardown_query(id.clone()).await?;
+            // Read status from the graph (source of truth) and determine if running
+            let was_running = {
+                let graph = self.graph.read().await;
+                let node = graph
+                    .get_component(&id)
+                    .ok_or_else(|| anyhow::anyhow!("Query '{id}' not found in graph"))?;
+                matches!(
+                    node.status,
+                    ComponentStatus::Running | ComponentStatus::Starting
+                )
+            };
+
+            // Validate and set Reconfiguring atomically through the graph
             {
                 let mut graph = self.graph.write().await;
-                let _ = graph.deregister(&id);
+                graph.validate_and_transition(
+                    &id,
+                    ComponentStatus::Reconfiguring,
+                    Some("Reconfiguring query".to_string()),
+                )?;
             }
 
-            // Re-register + provision
-            {
-                let mut graph = self.graph.write().await;
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("query".to_string(), config.query.clone());
-                let source_ids: Vec<String> =
-                    config.sources.iter().map(|s| s.source_id.clone()).collect();
-                graph.register_query(&config.id, metadata, &source_ids)?;
-            }
-            self.provision_query(config).await?;
-
-            // If it was running, restart it
+            // If running or starting, stop first
             if was_running {
-                // Query will subscribe directly to sources when started
+                info!("Stopping query '{id}' for reconfiguration");
+                old_query.stop().await?;
+
+                // Wait for Stopped status (via graph) with timeout
+                crate::component_graph::wait_for_status(
+                    &self.graph,
+                    &id,
+                    &[ComponentStatus::Stopped, ComponentStatus::Error],
+                    std::time::Duration::from_secs(10),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Timed out waiting for query '{id}' to stop: {e}"))?;
+            }
+
+            // Provision the new query runtime
+            if let Err(e) = self.provision_query(new_config).await {
+                // Revert to Error state on provisioning failure
+                let mut graph = self.graph.write().await;
+                let _ = graph.validate_and_transition(
+                    &id,
+                    ComponentStatus::Error,
+                    Some(format!("Reconfiguration failed: {e}")),
+                );
+                return Err(e);
+            }
+
+            info!("Reconfigured query '{id}'");
+
+            // Restart if it was running before, otherwise transition back to Stopped
+            if was_running {
                 self.start_query(id).await?;
+            } else {
+                let mut graph = self.graph.write().await;
+                graph.validate_and_transition(
+                    &id,
+                    ComponentStatus::Stopped,
+                    Some("Reconfiguration complete".to_string()),
+                )?;
             }
-        }
 
-        Ok(())
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Query not found: {id}"))
+        }
     }
 
     /// Teardown a query's runtime state — stop and remove from runtime map.
@@ -1467,69 +1487,35 @@ impl QueryManager {
     ///
     /// The caller should validate dependencies via `graph.can_remove()` before calling this.
     pub async fn teardown_query(&self, id: String) -> Result<()> {
-        // First check if the query exists
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
-
-        if let Some(query) = query {
-            let status = query.status().await;
-
-            // If the query is running or starting, stop it first
-            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
-                info!("Stopping query '{id}' before teardown");
-                if let Err(e) = query.stop().await {
-                    warn!(
-                        "Failed to stop query '{id}' during teardown (may already be stopped): {e}"
-                    );
-                }
-
-                // Wait a bit to ensure the query has fully stopped
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                // Verify it's stopped - accept Stopped or Error
-                let new_status = query.status().await;
-                if !matches!(
-                    new_status,
-                    ComponentStatus::Stopped | ComponentStatus::Error
-                ) {
-                    warn!("Query '{id}' in unexpected state {new_status:?} after stop, proceeding with teardown");
-                }
-            } else {
-                // Still validate the operation for non-running states
-                is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // Now remove the query from runtime map
-            self.queries.write().await.remove(&id);
-            // Clean up event history for this query
-            self.event_history.write().await.remove_component(&id);
-            // Clean up log resources for this query
-            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
-            self.log_registry.remove_component_by_key(&log_key).await;
-            info!("Teardown query: {id}");
-
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
-        }
+        crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Query>, _, _>(
+            &self.graph,
+            &id,
+            "query",
+            ComponentType::Query,
+            &self.instance_id,
+            &self.log_registry,
+            false,
+            || async {},
+        )
+        .await
     }
 
     pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
-        let graph = self.graph.read().await;
-        graph.list_by_kind(&ComponentKind::Query)
+        crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Query)
+            .await
     }
 
     pub async fn get_query_config(&self, id: &str) -> Option<QueryConfig> {
-        let queries = self.queries.read().await;
-        queries.get(id).map(|q| q.get_config().clone())
+        let graph = self.graph.read().await;
+        graph
+            .get_runtime::<Arc<dyn Query>>(id)
+            .map(|q| q.get_config().clone())
     }
 
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         let query = {
-            let queries = self.queries.read().await;
-            queries.get(id).cloned()
+            let graph = self.graph.read().await;
+            graph.get_runtime::<Arc<dyn Query>>(id).cloned()
         };
 
         if let Some(query) = query {
@@ -1553,12 +1539,17 @@ impl QueryManager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
-        let queries_snapshot = {
-            let queries = self.queries.read().await;
-            queries
+        let queries_snapshot: Vec<(String, Arc<dyn Query>)> = {
+            let graph = self.graph.read().await;
+            graph
+                .list_by_kind(&ComponentKind::Query)
                 .iter()
-                .map(|(id, query)| (id.clone(), Arc::clone(query)))
-                .collect::<Vec<_>>()
+                .filter_map(|(id, _)| {
+                    graph
+                        .get_runtime::<Arc<dyn Query>>(id)
+                        .map(|q| (id.clone(), q.clone()))
+                })
+                .collect()
         };
 
         let mut failed_queries = Vec::new();
@@ -1567,8 +1558,32 @@ impl QueryManager {
             let config = query.get_config();
             if config.auto_start {
                 info!("Auto-starting query: {id}");
+
+                // Validate and apply Starting transition atomically through the graph
+                {
+                    let mut graph = self.graph.write().await;
+                    if let Err(e) = graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Starting,
+                        Some("Starting query".to_string()),
+                    ) {
+                        log_component_error("Query", &id, &e.to_string());
+                        failed_queries.push((id.clone(), e.to_string()));
+                        continue;
+                    }
+                }
+
                 if let Err(e) = query.start().await {
-                    error!("Failed to start query {id}: {e}");
+                    // Revert graph status so the component isn't stuck at Starting
+                    {
+                        let mut graph = self.graph.write().await;
+                        let _ = graph.validate_and_transition(
+                            &id,
+                            ComponentStatus::Error,
+                            Some(format!("Start failed: {e}")),
+                        );
+                    }
+                    log_component_error("Query", &id, &e.to_string());
                     failed_queries.push((id.clone(), e.to_string()));
                     // Continue starting other queries instead of returning early
                 }
@@ -1591,35 +1606,102 @@ impl QueryManager {
     }
 
     pub async fn stop_all(&self) -> Result<()> {
-        let queries = self.queries.read().await;
-        for query in queries.values() {
-            if let Err(e) = query.stop().await {
-                log_component_error("Query", &query.get_config().id, &e.to_string());
+        let query_ids: Vec<String> = {
+            let graph = self.graph.read().await;
+            graph
+                .list_by_kind(&ComponentKind::Query)
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let mut failed_queries = Vec::new();
+
+        for id in query_ids {
+            // Check if the query is in a stoppable state before attempting
+            let (is_active, query) = {
+                let graph = self.graph.read().await;
+                let active = graph
+                    .get_component(&id)
+                    .map(|n| {
+                        matches!(
+                            n.status,
+                            ComponentStatus::Running | ComponentStatus::Starting
+                        )
+                    })
+                    .unwrap_or(false);
+                let q = graph.get_runtime::<Arc<dyn Query>>(&id).cloned();
+                (active, q)
+            };
+
+            if is_active {
+                if let Some(query) = query {
+                    // Validate and apply Stopping transition atomically through the graph
+                    {
+                        let mut graph = self.graph.write().await;
+                        if let Err(e) = graph.validate_and_transition(
+                            &id,
+                            ComponentStatus::Stopping,
+                            Some("Stopping query".to_string()),
+                        ) {
+                            log_component_error("Query", &id, &e.to_string());
+                            failed_queries.push((id.clone(), e.to_string()));
+                            continue;
+                        }
+                    }
+
+                    if let Err(e) = query.stop().await {
+                        // Revert graph status so the component isn't stuck at Stopping
+                        {
+                            let mut graph = self.graph.write().await;
+                            let _ = graph.validate_and_transition(
+                                &id,
+                                ComponentStatus::Error,
+                                Some(format!("Stop failed: {e}")),
+                            );
+                        }
+                        log_component_error("Query", &id, &e.to_string());
+                        failed_queries.push((id.clone(), e.to_string()));
+                    }
+                }
             }
         }
-        Ok(())
+
+        if !failed_queries.is_empty() {
+            let error_msg = failed_queries
+                .iter()
+                .map(|(id, err)| format!("{id}: {err}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!("Failed to stop some queries: {error_msg}"))
+        } else {
+            Ok(())
+        }
     }
 
-    /// Record a component event in the history.
-    ///
-    /// This should be called by the event processing loop to track component
-    /// lifecycle events for later querying.
+    /// Record a component event — delegates to the graph's centralized event history.
     pub async fn record_event(&self, event: ComponentEvent) {
-        self.event_history.write().await.record_event(event);
+        let mut graph = self.graph.write().await;
+        graph.record_event(event);
     }
 
     /// Get events for a specific query.
     ///
     /// Returns events in chronological order (oldest first).
     pub async fn get_query_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_events(id)
+        self.graph.read().await.get_events(id)
     }
 
     /// Get all events across all queries.
     ///
     /// Returns events sorted by timestamp (oldest first).
     pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_all_events()
+        let graph = self.graph.read().await;
+        graph
+            .get_all_events()
+            .into_iter()
+            .filter(|e| e.component_type == ComponentType::Query)
+            .collect()
     }
 
     /// Subscribe to live logs for a query.
@@ -1633,10 +1715,10 @@ impl QueryManager {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        // Verify the query exists
+        // Verify the query exists in the graph
         {
-            let queries = self.queries.read().await;
-            if !queries.contains_key(id) {
+            let graph = self.graph.read().await;
+            if !graph.has_runtime(id) {
                 return None;
             }
         }
@@ -1656,15 +1738,11 @@ impl QueryManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        // Verify the query exists
-        {
-            let queries = self.queries.read().await;
-            if !queries.contains_key(id) {
-                return None;
-            }
+        let mut graph = self.graph.write().await;
+        if !graph.has_runtime(id) {
+            return None;
         }
-
-        Some(self.event_history.write().await.subscribe(id))
+        Some(graph.subscribe_events(id))
     }
 }
 

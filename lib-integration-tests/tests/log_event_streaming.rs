@@ -273,6 +273,41 @@ impl Reaction for TestReaction {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+/// Wait for a component to reach Running status via event notification.
+async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+    {
+        return;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event)
+                    if event.component_id == component_id
+                        && event.status == ComponentStatus::Running =>
+                {
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for '{component_id}'");
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for '{component_id}' to reach Running"));
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -484,8 +519,8 @@ async fn test_query_log_streaming() {
 
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for startup logs
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for query to reach Running (startup logs emitted before this)
+    wait_for_running(&drasi, "test-query-logs").await;
 
     // Get log history
     let (history, _receiver) = drasi
@@ -801,10 +836,18 @@ async fn test_log_levels_captured() {
         .await
         .expect("Failed to build DrasiLib");
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("log-levels-source")
+        .await
+        .expect("Failed to subscribe to source logs");
+
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for logs to be captured
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for at least one log to arrive (event-based instead of sleep)
+    let _ = timeout(Duration::from_secs(5), log_rx.recv())
+        .await
+        .expect("Timed out waiting for logs");
 
     // Get log history
     let (history, _) = drasi

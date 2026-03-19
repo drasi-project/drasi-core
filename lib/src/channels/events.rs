@@ -32,6 +32,8 @@ pub enum ComponentType {
     Source,
     Query,
     Reaction,
+    BootstrapProvider,
+    IdentityProvider,
 }
 
 /// Execution status of a Drasi component
@@ -156,7 +158,7 @@ pub enum ComponentType {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentStatus {
     Starting,
     Running,

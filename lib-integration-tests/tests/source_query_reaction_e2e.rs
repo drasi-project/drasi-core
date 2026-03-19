@@ -30,7 +30,7 @@ use drasi_lib::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::timeout;
 
 // ============================================================================
@@ -129,6 +129,7 @@ impl Source for InjectableSource {
 struct CapturingReaction {
     base: drasi_lib::ReactionBase,
     captured: Arc<RwLock<Vec<QueryResult>>>,
+    notify: Arc<Notify>,
 }
 
 impl CapturingReaction {
@@ -137,11 +138,16 @@ impl CapturingReaction {
         Self {
             base: drasi_lib::ReactionBase::new(params),
             captured: Arc::new(RwLock::new(Vec::new())),
+            notify: Arc::new(Notify::new()),
         }
     }
 
     fn captured(&self) -> Arc<RwLock<Vec<QueryResult>>> {
         self.captured.clone()
+    }
+
+    fn notify(&self) -> Arc<Notify> {
+        self.notify.clone()
     }
 }
 
@@ -179,6 +185,7 @@ impl Reaction for CapturingReaction {
         // Spawn processing task that dequeues from priority queue and captures results
         let priority_queue = self.base.priority_queue.clone();
         let captured = self.captured.clone();
+        let notify = self.notify.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         let task = tokio::spawn(async move {
@@ -190,6 +197,7 @@ impl Reaction for CapturingReaction {
                 };
                 let result = (*result_arc).clone();
                 captured.write().await.push(result);
+                notify.notify_waiters();
             }
         });
 
@@ -220,20 +228,24 @@ impl Reaction for CapturingReaction {
 // ============================================================================
 
 async fn wait_for_status(drasi: &DrasiLib, component: &str, id: &str, expected: ComponentStatus) {
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == id && n.status == expected)
+    {
+        return;
+    }
     let result = timeout(Duration::from_secs(5), async {
         loop {
-            let status = match component {
-                "source" => drasi.get_source_status(id).await,
-                "query" => drasi.get_query_status(id).await,
-                "reaction" => drasi.get_reaction_status(id).await,
-                _ => panic!("Unknown component type"),
-            };
-            if let Ok(s) = status {
-                if s == expected {
-                    return;
+            match rx.recv().await {
+                Ok(event) if event.component_id == id && event.status == expected => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for {component} '{id}'");
                 }
+                _ => continue,
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
@@ -261,6 +273,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
 
     let reaction = CapturingReaction::new("test-reaction", vec!["test-query".to_string()]);
     let captured = reaction.captured();
+    let notify = reaction.notify();
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -307,12 +320,14 @@ async fn test_source_to_query_to_reaction_data_flow() {
     // Wait for the result to flow through query → reaction
     let received = timeout(Duration::from_secs(5), async {
         loop {
-            let results = captured.read().await;
-            if !results.is_empty() {
-                return results.clone();
+            let notified = notify.notified();
+            {
+                let results = captured.read().await;
+                if !results.is_empty() {
+                    return results.clone();
+                }
             }
-            drop(results);
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            notified.await;
         }
     })
     .await
@@ -344,6 +359,7 @@ async fn test_multiple_events_flow_through() {
 
     let reaction = CapturingReaction::new("multi-rx", vec!["multi-query".to_string()]);
     let captured = reaction.captured();
+    let notify = reaction.notify();
 
     let drasi = DrasiLib::builder()
         .with_source(source)
@@ -389,12 +405,14 @@ async fn test_multiple_events_flow_through() {
     // Wait for all 3 results
     let received = timeout(Duration::from_secs(5), async {
         loop {
-            let results = captured.read().await;
-            if results.len() >= 3 {
-                return results.clone();
+            let notified = notify.notified();
+            {
+                let results = captured.read().await;
+                if results.len() >= 3 {
+                    return results.clone();
+                }
             }
-            drop(results);
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            notified.await;
         }
     })
     .await

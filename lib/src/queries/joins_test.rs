@@ -19,6 +19,7 @@ mod query_joins_tests {
     use crate::queries::QueryManager;
     use crate::sources::tests::{create_test_mock_source, TestMockSource};
     use crate::sources::{convert_json_to_element_value, SourceManager};
+    use crate::test_helpers::wait_for_component_status;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use drasi_core::models::{
         Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -233,13 +234,19 @@ mod query_joins_tests {
             .unwrap();
 
         // Start the query - it will subscribe directly to sources
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("vehicle-driver-query".to_string())
             .await
             .unwrap();
 
-        // Give query time to initialize
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "vehicle-driver-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let vehicles_mock = source_manager
@@ -298,12 +305,21 @@ mod query_joins_tests {
         // NOTE: In the new broadcast architecture, tests would need to subscribe to the query
         // to receive results. This requires a full DrasiLib setup which is complex.
         // For now, we just verify the query starts successfully.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("vehicle-driver-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
 
         // Verify query is running
-        let status = query_manager
-            .get_query_status("vehicle-driver-query".to_string())
-            .await;
         assert!(status.is_ok(), "Should be able to get query status");
     }
 
@@ -341,12 +357,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("order-restaurant-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "order-restaurant-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let restaurants_mock = source_manager
@@ -399,7 +422,20 @@ mod query_joins_tests {
 
         // NOTE: In the new broadcast architecture, tests would need to subscribe to the query
         // to receive results. For now, we just verify the query handles updates without errors.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if query_manager
+                    .get_query_status("order-restaurant-query".to_string())
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query to process initial data");
 
         // Update the order - change orderId which is in the RETURN clause
         let updated_order = create_node_with_properties(
@@ -419,7 +455,20 @@ mod query_joins_tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if query_manager
+                    .get_query_status("order-restaurant-query".to_string())
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query to process update");
 
         // Delete the order
         let metadata = match order1 {
@@ -432,10 +481,19 @@ mod query_joins_tests {
             .unwrap();
 
         // Verify query is still running after updates and deletes
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let status = query_manager
-            .get_query_status("order-restaurant-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("order-restaurant-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(status.is_ok(), "Query should still be running");
     }
 
@@ -485,12 +543,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("full-order-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "full-order-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let orders_mock = source_manager
@@ -559,10 +624,19 @@ mod query_joins_tests {
             .unwrap();
 
         // NOTE: In the new broadcast architecture, would need subscription to verify results
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager
-            .get_query_status("full-order-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("full-order-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(
             status.is_ok(),
             "Query with multiple joins should be running"
@@ -598,12 +672,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("non-matching-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "non-matching-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let source1_mock = source_manager
@@ -647,10 +728,19 @@ mod query_joins_tests {
             .unwrap();
 
         // NOTE: Testing non-matching join behavior - query should still run
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager
-            .get_query_status("non-matching-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("non-matching-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(status.is_ok(), "Query should handle non-matching joins");
     }
 
@@ -683,12 +773,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("null-property-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "null-property-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let source1_mock = source_manager
@@ -732,10 +829,19 @@ mod query_joins_tests {
             .unwrap();
 
         // NOTE: Testing null property handling - query should still run
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager
-            .get_query_status("null-property-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("null-property-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(status.is_ok(), "Query should handle null properties");
     }
 
@@ -772,12 +878,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("product-category-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "product-category-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances
         let products_mock = source_manager
@@ -827,10 +940,19 @@ mod query_joins_tests {
         }
 
         // NOTE: Testing duplicate key handling - query should process all products
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager
-            .get_query_status("product-category-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("product-category-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(status.is_ok(), "Query should handle duplicate keys");
     }
 
@@ -868,13 +990,19 @@ mod query_joins_tests {
         add_query(&query_manager, &graph, query_config)
             .await
             .unwrap();
+        let mut event_rx = graph.read().await.subscribe();
         query_manager
             .start_query("user-posts-query".to_string())
             .await
             .unwrap();
 
-        // Give query time to subscribe to sources
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "user-posts-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Get mock source instances AFTER query is started and subscribed
         let users_mock = source_manager
@@ -921,8 +1049,21 @@ mod query_joins_tests {
             .await
             .unwrap();
 
-        // Give query time to process initial data
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for query to process initial data
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if query_manager
+                    .get_query_status("user-posts-query".to_string())
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query to process initial data");
 
         // Add new data after bootstrap
         let post2 = create_node_with_properties(
@@ -941,10 +1082,19 @@ mod query_joins_tests {
             .unwrap();
 
         // Verify query continues processing after bootstrap
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let status = query_manager
-            .get_query_status("user-posts-query".to_string())
-            .await;
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = query_manager
+                    .get_query_status("user-posts-query".to_string())
+                    .await;
+                if s.is_ok() {
+                    return s;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for query status");
         assert!(status.is_ok(), "Query should handle bootstrap with joins");
     }
 }

@@ -16,10 +16,12 @@
 mod manager_tests {
     use super::super::*;
     use crate::channels::*;
+    use crate::test_helpers::wait_for_component_status;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::RwLock;
 
     struct MockQueryProvider;
@@ -425,11 +427,20 @@ mod manager_tests {
             TestMockReaction::with_auto_start("no-auto-start-reaction".to_string(), vec![], false);
         add_reaction(&manager, &graph, reaction2).await.unwrap();
 
+        // Subscribe BEFORE the operation that triggers status changes
+        let mut event_rx = graph.read().await.subscribe();
+
         // Start all reactions
         manager.start_all().await.unwrap();
 
-        // Wait a bit for status to update
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for the auto-start reaction to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "auto-start-reaction",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         // Check statuses
         let status1 = manager
@@ -465,10 +476,20 @@ mod manager_tests {
 
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
+        // Subscribe BEFORE the operation that triggers status changes
+        let mut event_rx = graph.read().await.subscribe();
+
         // Start all should start this reaction
         manager.start_all().await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for the reaction to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "default-reaction",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         let status = manager
             .get_reaction_status("default-reaction".to_string())
@@ -493,7 +514,8 @@ mod manager_tests {
         // start_all should not start it
         manager.start_all().await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // No status change expected for auto_start=false; yield to let any queued work complete
+        tokio::task::yield_now().await;
 
         let status = manager
             .get_reaction_status("manual-reaction".to_string())
@@ -504,13 +526,23 @@ mod manager_tests {
             "Reaction with auto_start=false should not be started by start_all"
         );
 
+        // Subscribe BEFORE the operation that triggers status change
+        let mut event_rx = graph.read().await.subscribe();
+
         // Manually start the reaction
         manager
             .start_reaction("manual-reaction".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for the reaction to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "manual-reaction",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
 
         let status = manager
             .get_reaction_status("manual-reaction".to_string())
@@ -739,12 +771,21 @@ mod manager_tests {
         let reaction = DeprovisionTestReaction::new_simple("reconfig-running-reaction");
         add_reaction(&manager, &graph, reaction).await.unwrap();
 
+        // Subscribe BEFORE the operation that triggers status change
+        let mut event_rx = graph.read().await.subscribe();
+
         manager
             .start_reaction("reconfig-running-reaction".to_string())
             .await
             .unwrap();
-        // Allow async graph update to propagate
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for async graph update to propagate
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-running-reaction",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_reaction_status("reconfig-running-reaction".to_string())
             .await
@@ -757,8 +798,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Allow async graph update to propagate
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for async graph update to propagate
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-running-reaction",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_reaction_status("reconfig-running-reaction".to_string())
             .await
@@ -782,26 +829,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Events now arrive asynchronously via the graph update loop, so we
-        // wait briefly for the loop to process the channel message.
-        let mut found_reconfiguring = false;
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            match event_rx.try_recv() {
-                Ok(event) => {
-                    if event.component_id == "reconfig-event-reaction"
-                        && event.status == ComponentStatus::Reconfiguring
-                    {
-                        found_reconfiguring = true;
-                        break;
-                    }
-                }
-                Err(_) => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                }
-            }
-        }
-        assert!(found_reconfiguring, "Expected Reconfiguring event");
+        // Wait for the Reconfiguring event via the broadcast channel
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-event-reaction",
+            ComponentStatus::Reconfiguring,
+            Duration::from_secs(5),
+        )
+        .await;
     }
 
     #[tokio::test]

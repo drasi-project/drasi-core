@@ -352,6 +352,7 @@ impl Source for LoggingTestSource {
 mod manager_tests {
     use super::*;
     use crate::sources::SourceManager;
+    use crate::test_helpers::wait_for_component_status;
 
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -544,8 +545,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Wait a bit for source to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for source to reach Running before stopping
+        wait_for_component_status(
+            &mut event_rx,
+            "test-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Stop the source
         let result = manager.stop_source("test-source".to_string()).await;
@@ -584,6 +591,9 @@ mod manager_tests {
     async fn test_list_sources_with_status() {
         let (manager, graph) = create_test_manager().await;
 
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
         // Add multiple sources
         let source1 = create_test_mock_source("source1".to_string());
         let source2 = create_test_mock_source("source2".to_string());
@@ -594,8 +604,14 @@ mod manager_tests {
         // Start one source
         manager.start_source("source1".to_string()).await.unwrap();
 
-        // Wait a bit
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for source1 to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "source1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         let sources = manager.list_sources().await;
         assert_eq!(sources.len(), 2);
@@ -605,14 +621,12 @@ mod manager_tests {
             .iter()
             .find(|(name, _)| name == "source1")
             .unwrap()
-            .1
-            .clone();
+            .1;
         let source2_status = sources
             .iter()
             .find(|(name, _)| name == "source2")
             .unwrap()
-            .1
-            .clone();
+            .1;
 
         assert!(matches!(source1_status, ComponentStatus::Running));
         assert!(matches!(source2_status, ComponentStatus::Stopped));
@@ -698,6 +712,9 @@ mod manager_tests {
     async fn test_start_all_respects_auto_start() {
         let (manager, graph) = create_test_manager().await;
 
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
         // Add source with auto_start=true
         let source1 =
             TestMockSource::with_auto_start("auto-start-source".to_string(), true).unwrap();
@@ -711,8 +728,14 @@ mod manager_tests {
         // Start all sources
         manager.start_all().await.unwrap();
 
-        // Wait a bit for status to update
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for auto-start source to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "auto-start-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Check statuses
         let status1 = manager
@@ -739,6 +762,9 @@ mod manager_tests {
     async fn test_source_auto_start_defaults_to_true() {
         let (manager, graph) = create_test_manager().await;
 
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
         // Create source using default constructor (should have auto_start=true)
         let source = create_test_mock_source("default-source".to_string());
 
@@ -750,7 +776,14 @@ mod manager_tests {
         // Start all should start this source
         manager.start_all().await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for source to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "default-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         let status = manager
             .get_source_status("default-source".to_string())
@@ -767,6 +800,9 @@ mod manager_tests {
     async fn test_source_auto_start_false_can_be_manually_started() {
         let (manager, graph) = create_test_manager().await;
 
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
         // Add source with auto_start=false
         let source = TestMockSource::with_auto_start("manual-source".to_string(), false).unwrap();
         add_source(&manager, &graph, source).await.unwrap();
@@ -774,7 +810,8 @@ mod manager_tests {
         // start_all should not start it
         manager.start_all().await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Yield to let any pending graph updates propagate
+        tokio::task::yield_now().await;
 
         let status = manager
             .get_source_status("manual-source".to_string())
@@ -791,7 +828,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for source to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "manual-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         let status = manager
             .get_source_status("manual-source".to_string())
@@ -870,8 +914,8 @@ mod manager_tests {
         .instrument(span)
         .await;
 
-        // Wait for async log routing
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Yield to allow async log routing to complete
+        tokio::task::yield_now().await;
 
         // Should receive the log via broadcast
         let received = tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
@@ -919,11 +963,19 @@ mod manager_tests {
         .instrument(span)
         .await;
 
-        // Wait for async log routing
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        // Subscribe after logging to get history
-        let (history, _receiver) = manager.subscribe_logs(&source_id).await.unwrap();
+        // Allow async log routing to complete (logs go through tracing layer → channel → registry)
+        let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                    if logs.len() >= 3 {
+                        return logs;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for logs to be routed");
 
         // Should have log messages (note: trace/debug may be filtered by EnvFilter)
         // The tracing subscriber uses INFO as default level
@@ -962,11 +1014,21 @@ mod manager_tests {
         .instrument(span)
         .await;
 
-        // Wait for async log routing
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Allow async log routing to complete (logs go through tracing layer → channel → registry)
+        let history = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                    if logs.len() >= 3 {
+                        return logs;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for logs to be routed");
 
         // Subscribe and verify history
-        let (history, _receiver) = manager.subscribe_logs(&source_id).await.unwrap();
         assert_eq!(history.len(), 3);
         assert!(history[0].message.contains("first"));
         assert!(history[1].message.contains("second"));
@@ -1009,8 +1071,8 @@ mod manager_tests {
         .instrument(span)
         .await;
 
-        // Wait for async log task
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Yield to allow async log routing to complete
+        tokio::task::yield_now().await;
 
         let received =
             tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv()).await;
@@ -1103,14 +1165,23 @@ mod manager_tests {
         .instrument(span)
         .await;
 
-        // Wait for log to be recorded
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Allow async log routing to complete (logs go through tracing layer → channel → registry)
+        // Use a short retry loop since yield_now() alone may not be sufficient
+        let logs_ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                    if !logs.is_empty() {
+                        return logs;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for logs to be routed");
 
         // Verify logs exist
-        let result = manager.subscribe_logs(&source_id).await;
-        assert!(result.is_some(), "Expected to subscribe to source logs");
-        let (logs, _) = result.unwrap();
-        assert!(!logs.is_empty(), "Expected logs after emitting");
+        assert!(!logs_ready.is_empty(), "Expected logs after emitting");
 
         // Delete the source
         delete_source(&manager, &graph, &source_id, false)
@@ -1279,6 +1350,9 @@ mod manager_tests {
     async fn test_update_source_stops_and_restarts_running_source() {
         let (manager, graph) = create_test_manager().await;
 
+        // Subscribe to graph events BEFORE adding components
+        let mut event_rx = graph.read().await.subscribe();
+
         let source = DeprovisionTestSource::new_simple("reconfig-running-source");
         add_source(&manager, &graph, source).await.unwrap();
 
@@ -1287,8 +1361,14 @@ mod manager_tests {
             .start_source("reconfig-running-source".to_string())
             .await
             .unwrap();
-        // Allow async graph update to propagate
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for source to reach Running
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-running-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_source_status("reconfig-running-source".to_string())
             .await
@@ -1302,8 +1382,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Should be running again (allow async graph update to propagate)
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for source to reach Running again after update
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-running-source",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_source_status("reconfig-running-source".to_string())
             .await
@@ -1333,7 +1419,20 @@ mod manager_tests {
         }
         .instrument(span)
         .await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Yield to allow async log routing to complete
+        // Allow async log routing to complete (logs go through tracing layer → channel → registry)
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((logs, _)) = manager.subscribe_logs(&source_id).await {
+                    if !logs.is_empty() {
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Timed out waiting for logs to be routed");
 
         // Verify logs exist
         let (logs_before, _) = manager.subscribe_logs(&source_id).await.unwrap();
@@ -1371,27 +1470,14 @@ mod manager_tests {
             .await
             .unwrap();
 
-        // Check events from graph broadcast.
-        // Events now arrive asynchronously via the graph update loop, so we
-        // wait briefly for the loop to process the channel message.
-        let mut found_reconfiguring = false;
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            match event_rx.try_recv() {
-                Ok(event) => {
-                    if event.component_id == "reconfig-event-source"
-                        && event.status == ComponentStatus::Reconfiguring
-                    {
-                        found_reconfiguring = true;
-                        break;
-                    }
-                }
-                Err(_) => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                }
-            }
-        }
-        assert!(found_reconfiguring, "Expected Reconfiguring event");
+        // Wait for Reconfiguring event via the broadcast channel
+        wait_for_component_status(
+            &mut event_rx,
+            "reconfig-event-source",
+            ComponentStatus::Reconfiguring,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
     }
 
     #[tokio::test]

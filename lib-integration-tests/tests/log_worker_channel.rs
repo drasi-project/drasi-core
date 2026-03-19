@@ -216,6 +216,37 @@ impl Source for SimpleLogSource {
     }
 }
 
+/// Wait for a component to reach Running status via event notification.
+async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+    {
+        return;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event)
+                    if event.component_id == component_id
+                        && event.status == ComponentStatus::Running =>
+                {
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for '{component_id}'");
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for '{component_id}' to reach Running"));
+}
+
 // ============================================================================
 // Tests for Log Worker Channel Architecture
 // ============================================================================
@@ -286,8 +317,8 @@ async fn test_high_volume_logging() {
     // Start to trigger high volume logging
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give the log worker time to process
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for source to reach Running (log emissions complete before this)
+    wait_for_running(&drasi, "high-volume-source").await;
 
     // Collect logs - we may not get all of them if channel fills up
     // but we should get a good number
@@ -433,8 +464,8 @@ async fn test_concurrent_logging_from_multiple_tasks() {
 
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give source time to initialize
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for source to reach Running
+    wait_for_running(&drasi, "concurrent-log-source").await;
 
     let source_id = "concurrent-log-source";
 
@@ -480,9 +511,6 @@ async fn test_concurrent_logging_from_multiple_tasks() {
 
     let total_logged = log_counter.load(Ordering::SeqCst);
     println!("Total logs emitted: {total_logged}");
-
-    // Give the log worker time to process
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Collect logs
     let received = timeout(Duration::from_secs(3), async {
@@ -656,10 +684,18 @@ async fn test_log_level_filtering_through_channel() {
         .await
         .expect("Failed to build DrasiLib");
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("level-filter-source")
+        .await
+        .expect("Failed to subscribe");
+
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for logs
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for at least one log to arrive (event-based instead of sleep)
+    let _ = timeout(Duration::from_secs(5), log_rx.recv())
+        .await
+        .expect("Timed out waiting for logs");
 
     // Get log history
     let (history, _) = drasi

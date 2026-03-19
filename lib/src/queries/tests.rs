@@ -19,6 +19,7 @@ mod manager_tests {
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::sources::SourceManager;
+    use crate::test_helpers::wait_for_component_status;
     use drasi_core::middleware::MiddlewareTypeRegistry;
     use std::sync::Arc;
 
@@ -302,8 +303,14 @@ mod manager_tests {
 
         manager.start_query("test-query".to_string()).await.unwrap();
 
-        // Wait a bit
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for query to reach Running state
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Stop the query
         let result = manager.stop_query("test-query".to_string()).await;
@@ -331,12 +338,22 @@ mod manager_tests {
         let source = create_test_mock_source("source1".to_string());
         add_source(&source_manager, &graph, source).await.unwrap();
 
+        // Subscribe to graph events BEFORE starting the query
+        let mut event_rx = graph.read().await.subscribe();
+
         // Add the query and start it
         let config = create_test_query_config("test-query", vec!["source1".to_string()]);
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("test-query".to_string()).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for query to reach Running state
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Inspect concrete query to verify subscription tasks are present
         let query = manager.get_query_instance("test-query").await.unwrap();
@@ -349,7 +366,14 @@ mod manager_tests {
 
         manager.stop_query("test-query".to_string()).await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for query to reach Stopped state
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         assert!(
             concrete.subscription_task_count().await == 0,
@@ -360,6 +384,9 @@ mod manager_tests {
     #[tokio::test]
     async fn test_partial_subscription_failure_cleans_up_tasks() {
         let (manager, source_manager, graph) = create_test_manager().await;
+
+        // Subscribe to graph events BEFORE starting the query
+        let mut event_rx = graph.read().await.subscribe();
 
         // Add only source1 - source2 will be missing to trigger failure
         let source1 = create_test_mock_source("source1".to_string());
@@ -377,8 +404,14 @@ mod manager_tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("source2"));
 
-        // Query should be in Error state (allow async graph update to propagate)
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Wait for query to reach Error state via graph update
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Error,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
@@ -505,10 +538,24 @@ mod manager_tests {
         // Update config
         config.query = "MATCH (n:Updated) RETURN n".to_string();
 
-        let result = manager
-            .update_query("test-query".to_string(), config.clone())
-            .await;
-        assert!(result.is_ok());
+        // Perform update: teardown → deregister → re-register → provision
+        manager
+            .teardown_query("test-query".to_string())
+            .await
+            .unwrap();
+        {
+            let mut g = graph.write().await;
+            let _ = g.deregister("test-query");
+        }
+        {
+            let mut g = graph.write().await;
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            g.register_query(&config.id, metadata, &source_ids).unwrap();
+        }
+        manager.provision_query(config.clone()).await.unwrap();
 
         // Verify update
         let retrieved = manager.get_query_config("test-query").await.unwrap();
@@ -534,11 +581,20 @@ mod manager_tests {
             .unwrap();
         assert!(matches!(status, ComponentStatus::Stopped));
 
+        // Subscribe to graph events BEFORE starting the query
+        let mut event_rx = graph.read().await.subscribe();
+
         // Start the query
         manager.start_query("test-query".to_string()).await.unwrap();
 
         // Verify query is running
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
@@ -548,8 +604,14 @@ mod manager_tests {
         // Stop the query
         manager.stop_query("test-query".to_string()).await.unwrap();
 
-        // Verify query is stopped (allow async graph update to propagate)
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Verify query is stopped
+        wait_for_component_status(
+            &mut event_rx,
+            "test-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = manager
             .get_query_status("test-query".to_string())
             .await
@@ -616,13 +678,23 @@ mod manager_tests {
             "Query with auto_start=false should be stopped initially"
         );
 
+        // Subscribe to graph events BEFORE starting the query
+        let mut event_rx = graph.read().await.subscribe();
+
         // Manually start the query
         manager
             .start_query("manual-query".to_string())
             .await
             .unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Wait for query to reach Running state
+        wait_for_component_status(
+            &mut event_rx,
+            "manual-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
 
         // Query should now be running
         let status = manager
@@ -739,9 +811,6 @@ mod manager_tests {
         })
         .await
         .expect("Timeout waiting for Starting event");
-
-        // Give the system a moment to settle
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // While bootstrap channel is still open, the query should remain in Starting state
         let status = manager

@@ -74,7 +74,7 @@ impl InspectionAPI {
     pub async fn list_sources(
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         Ok(self.source_manager.list_sources().await)
     }
 
@@ -94,7 +94,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::config::SourceRuntime> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.source_manager
             .get_source(id.to_string())
             .await
@@ -116,7 +116,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.source_manager
             .get_source_status(id.to_string())
             .await
@@ -143,7 +143,7 @@ impl InspectionAPI {
     pub async fn list_queries(
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         Ok(self.query_manager.list_queries().await)
     }
 
@@ -164,7 +164,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::config::QueryRuntime> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager
             .get_query(id.to_string())
             .await
@@ -186,7 +186,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager
             .get_query_status(id.to_string())
             .await
@@ -208,14 +208,14 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<Vec<serde_json::Value>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager.get_query_results(id).await.map_err(|e| {
             if e.to_string().contains("not found") {
                 DrasiError::component_not_found("query", id)
             } else if e.to_string().contains("not running") {
                 DrasiError::invalid_state(format!("Query '{id}' is not running"))
             } else {
-                DrasiError::provisioning(e.to_string())
+                DrasiError::operation_failed("query", id, "get_results", e.to_string())
             }
         })
     }
@@ -238,7 +238,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::config::QueryConfig> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager
             .get_query_config(id)
             .await
@@ -265,7 +265,7 @@ impl InspectionAPI {
     pub async fn list_reactions(
         &self,
     ) -> crate::error::Result<Vec<(String, crate::channels::ComponentStatus)>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         Ok(self.reaction_manager.list_reactions().await)
     }
 
@@ -286,7 +286,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::config::ReactionRuntime> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.reaction_manager
             .get_reaction(id.to_string())
             .await
@@ -308,7 +308,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<crate::channels::ComponentStatus> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.reaction_manager
             .get_reaction_status(id.to_string())
             .await
@@ -335,7 +335,7 @@ impl InspectionAPI {
     /// # }
     /// ```
     pub async fn get_current_config(&self) -> crate::error::Result<DrasiLibConfig> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Collect all query configs
         let query_ids: Vec<String> = self
@@ -386,7 +386,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.source_manager.get_source_events(id).await;
         Ok(stream::iter(events))
     }
@@ -411,7 +411,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.query_manager.get_query_events(id).await;
         Ok(stream::iter(events))
     }
@@ -436,7 +436,7 @@ impl InspectionAPI {
         &self,
         id: &str,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.reaction_manager.get_reaction_events(id).await;
         Ok(stream::iter(events))
     }
@@ -460,7 +460,7 @@ impl InspectionAPI {
     pub async fn get_all_source_events(
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.source_manager.get_all_events().await;
         Ok(stream::iter(events))
     }
@@ -484,7 +484,7 @@ impl InspectionAPI {
     pub async fn get_all_query_events(
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.query_manager.get_all_events().await;
         Ok(stream::iter(events))
     }
@@ -508,7 +508,7 @@ impl InspectionAPI {
     pub async fn get_all_reaction_events(
         &self,
     ) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         let events = self.reaction_manager.get_all_events().await;
         Ok(stream::iter(events))
     }
@@ -530,7 +530,7 @@ impl InspectionAPI {
     /// # }
     /// ```
     pub async fn get_all_events(&self) -> crate::error::Result<impl Stream<Item = ComponentEvent>> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Collect events from all managers
         let mut all_events = Vec::new();
@@ -578,7 +578,7 @@ impl InspectionAPI {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.source_manager
             .subscribe_logs(id)
             .await
@@ -596,7 +596,7 @@ impl InspectionAPI {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager
             .subscribe_logs(id)
             .await
@@ -614,7 +614,7 @@ impl InspectionAPI {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.reaction_manager
             .subscribe_logs(id)
             .await
@@ -651,7 +651,7 @@ impl InspectionAPI {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.source_manager
             .subscribe_events(id)
             .await
@@ -669,7 +669,7 @@ impl InspectionAPI {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.query_manager
             .subscribe_events(id)
             .await
@@ -687,7 +687,7 @@ impl InspectionAPI {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
         self.reaction_manager
             .subscribe_events(id)
             .await

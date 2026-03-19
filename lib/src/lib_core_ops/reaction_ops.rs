@@ -21,7 +21,7 @@ use futures::stream::Stream;
 use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
-use crate::component_ops::map_state_error;
+use crate::component_ops::map_component_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
@@ -47,7 +47,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Capture auto_start and id before transferring ownership
         let should_auto_start = reaction.auto_start();
@@ -63,7 +63,12 @@ impl DrasiLib {
             graph
                 .register_reaction(&reaction_id, metadata, &query_ids)
                 .map_err(|e| {
-                    DrasiError::provisioning(format!("Failed to register reaction: {e}"))
+                    DrasiError::operation_failed(
+                        "reaction",
+                        &reaction_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
                 })?;
         }
 
@@ -72,17 +77,22 @@ impl DrasiLib {
             // Compensating rollback: remove from graph on runtime failure
             let mut graph = self.component_graph.write().await;
             let _ = graph.deregister(&reaction_id);
-            return Err(DrasiError::provisioning(format!(
-                "Failed to provision reaction: {e}"
-            )));
+            return Err(DrasiError::operation_failed(
+                "reaction",
+                &reaction_id,
+                "add",
+                format!("Failed to provision: {e}"),
+            ));
         }
 
         // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
             self.reaction_manager
-                .start_reaction(reaction_id)
+                .start_reaction(reaction_id.clone())
                 .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to start reaction: {e}")))?;
+                .map_err(|e| {
+                    DrasiError::operation_failed("reaction", &reaction_id, "start", format!("{e}"))
+                })?;
         }
 
         Ok(())
@@ -101,17 +111,18 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Step 1: Validate no dependents
         {
             let graph = self.component_graph.read().await;
             if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::provisioning(format!(
-                    "Cannot remove reaction '{}': depended on by: {}",
+                return Err(DrasiError::operation_failed(
+                    "reaction",
                     id,
-                    dependent_ids.join(", ")
-                )));
+                    "remove",
+                    format!("Depended on by: {}", dependent_ids.join(", ")),
+                ));
             }
         }
 
@@ -119,13 +130,25 @@ impl DrasiLib {
         self.reaction_manager
             .teardown_reaction(id.to_string(), cleanup)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown reaction: {e}")))?;
+            .map_err(|e| {
+                DrasiError::operation_failed(
+                    "reaction",
+                    id,
+                    "remove",
+                    format!("Teardown failed: {e}"),
+                )
+            })?;
 
         // Step 3: Deregister from graph (remove node + edges, emit events)
         {
             let mut graph = self.component_graph.write().await;
             graph.deregister(id).map_err(|e| {
-                DrasiError::provisioning(format!("Failed to deregister reaction: {e}"))
+                DrasiError::operation_failed(
+                    "reaction",
+                    id,
+                    "remove",
+                    format!("Deregister failed: {e}"),
+                )
             })?;
         }
 
@@ -134,15 +157,16 @@ impl DrasiLib {
 
     /// Update a reaction by replacing it with a new instance.
     ///
-    /// This stops the old reaction, replaces it with the new one, and restarts
-    /// if it was running before. Log and event history are preserved.
+    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
+    /// and event history. The old reaction is stopped, the runtime is swapped, and the
+    /// reaction is restarted if it was running.
     ///
     /// The new reaction must have the same ID as the existing one.
     ///
     /// # Errors
     ///
     /// Returns an error if the reaction doesn't exist, if the IDs don't match,
-    /// or if the new reaction cannot be started.
+    /// if referenced queries don't exist, or if provisioning fails.
     ///
     /// # Example
     /// ```no_run
@@ -158,17 +182,28 @@ impl DrasiLib {
         id: &str,
         new_reaction: impl crate::reactions::Reaction + 'static,
     ) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
+        // Validate the new reaction has the same ID
+        if new_reaction.id() != id {
+            return Err(DrasiError::operation_failed(
+                "reaction",
+                id,
+                "update",
+                format!(
+                    "New reaction ID '{}' does not match existing reaction ID '{}'",
+                    new_reaction.id(),
+                    id
+                ),
+            ));
+        }
+
+        // Delegate to ReactionManager which uses the Reconfiguring transition,
+        // preserving the graph node, edges, and event history.
         self.reaction_manager
             .update_reaction(id.to_string(), new_reaction)
             .await
-            .map_err(|e| match e.downcast::<DrasiError>() {
-                Ok(drasi_err) => drasi_err,
-                Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
-            })?;
-
-        Ok(())
+            .map_err(|e| DrasiError::operation_failed("reaction", id, "update", e.to_string()))
     }
 
     /// Start a stopped reaction
@@ -185,13 +220,14 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Start the reaction (QueryProvider was injected when reaction was added)
-        map_state_error(
+        map_component_error(
             self.reaction_manager.start_reaction(id.to_string()).await,
             "reaction",
             id,
+            "start",
         )
     }
 
@@ -206,13 +242,14 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop_reaction(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Stop the reaction (subscriptions managed by reaction itself)
-        map_state_error(
+        map_component_error(
             self.reaction_manager.stop_reaction(id.to_string()).await,
             "reaction",
             id,
+            "stop",
         )?;
 
         Ok(())

@@ -47,7 +47,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Capture auto_start and id before transferring ownership
         let should_auto_start = source.auto_start();
@@ -60,9 +60,14 @@ impl DrasiLib {
             let mut metadata = HashMap::new();
             metadata.insert("kind".to_string(), source_type);
             metadata.insert("autoStart".to_string(), should_auto_start.to_string());
-            graph
-                .register_source(&source_id, metadata)
-                .map_err(|e| DrasiError::provisioning(format!("Failed to register source: {e}")))?;
+            graph.register_source(&source_id, metadata).map_err(|e| {
+                DrasiError::operation_failed(
+                    "source",
+                    &source_id,
+                    "add",
+                    format!("Failed to register: {e}"),
+                )
+            })?;
         }
 
         // Step 2: Provision runtime (initialize + store)
@@ -70,17 +75,22 @@ impl DrasiLib {
             // Compensating rollback: remove from graph on runtime failure
             let mut graph = self.component_graph.write().await;
             let _ = graph.deregister(&source_id);
-            return Err(DrasiError::provisioning(format!(
-                "Failed to provision source: {e}"
-            )));
+            return Err(DrasiError::operation_failed(
+                "source",
+                &source_id,
+                "add",
+                format!("Failed to provision: {e}"),
+            ));
         }
 
         // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
             self.source_manager
-                .start_source(source_id)
+                .start_source(source_id.clone())
                 .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to start source: {e}")))?;
+                .map_err(|e| {
+                    DrasiError::operation_failed("source", &source_id, "start", format!("{e}"))
+                })?;
         }
 
         Ok(())
@@ -99,17 +109,18 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn remove_source(&self, id: &str, cleanup: bool) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Step 1: Validate no dependents
         {
             let graph = self.component_graph.read().await;
             if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::provisioning(format!(
-                    "Cannot remove source '{}': depended on by: {}",
+                return Err(DrasiError::operation_failed(
+                    "source",
                     id,
-                    dependent_ids.join(", ")
-                )));
+                    "remove",
+                    format!("Depended on by: {}", dependent_ids.join(", ")),
+                ));
             }
         }
 
@@ -117,13 +128,25 @@ impl DrasiLib {
         self.source_manager
             .teardown_source(id.to_string(), cleanup)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown source: {e}")))?;
+            .map_err(|e| {
+                DrasiError::operation_failed(
+                    "source",
+                    id,
+                    "remove",
+                    format!("Teardown failed: {e}"),
+                )
+            })?;
 
         // Step 3: Deregister from graph (remove node + edges, emit events)
         {
             let mut graph = self.component_graph.write().await;
             graph.deregister(id).map_err(|e| {
-                DrasiError::provisioning(format!("Failed to deregister source: {e}"))
+                DrasiError::operation_failed(
+                    "source",
+                    id,
+                    "remove",
+                    format!("Deregister failed: {e}"),
+                )
             })?;
         }
 
@@ -132,8 +155,9 @@ impl DrasiLib {
 
     /// Update a source by replacing it with a new instance.
     ///
-    /// This stops the old source, replaces it with the new one, and restarts
-    /// if it was running before. Log and event history are preserved.
+    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
+    /// and event history. The old source is stopped, the runtime is swapped, and the
+    /// source is restarted if it was running.
     ///
     /// The new source must have the same ID as the existing one.
     ///
@@ -156,17 +180,28 @@ impl DrasiLib {
         id: &str,
         new_source: impl crate::sources::Source + 'static,
     ) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
+        // Validate the new source has the same ID
+        if new_source.id() != id {
+            return Err(DrasiError::operation_failed(
+                "source",
+                id,
+                "update",
+                format!(
+                    "New source ID '{}' does not match existing source ID '{}'",
+                    new_source.id(),
+                    id
+                ),
+            ));
+        }
+
+        // Delegate to SourceManager which uses the Reconfiguring transition,
+        // preserving the graph node, edges, and event history.
         self.source_manager
             .update_source(id.to_string(), new_source)
             .await
-            .map_err(|e| match e.downcast::<DrasiError>() {
-                Ok(drasi_err) => drasi_err,
-                Err(e) => DrasiError::provisioning(format!("Failed to update source: {e}")),
-            })?;
-
-        Ok(())
+            .map_err(|e| DrasiError::operation_failed("source", id, "update", e.to_string()))
     }
 
     /// Start a stopped source
@@ -180,7 +215,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start_source(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         map_component_error(
             self.source_manager.start_source(id.to_string()).await,
@@ -201,7 +236,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop_source(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         map_component_error(
             self.source_manager.stop_source(id.to_string()).await,

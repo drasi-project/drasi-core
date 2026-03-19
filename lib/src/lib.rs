@@ -76,6 +76,9 @@ pub mod indexes;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod profiling;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 // ============================================================================
 // Clean Public API - Everything Users Need
 // ============================================================================
@@ -173,6 +176,8 @@ pub use builder::DrasiLibBuilder;
 /// Fluent builder for query configurations
 pub use builder::Query;
 
+/// Async helper to wait for a component to reach a target status without polling.
+pub use component_graph::wait_for_status;
 /// Component graph types for dependency tracking and configuration queries
 pub use component_graph::{
     ComponentGraph, ComponentKind, ComponentNode, GraphEdge, GraphSnapshot, RelationshipKind,

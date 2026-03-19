@@ -22,7 +22,7 @@ use futures::stream::Stream;
 use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
-use crate::component_ops::map_state_error;
+use crate::component_ops::map_component_error;
 use crate::config::{QueryConfig, QueryRuntime};
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
@@ -45,11 +45,12 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
+        let query_id = query.id.clone();
         self.add_query_with_options(query, true)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {e}")))?;
+            .map_err(|e| DrasiError::operation_failed("query", &query_id, "add", format!("{e}")))?;
 
         Ok(())
     }
@@ -67,17 +68,18 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn remove_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Step 1: Validate no dependents
         {
             let graph = self.component_graph.read().await;
             if let Err(dependent_ids) = graph.can_remove(id) {
-                return Err(DrasiError::provisioning(format!(
-                    "Cannot remove query '{}': depended on by: {}",
+                return Err(DrasiError::operation_failed(
+                    "query",
                     id,
-                    dependent_ids.join(", ")
-                )));
+                    "remove",
+                    format!("Depended on by: {}", dependent_ids.join(", ")),
+                ));
             }
         }
 
@@ -85,13 +87,20 @@ impl DrasiLib {
         self.query_manager
             .teardown_query(id.to_string())
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to teardown query: {e}")))?;
+            .map_err(|e| {
+                DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
+            })?;
 
         // Step 3: Deregister from graph (remove node + edges, emit events)
         {
             let mut graph = self.component_graph.write().await;
             graph.deregister(id).map_err(|e| {
-                DrasiError::provisioning(format!("Failed to deregister query: {e}"))
+                DrasiError::operation_failed(
+                    "query",
+                    id,
+                    "remove",
+                    format!("Deregister failed: {e}"),
+                )
             })?;
         }
 
@@ -111,7 +120,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Verify query exists
         let _config = self
@@ -121,10 +130,11 @@ impl DrasiLib {
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
         // Query will subscribe directly to sources when started
-        map_state_error(
+        map_component_error(
             self.query_manager.start_query(id.to_string()).await,
             "query",
             id,
+            "start",
         )
     }
 
@@ -139,16 +149,38 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Stop the query (it unsubscribes from sources automatically)
-        map_state_error(
+        map_component_error(
             self.query_manager.stop_query(id.to_string()).await,
             "query",
             id,
+            "stop",
         )?;
 
         Ok(())
+    }
+
+    /// Update a query by replacing it with a new configuration.
+    ///
+    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
+    /// and event history. The old query is stopped, the runtime is swapped, and the
+    /// query is restarted if it was running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query doesn't exist, if the new configuration
+    /// references non-existent sources, or if provisioning fails.
+    pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
+        self.state_guard.require_initialized()?;
+
+        // Delegate to QueryManager which uses the Reconfiguring transition,
+        // preserving the graph node, edges, and event history.
+        self.query_manager
+            .update_query(id.to_string(), config)
+            .await
+            .map_err(|e| DrasiError::operation_failed("query", id, "update", e.to_string()))
     }
 
     /// List all queries with their current status

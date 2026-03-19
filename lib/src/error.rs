@@ -203,36 +203,6 @@ impl DrasiError {
     // ========================================================================
     // Backward compatibility helpers (deprecated, use structured variants)
     // ========================================================================
-
-    /// Create a provisioning error.
-    ///
-    /// # Deprecated
-    /// Consider using `operation_failed` with specific component context instead.
-    pub fn provisioning(msg: impl Into<String>) -> Self {
-        DrasiError::InvalidConfig {
-            message: format!("Provisioning error: {}", msg.into()),
-        }
-    }
-
-    /// Create a component error (generic operation failure).
-    ///
-    /// # Deprecated
-    /// Consider using `operation_failed` with specific component context instead.
-    pub fn component_error(msg: impl Into<String>) -> Self {
-        DrasiError::InvalidState {
-            message: format!("Component error: {}", msg.into()),
-        }
-    }
-
-    /// Create a startup validation error.
-    ///
-    /// # Deprecated
-    /// Consider using `validation` or `invalid_config` instead.
-    pub fn startup_validation(msg: impl Into<String>) -> Self {
-        DrasiError::Validation {
-            message: format!("Startup validation failed: {}", msg.into()),
-        }
-    }
 }
 
 /// Result type for drasi-lib operations.
@@ -333,23 +303,5 @@ mod tests {
             // We can access the anyhow error and its chain
             assert!(anyhow_err.to_string().contains("Failed to read config"));
         }
-    }
-
-    #[test]
-    fn test_backward_compat_provisioning() {
-        let err = DrasiError::provisioning("Failed to provision");
-        assert!(err.to_string().contains("Provisioning error"));
-    }
-
-    #[test]
-    fn test_backward_compat_component_error() {
-        let err = DrasiError::component_error("Component failed");
-        assert!(err.to_string().contains("Component error"));
-    }
-
-    #[test]
-    fn test_backward_compat_startup_validation() {
-        let err = DrasiError::startup_validation("Validation failed");
-        assert!(err.to_string().contains("Startup validation failed"));
     }
 }

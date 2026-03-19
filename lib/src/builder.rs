@@ -282,7 +282,7 @@ impl DrasiLibBuilder {
         // Validate the configuration
         config
             .validate()
-            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
+            .map_err(|e| DrasiError::validation(e.to_string()))?;
 
         // Create runtime config and server with optional index and state store providers
         let runtime_config = Arc::new(crate::config::RuntimeConfig::new(
@@ -292,12 +292,15 @@ impl DrasiLibBuilder {
         ));
         let mut core = DrasiLib::new(runtime_config);
 
-        // Initialize the server
-        core.initialize().await?;
+        // Inject state store before provisioning sources (they need it for initialization)
+        let state_store = core.config.state_store_provider.clone();
+        core.source_manager
+            .inject_state_store(state_store.clone())
+            .await;
+        core.reaction_manager.inject_state_store(state_store).await;
 
-        // Register the component graph source before user sources.
-        // This built-in source exposes the ComponentGraph as a queryable Drasi source
-        // so queries can reactively observe component topology and lifecycle changes.
+        // Register the component graph source BEFORE initialize (which loads query config).
+        // Queries reference sources, so sources must exist in the graph first.
         {
             use crate::sources::component_graph_source::ComponentGraphSource;
             let graph_source = ComponentGraphSource::new(
@@ -306,10 +309,14 @@ impl DrasiLibBuilder {
                 core.component_graph.clone(),
             )
             .map_err(|e| {
-                DrasiError::provisioning(format!("Failed to create component graph source: {e}"))
+                DrasiError::operation_failed(
+                    "source",
+                    "component-graph",
+                    "add",
+                    format!("Failed to create: {e}"),
+                )
             })?;
 
-            // Register in graph first, then provision
             let source_id = graph_source.id().to_string();
             let source_type = graph_source.type_name().to_string();
             {
@@ -321,48 +328,61 @@ impl DrasiLibBuilder {
                     graph_source.auto_start().to_string(),
                 );
                 graph.register_source(&source_id, metadata).map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to register component graph source: {e}"
-                    ))
+                    DrasiError::operation_failed(
+                        "source",
+                        &source_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
                 })?;
             }
-            core.source_manager
-                .provision_source(graph_source)
-                .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to provision component graph source: {e}"
-                    ))
-                })?;
+            if let Err(e) = core.source_manager.provision_source(graph_source).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&source_id);
+                return Err(DrasiError::operation_failed(
+                    "source",
+                    &source_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
         }
 
-        // Inject pre-built source instances
+        // Inject pre-built source instances BEFORE initialize.
+        // Queries reference sources by ID, so sources must be in the graph first.
         for source in self.source_instances {
             let source_id = source.id().to_string();
             let source_type = source.type_name().to_string();
             let auto_start = source.auto_start();
 
-            // Register in graph first, then provision
             {
                 let mut graph = core.component_graph.write().await;
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("kind".to_string(), source_type);
                 metadata.insert("autoStart".to_string(), auto_start.to_string());
                 graph.register_source(&source_id, metadata).map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to register source instance '{source_id}': {e}"
-                    ))
+                    DrasiError::operation_failed(
+                        "source",
+                        &source_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
                 })?;
             }
-            core.source_manager
-                .provision_source(source)
-                .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to provision source instance '{source_id}': {e}"
-                    ))
-                })?;
+            if let Err(e) = core.source_manager.provision_source(source).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&source_id);
+                return Err(DrasiError::operation_failed(
+                    "source",
+                    &source_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
         }
+
+        // Initialize the server (loads query configurations — sources must already be registered)
+        core.initialize().await?;
 
         // Inject pre-built reaction instances
         for reaction in self.reaction_instances {
@@ -378,19 +398,24 @@ impl DrasiLibBuilder {
                 graph
                     .register_reaction(&reaction_id, metadata, &query_ids)
                     .map_err(|e| {
-                        DrasiError::provisioning(format!(
-                            "Failed to register reaction instance '{reaction_id}': {e}"
-                        ))
+                        DrasiError::operation_failed(
+                            "reaction",
+                            &reaction_id,
+                            "add",
+                            format!("Failed to register: {e}"),
+                        )
                     })?;
             }
-            core.reaction_manager
-                .provision_reaction(reaction)
-                .await
-                .map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to provision reaction instance '{reaction_id}': {e}"
-                    ))
-                })?;
+            if let Err(e) = core.reaction_manager.provision_reaction(reaction).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&reaction_id);
+                return Err(DrasiError::operation_failed(
+                    "reaction",
+                    &reaction_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
         }
 
         Ok(core)
@@ -680,7 +705,7 @@ mod tests {
         assert!(core.is_ok(), "Builder should create initialized server");
         let core = core.unwrap();
         assert!(
-            core.state_guard.is_initialized().await,
+            core.state_guard.is_initialized(),
             "Server should be initialized"
         );
     }
@@ -689,8 +714,11 @@ mod tests {
     async fn test_builder_with_query() {
         // In the instance-based approach, sources and reactions are added as instances
         // after the builder creates the core. Here we just test query config addition.
+        // Source must be registered before a query can reference it
+        let source = crate::sources::tests::TestMockSource::new("source1".to_string()).unwrap();
         let core = DrasiLib::builder()
             .with_id("complex-server")
+            .with_source(source)
             .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
@@ -702,7 +730,7 @@ mod tests {
 
         assert!(core.is_ok(), "Builder with query should succeed");
         let core = core.unwrap();
-        assert!(core.state_guard.is_initialized().await);
+        assert!(core.state_guard.is_initialized());
         assert_eq!(core.config.queries.len(), 1);
     }
 }
