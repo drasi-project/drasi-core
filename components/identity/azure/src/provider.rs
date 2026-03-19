@@ -31,12 +31,10 @@ const DEFAULT_AZURE_SCOPE: &str = "https://ossrdbms-aad.database.windows.net/.de
 ///
 /// # Identity Name
 ///
-/// The `identity_name` is the database identity used for authentication.
-/// For Azure Database for PostgreSQL, this should be in the format:
-/// `user@servername` (e.g., `myuser@myserver`).
-///
-/// For Azure AD authentication, use the Azure AD principal name
-/// (e.g., `user@tenant.onmicrosoft.com`).
+/// The `identity_name` is the identity used for authentication.
+/// This could be in the format `user@servername` (e.g., `myuser@myserver`)
+/// or an Azure AD principal name (e.g., `user@tenant.onmicrosoft.com`),
+/// depending on the target resource.
 #[derive(Clone)]
 pub struct AzureIdentityProvider {
     credential: Arc<dyn TokenCredential>,

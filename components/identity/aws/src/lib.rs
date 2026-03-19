@@ -16,8 +16,8 @@
 //! AWS identity provider plugin for Drasi.
 //!
 //! Provides AWS IAM authentication as a pluggable identity provider
-//! for sources and reactions. When used with RDS/Aurora databases,
-//! the caller provides endpoint details (hostname, port) via
+//! for sources and reactions. The caller provides endpoint details
+//! (hostname, port) via
 //! [`CredentialContext`](drasi_lib::identity::CredentialContext).
 
 mod provider;
@@ -33,19 +33,19 @@ use utoipa::OpenApi;
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AwsIdentityProviderConfigDto {
-    /// IAM database username.
+    /// IAM username used for authentication.
     pub username: String,
 
     /// AWS region (e.g., `"us-west-2"`). If omitted, loaded from environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
-    /// IAM role ARN to assume (e.g., `"arn:aws:iam::123456789012:role/RDSAccessRole"`).
+    /// IAM role ARN to assume (e.g., `"arn:aws:iam::123456789012:role/MyAccessRole"`).
     /// If provided, the provider will assume this role before generating tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role_arn: Option<String>,
 
-    /// STS session name when assuming a role. Defaults to `"drasi-rds-session"`.
+    /// STS session name when assuming a role. Defaults to `"drasi-session"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
 }

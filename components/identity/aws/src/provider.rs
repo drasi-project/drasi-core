@@ -21,14 +21,14 @@ use std::sync::Arc;
 /// Identity provider for AWS IAM authentication.
 ///
 /// Uses AWS IAM credentials to generate authentication tokens.
-/// For RDS/Aurora databases, the caller provides hostname and port via
+/// The caller provides hostname and port via
 /// [`CredentialContext`] so the provider can generate endpoint-specific tokens.
 ///
 /// # Context Properties
 ///
-/// When used with RDS/Aurora databases, the caller should provide:
-/// - `hostname` — the RDS endpoint (e.g., `"mydb.cluster-xxx.us-west-2.rds.amazonaws.com"`)
-/// - `port` — the database port (e.g., `"5432"`)
+/// The caller should provide:
+/// - `hostname` — the resource endpoint (e.g., `"myresource.us-west-2.amazonaws.com"`)
+/// - `port` — the service port (e.g., `"5432"`)
 #[derive(Clone)]
 pub struct AwsIdentityProvider {
     config: Arc<SdkConfig>,
@@ -99,7 +99,7 @@ impl AwsIdentityProvider {
             anyhow!("No AWS credentials found. Run 'aws configure' to set up credentials.")
         })?;
 
-        let session = session_name.unwrap_or_else(|| "drasi-rds-session".to_string());
+        let session = session_name.unwrap_or_else(|| "drasi-session".to_string());
         let role_provider = AssumeRoleProvider::builder(role_arn.into())
             .session_name(session)
             .region(region.clone())
@@ -128,7 +128,7 @@ impl IdentityProvider for AwsIdentityProvider {
         let hostname = context.get("hostname").ok_or_else(|| {
             anyhow!(
                 "AWS identity provider requires 'hostname' in credential context \
-                 (e.g., the RDS endpoint)"
+                 (e.g., the service endpoint)"
             )
         })?;
 
