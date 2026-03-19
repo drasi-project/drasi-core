@@ -164,6 +164,10 @@ fn spawn_log_worker(registry: Arc<ComponentLogRegistry>, mut rx: mpsc::Receiver<
 ///
 /// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
 /// This function is kept for backward compatibility.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
+)]
 pub fn init_tracing(log_registry: Arc<ComponentLogRegistry>) {
     // Ensure global registry is initialized (which sets up the channel worker)
     let _ = get_or_init_global_registry();
@@ -209,6 +213,10 @@ fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
 /// # Deprecated
 ///
 /// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
+)]
 pub fn try_init_tracing(log_registry: Arc<ComponentLogRegistry>) -> bool {
     // Check if already initialized
     if GLOBAL_LOG_REGISTRY.get().is_some() {

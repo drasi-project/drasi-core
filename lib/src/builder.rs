@@ -477,7 +477,7 @@ impl Query {
         }
     }
 
-    /// Create a new GQL query builder.
+    /// Create a new GQL (ISO 9074:2024) query builder.
     pub fn gql(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),

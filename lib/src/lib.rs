@@ -120,7 +120,12 @@ pub use channels::DispatchMode;
 pub use managers::{LogLevel, LogMessage};
 
 /// Tracing initialization function - call to set up component log routing
-pub use managers::{get_or_init_global_registry, init_tracing, try_init_tracing};
+/// Tracing initialization function - call to set up component log routing
+pub use managers::get_or_init_global_registry;
+
+/// Deprecated tracing initialization functions — use `get_or_init_global_registry()` instead.
+#[allow(deprecated)]
+pub use managers::{init_tracing, try_init_tracing};
 
 // ============================================================================
 // Configuration Types

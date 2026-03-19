@@ -1,25 +1,42 @@
 # DrasiLib
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Crates.io](https://img.shields.io/crates/v/drasi-lib.svg)](https://crates.io/crates/drasi-lib)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-DrasiLib is a Rust library for building change-driven solutions that detect and react to data changes with precision.
+DrasiLib is a Rust library for building change-driven solutions that detect and react to data changes with precision. It is the embedded library form of [Drasi](https://drasi.io/), a CNCF Sandbox project.
 
-## Overview
+## What is DrasiLib?
 
-DrasiLib enables real-time change detection using **continuous queries** that maintain live result sets. Unlike traditional event-driven systems, you declare *what changes matter* using Cypher queries, and DrasiLib handles the complexity of tracking state and detecting meaningful transitions.
+DrasiLib enables real-time data change processing using **continuous queries**. Unlike traditional query systems that run once and return static results, DrasiLib's continuous queries run perpetually, maintaining live result sets and emitting precise change notifications whenever the underlying data changes.
+
+You declare *what changes matter* using [Cypher](https://opencypher.org/) or [GQL (ISO 9074:2024)](https://www.iso.org/standard/76120.html) graph queries. DrasiLib handles the complexity of tracking state, detecting meaningful transitions, and delivering the results.
+
+### How It Works
 
 ```
-Sources → Continuous Queries → Reactions
-   ↓              ↓                 ↓
+Sources -> Continuous Queries -> Reactions
+   |              |                 |
 Data In    Change Detection    Actions Out
 ```
 
-**Key Benefits:**
-- **Declarative**: Define change detection with Cypher queries, not custom code
-- **Precise**: Get before/after states for every change, not just raw events
-- **Pluggable**: Use existing source/reaction plugins or build your own
-- **Scalable**: Built-in backpressure, priority queues, and dispatch modes
+1. **Sources** ingest data from external systems (databases, APIs, message queues) and model them as a property graph of nodes and relationships.
+2. **Continuous Queries** evaluate Cypher/GQL queries against the graph whenever the data changes, producing a stream of result changes:
+   - **Added** -- a new row matches the query criteria
+   - **Updated** -- an existing row still matches but values changed (includes before/after)
+   - **Deleted** -- a row no longer matches the query criteria
+3. **Reactions** receive those result changes and trigger actions (webhooks, logging, alerts, database writes).
+
+### Key Benefits
+
+- **Declarative** -- define change semantics with Cypher/GQL queries, not custom code
+- **Precise** -- get before/after states for every change, not just raw events
+- **Pluggable** -- use existing source/reaction plugins or build your own
+- **Multi-source** -- a single query can span data from multiple sources
+- **Embeddable** -- runs fully in-process with no external infrastructure
+- **Scalable** -- built-in backpressure, priority queues, and configurable dispatch modes
+
+---
 
 ## Getting Started
 
@@ -27,87 +44,27 @@ Data In    Change Detection    Actions Out
 
 ```toml
 [dependencies]
-drasi-lib = "0.3"
+drasi-lib = "0.4"
 tokio = { version = "1", features = ["full"] }
 ```
-
-### Middleware Features (Optional)
-
-DrasiLib supports optional middleware for data transformation. **All middleware are disabled by default.**
-
-Enable only the middleware you need:
-
-```toml
-[dependencies]
-drasi-lib = { version = "0.3", features = ["middleware-jq", "middleware-decoder"] }
-```
-
-**Available Middleware Features:**
-
-- **`middleware-jq`** - JQ query language transformations (requires build tools, see below)
-- **`middleware-decoder`** - Decode encoded strings (base64, hex, URL encoding)
-- **`middleware-map`** - JSONPath-based property mapping
-- **`middleware-parse-json`** - Parse JSON strings into structured objects
-- **`middleware-promote`** - Promote nested properties to top level
-- **`middleware-relabel`** - Transform element labels
-- **`middleware-unwind`** - Unwind arrays into multiple elements
-- **`middleware-all`** - Enable all middleware (convenience feature)
-
-**JQ Middleware Build Requirements:**
-
-The `middleware-jq` feature compiles jq from source and requires build tools:
-
-**macOS:**
-```bash
-brew install autoconf automake libtool
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install autoconf automake libtool flex bison
-```
-
-**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
-
-## Initialization Methods
-
-DrasiLib can be initialized in two ways:
-1. **Builder Pattern** (Recommended) - Fluent API for programmatic configuration
-2. **Config Struct** - Direct configuration for YAML/JSON loading scenarios
-
----
-
-## Method 1: Builder Pattern (Recommended)
-
-The builder provides a fluent interface for configuring sources, queries, and reactions.
 
 ### Basic Example
 
 ```rust
 use drasi_lib::{DrasiLib, Query};
-use drasi_source_mock::{MockSource, MockSourceConfig};
-use drasi_reaction_log::{LogReaction, LogReactionConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Create source plugin instance
-    let source = MockSource::new("sensors", MockSourceConfig {
-        data_type: "sensor".to_string(),
-        interval_ms: 1000,
-    })?;
+    // 1. Create source and reaction plugin instances
+    //    (these are external crates -- DrasiLib only knows the Source/Reaction traits)
+    let source = MySource::new("sensors", my_config)?;
+    let reaction = MyReaction::new("alerts", vec!["high-temp".into()], reaction_config);
 
-    // 2. Create reaction plugin instance
-    let reaction = LogReaction::new(
-        "alerts",
-        vec!["high-temp".to_string()],
-        LogReactionConfig::default(),
-    );
-
-    // 3. Build DrasiLib using the builder
+    // 2. Build DrasiLib with the builder pattern
     let core = DrasiLib::builder()
         .with_id("my-app")
-        .with_source(source)      // Ownership transferred
-        .with_reaction(reaction)  // Ownership transferred
+        .with_source(source)        // Ownership transferred
+        .with_reaction(reaction)    // Ownership transferred
         .with_query(
             Query::cypher("high-temp")
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s")
@@ -117,10 +74,10 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
 
-    // 4. Start processing
+    // 3. Start processing (Sources -> Queries -> Reactions in dependency order)
     core.start().await?;
 
-    // Run until shutdown
+    // 4. Run until shutdown
     tokio::signal::ctrl_c().await?;
     core.stop().await?;
 
@@ -128,269 +85,91 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### DrasiLibBuilder API Reference
+### Middleware Features (Optional)
 
-Create a builder with `DrasiLib::builder()` and configure using the fluent API.
+DrasiLib supports optional middleware for transforming data between sources and queries. **All middleware are disabled by default** to minimize dependencies.
 
-#### `with_id(id: impl Into<String>)`
-
-Set a unique identifier for this DrasiLib instance. Used for logging and debugging.
-
-```rust
-DrasiLib::builder()
-    .with_id("my-application")
+```toml
+[dependencies]
+drasi-lib = { version = "0.4", features = ["middleware-decoder", "middleware-promote"] }
 ```
 
-#### `with_source(source: impl Source + 'static)`
+| Feature | Description |
+|---------|-------------|
+| `middleware-jq` | JQ query language transformations (requires build tools) |
+| `middleware-decoder` | Decode base64, hex, URL-encoded strings |
+| `middleware-map` | JSONPath-based property mapping |
+| `middleware-parse-json` | Parse JSON strings into structured objects |
+| `middleware-promote` | Promote nested properties to top level |
+| `middleware-relabel` | Transform element labels |
+| `middleware-unwind` | Unwind arrays into multiple elements |
+| `middleware-all` | Enable all middleware (convenience) |
 
-Add a source plugin instance. **Ownership is transferred** to DrasiLib.
+The `middleware-jq` feature compiles jq from source. Install build tools first:
+- **macOS:** `brew install autoconf automake libtool`
+- **Ubuntu/Debian:** `sudo apt-get install autoconf automake libtool flex bison`
 
-```rust
-let source = MockSource::new("my-source", config)?;
-DrasiLib::builder()
-    .with_source(source)  // source is moved here
-```
+---
 
-You can add multiple sources by chaining:
+## Builder API
+
+Create a DrasiLib instance with `DrasiLib::builder()` and configure using the fluent API.
+
+### Builder Methods
+
+| Method | Description | Default |
+|--------|-------------|---------|
+| `.with_id(id)` | Set instance identifier (used for logging) | UUID |
+| `.with_source(source)` | Add a source plugin instance (ownership transferred) | -- |
+| `.with_reaction(reaction)` | Add a reaction plugin instance (ownership transferred) | -- |
+| `.with_query(config)` | Add a query configuration (use `Query` builder) | -- |
+| `.with_priority_queue_capacity(n)` | Default event queue capacity | `10000` |
+| `.with_dispatch_buffer_capacity(n)` | Default channel buffer capacity | `1000` |
+| `.add_storage_backend(config)` | Define a named storage backend (RocksDB, Redis) | -- |
+| `.with_index_provider(provider)` | Set the index backend plugin for persistent storage | In-memory |
+| `.with_state_store_provider(provider)` | Set the state store for plugin state persistence | In-memory |
+| `.build().await?` | Build and initialize the instance | -- |
+
+### Multiple Sources
 
 ```rust
 DrasiLib::builder()
     .with_source(source1)
     .with_source(source2)
     .with_source(source3)
+    // ...
 ```
 
-#### `with_reaction(reaction: impl Reaction + 'static)`
+### Storage Backends
 
-Add a reaction plugin instance. **Ownership is transferred** to DrasiLib.
-
-```rust
-let reaction = LogReaction::new("my-reaction", vec!["query1".into()], config);
-DrasiLib::builder()
-    .with_reaction(reaction)  // reaction is moved here
-```
-
-#### `with_query(config: QueryConfig)`
-
-Add a query configuration. Use the `Query` builder to create configurations:
+For persistent query state (survives restarts), configure a storage backend and an index provider:
 
 ```rust
-DrasiLib::builder()
-    .with_query(
-        Query::cypher("my-query")
-            .query("MATCH (n:Person) RETURN n")
-            .from_source("my-source")
-            .build()
-    )
-```
+use drasi_lib::{StorageBackendConfig, StorageBackendSpec};
+use drasi_index_rocksdb::RocksDbIndexPlugin;
 
-#### `with_priority_queue_capacity(capacity: usize)`
-
-Set the default priority queue capacity for all components. Controls how many events can be buffered before backpressure is applied.
-
-```rust
-DrasiLib::builder()
-    .with_priority_queue_capacity(50000)  // Default: 10000
-```
-
-#### `with_dispatch_buffer_capacity(capacity: usize)`
-
-Set the default dispatch buffer capacity for event routing channels.
-
-```rust
-DrasiLib::builder()
-    .with_dispatch_buffer_capacity(5000)  // Default: 1000
-```
-
-#### `add_storage_backend(config: StorageBackendConfig)`
-
-Add a storage backend for persistent query state (RocksDB, Redis/Garnet).
-
-```rust
-use drasi_lib::StorageBackendConfig;
-
-DrasiLib::builder()
-    .add_storage_backend(StorageBackendConfig {
-        id: "rocksdb-backend".to_string(),
-        spec: StorageBackendSpec::RocksDb { path: "./data".to_string() },
-    })
-```
-
-#### `build() -> Result<DrasiLib>`
-
-Build the DrasiLib instance. This validates configuration, creates all components, and initializes the system.
-
-```rust
 let core = DrasiLib::builder()
     .with_id("my-app")
-    .with_source(source)
-    .with_query(query)
-    .build()
-    .await?;
-
-// Now start processing
-core.start().await?;
-```
-
----
-
-## Method 2: Config Struct Initialization
-
-For scenarios where you need to load configuration from YAML/JSON files or construct configuration programmatically without the builder.
-
-### DrasiLibConfig Structure
-
-```rust
-use drasi_lib::{DrasiLibConfig, QueryConfig, RuntimeConfig};
-use std::sync::Arc;
-
-// Create configuration directly
-let config = DrasiLibConfig {
-    id: "my-server".to_string(),
-    priority_queue_capacity: Some(50000),
-    dispatch_buffer_capacity: Some(5000),
-    storage_backends: vec![],
-    queries: vec![
-        QueryConfig {
-            id: "my-query".to_string(),
-            query: "MATCH (n:Person) RETURN n".to_string(),
-            query_language: QueryLanguage::Cypher,
-            sources: vec![
-                SourceSubscriptionConfig {
-                    source_id: "my-source".to_string(),
-                    pipeline: vec![],
-                }
-            ],
-            middleware: vec![],
-            auto_start: true,
-            joins: None,
-            enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,  // Inherits from global
-            dispatch_buffer_capacity: None, // Inherits from global
-            dispatch_mode: None,
-            storage_backend: None,
+    .add_storage_backend(StorageBackendConfig {
+        id: "rocks".to_string(),
+        spec: StorageBackendSpec::RocksDb {
+            path: "/data/drasi".to_string(),
+            enable_archive: false,
+            direct_io: false,
         },
-    ],
-};
-
-// Validate the configuration
-config.validate()?;
-```
-
-### YAML Configuration Format
-
-```yaml
-# DrasiLibConfig structure
-id: my-server
-priority_queue_capacity: 50000      # Optional, default: 10000
-dispatch_buffer_capacity: 5000      # Optional, default: 1000
-
-storage_backends:                    # Optional
-  - id: rocksdb-backend
-    spec:
-      type: rocksdb
-      path: ./data
-
-queries:
-  - id: high-temp-alerts
-    query: |
-      MATCH (s:Sensor)
-      WHERE s.temperature > 75
-      RETURN s.id, s.temperature, s.location
-    queryLanguage: Cypher           # Optional, default: Cypher
-    sources:
-      - source_id: sensors
-        pipeline: []                # Optional middleware pipeline
-    auto_start: true                # Optional, default: true
-    enableBootstrap: true           # Optional, default: true
-    bootstrapBufferSize: 10000      # Optional, default: 10000
-
-  - id: complex-join-query
-    query: |
-      MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
-      WHERE o.status = 'pending'
-      RETURN o.id, c.email, o.total
-    sources:
-      - source_id: orders
-      - source_id: customers
-    joins:                          # Synthetic joins for cross-source queries
-      - id: PLACED_BY
-        keys:
-          - label: Order
-            property: customer_id
-          - label: Customer
-            property: id
-```
-
-### Loading from YAML and Initializing
-
-```rust
-use drasi_lib::{DrasiLibConfig, RuntimeConfig};
-use std::sync::Arc;
-
-// Load YAML configuration
-let yaml_str = std::fs::read_to_string("config.yaml")?;
-let config: DrasiLibConfig = serde_yaml::from_str(&yaml_str)?;
-
-// Validate configuration
-config.validate()?;
-
-// Convert to RuntimeConfig (applies defaults to queries)
-let runtime_config = Arc::new(RuntimeConfig::from(config));
-
-// Note: DrasiLib::new() is internal. For config-based initialization,
-// use the builder pattern and add sources/reactions programmatically:
-
-let mut core = DrasiLib::builder()
-    .with_id(&runtime_config.id);
-
-// Add queries from config
-for query_config in &runtime_config.queries {
-    core = core.with_query(query_config.clone());
-}
-
-// Add sources and reactions as plugin instances
-// (Sources/reactions must be created from plugin types - they cannot be in YAML)
-let source = create_source_from_external_config()?;
-let reaction = create_reaction_from_external_config()?;
-
-let core = core
+    })
+    .with_index_provider(Arc::new(RocksDbIndexPlugin::new()))
     .with_source(source)
-    .with_reaction(reaction)
+    .with_query(
+        Query::cypher("my-query")
+            .query("MATCH (n:Sensor) RETURN n")
+            .from_source("sensors")
+            .with_storage_backend(StorageBackendRef::Named("rocks".into()))
+            .build()
+    )
     .build()
     .await?;
-
-core.start().await?;
 ```
-
-### Configuration Fields Reference
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `id` | `String` | UUID | Unique identifier for this instance |
-| `priority_queue_capacity` | `Option<usize>` | `10000` | Default event queue capacity |
-| `dispatch_buffer_capacity` | `Option<usize>` | `1000` | Default channel buffer capacity |
-| `storage_backends` | `Vec<StorageBackendConfig>` | `[]` | Storage backend definitions |
-| `queries` | `Vec<QueryConfig>` | `[]` | Query configurations |
-
-### QueryConfig Fields Reference
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `id` | `String` | Required | Unique query identifier |
-| `query` | `String` | Required | Cypher or GQL query string |
-| `query_language` | `QueryLanguage` | `Cypher` | Query language (`Cypher` or `GQL`) |
-| `sources` | `Vec<SourceSubscriptionConfig>` | `[]` | Source subscriptions |
-| `middleware` | `Vec<SourceMiddlewareConfig>` | `[]` | Middleware configurations |
-| `auto_start` | `bool` | `true` | Start automatically with DrasiLib |
-| `joins` | `Option<Vec<QueryJoinConfig>>` | `None` | Synthetic join definitions |
-| `enable_bootstrap` | `bool` | `true` | Load initial data from sources |
-| `bootstrap_buffer_size` | `usize` | `10000` | Bootstrap buffer size |
-| `priority_queue_capacity` | `Option<usize>` | Inherited | Override queue capacity |
-| `dispatch_buffer_capacity` | `Option<usize>` | Inherited | Override buffer capacity |
-| `dispatch_mode` | `Option<DispatchMode>` | `Channel` | Event dispatch mode |
-| `storage_backend` | `Option<StorageBackendRef>` | Default | Storage backend reference |
 
 ---
 
@@ -398,22 +177,16 @@ core.start().await?;
 
 The `Query` builder creates query configurations with a fluent API.
 
-### `Query::cypher(id: impl Into<String>)`
-
-Create a new Cypher query builder:
+### Creating Queries
 
 ```rust
+// Cypher query (primary query language)
 Query::cypher("my-query")
     .query("MATCH (n:Person) WHERE n.age > 21 RETURN n")
     .from_source("people-source")
     .build()
-```
 
-### `Query::gql(id: impl Into<String>)`
-
-Create a new GQL (GraphQL) query builder:
-
-```rust
+// GQL query (ISO 9074:2024 -- not GraphQL)
 Query::gql("my-gql-query")
     .query("MATCH (n:Person) RETURN n.name")
     .from_source("people-source")
@@ -425,35 +198,41 @@ Query::gql("my-gql-query")
 | Method | Description | Default |
 |--------|-------------|---------|
 | `.query(str)` | Set the query string | Required |
-| `.from_source(id)` | Subscribe to a source | Required (at least one) |
-| `.from_source_with_pipeline(id, pipeline)` | Subscribe with middleware pipeline | - |
+| `.from_source(id)` | Subscribe to a source | Required |
+| `.from_source_with_pipeline(id, pipeline)` | Subscribe with middleware pipeline | -- |
 | `.with_middleware(config)` | Add middleware transformation | `[]` |
-| `.auto_start(bool)` | Start automatically with DrasiLib | `true` |
-| `.enable_bootstrap(bool)` | Load initial data from sources | `true` |
+| `.auto_start(bool)` | Start automatically when `core.start()` is called | `true` |
+| `.enable_bootstrap(bool)` | Load initial data from sources on start | `true` |
 | `.with_bootstrap_buffer_size(size)` | Bootstrap buffer size | `10000` |
-| `.with_joins(joins)` | Configure synthetic joins | None |
-| `.with_priority_queue_capacity(cap)` | Override queue capacity | Inherited |
-| `.with_dispatch_buffer_capacity(cap)` | Override buffer capacity | Inherited |
-| `.with_dispatch_mode(mode)` | Set dispatch mode | `Channel` |
-| `.with_storage_backend(ref)` | Use specific storage backend | Default |
+| `.with_joins(joins)` | Configure synthetic joins for multi-source queries | `None` |
+| `.with_priority_queue_capacity(cap)` | Override queue capacity for this query | Inherited |
+| `.with_dispatch_buffer_capacity(cap)` | Override buffer capacity for this query | Inherited |
+| `.with_dispatch_mode(mode)` | Set dispatch mode (`Channel` or `Broadcast`) | `Channel` |
+| `.with_storage_backend(ref)` | Use a specific storage backend | In-memory |
+| `.build()` | Build the `QueryConfig` | -- |
 
-### Complete Query Example
+### Multi-Source Queries with Joins
+
+When a query spans multiple sources, use synthetic joins to define how elements relate:
 
 ```rust
-use drasi_lib::{Query, DispatchMode};
+use drasi_lib::config::{QueryJoinConfig, QueryJoinKey};
 
-Query::cypher("complex-query")
+Query::cypher("cross-source")
     .query(r#"
         MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
         WHERE o.status = 'pending' AND o.total > 1000
         RETURN o.id, c.email, o.total
     "#)
-    .from_source("orders")
-    .from_source("customers")
-    .auto_start(true)
-    .enable_bootstrap(true)
-    .with_priority_queue_capacity(20000)
-    .with_dispatch_mode(DispatchMode::Channel)
+    .from_source("orders-db")
+    .from_source("customers-db")
+    .with_joins(vec![QueryJoinConfig {
+        id: "PLACED_BY".to_string(),
+        keys: vec![
+            QueryJoinKey { label: "Order".into(), property: "customer_id".into() },
+            QueryJoinKey { label: "Customer".into(), property: "id".into() },
+        ],
+    }])
     .build()
 ```
 
@@ -461,14 +240,20 @@ Query::cypher("complex-query")
 
 ## Runtime Management
 
-After building, use these methods to manage the DrasiLib instance:
+After building, manage the DrasiLib instance with these methods:
+
+### Lifecycle
 
 ```rust
-// Lifecycle
-core.start().await?;           // Start all auto-start components
-core.stop().await?;            // Stop all components
+core.start().await?;             // Start all auto-start components (Sources -> Queries -> Reactions)
+core.stop().await?;              // Stop all components (Reactions -> Queries -> Sources)
+let running = core.is_running().await;
+```
 
-// Component control
+### Individual Component Control
+
+```rust
+// Start / Stop
 core.start_source("my-source").await?;
 core.stop_source("my-source").await?;
 core.start_query("my-query").await?;
@@ -476,36 +261,75 @@ core.stop_query("my-query").await?;
 core.start_reaction("my-reaction").await?;
 core.stop_reaction("my-reaction").await?;
 
-// Add components at runtime
+// Add at runtime (auto-starts if server is running and auto_start=true)
 core.add_source(new_source).await?;
-core.add_reaction(new_reaction).await?;
 core.add_query(query_config).await?;
+core.add_reaction(new_reaction).await?;
 
-// Remove components
+// Hot-swap (preserves graph node, edges, and event history)
+core.update_source("my-source", replacement_source).await?;
+core.update_query("my-query", new_query_config).await?;
+core.update_reaction("my-reaction", replacement_reaction).await?;
+
+// Remove (cleanup=true calls deprovision() on the component)
 core.remove_source("my-source", false).await?;
 core.remove_query("my-query").await?;
-core.remove_reaction("my-reaction", false).await?;
+core.remove_reaction("my-reaction", true).await?;
+```
 
-// Remove with cleanup (calls deprovision on the component)
-core.remove_source("my-source", true).await?;
+### Inspection
 
-// Inspection
-let sources = core.list_sources().await?;
+```rust
+// List components with status
+let sources: Vec<(String, ComponentStatus)> = core.list_sources().await?;
 let queries = core.list_queries().await?;
 let reactions = core.list_reactions().await?;
-let status = core.get_source_status("my-source").await?;
-let results = core.get_query_results("my-query").await?;
 
-// Component dependency graph
-let graph = core.get_graph().await;
-let dependents = core.get_dependents("my-source").await;
+// Get individual component status
+let status = core.get_source_status("my-source").await?;
+
+// Get detailed component info
+let info = core.get_source_info("my-source").await?;
+let info = core.get_query_info("my-query").await?;
+let info = core.get_reaction_info("my-reaction").await?;
+
+// Get current query result set (snapshot)
+let results: Vec<serde_json::Value> = core.get_query_results("my-query").await?;
+
+// Get current configuration snapshot
+let config = core.get_current_config().await?;
+```
+
+### Component Dependency Graph
+
+```rust
+// Full graph snapshot (serializable to JSON)
+let snapshot: GraphSnapshot = core.get_graph().await;
+println!("Components: {}", snapshot.nodes.len());
+
+// Dependency queries
+let dependents = core.get_dependents("orders-db").await;
 let dependencies = core.get_dependencies("my-query").await;
 
-// Check running state
-let is_running = core.is_running().await;
+// Check if safe to remove (fails if other components depend on it)
+core.can_remove_component("orders-db").await?;
+```
 
-// Get current configuration
-let config = core.get_current_config().await?;
+### Lifecycle Events
+
+```rust
+// Subscribe to ALL component events (global broadcast)
+let mut receiver = core.subscribe_all_component_events();
+
+// Subscribe to events for a specific component (history + live stream)
+let (history, mut rx) = core.subscribe_source_events("my-source").await?;
+let (history, mut rx) = core.subscribe_query_events("my-query").await?;
+let (history, mut rx) = core.subscribe_reaction_events("my-reaction").await?;
+
+// Process events
+while let Ok(event) = rx.recv().await {
+    println!("{}: {:?}", event.component_id, event.status);
+}
 ```
 
 ---
@@ -514,331 +338,176 @@ let config = core.get_current_config().await?;
 
 ### Sources
 
-Sources ingest data from external systems and emit graph elements (nodes and relationships). DrasiLib provides a trait-based plugin architecture. Each source uses a `ComponentStatusHandle` for unified status reporting — status changes flow to the component dependency graph automatically.
+Sources ingest data from external systems and emit graph elements (nodes and relationships). They are trait-based plugins: you create source instances externally and pass them to DrasiLib.
 
-**Important**: Sources are plugins that must be instantiated externally and passed to DrasiLib. DrasiLib has no awareness of which source plugins exist.
-
-**Available Source Plugins:** See `components/sources/` for PostgreSQL, HTTP, gRPC, Mock, Platform, and Application sources.
+**Available source plugins:** PostgreSQL, HTTP, gRPC, Mock, MSSQL, Platform, Application (see `components/sources/`).
 
 ### Queries
 
-Queries define what changes matter using Cypher. They track **three types of results:**
-- `Adding` - New rows matching the query
-- `Updating` - Existing rows with changed values
-- `Removing` - Rows that no longer match
+Continuous queries define what changes matter using Cypher or GQL. They produce three types of result changes:
 
-**Limitation:** ORDER BY, TOP, and LIMIT are not supported in continuous queries.
+| Change Type | Meaning |
+|-------------|---------|
+| **Added** | A new row matches the query criteria |
+| **Updated** | An existing row still matches but values changed (includes before/after) |
+| **Deleted** | A row no longer matches the query criteria |
+
+**Limitation:** `ORDER BY`, `TOP`, and `LIMIT` are not supported in continuous queries.
 
 ### Reactions
 
-Reactions respond to query results by triggering actions (webhooks, logging, etc.).
+Reactions receive query result changes and trigger actions (webhooks, logging, database writes, etc.).
 
-**Important**: Like sources, reactions are plugins that must be instantiated externally.
-
-**Available Reaction Plugins:** See `components/reactions/` for HTTP, gRPC, SSE, Log, Platform, and Profiler reactions.
+**Available reaction plugins:** HTTP, gRPC, gRPC-Adaptive, SSE, Log, Platform, Profiler, StoredProc (PostgreSQL/MySQL/MSSQL), Application (see `components/reactions/`).
 
 ### Bootstrap Providers
 
-Bootstrap providers deliver initial data to queries before streaming begins. Any source can use any bootstrap provider, enabling flexible scenarios like "bootstrap from database, stream changes via HTTP."
+Bootstrap providers deliver initial data to queries before streaming begins. When a query starts, it bootstraps from each source to build an initial result set, then processes live changes.
 
 ---
 
 ## Component Dependency Graph
 
-DrasiLib maintains an internal **component dependency graph** that tracks all components and their relationships. The graph is backed by [petgraph](https://docs.rs/petgraph/) and serves as the source of truth for component relationships.
+DrasiLib maintains an internal component dependency graph backed by [petgraph](https://docs.rs/petgraph/). The graph is the **single source of truth** for all component metadata, relationships, runtime instances, and lifecycle events.
 
 ### Graph Structure
 
-The DrasiLib instance itself is the root node. All components (sources, queries, reactions) are connected to it via ownership edges. Data-flow relationships (Source→Query→Reaction) are tracked via bidirectional Feeds/SubscribesTo edges.
-
 ```
 Instance ("my-app")
-├──Owns──> Source: "orders_db"
-│          └──Feeds──> Query: "active_orders"
-├──Owns──> Query: "active_orders"
-│          └──Feeds──> Reaction: "webhook"
-└──Owns──> Reaction: "webhook"
-```
-
-### Querying the Graph
-
-```rust
-// Get a full snapshot (serializable to JSON)
-let snapshot = core.get_graph().await;
-println!("Components: {}", snapshot.nodes.len());
-println!("Relationships: {}", snapshot.edges.len());
-
-// Find what depends on a source
-let dependents = core.get_dependents("orders_db").await;
-for dep in &dependents {
-    println!("{} ({:?}) depends on orders_db", dep.id, dep.kind);
-}
-
-// Find what a query depends on
-let dependencies = core.get_dependencies("active_orders").await;
-
-// Check if a component can be safely removed
-match core.can_remove_component("orders_db").await {
-    Ok(()) => println!("Safe to remove"),
-    Err(e) => println!("Cannot remove: {}", e),
-}
++-- Owns -> Source: "orders_db"
+|             +-- Feeds -> Query: "active_orders"
++-- Owns -> Query: "active_orders"
+|             +-- Feeds -> Reaction: "webhook"
++-- Owns -> Reaction: "webhook"
 ```
 
 ### Relationship Types
 
 | From | Relationship | To | Reverse |
 |------|-------------|-----|---------|
-| Instance | Owns → | Component | ← OwnedBy |
-| Source | Feeds → | Query | ← SubscribesTo |
-| Query | Feeds → | Reaction | ← SubscribesTo |
+| Instance | Owns | Component | OwnedBy |
+| Source | Feeds | Query | SubscribesTo |
+| Query | Feeds | Reaction | SubscribesTo |
+| BootstrapProvider | Bootstraps | Source | BootstrappedBy |
+| IdentityProvider | Authenticates | Component | AuthenticatedBy |
 
-The graph is automatically maintained as components are added, removed, or updated — no manual graph management is needed. Status changes flow to the graph automatically via `ComponentStatusHandle` — every `set_status()` call updates both local state and the graph.
+### Component Status Lifecycle
+
+```
+Stopped --> Starting --> Running --> Stopping --> Stopped
+               |            |            |
+               v            v            v
+             Error        Error        Error
+
+Error --> Starting (retry) | Stopped (reset)
+```
 
 ---
 
 ## Dispatch Modes
 
-DrasiLib supports two dispatch modes for event routing:
-
 | Mode | Backpressure | Message Loss | Best For |
-|------|--------------|--------------|----------|
+|------|-------------|--------------|----------|
 | **Channel** (default) | Yes | None | Different subscriber speeds, critical data |
-| **Broadcast** | No | Possible | High fanout (10+ subscribers), uniform speeds |
-
-Configure per-query:
+| **Broadcast** | No | Possible | High fanout, uniform speeds |
 
 ```rust
-use drasi_lib::DispatchMode;
-
 Query::cypher("my-query")
-    .with_dispatch_mode(DispatchMode::Channel)  // Default
-    // or
-    .with_dispatch_mode(DispatchMode::Broadcast)
+    .with_dispatch_mode(DispatchMode::Channel)    // Default
+    .with_dispatch_mode(DispatchMode::Broadcast)  // Alternative
     .build()
 ```
-
----
-
-## Developer Guides
-
-For detailed information on building plugins:
-
-- **[Source Developer Guide](../components/sources/README.md)** - Creating custom data sources
-- **[Reaction Developer Guide](../components/reactions/README.md)** - Creating custom reactions
-- **[Bootstrap Provider Guide](../components/bootstrappers/README.md)** - Creating bootstrap providers
-- **[State Store Provider Guide](../components/state_stores/README.md)** - Creating state store providers
-
----
-
-## State Store Providers
-
-State store providers allow plugins (Sources, BootstrapProviders, and Reactions) to persist runtime state that survives restarts of DrasiLib.
-
-### Default (Memory) Provider
-
-By default, DrasiLib uses an in-memory state store that does not persist across restarts:
-
-```rust
-let core = DrasiLib::builder()
-    .with_id("my-app")
-    .build()  // Uses MemoryStateStoreProvider by default
-    .await?;
-```
-
-### Redb Provider
-
-For ACID-compliant persistent storage, use the redb state store provider:
-
-```rust
-use drasi_state_store_redb::RedbStateStoreProvider;
-use std::sync::Arc;
-
-let state_store = RedbStateStoreProvider::new("/data/state.redb")?;
-let core = DrasiLib::builder()
-    .with_id("my-app")
-    .with_state_store_provider(Arc::new(state_store))
-    .build()
-    .await?;
-```
-
-### Using State Store in Plugins
-
-When a Source or Reaction is added to DrasiLib, a runtime context is provided via the `initialize()` method. The context contains all DrasiLib-provided services, including the state store (if configured):
-
-```rust
-use drasi_lib::{Source, SourceRuntimeContext};
-
-#[async_trait]
-impl Source for MySource {
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        // Store the context for later use
-        self.base.initialize(context).await;
-
-        // Access state store from context (may be None if not configured)
-        if let Some(state_store) = self.base.state_store().await {
-            // Use state_store for persistent state
-        }
-    }
-}
-```
-
-For reactions, use `ReactionRuntimeContext` which also provides access to `QueryProvider`:
-
-```rust
-use drasi_lib::{Reaction, ReactionRuntimeContext};
-
-#[async_trait]
-impl Reaction for MyReaction {
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
-
-        // Access query provider for subscribing to query results
-        let query_provider = self.base.query_provider().await;
-    }
-}
-```
-
-See the **[State Store Provider Guide](../components/state_stores/README.md)** for full documentation.
-
----
-
-## Troubleshooting
-
-### "Source/Reaction not found"
-
-Ensure you've added the instance to DrasiLib before referencing it in queries:
-
-```rust
-let source = MySource::new("my-source", config)?;
-let core = DrasiLib::builder()
-    .with_source(source)  // Must add source before queries reference it
-    .with_query(
-        Query::cypher("my-query")
-            .from_source("my-source")  // References the source above
-            .build()
-    )
-    .build()
-    .await?;
-```
-
-### Events not being received
-
-- **Broadcast mode**: May lose events if receivers are slow
-- **Channel mode**: Provides backpressure but may block senders
-- Check `dispatch_buffer_capacity` and `priority_queue_capacity` settings
 
 ---
 
 ## Logging
 
-DrasiLib provides a component-aware logging system that routes logs to per-component streams, enabling you to subscribe to and monitor logs from specific sources, queries, and reactions.
-
-### Initializing Logging
-
-**Important:** You must initialize DrasiLib's logging **before** any other logger is set up in your application.
-
-#### Option 1: Default Logger (stderr output)
-
-```rust
-use drasi_lib::init_logging;
-
-fn main() {
-    // Initialize DrasiLib logging first, before any other logger
-    init_logging();
-    
-    // Now create and use DrasiLib...
-}
-```
-
-#### Option 2: Specify Log Level
-
-```rust
-use drasi_lib::init_logging_with_level;
-
-fn main() {
-    init_logging_with_level(log::LevelFilter::Debug);
-    
-    // Now create and use DrasiLib...
-}
-```
-
-#### Option 3: Wrap Your Own Logger
-
-If you need custom log formatting, file output, or other features from your preferred logging framework, you can wrap your logger with DrasiLib's component-aware logging:
-
-```rust
-use drasi_lib::init_logging_with_logger;
-
-fn main() {
-    // Create your logger but DON'T install it directly
-    let my_logger = env_logger::Builder::from_default_env()
-        .format_timestamp_millis()
-        .build();
-    
-    // Let DrasiLib wrap it with component logging support
-    init_logging_with_logger(my_logger, log::LevelFilter::Debug);
-    
-    // Now both your logger AND component log streaming work!
-}
-```
-
-### Non-Panicking Variants
-
-If you need to handle initialization failures gracefully:
-
-```rust
-use drasi_lib::{try_init_logging, try_init_logging_with_logger};
-
-// Returns Err if another logger is already set
-if let Err(e) = try_init_logging() {
-    eprintln!("Warning: Could not initialize Drasi logging: {}", e);
-}
-```
+DrasiLib provides component-aware logging built on [tracing](https://docs.rs/tracing/). Logging is initialized automatically when you call `.build()`.
 
 ### Subscribing to Component Logs
 
-Once DrasiLib is running, you can subscribe to logs from specific components:
-
 ```rust
-// Subscribe to source logs
 let (history, mut receiver) = core.subscribe_source_logs("my-source").await?;
+let (history, mut receiver) = core.subscribe_query_logs("my-query").await?;
+let (history, mut receiver) = core.subscribe_reaction_logs("my-reaction").await?;
 
-// `history` contains recent log messages
-for log in history {
+for log in &history {
     println!("[{}] {}: {}", log.level, log.component_id, log.message);
 }
 
-// `receiver` streams new log messages in real-time
 while let Ok(log) = receiver.recv().await {
-    println!("[LIVE] {}: {}", log.level, log.message);
+    println!("[LIVE] {}: {}", log.component_id, log.message);
 }
 ```
-
-Similar methods exist for queries and reactions:
-
-```rust
-let (history, receiver) = core.subscribe_query_logs("my-query").await?;
-let (history, receiver) = core.subscribe_reaction_logs("my-reaction").await?;
-```
-
-### How Component Logging Works
-
-1. **Standard `log::info!()`, `log::debug!()`, etc. macros work automatically** within component contexts
-2. When code runs inside a source, query, or reaction task, logs are routed to that component's log stream
-3. Logs are also forwarded to your logger (or stderr) for normal output
-4. Subscribers receive logs in real-time via broadcast channels
 
 ### Log Message Structure
 
 ```rust
 pub struct LogMessage {
     pub timestamp: DateTime<Utc>,
-    pub level: LogLevel,        // Trace, Debug, Info, Warn, Error
+    pub level: LogLevel,            // Trace, Debug, Info, Warn, Error
     pub message: String,
-    pub component_id: String,   // e.g., "my-source", "my-query"
+    pub instance_id: String,        // DrasiLib instance that owns the component
+    pub component_id: String,       // e.g., "my-source"
     pub component_type: ComponentType,  // Source, Query, or Reaction
 }
 ```
+
+Control verbosity with `RUST_LOG`: `RUST_LOG=info cargo run` (default), `RUST_LOG=debug cargo run`.
+
+---
+
+## State Store Providers
+
+State store providers allow plugins to persist runtime state that survives restarts.
+
+```rust
+// Default: in-memory (no persistence)
+let core = DrasiLib::builder().with_id("my-app").build().await?;
+
+// Persistent: redb
+use drasi_state_store_redb::RedbStateStoreProvider;
+let core = DrasiLib::builder()
+    .with_id("my-app")
+    .with_state_store_provider(Arc::new(RedbStateStoreProvider::new("/data/state.redb")?))
+    .build()
+    .await?;
+```
+
+---
+
+## Configuration via YAML
+
+Queries can be defined in YAML and loaded programmatically:
+
+```yaml
+id: my-server
+queries:
+  - id: high-temp-alerts
+    query: "MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s"
+    queryLanguage: Cypher
+    sources:
+      - source_id: sensors
+    auto_start: true
+    enableBootstrap: true
+```
+
+```rust
+let config: DrasiLibConfig = serde_yaml::from_str(&yaml_str)?;
+config.validate()?;
+let mut builder = DrasiLib::builder().with_id(&config.id);
+for q in &config.queries { builder = builder.with_query(q.clone()); }
+let core = builder.with_source(source).with_reaction(reaction).build().await?;
+```
+
+---
+
+## Developer Guides
+
+- **[Source Developer Guide](../components/sources/README.md)**
+- **[Reaction Developer Guide](../components/reactions/README.md)**
+- **[Bootstrap Provider Guide](../components/bootstrappers/README.md)**
+- **[State Store Provider Guide](../components/state_stores/README.md)**
 
 ---
 
@@ -848,5 +517,7 @@ Apache License 2.0
 
 ## Related Projects
 
-- [Drasi Platform](https://github.com/drasi-project/drasi-platform) - Complete deployment platform
-- [Drasi Core](https://github.com/drasi-project/drasi-core) - Continuous query engine
+- [Drasi](https://drasi.io/) -- Project documentation and guides
+- [Drasi Platform](https://github.com/drasi-project/drasi-platform) -- Kubernetes deployment platform
+- [Drasi Server](https://github.com/drasi-project/drasi-server) -- Single-process/Docker deployment
+- [Drasi Core](https://github.com/drasi-project/drasi-core) -- Continuous query engine (this repo)
