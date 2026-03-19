@@ -683,9 +683,7 @@ impl DrasiLib {
                 }
                 ComponentKind::Query => {
                     if let Some(query) = graph
-                        .get_runtime::<std::sync::Arc<dyn crate::queries::manager::Query>>(
-                            &node.id,
-                        )
+                        .get_runtime::<std::sync::Arc<dyn crate::queries::manager::Query>>(&node.id)
                     {
                         queries.push(QuerySnapshot {
                             id: node.id.clone(),
@@ -1071,8 +1069,17 @@ mod tests {
         struct PropertiedSource {
             id: String,
             status_handle: crate::component_graph::ComponentStatusHandle,
-            dispatchers:
-                Arc<RwLock<Vec<Box<dyn crate::channels::ChangeDispatcher<crate::channels::SourceEventWrapper>>>>>,
+            dispatchers: Arc<
+                RwLock<
+                    Vec<
+                        Box<
+                            dyn crate::channels::ChangeDispatcher<
+                                crate::channels::SourceEventWrapper,
+                            >,
+                        >,
+                    >,
+                >,
+            >,
         }
 
         impl PropertiedSource {
@@ -1293,11 +1300,7 @@ mod tests {
             // StateGuard is marked initialized during build(), so we test
             // with a manually constructed guard to verify the check exists.
             // This validates the guard is wired up in the snapshot method.
-            let core = DrasiLib::builder()
-                .with_id("uninit")
-                .build()
-                .await
-                .unwrap();
+            let core = DrasiLib::builder().with_id("uninit").build().await.unwrap();
 
             // After build(), snapshot should succeed (initialized at build time)
             let result = core.snapshot_configuration().await;
@@ -1345,10 +1348,7 @@ mod tests {
 
             assert_eq!(q1.config.query, "MATCH (n:Person) RETURN n.name");
             assert!(
-                q1.config
-                    .sources
-                    .iter()
-                    .any(|s| s.source_id == "pg-source"),
+                q1.config.sources.iter().any(|s| s.source_id == "pg-source"),
                 "Query should reference pg-source"
             );
         }
@@ -1396,10 +1396,7 @@ mod tests {
                 .edges
                 .iter()
                 .any(|e| e.from == "pg-source" && e.to == "q1");
-            assert!(
-                has_source_to_query,
-                "Should have edge from pg-source to q1"
-            );
+            assert!(has_source_to_query, "Should have edge from pg-source to q1");
 
             // Check query→reaction edge exists
             let has_query_to_reaction = snapshot
@@ -1527,10 +1524,7 @@ mod tests {
 
             // PropertiedSource has properties, TestMockSource has empty
             let src_a = snapshot.sources.iter().find(|s| s.id == "src-a").unwrap();
-            assert!(
-                !src_a.properties.is_empty(),
-                "src-a should have properties"
-            );
+            assert!(!src_a.properties.is_empty(), "src-a should have properties");
             let src_b = snapshot.sources.iter().find(|s| s.id == "src-b").unwrap();
             assert!(
                 src_b.properties.is_empty(),
