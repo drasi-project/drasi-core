@@ -23,20 +23,44 @@ pub fn default_topic() -> String {
     "".to_string()
 }
 
-pub fn default_timeout_ms() -> u64 {
-    5000
+pub fn default_keep_alive() -> u64 {
+    60 // seconds
+}
+
+pub fn default_connection_timeout() -> u64 {
+    30 // seconds
+}
+
+pub fn default_clean_session() -> bool {
+    true
 }
 
 pub fn default_port() -> u16 {
     1883
 }
 
-pub fn default_host() -> String {
+pub fn default_broker_addr() -> String {
     "localhost".to_string()
 }
 
-pub fn default_capacity() -> usize {
-    10
+pub fn default_request_channel_capacity() -> usize {
+    10 // following rumqttc default
+}
+
+pub fn default_event_channel_capacity() -> usize {
+    20
+}
+
+pub fn default_max_packet_size() -> u32 {
+    10 * 1024 // following rumqttc default
+}
+
+pub fn default_pending_throttle() -> u64 {
+    0 // following rumqttc default
+}
+
+pub fn default_inflight() -> u16 {
+    100 // following rumqttc defaults
 }
 
 /// MQTT message retain policy.
@@ -65,6 +89,14 @@ pub enum MqttAuthMode {
 
     /// Username and password authentication
     UsernamePassword { username: String, password: String },
+}
+
+/// Transport mode for MQTT connection.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MqttTransportMode {
+    #[default]
+    TCP,
+    TLS,
 }
 
 /// Specification for an MQTT call, including topic, retain policy, headers, and body template.
@@ -119,44 +151,83 @@ pub struct MqttQueryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MqttReactionConfig {
     /// MQTT broker host (default: "localhost")
-    #[serde(default = "default_host")]
-    pub host: String,
+    #[serde(default = "default_broker_addr")]
+    pub broker_addr: String,
 
     /// MQTT broker port (default: 1883)
     #[serde(default = "default_port")]
     pub port: u16,
 
-    /// Base topic for MQTT requests
-    #[serde(default = "default_topic")]
-    pub default_topic: String,
+    /// What transport mode to use when connecting to the MQTT broker (default: TCP)
+    #[serde(default)]
+    pub transport_mode: MqttTransportMode,
 
     /// Request timeout in milliseconds
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive: u64,
 
-    /// Query-specific call configurations
-    #[serde(default)]
-    pub routes: HashMap<String, MqttQueryConfig>,
-
-    /// Capacity of the priority queue for incoming query results
-    #[serde(default)]
-    pub capacity: usize,
+    /// Clean or Persistent session for MQTT connection (default: true)
+    #[serde(default = "default_clean_session")]
+    pub clean_session: bool,
 
     /// Authentication mode for connecting to the MQTT broker.
     #[serde(default)]
     pub auth_mode: MqttAuthMode,
-}
 
+    /// Request (publish, subscribe) channel capacity
+    #[serde(default = "default_request_channel_capacity")]
+    pub request_channel_capacity: usize,
+
+    /// Capacity of the async channel
+    #[serde(default = "default_event_channel_capacity")]
+    pub event_channel_capacity: usize,
+
+    /// Minimum detlay time between consecutive outgoing packets
+    /// While retransmitting pending packets.
+    #[serde(default = "default_pending_throttle")]
+    pub pending_throttle: u64,
+
+    /// Connection timeout
+    #[serde(default = "default_connection_timeout")]
+    pub connection_timeout: u64,
+
+    /// Default value of for maximum incoming packet size.
+    /// Used when `max_incomming_size` in `connect_properties` is NOT available.
+    #[serde(default = "default_max_packet_size")]
+    pub max_packet_size: u32,
+
+    /// Connection properties since we follow V5
+    /// TODO
+
+    /// Maximum number of outgoing inflight messages
+    #[serde(default = "default_inflight")]
+    pub max_inflight: u16,
+
+    /// Base topic for MQTT requests
+    #[serde(default = "default_topic")]
+    pub default_topic: String,
+
+    /// Query-specific call configurations
+    #[serde(default)]
+    pub query_configs: HashMap<String, MqttQueryConfig>,
+}
 impl Default for MqttReactionConfig {
     fn default() -> Self {
         Self {
-            host: default_host(),
+            broker_addr: default_broker_addr(),
             port: default_port(),
+            transport_mode: MqttTransportMode::default(),
+            keep_alive: default_keep_alive(),
+            clean_session: default_clean_session(),
+            auth_mode: MqttAuthMode::default(),
+            request_channel_capacity: default_request_channel_capacity(),
+            event_channel_capacity: default_event_channel_capacity(),
+            pending_throttle: default_pending_throttle(),
+            connection_timeout: default_connection_timeout(),
+            max_packet_size: default_max_packet_size(),
+            max_inflight: default_inflight(),
             default_topic: default_topic(),
-            timeout_ms: default_timeout_ms(),
-            routes: HashMap::new(),
-            capacity: default_capacity(),
-            auth_mode: MqttAuthMode::None,
+            query_configs: HashMap::new(),
         }
     }
 }

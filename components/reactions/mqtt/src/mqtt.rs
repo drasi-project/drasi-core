@@ -14,7 +14,8 @@
 
 use super::MqttReactionBuilder;
 use crate::config::{
-    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, RetainPolicy,
+    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, MqttTransportMode,
+    RetainPolicy,
 };
 
 use anyhow::Result;
@@ -234,12 +235,52 @@ impl Reaction for MqttReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
         props.insert(
-            "default_topic".to_string(),
-            serde_json::Value::String(self.config.default_topic.clone()),
+            "broker_addr".to_string(),
+            serde_json::Value::String(self.config.broker_addr.clone()),
         );
         props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
+            "port".to_string(),
+            serde_json::Value::Number(self.config.port.into()),
+        );
+        props.insert(
+            "transport_mode".to_string(),
+            serde_json::Value::String(format!("{:?}", self.config.transport_mode)),
+        );
+        props.insert(
+            "keep_alive".to_string(),
+            serde_json::Value::Number(self.config.keep_alive.into()),
+        );
+        props.insert(
+            "clean_session".to_string(),
+            serde_json::Value::Bool(self.config.clean_session),
+        );
+        props.insert(
+            "request_channel_capacity".to_string(),
+            serde_json::Value::Number(self.config.request_channel_capacity.into()),
+        );
+        props.insert(
+            "event_channel_capacity".to_string(),
+            serde_json::Value::Number(self.config.event_channel_capacity.into()),
+        );
+        props.insert(
+            "pending_throttle".to_string(),
+            serde_json::Value::Number(self.config.pending_throttle.into()),
+        );
+        props.insert(
+            "connection_timeout".to_string(),
+            serde_json::Value::Number(self.config.connection_timeout.into()),
+        );
+        props.insert(
+            "max_packet_size".to_string(),
+            serde_json::Value::Number(self.config.max_packet_size.into()),
+        );
+        props.insert(
+            "max_inflight".to_string(),
+            serde_json::Value::Number(self.config.max_inflight.into()),
+        );
+        props.insert(
+            "auth_mode".to_string(),
+            serde_json::Value::String(format!("{:?}", self.config.auth_mode)),
         );
         props
     }
@@ -285,23 +326,51 @@ impl Reaction for MqttReaction {
 
         // Spawn the main processing task
         let reaction_name = self.base.id.clone();
-        let host = self.config.host.clone();
-        let port = self.config.port;
-        let status = self.base.status.clone();
-        let query_configs = self.config.routes.clone();
-        let default_topic = self.config.default_topic.clone();
-        let timeout_ms = self.config.timeout_ms;
         let priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult> =
             self.base.priority_queue.clone();
-        let capacity = self.config.capacity;
+        let status = self.base.status.clone();
+
+        let broker_addr = self.config.broker_addr.clone();
+        let port = self.config.port;
+        let transport_mode = self.config.transport_mode.clone();
+        let keep_alive = self.config.keep_alive;
+        let clean_session = self.config.clean_session;
         let auth_mode = self.config.auth_mode.clone();
+        let request_channel_capacity = self.config.request_channel_capacity;
+        let event_channel_capacity = self.config.event_channel_capacity;
+        let pending_throttle = self.config.pending_throttle;
+        let max_packet_size = self.config.max_packet_size;
+        let max_inflight = self.config.max_inflight;
+        let connection_timeout = self.config.connection_timeout;
+        let default_topic = self.config.default_topic.clone();
+        let query_configs = self.config.query_configs.clone();
 
         let processing_task_handle = tokio::spawn(async move {
             // Initialize MQTT client options
             let mqtt_id = reaction_name.clone();
             let reaction_name_eventloop = reaction_name.clone();
-            let mut options = MqttOptions::new(mqtt_id, host, port);
-            options.set_keep_alive(Duration::from_secs(timeout_ms));
+            let mut options = MqttOptions::new(mqtt_id, broker_addr, port);
+
+            match transport_mode {
+                MqttTransportMode::TCP => {
+                    options.set_transport(rumqttc::Transport::Tcp);
+                }
+                MqttTransportMode::TLS => {
+                    // TODO: Add TLS configuration options to MqttReactionConfig and set them here
+                }
+            }
+
+            if let MqttAuthMode::UsernamePassword { username, password } = auth_mode {
+                options.set_credentials(username, password);
+            }
+
+            options.set_outgoing_inflight_upper_limit(max_inflight);
+            options.set_keep_alive(Duration::from_secs(keep_alive));
+            options.set_clean_start(clean_session);
+            options.set_max_packet_size(Some(max_packet_size));
+            options.set_pending_throttle(Duration::from_micros(pending_throttle));
+            options.set_request_channel_capacity(request_channel_capacity);
+            options.set_connection_timeout(connection_timeout);
 
             // Set up Handlebars with json helper
             let mut handlebars = Handlebars::new();
@@ -324,12 +393,8 @@ impl Reaction for MqttReaction {
                 ),
             );
 
-            if let MqttAuthMode::UsernamePassword { username, password } = auth_mode {
-                options.set_credentials(username, password);
-            }
-
             // Create MQTT client
-            let (mqtt_client, mut eventloop) = AsyncClient::new(options, capacity);
+            let (mqtt_client, mut eventloop) = AsyncClient::new(options, event_channel_capacity);
 
             // Task to handle MQTT connection events
             let (mut event_loop_shutdown_tx, mut event_loop_shutdown_rx) =
