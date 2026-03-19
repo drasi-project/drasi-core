@@ -183,7 +183,19 @@ async fn main() -> Result<()> {
         .with_query("all-prices")
         .with_query("gainers")
         .with_query("high-volume")
-        .with_default_route(default_template)
+        .with_query_configs_extend(vec![
+            ("all-prices".to_string(), default_template.clone()),
+            ("gainers".to_string(), default_template.clone()),
+            ("high-volume".to_string(), default_template.clone()),
+        ])
+        .with_broker_addr("localhost".to_string())
+        .with_port(1883)
+        .with_transport_mode(drasi_reaction_mqtt::config::MqttTransportMode::TCP)
+        .with_keep_alive(30)
+        .with_clean_session(true)
+        .with_max_packet_size(10 * 1024) // 10 KB
+        .with_pending_throttle(0)
+        .with_max_inflight(100)
         .with_auth_mode(MqttAuthMode::UsernamePassword {
             username: "ahmed".to_string(),
             password: "ahmed".to_string(),
