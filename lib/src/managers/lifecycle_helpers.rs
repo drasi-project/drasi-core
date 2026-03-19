@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::channels::ComponentStatus;
@@ -31,12 +32,17 @@ use crate::component_graph::{ComponentGraph, ComponentKind};
 /// Implemented by `Arc<dyn Source>`, `Arc<dyn Query>`, and `Arc<dyn Reaction>`.
 /// Allows the shared lifecycle helpers to call start/stop without knowing
 /// the concrete component type.
+///
+/// Uses `#[async_trait]` (boxed futures) rather than RPITIT to avoid
+/// higher-ranked lifetime issues when futures flow through axum handlers.
+#[async_trait]
 pub trait ComponentRuntime: Send + Sync + 'static {
-    fn start(&self) -> impl std::future::Future<Output = Result<()>> + Send;
-    fn stop(&self) -> impl std::future::Future<Output = Result<()>> + Send;
-    fn deprovision(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+    async fn start(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()>;
+    async fn deprovision(&self) -> Result<()>;
 }
 
+#[async_trait]
 impl ComponentRuntime for Arc<dyn crate::sources::Source> {
     async fn start(&self) -> Result<()> {
         crate::sources::Source::start(self.as_ref()).await
@@ -49,6 +55,7 @@ impl ComponentRuntime for Arc<dyn crate::sources::Source> {
     }
 }
 
+#[async_trait]
 impl ComponentRuntime for Arc<dyn crate::queries::manager::Query> {
     async fn start(&self) -> Result<()> {
         crate::queries::manager::Query::start(self.as_ref()).await
@@ -61,6 +68,7 @@ impl ComponentRuntime for Arc<dyn crate::queries::manager::Query> {
     }
 }
 
+#[async_trait]
 impl ComponentRuntime for Arc<dyn crate::reactions::Reaction> {
     async fn start(&self) -> Result<()> {
         crate::reactions::Reaction::start(self.as_ref()).await
@@ -314,6 +322,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl ComponentRuntime for MockRuntime {
         async fn start(&self) -> Result<()> {
             if self.should_fail.load(Ordering::SeqCst) {
