@@ -284,8 +284,17 @@ impl DataverseBootstrapProvider {
         let id = obj
             .get(&entity_id_key)
             .or_else(|| obj.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+            .and_then(|v| v.as_str());
+        let id = match id {
+            Some(id) => id,
+            None => {
+                warn!(
+                    "Skipping record for entity '{}' because no ID field ('{}' or 'id') was present",
+                    entity_name, entity_id_key
+                );
+                return None;
+            }
+        };
 
         // Build properties from all non-annotation attributes
         let mut properties = ElementPropertyMap::new();
