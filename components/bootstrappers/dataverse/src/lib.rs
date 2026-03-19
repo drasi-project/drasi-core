@@ -124,12 +124,37 @@ impl DataverseBootstrapProvider {
 
     /// Obtain a token via Azure CLI.
     async fn get_token_azure_cli(&self) -> Result<String> {
+        // Normalize environment_url to scheme://host for the Azure AD resource.
+        // A trailing slash or path components would cause `az` to return a token
+        // for the wrong audience.
+        let resource = match url::Url::parse(&self.config.environment_url) {
+            Ok(url) => match (url.scheme(), url.host_str()) {
+                (scheme, Some(host)) if !scheme.is_empty() && !host.is_empty() => {
+                    format!("{scheme}://{host}")
+                }
+                _ => {
+                    warn!(
+                        "Dataverse environment_url '{}' could not be normalized; using as-is",
+                        self.config.environment_url
+                    );
+                    self.config.environment_url.clone()
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to parse environment_url '{}' ({}); using as-is",
+                    self.config.environment_url, e
+                );
+                self.config.environment_url.clone()
+            }
+        };
+
         let output = tokio::process::Command::new("az")
             .args([
                 "account",
                 "get-access-token",
                 "--resource",
-                &self.config.environment_url,
+                &resource,
                 "--output",
                 "json",
             ])

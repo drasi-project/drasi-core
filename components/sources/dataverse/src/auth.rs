@@ -20,7 +20,7 @@
 //!
 //! Tokens are cached and refreshed automatically before expiry (30-second buffer).
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -99,16 +99,18 @@ impl TokenManager {
         client_id: &str,
         client_secret: &str,
         environment_url: &str,
-    ) -> Self {
-        let url = url::Url::parse(environment_url).unwrap_or_else(|_| {
-            url::Url::parse("https://placeholder.crm.dynamics.com")
-                .expect("fallback URL should parse")
-        });
-        let resource = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+    ) -> Result<Self> {
+        let url = url::Url::parse(environment_url)
+            .with_context(|| format!("invalid Dataverse environment_url: {environment_url}"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow!("environment_url is missing a host: {environment_url}"))?;
+        let resource = format!("{}://{}", url.scheme(), host);
         let scope = format!("{resource}/.default");
-        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+        let token_url =
+            format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
 
-        Self {
+        Ok(Self {
             auth_method: AuthMethod::ClientSecret {
                 tenant_id: tenant_id.to_string(),
                 client_id: client_id.to_string(),
@@ -119,7 +121,7 @@ impl TokenManager {
             token_url,
             http_client: reqwest::Client::new(),
             cached_token: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Create a token manager that uses Azure CLI for authentication.
@@ -132,22 +134,23 @@ impl TokenManager {
     /// # Arguments
     ///
     /// * `environment_url` - Dataverse environment URL (e.g., `https://myorg.crm.dynamics.com`)
-    pub fn azure_cli(environment_url: &str) -> Self {
-        let url = url::Url::parse(environment_url).unwrap_or_else(|_| {
-            url::Url::parse("https://placeholder.crm.dynamics.com")
-                .expect("fallback URL should parse")
-        });
-        let resource = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+    pub fn azure_cli(environment_url: &str) -> Result<Self> {
+        let url = url::Url::parse(environment_url)
+            .with_context(|| format!("invalid Dataverse environment_url: {environment_url}"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow!("environment_url is missing a host: {environment_url}"))?;
+        let resource = format!("{}://{}", url.scheme(), host);
         let scope = format!("{resource}/.default");
 
-        Self {
+        Ok(Self {
             auth_method: AuthMethod::AzureCli,
             resource,
             scope,
             token_url: String::new(),
             http_client: reqwest::Client::new(),
             cached_token: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Create a token manager with a custom token URL (for testing).
@@ -157,15 +160,16 @@ impl TokenManager {
         client_secret: &str,
         environment_url: &str,
         token_url: &str,
-    ) -> Self {
-        let url = url::Url::parse(environment_url).unwrap_or_else(|_| {
-            url::Url::parse("https://placeholder.crm.dynamics.com")
-                .expect("fallback URL should parse")
-        });
-        let resource = format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""));
+    ) -> Result<Self> {
+        let url = url::Url::parse(environment_url)
+            .with_context(|| format!("invalid Dataverse environment_url: {environment_url}"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow!("environment_url is missing a host: {environment_url}"))?;
+        let resource = format!("{}://{}", url.scheme(), host);
         let scope = format!("{resource}/.default");
 
-        Self {
+        Ok(Self {
             auth_method: AuthMethod::ClientSecret {
                 tenant_id: tenant_id.to_string(),
                 client_id: client_id.to_string(),
@@ -176,7 +180,7 @@ impl TokenManager {
             token_url: token_url.to_string(),
             http_client: reqwest::Client::new(),
             cached_token: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Get a valid access token, refreshing if necessary.
@@ -373,7 +377,8 @@ mod tests {
             "client-456",
             "secret-789",
             "https://myorg.crm.dynamics.com",
-        );
+        )
+        .expect("should create token manager");
         assert_eq!(tm.scope, "https://myorg.crm.dynamics.com/.default");
         assert!(tm.token_url.contains("tenant-123"));
         assert!(matches!(tm.auth_method, AuthMethod::ClientSecret { .. }));
@@ -381,7 +386,8 @@ mod tests {
 
     #[test]
     fn test_token_manager_azure_cli() {
-        let tm = TokenManager::azure_cli("https://myorg.crm.dynamics.com");
+        let tm =
+            TokenManager::azure_cli("https://myorg.crm.dynamics.com").expect("should create");
         assert_eq!(tm.resource, "https://myorg.crm.dynamics.com");
         assert_eq!(tm.scope, "https://myorg.crm.dynamics.com/.default");
         assert!(matches!(tm.auth_method, AuthMethod::AzureCli));
@@ -395,15 +401,29 @@ mod tests {
             "s",
             "https://myorg.crm.dynamics.com",
             "http://localhost:8080/token",
-        );
+        )
+        .expect("should create");
         assert_eq!(tm.token_url, "http://localhost:8080/token");
     }
 
     #[tokio::test]
     async fn test_token_cache_initially_empty() {
-        let tm = TokenManager::new("t", "c", "s", "https://test.crm.dynamics.com");
+        let tm = TokenManager::new("t", "c", "s", "https://test.crm.dynamics.com")
+            .expect("should create");
         let cached = tm.cached_token.read().await;
         assert!(cached.is_none());
+    }
+
+    #[test]
+    fn test_token_manager_rejects_invalid_url() {
+        let result = TokenManager::new("t", "c", "s", "not-a-url");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_azure_cli_rejects_invalid_url() {
+        let result = TokenManager::azure_cli("not-a-url");
+        assert!(result.is_err());
     }
 
     #[test]

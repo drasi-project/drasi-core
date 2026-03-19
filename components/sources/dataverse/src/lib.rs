@@ -576,7 +576,7 @@ impl Source for DataverseSource {
                 "[{}] Using Azure CLI authentication (TokenManager)",
                 self.base.id
             );
-            Arc::new(TokenManager::azure_cli(&base_url))
+            Arc::new(TokenManager::azure_cli(&base_url)?)
         } else {
             let token_url = format!(
                 "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
@@ -588,7 +588,7 @@ impl Source for DataverseSource {
                 &self.config.client_secret,
                 &base_url,
                 &token_url,
-            ))
+            )?)
         };
 
         let client = Arc::new(DataverseClient::new(
@@ -1265,7 +1265,7 @@ mod tests {
 
             assert_eq!(
                 source.config.select_columns("account"),
-                Some("name,revenue".to_string())
+                Some("name,revenue,accountid".to_string())
             );
         }
 

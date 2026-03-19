@@ -146,8 +146,24 @@ impl DataverseSourceConfig {
     }
 
     /// Get the `$select` clause for a given entity, or `None` for all columns.
+    ///
+    /// Ensures that the primary key column (`{entity}id`) is always included
+    /// when a column list is configured, to keep change tracking and bootstrap
+    /// logic functional.
     pub fn select_columns(&self, entity: &str) -> Option<String> {
-        self.entity_columns.get(entity).map(|cols| cols.join(","))
+        self.entity_columns.get(entity).map(|cols| {
+            let primary_key = format!("{entity}id");
+            let has_primary_key = cols
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(&primary_key));
+            if has_primary_key {
+                cols.join(",")
+            } else {
+                let mut all_columns = cols.clone();
+                all_columns.push(primary_key);
+                all_columns.join(",")
+            }
+        })
     }
 }
 
@@ -286,10 +302,60 @@ mod tests {
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
         };
+        // Primary key "accountid" is auto-appended
         assert_eq!(
             config.select_columns("account"),
-            Some("name,revenue".to_string())
+            Some("name,revenue,accountid".to_string())
         );
         assert_eq!(config.select_columns("contact"), None);
+    }
+
+    #[test]
+    fn test_select_columns_appends_primary_key() {
+        let mut entity_columns = HashMap::new();
+        entity_columns.insert("account".to_string(), vec!["name".to_string()]);
+        let config = DataverseSourceConfig {
+            environment_url: "https://myorg.crm.dynamics.com".to_string(),
+            tenant_id: "t".to_string(),
+            client_id: "c".to_string(),
+            client_secret: "s".to_string(),
+            use_azure_cli: false,
+            entities: vec!["account".to_string()],
+            entity_set_overrides: HashMap::new(),
+            entity_columns,
+            min_interval_ms: 500,
+            max_interval_seconds: 30,
+            api_version: "v9.2".to_string(),
+        };
+        assert_eq!(
+            config.select_columns("account"),
+            Some("name,accountid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_columns_does_not_duplicate_primary_key() {
+        let mut entity_columns = HashMap::new();
+        entity_columns.insert(
+            "account".to_string(),
+            vec!["name".to_string(), "accountid".to_string()],
+        );
+        let config = DataverseSourceConfig {
+            environment_url: "https://myorg.crm.dynamics.com".to_string(),
+            tenant_id: "t".to_string(),
+            client_id: "c".to_string(),
+            client_secret: "s".to_string(),
+            use_azure_cli: false,
+            entities: vec!["account".to_string()],
+            entity_set_overrides: HashMap::new(),
+            entity_columns,
+            min_interval_ms: 500,
+            max_interval_seconds: 30,
+            api_version: "v9.2".to_string(),
+        };
+        assert_eq!(
+            config.select_columns("account"),
+            Some("name,accountid".to_string())
+        );
     }
 }

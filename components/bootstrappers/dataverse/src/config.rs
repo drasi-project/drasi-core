@@ -154,11 +154,26 @@ impl DataverseBootstrapConfig {
     }
 
     /// Get the `$select` columns for a specific entity.
+    ///
+    /// Ensures that the primary key column (`{entity}id`) is always included
+    /// when a column list is configured, so bootstrap records always have an ID.
     pub fn select_columns(&self, entity: &str) -> Option<String> {
         self.entity_columns
             .get(entity)
             .filter(|cols| !cols.is_empty())
-            .map(|cols| cols.join(","))
+            .map(|cols| {
+                let primary_key = format!("{entity}id");
+                let has_primary_key = cols
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(&primary_key));
+                if has_primary_key {
+                    cols.join(",")
+                } else {
+                    let mut all_columns = cols.clone();
+                    all_columns.push(primary_key);
+                    all_columns.join(",")
+                }
+            })
     }
 }
 
@@ -247,11 +262,37 @@ mod tests {
             "account".to_string(),
             vec!["name".to_string(), "revenue".to_string()],
         );
+        // Primary key "accountid" is auto-appended
         assert_eq!(
             config.select_columns("account"),
-            Some("name,revenue".to_string())
+            Some("name,revenue,accountid".to_string())
         );
         assert_eq!(config.select_columns("contact"), None);
+    }
+
+    #[test]
+    fn test_select_columns_appends_primary_key() {
+        let mut config = DataverseBootstrapConfig::default();
+        config
+            .entity_columns
+            .insert("account".to_string(), vec!["name".to_string()]);
+        assert_eq!(
+            config.select_columns("account"),
+            Some("name,accountid".to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_columns_does_not_duplicate_primary_key() {
+        let mut config = DataverseBootstrapConfig::default();
+        config.entity_columns.insert(
+            "account".to_string(),
+            vec!["name".to_string(), "accountid".to_string()],
+        );
+        assert_eq!(
+            config.select_columns("account"),
+            Some("name,accountid".to_string())
+        );
     }
 
     #[test]

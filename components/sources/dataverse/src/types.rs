@@ -147,10 +147,13 @@ pub fn parse_delta_changes(
         } else if let Some(obj) = record.as_object() {
             // New or updated entity: extract ID and attributes
             if let Some(id) = extract_entity_id(obj, entity_name) {
-                // Filter out OData metadata fields from attributes
+                // Filter out OData metadata and annotation fields from attributes.
+                // Dataverse annotations either start with "@" (e.g. "@odata.etag")
+                // or are attached to a base field name via "@" (e.g.
+                // "createdon@OData.Community.Display.V1.FormattedValue").
                 let attributes: serde_json::Map<String, Value> = obj
                     .iter()
-                    .filter(|(key, _)| !key.starts_with("@odata."))
+                    .filter(|(key, _)| !key.starts_with('@') && !key.contains('@'))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
 
