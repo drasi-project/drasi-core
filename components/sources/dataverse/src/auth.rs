@@ -107,8 +107,7 @@ impl TokenManager {
             .ok_or_else(|| anyhow!("environment_url is missing a host: {environment_url}"))?;
         let resource = format!("{}://{}", url.scheme(), host);
         let scope = format!("{resource}/.default");
-        let token_url =
-            format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+        let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
 
         Ok(Self {
             auth_method: AuthMethod::ClientSecret {
@@ -386,8 +385,7 @@ mod tests {
 
     #[test]
     fn test_token_manager_azure_cli() {
-        let tm =
-            TokenManager::azure_cli("https://myorg.crm.dynamics.com").expect("should create");
+        let tm = TokenManager::azure_cli("https://myorg.crm.dynamics.com").expect("should create");
         assert_eq!(tm.resource, "https://myorg.crm.dynamics.com");
         assert_eq!(tm.scope, "https://myorg.crm.dynamics.com/.default");
         assert!(matches!(tm.auth_method, AuthMethod::AzureCli));

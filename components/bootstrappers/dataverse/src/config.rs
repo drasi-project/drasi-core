@@ -163,9 +163,7 @@ impl DataverseBootstrapConfig {
             .filter(|cols| !cols.is_empty())
             .map(|cols| {
                 let primary_key = format!("{entity}id");
-                let has_primary_key = cols
-                    .iter()
-                    .any(|c| c.eq_ignore_ascii_case(&primary_key));
+                let has_primary_key = cols.iter().any(|c| c.eq_ignore_ascii_case(&primary_key));
                 if has_primary_key {
                     cols.join(",")
                 } else {

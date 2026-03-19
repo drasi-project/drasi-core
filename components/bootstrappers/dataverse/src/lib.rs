@@ -195,9 +195,14 @@ impl DataverseBootstrapProvider {
                 let host = u.host_str().unwrap_or_default();
                 format!("{}://{}", u.scheme(), host)
             })
-            .unwrap_or_else(|_| self.config.environment_url.trim_end_matches('/').to_string());
+            .unwrap_or_else(|_| {
+                self.config
+                    .environment_url
+                    .trim_end_matches('/')
+                    .to_string()
+            });
 
-        let scope = format!("{}/.default", resource);
+        let scope = format!("{resource}/.default");
 
         let params = [
             ("grant_type", "client_credentials"),
@@ -314,8 +319,7 @@ impl DataverseBootstrapProvider {
             Some(id) => id,
             None => {
                 warn!(
-                    "Skipping record for entity '{}' because no ID field ('{}' or 'id') was present",
-                    entity_name, entity_id_key
+                    "Skipping record for entity '{entity_name}' because no ID field ('{entity_id_key}' or 'id') was present"
                 );
                 return None;
             }
