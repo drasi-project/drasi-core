@@ -408,21 +408,22 @@ mod tests {
         let mut found_reaction = false;
 
         for event in &events {
-            if let SourceChange::Insert { element } = &event.change {
-                if let Element::Node { metadata, .. } = element {
-                    let labels: Vec<&str> = metadata.labels.iter().map(|l| l.as_ref()).collect();
-                    if labels.contains(&"DrasiInstance") {
-                        found_instance = true;
-                    }
-                    if labels.contains(&"Source") {
-                        found_source = true;
-                    }
-                    if labels.contains(&"Query") {
-                        found_query = true;
-                    }
-                    if labels.contains(&"Reaction") {
-                        found_reaction = true;
-                    }
+            if let SourceChange::Insert {
+                element: Element::Node { metadata, .. },
+            } = &event.change
+            {
+                let labels: Vec<&str> = metadata.labels.iter().map(|l| l.as_ref()).collect();
+                if labels.contains(&"DrasiInstance") {
+                    found_instance = true;
+                }
+                if labels.contains(&"Source") {
+                    found_source = true;
+                }
+                if labels.contains(&"Query") {
+                    found_query = true;
+                }
+                if labels.contains(&"Reaction") {
+                    found_reaction = true;
                 }
             }
         }

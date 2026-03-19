@@ -3629,7 +3629,7 @@ mod tests {
 
         let events = graph.get_events("source-1");
         // add_component also records an event, plus the apply_update
-        assert!(events.len() >= 1);
+        assert!(!events.is_empty());
         let last = events.last().unwrap();
         assert_eq!(last.status, ComponentStatus::Starting);
         assert_eq!(last.message, Some("boot".into()));
