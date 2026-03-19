@@ -605,4 +605,156 @@ mod tests {
         let result = base.stop_common().await;
         assert!(result.is_ok());
     }
+
+    // =============================================================================
+    // Accessor Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_get_id() {
+        let params = ReactionBaseParams::new("my-reaction-42", vec![]);
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_id(), "my-reaction-42");
+    }
+
+    #[tokio::test]
+    async fn test_get_queries() {
+        let queries = vec!["query-a".to_string(), "query-b".to_string(), "query-c".to_string()];
+        let params = ReactionBaseParams::new("r1", queries.clone());
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_queries(), &queries[..]);
+    }
+
+    #[tokio::test]
+    async fn test_get_queries_empty() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_queries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_default_true() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_auto_start());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_override_false() {
+        let params = ReactionBaseParams::new("r1", vec![]).with_auto_start(false);
+        let base = ReactionBase::new(params);
+        assert!(!base.get_auto_start());
+    }
+
+    // =============================================================================
+    // Context / State Store / Identity Provider Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_context_none_before_initialize() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.context().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_context_some_after_initialize() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        let ctx = base.context().await;
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().reaction_id, "r1");
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_when_not_configured() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_after_initialize_without_store() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_identity_provider_none_by_default() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.identity_provider().await.is_none());
+    }
+
+    // =============================================================================
+    // Status Handle Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        let handle = base.status_handle();
+        // The handle should share the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // Mutating via handle should be visible via base
+        handle.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+    }
+
+    // =============================================================================
+    // Deprovision Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_deprovision_common_noop_without_state_store() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        // Should succeed without panicking when no state store is configured
+        let result = base.deprovision_common().await;
+        assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Processing Task Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_set_processing_task_stores_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Initially no processing task
+        assert!(base.processing_task.read().await.is_none());
+
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        base.set_processing_task(task).await;
+
+        // Now it should be stored
+        assert!(base.processing_task.read().await.is_some());
+
+        // Clean up: abort the long-running task
+        let task = base.processing_task.write().await.take();
+        if let Some(t) = task {
+            t.abort();
+        }
+    }
 }

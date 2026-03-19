@@ -270,6 +270,248 @@ mod tests {
     use super::*;
     use crate::config::QueryLanguage;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Helper to build a minimal QueryConfig for tests.
+    fn test_config(id: &str, mode: Option<DispatchMode>) -> QueryConfig {
+        QueryConfig {
+            id: id.to_string(),
+            query: "MATCH (n) RETURN n".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            sources: vec![],
+            auto_start: false,
+            joins: None,
+            enable_bootstrap: false,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: Some(100),
+            dispatch_mode: mode,
+            storage_backend: None,
+        }
+    }
+
+    // =============================================================================
+    // Construction Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_new_initial_status_is_stopped() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_new_channel_mode_starts_with_no_dispatchers() {
+        let base = QueryBase::new(test_config("q1", Some(DispatchMode::Channel))).unwrap();
+        let dispatchers = base.dispatchers.read().await;
+        assert!(
+            dispatchers.is_empty(),
+            "Channel mode should start with zero dispatchers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_broadcast_mode_starts_with_one_dispatcher() {
+        let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
+        let dispatchers = base.dispatchers.read().await;
+        assert_eq!(
+            dispatchers.len(),
+            1,
+            "Broadcast mode should start with one dispatcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_new_default_dispatch_mode_is_channel() {
+        // dispatch_mode = None should behave like Channel (no initial dispatchers)
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        let dispatchers = base.dispatchers.read().await;
+        assert!(dispatchers.is_empty());
+    }
+
+    // =============================================================================
+    // Status Handle Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        let handle = base.status_handle();
+        // The returned handle should reflect the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_shares_state_with_base() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        let handle = base.status_handle();
+
+        // Mutate via handle, observe via base
+        handle.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+    }
+
+    // =============================================================================
+    // get_status / set_status Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_set_and_get_status() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+
+        base.set_status(ComponentStatus::Starting, Some("booting".into()))
+            .await;
+        assert_eq!(base.get_status().await, ComponentStatus::Starting);
+
+        base.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        base.set_status(ComponentStatus::Stopped, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_set_status_without_initialization() {
+        // set_status should work even if initialize() was never called (no graph)
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        base.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+    }
+
+    // =============================================================================
+    // subscribe() Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_subscribe_channel_mode_creates_receiver() {
+        let base = QueryBase::new(test_config("q1", Some(DispatchMode::Channel))).unwrap();
+        let sub = base.subscribe("reaction-a").await.unwrap();
+        assert_eq!(sub.query_id, "q1");
+
+        // A dispatcher should have been added
+        let dispatchers = base.dispatchers.read().await;
+        assert_eq!(dispatchers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_channel_mode_adds_dispatcher_per_subscription() {
+        let base = QueryBase::new(test_config("q1", Some(DispatchMode::Channel))).unwrap();
+        let _s1 = base.subscribe("r1").await.unwrap();
+        let _s2 = base.subscribe("r2").await.unwrap();
+        let _s3 = base.subscribe("r3").await.unwrap();
+
+        let dispatchers = base.dispatchers.read().await;
+        assert_eq!(
+            dispatchers.len(),
+            3,
+            "Channel mode should create one dispatcher per subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_broadcast_mode_reuses_single_dispatcher() {
+        let base = QueryBase::new(test_config("q1", Some(DispatchMode::Broadcast))).unwrap();
+        let _s1 = base.subscribe("r1").await.unwrap();
+        let _s2 = base.subscribe("r2").await.unwrap();
+
+        let dispatchers = base.dispatchers.read().await;
+        assert_eq!(
+            dispatchers.len(),
+            1,
+            "Broadcast mode should reuse the single dispatcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_returns_correct_query_id() {
+        let base = QueryBase::new(test_config("my-query", Some(DispatchMode::Channel))).unwrap();
+        let sub = base.subscribe("any-reaction").await.unwrap();
+        assert_eq!(sub.query_id, "my-query");
+    }
+
+    // =============================================================================
+    // stop_common() Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_stop_common_sends_shutdown_signal() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        base.set_shutdown_tx(tx).await;
+
+        let shutdown_received = Arc::new(AtomicBool::new(false));
+        let flag = shutdown_received.clone();
+
+        let task = tokio::spawn(async move {
+            let mut shutdown_rx = rx;
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        base.set_task_handle(task).await;
+
+        base.stop_common().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            shutdown_received.load(Ordering::SeqCst),
+            "Task should have received shutdown signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_sets_status_to_stopped() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+
+        // Move to Running first
+        base.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        base.stop_common().await.unwrap();
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_without_task_or_shutdown() {
+        // Should succeed gracefully when nothing has been set up
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+        let result = base.stop_common().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stop_common_graceful_shutdown_timing() {
+        let base = QueryBase::new(test_config("q1", None)).unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        base.set_shutdown_tx(tx).await;
+
+        let task = tokio::spawn(async move {
+            let mut shutdown_rx = rx;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => { break; }
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                }
+            }
+        });
+        base.set_task_handle(task).await;
+
+        let start = std::time::Instant::now();
+        base.stop_common().await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "Shutdown took {elapsed:?}, expected < 500ms"
+        );
+    }
 
     #[tokio::test]
     async fn test_query_base_broadcast_mode() {

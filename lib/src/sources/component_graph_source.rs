@@ -432,3 +432,70 @@ fn component_label_prefix(ct: &ComponentType) -> (&'static str, &'static str) {
         ComponentType::IdentityProvider => ("IdentityProvider", "identity_provider"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component_graph::ComponentGraph;
+
+    /// Helper: create a ComponentGraphSource with default test values.
+    fn make_source() -> ComponentGraphSource {
+        let (graph, _update_rx) = ComponentGraph::new("test-instance");
+        let broadcast_tx = graph.event_sender().clone();
+        let graph = Arc::new(RwLock::new(graph));
+        ComponentGraphSource::new(broadcast_tx, "test-instance".to_string(), graph).unwrap()
+    }
+
+    #[test]
+    fn new_creates_source_with_correct_id() {
+        let source = make_source();
+        assert_eq!(source.id(), COMPONENT_GRAPH_SOURCE_ID);
+        assert_eq!(source.id(), "__component_graph__");
+    }
+
+    #[test]
+    fn id_returns_component_graph_source_id() {
+        let source = make_source();
+        assert_eq!(source.id(), "__component_graph__");
+    }
+
+    #[test]
+    fn type_name_returns_component_graph() {
+        let source = make_source();
+        assert_eq!(source.type_name(), "component_graph");
+    }
+
+    #[test]
+    fn auto_start_returns_true() {
+        let source = make_source();
+        assert!(source.auto_start());
+    }
+
+    #[tokio::test]
+    async fn initial_status_is_stopped() {
+        let source = make_source();
+        assert_eq!(source.status().await, ComponentStatus::Stopped);
+    }
+
+    #[test]
+    fn dispatch_mode_is_broadcast() {
+        let source = make_source();
+        assert_eq!(source.dispatch_mode(), DispatchMode::Broadcast);
+    }
+
+    #[test]
+    fn properties_contains_instance_id() {
+        let source = make_source();
+        let props = source.properties();
+        assert_eq!(
+            props.get("instance_id"),
+            Some(&serde_json::json!("test-instance"))
+        );
+    }
+
+    #[test]
+    fn as_any_downcasts_to_self() {
+        let source = make_source();
+        assert!(source.as_any().is::<ComponentGraphSource>());
+    }
+}

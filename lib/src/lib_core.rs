@@ -867,4 +867,76 @@ mod tests {
 
         core.stop().await.expect("Failed to stop server");
     }
+
+    // ========================================================================
+    // DrasiLib Lifecycle Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_build_minimal_instance() {
+        let result = DrasiLib::builder().with_id("test").build().await;
+        assert!(result.is_ok(), "Minimal DrasiLib build should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_is_running_lifecycle() {
+        let core = create_test_server().await;
+
+        assert!(
+            !core.is_running().await,
+            "Should not be running before start"
+        );
+
+        core.start().await.expect("Failed to start");
+        assert!(core.is_running().await, "Should be running after start");
+
+        core.stop().await.expect("Failed to stop");
+        assert!(!core.is_running().await, "Should not be running after stop");
+    }
+
+    #[tokio::test]
+    async fn test_start_then_stop() {
+        let core = create_test_server().await;
+
+        let start_result = core.start().await;
+        assert!(start_result.is_ok(), "start() should succeed");
+
+        let stop_result = core.stop().await;
+        assert!(stop_result.is_ok(), "stop() should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_config_returns_runtime_config() {
+        let core = DrasiLib::builder()
+            .with_id("config-test")
+            .build()
+            .await
+            .expect("Failed to build");
+
+        let config = core.get_config();
+        assert_eq!(config.id, "config-test");
+    }
+
+    #[tokio::test]
+    async fn test_component_graph_returns_arc_rwlock() {
+        let core = DrasiLib::builder()
+            .with_id("graph-test")
+            .build()
+            .await
+            .expect("Failed to build");
+
+        let graph = core.component_graph();
+        let graph_read = graph.read().await;
+        assert_eq!(graph_read.instance_id(), "graph-test");
+    }
+
+    #[tokio::test]
+    async fn test_builder_returns_drasi_lib_builder() {
+        let builder = DrasiLib::builder();
+        let result = builder.with_id("builder-test").build().await;
+        assert!(
+            result.is_ok(),
+            "Builder should produce a valid DrasiLib instance"
+        );
+    }
 }

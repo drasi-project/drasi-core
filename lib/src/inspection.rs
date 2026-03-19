@@ -694,3 +694,350 @@ impl InspectionAPI {
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::builder::Query;
+    use crate::channels::*;
+    use crate::error::DrasiError;
+    use crate::lib_core::DrasiLib;
+    use crate::sources::tests::TestMockSource;
+    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    // ========================================================================
+    // Mock reaction for testing
+    // ========================================================================
+
+    struct TestMockReaction {
+        id: String,
+        queries: Vec<String>,
+        auto_start: bool,
+        status_handle: crate::component_graph::ComponentStatusHandle,
+    }
+
+    impl TestMockReaction {
+        fn new(id: String, queries: Vec<String>, auto_start: bool) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+            Self {
+                id,
+                queries,
+                auto_start,
+                status_handle,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for TestMockReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "mock"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+
+        fn auto_start(&self) -> bool {
+            self.auto_start
+        }
+
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
+
+        async fn start(&self) -> anyhow::Result<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Starting,
+                    Some("Starting reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Running,
+                    Some("Reaction started".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> anyhow::Result<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("Reaction stopped".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+
+        async fn enqueue_query_result(&self, _result: QueryResult) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    async fn build_and_start() -> DrasiLib {
+        let core = DrasiLib::builder().with_id("test").build().await.unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    async fn build_with_source_and_query() -> DrasiLib {
+        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("test-source")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    // ========================================================================
+    // list_sources
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_sources_empty() {
+        let core = build_and_start().await;
+        let sources = core.list_sources().await.unwrap();
+        let user_sources: Vec<_> = sources
+            .iter()
+            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
+            .collect();
+        assert!(user_sources.is_empty(), "No user sources initially");
+    }
+
+    #[tokio::test]
+    async fn list_sources_after_adding() {
+        let core = build_and_start().await;
+        let s1 = TestMockSource::with_auto_start("src-a".to_string(), false).unwrap();
+        let s2 = TestMockSource::with_auto_start("src-b".to_string(), false).unwrap();
+        core.add_source(s1).await.unwrap();
+        core.add_source(s2).await.unwrap();
+
+        let sources = core.list_sources().await.unwrap();
+        let user_sources: Vec<_> = sources
+            .iter()
+            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
+            .collect();
+        assert_eq!(user_sources.len(), 2);
+        assert!(user_sources.iter().any(|(id, _)| id == "src-a"));
+        assert!(user_sources.iter().any(|(id, _)| id == "src-b"));
+    }
+
+    // ========================================================================
+    // get_source_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_source_status_found() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("status-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        let status = core.get_source_status("status-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_source_status_not_found() {
+        let core = build_and_start().await;
+        let err = core.get_source_status("nonexistent").await.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // list_queries
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_queries_empty() {
+        let core = build_and_start().await;
+        let queries = core.list_queries().await.unwrap();
+        assert!(queries.is_empty(), "No queries initially");
+    }
+
+    #[tokio::test]
+    async fn list_queries_after_adding() {
+        let core = build_with_source_and_query().await;
+        let queries = core.list_queries().await.unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].0, "q1");
+    }
+
+    // ========================================================================
+    // get_query_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_query_status_found() {
+        let core = build_with_source_and_query().await;
+        let status = core.get_query_status("q1").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_query_status_not_found() {
+        let core = build_and_start().await;
+        let err = core.get_query_status("nonexistent").await.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // list_reactions
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_reactions_empty() {
+        let core = build_and_start().await;
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(reactions.is_empty(), "No reactions initially");
+    }
+
+    #[tokio::test]
+    async fn list_reactions_after_adding() {
+        let core = build_with_source_and_query().await;
+        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].0, "r1");
+    }
+
+    // ========================================================================
+    // get_reaction_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_reaction_status_found() {
+        let core = build_with_source_and_query().await;
+        let reaction = TestMockReaction::new("r1".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let status = core.get_reaction_status("r1").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_reaction_status_not_found() {
+        let core = build_and_start().await;
+        let err = core.get_reaction_status("nonexistent").await.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // get_current_config
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_current_config_returns_snapshot() {
+        let core = build_with_source_and_query().await;
+        let config = core.get_current_config().await.unwrap();
+        assert_eq!(config.id, "test");
+        assert_eq!(config.queries.len(), 1);
+        assert_eq!(config.queries[0].id, "q1");
+    }
+
+    #[tokio::test]
+    async fn get_current_config_empty_queries() {
+        let core = build_and_start().await;
+        let config = core.get_current_config().await.unwrap();
+        assert_eq!(config.id, "test");
+        assert!(config.queries.is_empty());
+    }
+
+    // ========================================================================
+    // subscribe_source_logs — returns history + receiver
+    // ========================================================================
+
+    #[tokio::test]
+    async fn subscribe_source_logs_returns_history_and_receiver() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("log-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        let (history, _receiver) = core.subscribe_source_logs("log-src").await.unwrap();
+        // Freshly added source should have no log history yet
+        assert!(history.is_empty(), "No logs emitted yet");
+    }
+
+    #[tokio::test]
+    async fn subscribe_source_logs_not_found() {
+        let core = build_and_start().await;
+        let err = core.subscribe_source_logs("ghost").await.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // subscribe_source_events — returns history + receiver
+    // ========================================================================
+
+    #[tokio::test]
+    async fn subscribe_source_events_returns_history_and_receiver() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("event-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        let (history, _receiver) = core.subscribe_source_events("event-src").await.unwrap();
+        // Newly added source should have at least a Stopped event from registration
+        // (or could be empty depending on implementation). Just verify it returns successfully.
+        let _ = history;
+    }
+
+    #[tokio::test]
+    async fn subscribe_source_events_not_found() {
+        let core = build_and_start().await;
+        let err = core.subscribe_source_events("ghost").await.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Expected ComponentNotFound, got: {err:?}"
+        );
+    }
+}

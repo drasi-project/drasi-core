@@ -2984,4 +2984,765 @@ mod tests {
         let retrieved = graph.get_runtime::<Arc<String>>("source-1");
         assert_eq!(**retrieved.unwrap(), "second");
     }
+
+    // ========================================================================
+    // ComponentStatusHandle tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_status_handle_new_defaults_to_stopped() {
+        let handle = ComponentStatusHandle::new("comp-1");
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_set_and_get() {
+        let handle = ComponentStatusHandle::new("comp-1");
+        handle.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(handle.get_status().await, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_new_wired_sends_update() {
+        let (tx, mut rx) = mpsc::channel::<ComponentUpdate>(16);
+        let handle = ComponentStatusHandle::new_wired("comp-1", tx);
+
+        // Local status starts at Stopped
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // set_status should update locally AND send via the channel
+        handle
+            .set_status(ComponentStatus::Running, Some("started".into()))
+            .await;
+        assert_eq!(handle.get_status().await, ComponentStatus::Running);
+
+        let update = rx.try_recv().unwrap();
+        match update {
+            ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            } => {
+                assert_eq!(component_id, "comp-1");
+                assert_eq!(status, ComponentStatus::Running);
+                assert_eq!(message, Some("started".into()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_unwired_does_not_send() {
+        let handle = ComponentStatusHandle::new("comp-1");
+        // No channel wired — set_status should still work locally
+        handle.set_status(ComponentStatus::Error, None).await;
+        assert_eq!(handle.get_status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_wire_after_creation() {
+        let (tx, mut rx) = mpsc::channel::<ComponentUpdate>(16);
+        let handle = ComponentStatusHandle::new("comp-1");
+
+        // Wire later
+        handle.wire(tx).await;
+
+        handle.set_status(ComponentStatus::Starting, None).await;
+
+        let update = rx.try_recv().unwrap();
+        match update {
+            ComponentUpdate::Status {
+                component_id,
+                status,
+                ..
+            } => {
+                assert_eq!(component_id, "comp-1");
+                assert_eq!(status, ComponentStatus::Starting);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_wire_only_first_call_takes_effect() {
+        let (tx1, mut rx1) = mpsc::channel::<ComponentUpdate>(16);
+        let (tx2, mut rx2) = mpsc::channel::<ComponentUpdate>(16);
+        let handle = ComponentStatusHandle::new("comp-1");
+
+        handle.wire(tx1).await;
+        // Second wire is ignored (OnceCell)
+        handle.wire(tx2).await;
+
+        handle.set_status(ComponentStatus::Running, None).await;
+
+        // Should arrive on first channel only
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_clone_shares_state() {
+        let handle1 = ComponentStatusHandle::new("comp-1");
+        let handle2 = handle1.clone();
+
+        handle1.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(handle2.get_status().await, ComponentStatus::Running);
+    }
+
+    // ========================================================================
+    // subscribe() tests
+    // ========================================================================
+
+    #[test]
+    fn test_subscribe_receives_add_event() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut event_rx = graph.subscribe();
+
+        graph.add_component(source_node("source-1")).unwrap();
+
+        let event = event_rx.try_recv().unwrap();
+        assert_eq!(event.component_id, "source-1");
+        assert_eq!(event.component_type, ComponentType::Source);
+        assert_eq!(event.status, ComponentStatus::Stopped);
+    }
+
+    #[test]
+    fn test_subscribe_receives_status_change_event() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut event_rx = graph.subscribe();
+
+        graph.add_component(source_node("source-1")).unwrap();
+        let _add_event = event_rx.try_recv().unwrap(); // consume add event
+
+        // Transition Stopped → Starting
+        graph
+            .validate_and_transition("source-1", ComponentStatus::Starting, None)
+            .unwrap();
+
+        let event = event_rx.try_recv().unwrap();
+        assert_eq!(event.component_id, "source-1");
+        assert_eq!(event.status, ComponentStatus::Starting);
+    }
+
+    #[test]
+    fn test_subscribe_multiple_receivers() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut rx1 = graph.subscribe();
+        let mut rx2 = graph.subscribe();
+
+        graph.add_component(source_node("source-1")).unwrap();
+
+        assert_eq!(rx1.try_recv().unwrap().component_id, "source-1");
+        assert_eq!(rx2.try_recv().unwrap().component_id, "source-1");
+    }
+
+    // ========================================================================
+    // apply_update() tests
+    // ========================================================================
+
+    #[test]
+    fn test_apply_update_changes_status() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        // Stopped → Starting is valid
+        let event = graph.apply_update(ComponentUpdate::Status {
+            component_id: "source-1".into(),
+            status: ComponentStatus::Starting,
+            message: Some("booting".into()),
+        });
+
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.component_id, "source-1");
+        assert_eq!(event.status, ComponentStatus::Starting);
+        assert_eq!(event.message, Some("booting".into()));
+
+        // Verify status was updated in the graph
+        let node = graph.get_component("source-1").unwrap();
+        assert_eq!(node.status, ComponentStatus::Starting);
+    }
+
+    #[test]
+    fn test_apply_update_emits_broadcast_event() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+        let mut event_rx = graph.subscribe();
+        let _add = event_rx.try_recv(); // consume add event
+
+        graph.apply_update(ComponentUpdate::Status {
+            component_id: "source-1".into(),
+            status: ComponentStatus::Starting,
+            message: None,
+        });
+
+        let event = event_rx.try_recv().unwrap();
+        assert_eq!(event.component_id, "source-1");
+        assert_eq!(event.status, ComponentStatus::Starting);
+    }
+
+    #[test]
+    fn test_apply_update_nonexistent_component_returns_none() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        let event = graph.apply_update(ComponentUpdate::Status {
+            component_id: "nonexistent".into(),
+            status: ComponentStatus::Running,
+            message: None,
+        });
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_apply_update_invalid_transition_returns_none() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        // Stopped → Running is not a valid transition (must go through Starting)
+        let event = graph.apply_update(ComponentUpdate::Status {
+            component_id: "source-1".into(),
+            status: ComponentStatus::Running,
+            message: None,
+        });
+
+        assert!(event.is_none());
+        // Status should remain Stopped
+        assert_eq!(
+            graph.get_component("source-1").unwrap().status,
+            ComponentStatus::Stopped
+        );
+    }
+
+    #[test]
+    fn test_apply_update_same_status_is_noop() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        let event = graph.apply_update(ComponentUpdate::Status {
+            component_id: "source-1".into(),
+            status: ComponentStatus::Stopped,
+            message: None,
+        });
+
+        assert!(event.is_none());
+    }
+
+    // ========================================================================
+    // get_dependents() / get_dependencies() tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_dependents_returns_empty_for_leaf() {
+        let mut graph = create_test_graph();
+        graph.add_component(reaction_node("reaction-1")).unwrap();
+
+        assert!(graph.get_dependents("reaction-1").is_empty());
+    }
+
+    #[test]
+    fn test_get_dependents_returns_empty_for_nonexistent() {
+        let graph = create_test_graph();
+        assert!(graph.get_dependents("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_get_dependents_multiple() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+        graph.add_component(query_node("query-2")).unwrap();
+
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        graph
+            .add_relationship("source-1", "query-2", RelationshipKind::Feeds)
+            .unwrap();
+
+        let dependents = graph.get_dependents("source-1");
+        assert_eq!(dependents.len(), 2);
+        let ids: Vec<&str> = dependents.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"query-1"));
+        assert!(ids.contains(&"query-2"));
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_root_component() {
+        let mut graph = create_test_graph();
+        graph.add_component(source_node("source-1")).unwrap();
+
+        // Source has no SubscribesTo edges
+        assert!(graph.get_dependencies("source-1").is_empty());
+    }
+
+    #[test]
+    fn test_get_dependencies_returns_empty_for_nonexistent() {
+        let graph = create_test_graph();
+        assert!(graph.get_dependencies("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_get_dependencies_follows_subscribes_to() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+
+        // query-1 subscribes to source-1
+        let deps = graph.get_dependencies("query-1");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].id, "source-1");
+    }
+
+    #[test]
+    fn test_get_dependencies_multiple() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(source_node("source-2")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        graph
+            .add_relationship("source-2", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+
+        let deps = graph.get_dependencies("query-1");
+        assert_eq!(deps.len(), 2);
+        let ids: Vec<&str> = deps.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"source-1"));
+        assert!(ids.contains(&"source-2"));
+    }
+
+    #[test]
+    fn test_get_dependencies_chain() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+        graph.add_component(query_node("query-1")).unwrap();
+        graph.add_component(reaction_node("reaction-1")).unwrap();
+
+        graph
+            .add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+            .unwrap();
+        graph
+            .add_relationship("query-1", "reaction-1", RelationshipKind::Feeds)
+            .unwrap();
+
+        // reaction-1 depends on query-1 (not transitively on source-1)
+        let deps = graph.get_dependencies("reaction-1");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].id, "query-1");
+    }
+
+    // ========================================================================
+    // wait_for_status() tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_wait_for_status_already_reached() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+
+        {
+            let mut g = graph.write().await;
+            g.add_component(source_node("source-1")).unwrap();
+        }
+
+        // source-1 starts as Stopped, so waiting for Stopped should return immediately
+        let result = wait_for_status(
+            &graph,
+            "source-1",
+            &[ComponentStatus::Stopped],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_component_not_found() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+
+        let result = wait_for_status(
+            &graph,
+            "nonexistent",
+            &[ComponentStatus::Running],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_timeout() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+
+        {
+            let mut g = graph.write().await;
+            g.add_component(source_node("source-1")).unwrap();
+        }
+
+        // source-1 is Stopped, wait for Running with a short timeout
+        let result = wait_for_status(
+            &graph,
+            "source-1",
+            &[ComponentStatus::Running],
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_reaches_target_via_update() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+
+        {
+            let mut g = graph.write().await;
+            g.add_component(source_node("source-1")).unwrap();
+        }
+
+        let graph_clone = Arc::clone(&graph);
+        // Spawn a task that transitions the component after a short delay
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let mut g = graph_clone.write().await;
+            g.apply_update(ComponentUpdate::Status {
+                component_id: "source-1".into(),
+                status: ComponentStatus::Starting,
+                message: None,
+            });
+        });
+
+        let result = wait_for_status(
+            &graph,
+            "source-1",
+            &[ComponentStatus::Starting],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        handle.await.unwrap();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ComponentStatus::Starting);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_status_multiple_targets() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+
+        {
+            let mut g = graph.write().await;
+            g.add_component(source_node("source-1")).unwrap();
+        }
+
+        // Stopped matches the second target
+        let result = wait_for_status(
+            &graph,
+            "source-1",
+            &[ComponentStatus::Running, ComponentStatus::Stopped],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // GraphTransaction additional tests
+    // ========================================================================
+
+    #[test]
+    fn test_transaction_rollback_cleans_edges_and_nodes() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        // Pre-add source outside transaction
+        graph.add_component(source_node("source-1")).unwrap();
+        let initial_edge_count = graph.edge_count(); // 2 (Owns + OwnedBy)
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(query_node("query-1")).unwrap();
+            txn.add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+                .unwrap();
+            // Drop without commit
+        }
+
+        assert!(!graph.contains("query-1"));
+        assert_eq!(graph.edge_count(), initial_edge_count);
+        assert!(graph.get_dependents("source-1").is_empty());
+    }
+
+    #[test]
+    fn test_transaction_commit_events_have_correct_status() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut event_rx = graph.subscribe();
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(source_node("source-1")).unwrap();
+            txn.commit();
+        }
+
+        let event = event_rx.try_recv().unwrap();
+        assert_eq!(event.status, ComponentStatus::Stopped);
+        assert_eq!(event.component_type, ComponentType::Source);
+    }
+
+    #[test]
+    fn test_transaction_no_events_before_commit() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        let mut event_rx = graph.subscribe();
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(source_node("source-1")).unwrap();
+            txn.add_component(query_node("query-1")).unwrap();
+            // Not committed yet — no events emitted
+            assert!(event_rx.try_recv().is_err());
+            txn.commit();
+        }
+
+        // Now events should be available
+        assert!(event_rx.try_recv().is_ok());
+        assert!(event_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn test_transaction_add_relationship_between_existing_and_new() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        {
+            let mut txn = graph.begin();
+            txn.add_component(query_node("query-1")).unwrap();
+            txn.add_relationship("source-1", "query-1", RelationshipKind::Feeds)
+                .unwrap();
+            txn.commit();
+        }
+
+        assert!(graph.contains("query-1"));
+        assert_eq!(graph.get_dependents("source-1").len(), 1);
+    }
+
+    // ========================================================================
+    // record_event() / get_events() / get_all_events() / get_last_error()
+    // ========================================================================
+
+    #[test]
+    fn test_record_and_get_events() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        let event = ComponentEvent {
+            component_id: "source-1".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Starting,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        graph.record_event(event.clone());
+
+        let events = graph.get_events("source-1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component_id, "source-1");
+        assert_eq!(events[0].status, ComponentStatus::Starting);
+    }
+
+    #[test]
+    fn test_get_events_empty_for_unknown_component() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        assert!(graph.get_events("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_get_all_events_across_components() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        let event1 = ComponentEvent {
+            component_id: "source-1".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Starting,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        let event2 = ComponentEvent {
+            component_id: "query-1".into(),
+            component_type: ComponentType::Query,
+            status: ComponentStatus::Running,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        graph.record_event(event1);
+        graph.record_event(event2);
+
+        let all = graph.get_all_events();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_get_last_error_returns_none_when_no_errors() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        assert!(graph.get_last_error("source-1").is_none());
+    }
+
+    #[test]
+    fn test_get_last_error_returns_error_message() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        let event = ComponentEvent {
+            component_id: "source-1".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Error,
+            timestamp: chrono::Utc::now(),
+            message: Some("connection refused".into()),
+        };
+        graph.record_event(event);
+
+        let error = graph.get_last_error("source-1");
+        assert!(error.is_some());
+        assert_eq!(error.unwrap(), "connection refused");
+    }
+
+    #[test]
+    fn test_apply_update_records_event_in_history() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        graph.apply_update(ComponentUpdate::Status {
+            component_id: "source-1".into(),
+            status: ComponentStatus::Starting,
+            message: Some("boot".into()),
+        });
+
+        let events = graph.get_events("source-1");
+        // add_component also records an event, plus the apply_update
+        assert!(events.len() >= 1);
+        let last = events.last().unwrap();
+        assert_eq!(last.status, ComponentStatus::Starting);
+        assert_eq!(last.message, Some("boot".into()));
+    }
+
+    // ========================================================================
+    // subscribe_events() tests
+    // ========================================================================
+
+    #[test]
+    fn test_subscribe_events_returns_history_and_receiver() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        // Record some history first
+        let event = ComponentEvent {
+            component_id: "source-1".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Starting,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        graph.record_event(event);
+
+        let (history, _rx) = graph.subscribe_events("source-1");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, ComponentStatus::Starting);
+    }
+
+    #[test]
+    fn test_subscribe_events_receives_new_events() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.add_component(source_node("source-1")).unwrap();
+
+        let (_history, mut event_rx) = graph.subscribe_events("source-1");
+
+        // Record a new event after subscribing
+        let event = ComponentEvent {
+            component_id: "source-1".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Running,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        graph.record_event(event);
+
+        let received = event_rx.try_recv().unwrap();
+        assert_eq!(received.status, ComponentStatus::Running);
+    }
+
+    #[test]
+    fn test_subscribe_events_empty_history_for_new_component() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+
+        let (history, _rx) = graph.subscribe_events("brand-new");
+        assert!(history.is_empty());
+    }
+
+    // ========================================================================
+    // event_sender() / update_sender() / status_notifier() accessor tests
+    // ========================================================================
+
+    #[test]
+    fn test_event_sender_broadcasts_to_subscribers() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let sender = graph.event_sender().clone();
+        let mut rx = graph.subscribe();
+
+        let event = ComponentEvent {
+            component_id: "test".into(),
+            component_type: ComponentType::Source,
+            status: ComponentStatus::Running,
+            timestamp: chrono::Utc::now(),
+            message: None,
+        };
+        sender.send(event).unwrap();
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.component_id, "test");
+    }
+
+    #[tokio::test]
+    async fn test_update_sender_delivers_to_receiver() {
+        let (graph, mut update_rx) = ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        update_tx
+            .send(ComponentUpdate::Status {
+                component_id: "comp-1".into(),
+                status: ComponentStatus::Running,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        let update = update_rx.recv().await.unwrap();
+        match update {
+            ComponentUpdate::Status {
+                component_id,
+                status,
+                ..
+            } => {
+                assert_eq!(component_id, "comp-1");
+                assert_eq!(status, ComponentStatus::Running);
+            }
+        }
+    }
+
+    #[test]
+    fn test_status_notifier_returns_arc() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let n1 = graph.status_notifier();
+        let n2 = graph.status_notifier();
+        // Both should point to the same Notify
+        assert!(Arc::ptr_eq(&n1, &n2));
+    }
 }

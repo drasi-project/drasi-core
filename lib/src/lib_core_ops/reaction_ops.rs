@@ -416,3 +416,296 @@ impl DrasiLib {
         self.inspection.subscribe_reaction_events(id).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::channels::{ComponentStatus, QueryResult};
+    use crate::error::DrasiError;
+    use crate::sources::tests::TestMockSource;
+    use crate::{DrasiLib, Query};
+    use anyhow::Result as AnyhowResult;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    // ========================================================================
+    // Mock reaction for testing
+    // ========================================================================
+
+    struct TestMockReaction {
+        id: String,
+        queries: Vec<String>,
+        auto_start: bool,
+        status_handle: crate::component_graph::ComponentStatusHandle,
+    }
+
+    impl TestMockReaction {
+        fn new(id: String, queries: Vec<String>) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+            Self {
+                id,
+                queries,
+                auto_start: true,
+                status_handle,
+            }
+        }
+
+        fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+            Self {
+                id,
+                queries,
+                auto_start,
+                status_handle,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for TestMockReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "test-log"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+
+        fn auto_start(&self) -> bool {
+            self.auto_start
+        }
+
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
+
+        async fn start(&self) -> AnyhowResult<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Starting,
+                    Some("Starting reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Running,
+                    Some("Reaction started".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> AnyhowResult<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("Reaction stopped".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+
+        async fn enqueue_query_result(&self, _result: QueryResult) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    /// Build a started DrasiLib with a mock source and one query.
+    async fn build_core_with_query() -> DrasiLib {
+        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("test-source")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    // ========================================================================
+    // add_reaction
+    // ========================================================================
+
+    #[tokio::test]
+    async fn add_reaction_happy_path() {
+        let core = build_core_with_query().await;
+
+        let reaction = TestMockReaction::with_auto_start("r1".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(reactions.iter().any(|(id, _)| id == "r1"));
+    }
+
+    #[tokio::test]
+    async fn add_reaction_duplicate_returns_error() {
+        let core = build_core_with_query().await;
+
+        let r1 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
+        core.add_reaction(r1).await.unwrap();
+
+        let r2 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
+        let result = core.add_reaction(r2).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::OperationFailed { .. }),
+            "expected OperationFailed, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // remove_reaction
+    // ========================================================================
+
+    #[tokio::test]
+    async fn remove_reaction_happy_path() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-remove".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        core.remove_reaction("r-remove", false).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(!reactions.iter().any(|(id, _)| id == "r-remove"));
+    }
+
+    #[tokio::test]
+    async fn remove_reaction_nonexistent_returns_error() {
+        let core = build_core_with_query().await;
+
+        let result = core.remove_reaction("does-not-exist", false).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // list_reactions
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_reactions_empty_then_populated() {
+        let core = build_core_with_query().await;
+
+        // Initially no reactions
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(reactions.is_empty(), "expected no reactions initially");
+
+        // Add two reactions
+        let r1 = TestMockReaction::with_auto_start("r-list-1".into(), vec!["q1".into()], false);
+        let r2 = TestMockReaction::with_auto_start("r-list-2".into(), vec!["q1".into()], false);
+        core.add_reaction(r1).await.unwrap();
+        core.add_reaction(r2).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        let ids: Vec<&str> = reactions.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"r-list-1"));
+        assert!(ids.contains(&"r-list-2"));
+        assert_eq!(reactions.len(), 2);
+    }
+
+    // ========================================================================
+    // get_reaction_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_reaction_status_returns_correct_status() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-status".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let status = core.get_reaction_status("r-status").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_reaction_status_nonexistent_returns_error() {
+        let core = build_core_with_query().await;
+
+        let result = core.get_reaction_status("ghost-reaction").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // start_reaction / stop_reaction lifecycle
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_and_stop_reaction_lifecycle() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-lifecycle".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        // Start the reaction
+        core.start_reaction("r-lifecycle").await.unwrap();
+
+        // Allow async status propagation
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let status = core.get_reaction_status("r-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        // Stop the reaction
+        core.stop_reaction("r-lifecycle").await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let status = core.get_reaction_status("r-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // get_reaction_info
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_reaction_info_returns_correct_fields() {
+        let core = build_core_with_query().await;
+
+        let reaction = TestMockReaction::with_auto_start("r-info".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let info = core.get_reaction_info("r-info").await.unwrap();
+        assert_eq!(info.id, "r-info");
+        assert_eq!(info.reaction_type, "test-log");
+        assert_eq!(info.status, ComponentStatus::Stopped);
+        assert_eq!(info.queries, vec!["q1".to_string()]);
+    }
+}

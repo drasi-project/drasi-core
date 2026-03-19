@@ -189,3 +189,144 @@ impl LifecycleManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::channels::ComponentStatus;
+    use crate::lib_core::DrasiLib;
+    use crate::sources::tests::TestMockSource;
+    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+    use crate::test_helpers::wait_for_component_status;
+    use std::time::Duration;
+
+    /// Helper: build a DrasiLib with the given sources (not yet started).
+    async fn build_with_sources(sources: Vec<TestMockSource>) -> DrasiLib {
+        let mut builder = DrasiLib::builder().with_id("lifecycle-test");
+        for s in sources {
+            builder = builder.with_source(s);
+        }
+        builder.build().await.unwrap()
+    }
+
+    // ========================================================================
+    // start_components
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_components_starts_auto_start_sources() {
+        let source = TestMockSource::with_auto_start("auto-src".to_string(), true).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "auto-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("auto-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn start_components_skips_non_auto_start() {
+        let source = TestMockSource::with_auto_start("manual-src".to_string(), false).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        core.start().await.unwrap();
+
+        // Non-autostart source should remain Stopped
+        let status = core.get_source_status("manual-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // stop_all_components
+    // ========================================================================
+
+    #[tokio::test]
+    async fn stop_all_components_stops_running() {
+        let source = TestMockSource::with_auto_start("stop-src".to_string(), true).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "stop-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // Now stop
+        core.stop().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "stop-src",
+            ComponentStatus::Stopped,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("stop-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_all_components_handles_already_stopped() {
+        let source = TestMockSource::with_auto_start("idle-src".to_string(), false).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        core.start().await.unwrap();
+
+        // Source is not auto-started, so it's already Stopped.
+        // Stopping should succeed without errors.
+        core.stop().await.unwrap();
+
+        let status = core.get_source_status("idle-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // load_configuration
+    // ========================================================================
+
+    #[tokio::test]
+    async fn load_configuration_creates_queries_from_config() {
+        use crate::builder::Query;
+
+        // Build with a source and a query that references it
+        let source = TestMockSource::with_auto_start("cfg-src".to_string(), true).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("cfg-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("cfg-query")
+                    .query("MATCH (n:Person) RETURN n")
+                    .from_source("cfg-src")
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // After build(), load_configuration has already run.
+        // The query should exist in the list.
+        let queries = core.list_queries().await.unwrap();
+        assert!(
+            queries.iter().any(|(id, _)| id == "cfg-query"),
+            "Query 'cfg-query' should exist after build; got: {queries:?}"
+        );
+
+        // Query should be in Stopped state (not yet started)
+        let (_, status) = queries.iter().find(|(id, _)| id == "cfg-query").unwrap();
+        assert_eq!(*status, ComponentStatus::Stopped);
+    }
+}

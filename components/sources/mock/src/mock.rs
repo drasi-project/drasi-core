@@ -221,6 +221,15 @@ impl Source for MockSource {
         );
         let task = tokio::spawn(
             async move {
+                // Set Running status inside the task to avoid a race condition where
+                // the loop checks status before the caller sets it after spawn.
+                status_handle
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some("Mock source started successfully".to_string()),
+                    )
+                    .await;
+
                 let mut interval =
                     tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
                 let mut seq = 0u64;
@@ -424,12 +433,6 @@ impl Source for MockSource {
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some("Mock source started successfully".to_string()),
-            )
-            .await;
 
         Ok(())
     }

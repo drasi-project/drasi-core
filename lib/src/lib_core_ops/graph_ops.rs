@@ -135,3 +135,222 @@ impl DrasiLib {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::component_graph::ComponentKind;
+    use crate::sources::tests::TestMockSource;
+    use crate::{DrasiLib, Query};
+
+    // ========================================================================
+    // get_graph
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_graph_empty_has_instance_root() {
+        let core = DrasiLib::builder()
+            .with_id("empty-graph")
+            .build()
+            .await
+            .unwrap();
+
+        let snapshot = core.get_graph().await;
+
+        assert_eq!(snapshot.instance_id, "empty-graph");
+        // Instance root must be present
+        assert!(snapshot
+            .nodes
+            .iter()
+            .any(|n| n.id == "empty-graph" && n.kind == ComponentKind::Instance));
+        // No user-added sources, queries, or reactions
+        assert!(!snapshot
+            .nodes
+            .iter()
+            .any(|n| n.kind == ComponentKind::Query));
+        assert!(!snapshot
+            .nodes
+            .iter()
+            .any(|n| n.kind == ComponentKind::Reaction));
+    }
+
+    #[tokio::test]
+    async fn get_graph_with_components() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("graph-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let snapshot = core.get_graph().await;
+
+        assert_eq!(snapshot.instance_id, "graph-test");
+        // instance + source + query
+        assert!(snapshot.nodes.len() >= 3);
+
+        let kinds: Vec<_> = snapshot.nodes.iter().map(|n| &n.kind).collect();
+        assert!(kinds.contains(&&ComponentKind::Instance));
+        assert!(kinds.contains(&&ComponentKind::Source));
+        assert!(kinds.contains(&&ComponentKind::Query));
+
+        // There should be edges connecting the components
+        assert!(!snapshot.edges.is_empty());
+    }
+
+    // ========================================================================
+    // get_dependents
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_dependents_source_with_query() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("dep-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let dependents = core.get_dependents("src1").await;
+
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].id, "q1");
+        assert_eq!(dependents[0].kind, ComponentKind::Query);
+    }
+
+    #[tokio::test]
+    async fn get_dependents_leaf_returns_empty() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("leaf-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // q1 is a leaf — nothing depends on it
+        let dependents = core.get_dependents("q1").await;
+        assert!(dependents.is_empty());
+    }
+
+    // ========================================================================
+    // get_dependencies
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_dependencies_query_depends_on_source() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("deps-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let deps = core.get_dependencies("q1").await;
+
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].id, "src1");
+        assert_eq!(deps[0].kind, ComponentKind::Source);
+    }
+
+    #[tokio::test]
+    async fn get_dependencies_source_has_none() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("no-deps-test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+
+        let deps = core.get_dependencies("src1").await;
+        assert!(deps.is_empty());
+    }
+
+    // ========================================================================
+    // can_remove_component
+    // ========================================================================
+
+    #[tokio::test]
+    async fn can_remove_component_safe() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("remove-safe")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // q1 is a leaf — safe to remove
+        assert!(core.can_remove_component("q1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn can_remove_component_unsafe_has_dependents() {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("remove-unsafe")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // src1 has q1 depending on it — cannot remove
+        let result = core.can_remove_component("src1").await;
+        assert!(result.is_err());
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("src1"),
+            "Error should mention the component ID"
+        );
+        assert!(
+            err_msg.contains("q1"),
+            "Error should mention the dependent ID"
+        );
+    }
+}

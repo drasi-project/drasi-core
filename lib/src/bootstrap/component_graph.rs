@@ -262,3 +262,174 @@ fn status_str(status: &ComponentStatus) -> &'static str {
         ComponentStatus::Error => "Error",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    fn make_request(query_id: &str) -> BootstrapRequest {
+        BootstrapRequest {
+            query_id: query_id.to_string(),
+            node_labels: vec![],
+            relation_labels: vec![],
+            request_id: "test-request".to_string(),
+        }
+    }
+
+    fn make_context() -> BootstrapContext {
+        BootstrapContext::new_minimal(
+            "test-server".to_string(),
+            COMPONENT_GRAPH_SOURCE_ID.to_string(),
+        )
+    }
+
+    #[test]
+    fn test_new_creates_provider_with_graph_reference() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+        let _provider = ComponentGraphBootstrapProvider::new(graph);
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_empty_graph() {
+        let (graph, _rx) = ComponentGraph::new("test-instance");
+        let graph = Arc::new(RwLock::new(graph));
+        let provider = ComponentGraphBootstrapProvider::new(graph);
+
+        let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
+        let request = make_request("test-query");
+        let context = make_context();
+
+        let count = provider
+            .bootstrap(request, &context, tx, None)
+            .await
+            .unwrap();
+
+        // Only the instance root node is present; it is emitted as DrasiInstance
+        assert_eq!(count, 1);
+
+        let event = rx.recv().await.unwrap();
+        match &event.change {
+            SourceChange::Insert { element } => match element {
+                Element::Node { metadata, .. } => {
+                    let labels: Vec<&str> = metadata.labels.iter().map(|l| l.as_ref()).collect();
+                    assert!(labels.contains(&"DrasiInstance"));
+                }
+                _ => panic!("Expected Node element for instance"),
+            },
+            _ => panic!("Expected Insert change"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_with_sources_and_queries() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.register_source("src1", HashMap::new()).unwrap();
+        graph.register_source("src2", HashMap::new()).unwrap();
+        graph
+            .register_query(
+                "q1",
+                HashMap::new(),
+                &["src1".to_string(), "src2".to_string()],
+            )
+            .unwrap();
+
+        let graph = Arc::new(RwLock::new(graph));
+        let provider = ComponentGraphBootstrapProvider::new(graph);
+
+        let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
+        let request = make_request("test-query");
+        let context = make_context();
+
+        let count = provider
+            .bootstrap(request, &context, tx, None)
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        assert_eq!(count, events.len());
+
+        let mut node_count = 0;
+        let mut relation_count = 0;
+        for event in &events {
+            match &event.change {
+                SourceChange::Insert { element } => match element {
+                    Element::Node { .. } => node_count += 1,
+                    Element::Relation { .. } => relation_count += 1,
+                },
+                _ => panic!("Expected Insert change"),
+            }
+        }
+
+        // 4 nodes: instance + src1 + src2 + q1
+        assert_eq!(node_count, 4);
+        // 5 relations: HAS_SOURCE×2 + HAS_QUERY×1 + SUBSCRIBES_TO×2
+        assert_eq!(relation_count, 5);
+        assert_eq!(count, 9);
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_emitted_labels_match_component_kind() {
+        let (mut graph, _rx) = ComponentGraph::new("test-instance");
+        graph.register_source("my-source", HashMap::new()).unwrap();
+        graph
+            .register_query("my-query", HashMap::new(), &["my-source".to_string()])
+            .unwrap();
+        graph
+            .register_reaction("my-reaction", HashMap::new(), &["my-query".to_string()])
+            .unwrap();
+
+        let graph = Arc::new(RwLock::new(graph));
+        let provider = ComponentGraphBootstrapProvider::new(graph);
+
+        let (tx, mut rx) = mpsc::channel::<BootstrapEvent>(100);
+        let request = make_request("test-query");
+        let context = make_context();
+
+        provider
+            .bootstrap(request, &context, tx, None)
+            .await
+            .unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let mut found_instance = false;
+        let mut found_source = false;
+        let mut found_query = false;
+        let mut found_reaction = false;
+
+        for event in &events {
+            if let SourceChange::Insert { element } = &event.change {
+                if let Element::Node { metadata, .. } = element {
+                    let labels: Vec<&str> = metadata.labels.iter().map(|l| l.as_ref()).collect();
+                    if labels.contains(&"DrasiInstance") {
+                        found_instance = true;
+                    }
+                    if labels.contains(&"Source") {
+                        found_source = true;
+                    }
+                    if labels.contains(&"Query") {
+                        found_query = true;
+                    }
+                    if labels.contains(&"Reaction") {
+                        found_reaction = true;
+                    }
+                }
+            }
+        }
+
+        assert!(found_instance, "Should emit DrasiInstance label");
+        assert!(found_source, "Should emit Source label");
+        assert!(found_query, "Should emit Query label");
+        assert!(found_reaction, "Should emit Reaction label");
+    }
+}

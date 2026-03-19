@@ -680,3 +680,114 @@ impl SourceBase {
         *self.shutdown_tx.write().await = Some(tx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // SourceBaseParams tests
+    // =========================================================================
+
+    #[test]
+    fn test_params_new_defaults() {
+        let params = SourceBaseParams::new("test-source");
+        assert_eq!(params.id, "test-source");
+        assert!(params.dispatch_mode.is_none());
+        assert!(params.dispatch_buffer_capacity.is_none());
+        assert!(params.bootstrap_provider.is_none());
+        assert!(params.auto_start);
+    }
+
+    #[test]
+    fn test_params_with_dispatch_mode() {
+        let params = SourceBaseParams::new("s1").with_dispatch_mode(DispatchMode::Broadcast);
+        assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
+    }
+
+    #[test]
+    fn test_params_with_dispatch_buffer_capacity() {
+        let params = SourceBaseParams::new("s1").with_dispatch_buffer_capacity(50000);
+        assert_eq!(params.dispatch_buffer_capacity, Some(50000));
+    }
+
+    #[test]
+    fn test_params_with_auto_start_false() {
+        let params = SourceBaseParams::new("s1").with_auto_start(false);
+        assert!(!params.auto_start);
+    }
+
+    #[test]
+    fn test_params_builder_chaining() {
+        let params = SourceBaseParams::new("chained")
+            .with_dispatch_mode(DispatchMode::Broadcast)
+            .with_dispatch_buffer_capacity(2000)
+            .with_auto_start(false);
+
+        assert_eq!(params.id, "chained");
+        assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
+        assert_eq!(params.dispatch_buffer_capacity, Some(2000));
+        assert!(!params.auto_start);
+    }
+
+    // =========================================================================
+    // SourceBase tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_new_defaults() {
+        let params = SourceBaseParams::new("my-source");
+        let base = SourceBase::new(params).unwrap();
+
+        assert_eq!(base.id, "my-source");
+        assert!(base.auto_start);
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_get_id() {
+        let base = SourceBase::new(SourceBaseParams::new("id-check")).unwrap();
+        assert_eq!(base.get_id(), "id-check");
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start() {
+        let base_default = SourceBase::new(SourceBaseParams::new("a")).unwrap();
+        assert!(base_default.get_auto_start());
+
+        let base_false =
+            SourceBase::new(SourceBaseParams::new("b").with_auto_start(false)).unwrap();
+        assert!(!base_false.get_auto_start());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_initial() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_set_status() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+
+        base.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        base.set_status(ComponentStatus::Error, Some("oops".into()))
+            .await;
+        assert_eq!(base.get_status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        let handle = base.status_handle();
+
+        // The handle should reflect the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // Mutating through the handle should be visible via SourceBase
+        handle.set_status(ComponentStatus::Starting, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Starting);
+    }
+}

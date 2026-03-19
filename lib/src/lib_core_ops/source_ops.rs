@@ -402,3 +402,220 @@ impl DrasiLib {
         self.inspection.subscribe_source_events(id).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::channels::ComponentStatus;
+    use crate::error::DrasiError;
+    use crate::lib_core::DrasiLib;
+    use crate::sources::tests::{create_test_mock_source, TestMockSource};
+    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+    use crate::test_helpers::wait_for_component_status;
+    use std::time::Duration;
+
+    /// Helper: build a DrasiLib, start it, and return it.
+    async fn build_and_start() -> DrasiLib {
+        let core = DrasiLib::builder().with_id("test").build().await.unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    // ========================================================================
+    // add_source
+    // ========================================================================
+
+    #[tokio::test]
+    async fn add_source_happy_path() {
+        let core = build_and_start().await;
+        let source = create_test_mock_source("src-1".to_string());
+
+        core.add_source(source).await.unwrap();
+
+        let sources = core.list_sources().await.unwrap();
+        assert!(
+            sources.iter().any(|(id, _)| id == "src-1"),
+            "Added source should appear in list"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_source_duplicate_returns_error() {
+        let core = build_and_start().await;
+        let s1 = create_test_mock_source("dup-src".to_string());
+        let s2 = create_test_mock_source("dup-src".to_string());
+
+        core.add_source(s1).await.unwrap();
+        let err = core.add_source(s2).await.unwrap_err();
+
+        assert!(
+            matches!(err, DrasiError::OperationFailed { .. }),
+            "Duplicate add should return OperationFailed, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // remove_source
+    // ========================================================================
+
+    #[tokio::test]
+    async fn remove_source_happy_path() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("rm-src".to_string(), false).unwrap();
+
+        core.add_source(source).await.unwrap();
+        assert!(core
+            .list_sources()
+            .await
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "rm-src"));
+
+        core.remove_source("rm-src", false).await.unwrap();
+        assert!(
+            !core
+                .list_sources()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(id, _)| id == "rm-src"),
+            "Removed source should not appear in list"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_source_nonexistent_returns_error() {
+        let core = build_and_start().await;
+        let err = core
+            .remove_source("no-such-source", false)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, DrasiError::OperationFailed { .. }),
+            "Removing nonexistent source should fail, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // list_sources
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_sources_empty_then_populated() {
+        let core = build_and_start().await;
+
+        // Fresh server has at least the internal component-graph source
+        let initial = core.list_sources().await.unwrap();
+        let user_sources: Vec<_> = initial
+            .iter()
+            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
+            .collect();
+        assert!(user_sources.is_empty(), "No user sources initially");
+
+        // Add two sources
+        let s1 = TestMockSource::with_auto_start("list-s1".to_string(), false).unwrap();
+        let s2 = TestMockSource::with_auto_start("list-s2".to_string(), false).unwrap();
+        core.add_source(s1).await.unwrap();
+        core.add_source(s2).await.unwrap();
+
+        let after = core.list_sources().await.unwrap();
+        let user_sources: Vec<_> = after
+            .iter()
+            .filter(|(id, _)| id != COMPONENT_GRAPH_SOURCE_ID)
+            .collect();
+        assert_eq!(user_sources.len(), 2, "Should have 2 user sources");
+    }
+
+    // ========================================================================
+    // get_source_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_source_status_returns_correct_status() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("status-src".to_string(), false).unwrap();
+
+        core.add_source(source).await.unwrap();
+
+        let status = core.get_source_status("status-src").await.unwrap();
+        assert_eq!(
+            status,
+            ComponentStatus::Stopped,
+            "Newly added non-autostart source should be Stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_source_status_nonexistent_returns_error() {
+        let core = build_and_start().await;
+        let err = core.get_source_status("ghost").await.unwrap_err();
+
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "Status of nonexistent source should return ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // start_source / stop_source lifecycle
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_and_stop_source_lifecycle() {
+        let core = build_and_start().await;
+
+        // Subscribe BEFORE adding so we catch all events
+        let mut event_rx = core.component_graph.read().await.subscribe();
+
+        let source = TestMockSource::with_auto_start("lifecycle-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        // Initially stopped
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+
+        // Start
+        core.start_source("lifecycle-src").await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "lifecycle-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        // Stop
+        core.stop_source("lifecycle-src").await.unwrap();
+        wait_for_component_status(
+            &mut event_rx,
+            "lifecycle-src",
+            ComponentStatus::Stopped,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("lifecycle-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // get_source_info
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_source_info_returns_correct_fields() {
+        let core = build_and_start().await;
+        let source = TestMockSource::with_auto_start("info-src".to_string(), false).unwrap();
+
+        core.add_source(source).await.unwrap();
+
+        let info = core.get_source_info("info-src").await.unwrap();
+        assert_eq!(info.id, "info-src");
+        assert_eq!(info.source_type, "mock");
+        assert_eq!(info.status, ComponentStatus::Stopped);
+        assert!(info.error_message.is_none());
+    }
+}
