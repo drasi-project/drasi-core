@@ -133,9 +133,11 @@ pub use managers::{init_tracing, try_init_tracing};
 
 /// Configuration types
 pub use config::{
-    DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime, ReactionRuntime, RuntimeConfig,
-    SourceRuntime, SourceSubscriptionSettings,
+    ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime,
+    ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
+    SourceSubscriptionSettings,
 };
+pub use config::snapshot::QuerySnapshot;
 
 /// Storage backend configuration types
 pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
