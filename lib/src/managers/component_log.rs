@@ -326,6 +326,25 @@ impl ComponentLogRegistry {
         channel.log(message);
     }
 
+    /// Non-blocking log: tries to acquire the write lock without waiting.
+    ///
+    /// Returns `true` if the message was logged, `false` if the lock was held.
+    /// Use this from synchronous contexts (e.g., FFI callbacks) where blocking
+    /// on an async lock would stall the runtime scheduler.
+    pub fn try_log(&self, message: LogMessage) -> bool {
+        match self.channels.try_write() {
+            Ok(mut channels) => {
+                let key = message.key().to_string_key();
+                let channel = channels.entry(key).or_insert_with(|| {
+                    ComponentLogChannel::new(self.max_history, self.channel_capacity)
+                });
+                channel.log(message);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Get the log history for a component using composite key.
     ///
     /// Returns an empty vector if the component has no logs.

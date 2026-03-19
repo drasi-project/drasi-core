@@ -135,7 +135,7 @@ impl Reaction for ReactionProxy {
             event_tx: context.status_tx.clone(),
         });
 
-        let ctx_ptr = crate::callbacks::InstanceCallbackContext::into_raw(per_instance_ctx.clone());
+        let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
 
         if let Ok(mut guard) = self._callback_ctx.lock() {
             *guard = Some(per_instance_ctx);
@@ -269,7 +269,9 @@ impl Drop for ReactionProxy {
                 }
             }
         }
-        (self.vtable.drop_fn)(self.vtable.state);
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 
@@ -356,6 +358,8 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
 
 impl Drop for ReactionPluginProxy {
     fn drop(&mut self) {
-        (self.vtable.drop_fn)(self.vtable.state);
+        let drop_fn = self.vtable.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }

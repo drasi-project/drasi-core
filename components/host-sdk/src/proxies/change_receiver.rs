@@ -45,9 +45,13 @@ extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSo
 
     if event.is_null() {
         // Channel closed — drop the sender to signal the host receiver
-        let mut guard = context.tx.lock().expect("push callback mutex poisoned");
-        *guard = None;
-        context.notify.notify_one();
+        {
+            let mut guard = context.tx.lock().expect("push callback mutex poisoned");
+            *guard = None;
+            context.notify.notify_one();
+            // guard must be dropped BEFORE reclaiming the Arc, otherwise
+            // MutexGuard::drop runs after the PushCallbackContext is freed.
+        }
         // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         return false;
@@ -88,7 +92,12 @@ unsafe impl Sync for FfiReceiverState {}
 
 impl Drop for FfiReceiverState {
     fn drop(&mut self) {
-        (self.drop_fn)(self.state);
+        // Run plugin drop on a dedicated thread to avoid initializing
+        // plugin TLS on the caller's thread.
+        let drop_fn = self.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.state);
+        // Safety: state is a valid pointer owned by the plugin
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 
@@ -182,12 +191,15 @@ extern "C" fn bootstrap_push_callback(
 
     if event.is_null() {
         // Stream exhausted — drop the sender to signal completion
-        let mut guard = context
-            .tx
-            .lock()
-            .expect("bootstrap push callback mutex poisoned");
-        *guard = None;
-        context.notify.notify_one();
+        {
+            let mut guard = context
+                .tx
+                .lock()
+                .expect("bootstrap push callback mutex poisoned");
+            *guard = None;
+            context.notify.notify_one();
+            // guard must be dropped BEFORE reclaiming the Arc
+        }
         // Reclaim the leaked Arc reference
         unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         return false;
