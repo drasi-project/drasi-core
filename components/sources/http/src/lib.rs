@@ -899,22 +899,10 @@ impl Source for HttpSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        if let Some(ref endpoint) = self.config.endpoint {
-            props.insert(
-                "endpoint".to_string(),
-                serde_json::Value::String(endpoint.clone()),
-            );
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props
     }
 
     fn auto_start(&self) -> bool {

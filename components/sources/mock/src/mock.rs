@@ -154,21 +154,34 @@ impl Source for MockSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        // Convert MockSourceConfig to HashMap
         let mut props = HashMap::new();
-        props.insert(
-            "data_type".to_string(),
-            serde_json::Value::String(self.config.data_type.to_string()),
-        );
         props.insert(
             "interval_ms".to_string(),
             serde_json::Value::Number(self.config.interval_ms.into()),
         );
-        if let Some(sensor_count) = self.config.data_type.sensor_count() {
-            props.insert(
-                "sensor_count".to_string(),
-                serde_json::Value::Number(sensor_count.into()),
-            );
+        match &self.config.data_type {
+            DataType::Counter => {
+                props.insert(
+                    "data_type".to_string(),
+                    serde_json::Value::String("counter".to_string()),
+                );
+            }
+            DataType::SensorReading { sensor_count } => {
+                props.insert(
+                    "data_type".to_string(),
+                    serde_json::Value::String("sensor_reading".to_string()),
+                );
+                props.insert(
+                    "sensor_count".to_string(),
+                    serde_json::Value::Number((*sensor_count).into()),
+                );
+            }
+            DataType::Generic => {
+                props.insert(
+                    "data_type".to_string(),
+                    serde_json::Value::String("generic".to_string()),
+                );
+            }
         }
         props
     }

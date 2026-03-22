@@ -60,6 +60,7 @@ impl DrasiLib {
             let mut graph = self.component_graph.write().await;
             let mut metadata = HashMap::new();
             metadata.insert("kind".to_string(), reaction_type);
+            metadata.insert("autoStart".to_string(), should_auto_start.to_string());
             graph
                 .register_reaction(&reaction_id, metadata, &query_ids)
                 .map_err(|e| {

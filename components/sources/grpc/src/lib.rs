@@ -261,6 +261,10 @@ impl Source for GrpcSource {
                 serde_json::Value::String(endpoint.clone()),
             );
         }
+        props.insert(
+            "timeout_ms".to_string(),
+            serde_json::Value::Number(self.config.timeout_ms.into()),
+        );
         props
     }
 

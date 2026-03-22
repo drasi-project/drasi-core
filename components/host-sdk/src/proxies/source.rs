@@ -101,8 +101,9 @@ impl Source for SourceProxy {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        // Dynamic plugins don't expose properties through FFI yet
-        HashMap::new()
+        let owned = (self.vtable.properties_fn)(self.vtable.state as *const c_void);
+        let json_str = unsafe { owned.into_string() };
+        serde_json::from_str(&json_str).unwrap_or_default()
     }
 
     fn dispatch_mode(&self) -> DispatchMode {

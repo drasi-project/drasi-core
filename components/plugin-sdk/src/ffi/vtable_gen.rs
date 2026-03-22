@@ -211,6 +211,13 @@ pub fn build_source_vtable<T: Source + 'static>(
         dispatch_mode_to_ffi(w.inner.dispatch_mode())
     }
 
+    extern "C" fn properties_fn<T: Source + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
     /// Emit a lifecycle event, preferring per-instance callback over global.
     fn emit_lifecycle_for<T: Source + 'static>(
         w: &SourceWrapper<T>,
@@ -476,6 +483,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         type_name_fn: type_name_fn::<T>,
         auto_start_fn: auto_start_fn::<T>,
         dispatch_mode_fn: dispatch_mode_fn::<T>,
+        properties_fn: properties_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -531,6 +539,13 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn dispatch_mode_fn(state: *const c_void) -> FfiDispatchMode {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         dispatch_mode_to_ffi(w.inner.dispatch_mode())
+    }
+
+    extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_dyn_source_lifecycle(
@@ -788,6 +803,7 @@ pub fn build_source_vtable_from_boxed(
         type_name_fn,
         auto_start_fn,
         dispatch_mode_fn,
+        properties_fn,
         start_fn,
         stop_fn,
         status_fn,
@@ -843,6 +859,13 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     extern "C" fn query_ids_fn<T: Reaction + 'static>(state: *const c_void) -> FfiStringArray {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         FfiStringArray::from_vec(w.inner.query_ids())
+    }
+
+    extern "C" fn properties_fn<T: Reaction + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_reaction_lifecycle_for<T: Reaction + 'static>(
@@ -1079,6 +1102,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         type_name_fn: type_name_fn::<T>,
         auto_start_fn: auto_start_fn::<T>,
         query_ids_fn: query_ids_fn::<T>,
+        properties_fn: properties_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -1128,6 +1152,13 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn query_ids_fn(state: *const c_void) -> FfiStringArray {
         let w = unsafe { &*(state as *const DynReactionWrapper) };
         FfiStringArray::from_vec(w.inner.query_ids())
+    }
+
+    extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_dyn_reaction_lifecycle(
@@ -1353,6 +1384,7 @@ pub fn build_reaction_vtable_from_boxed(
         type_name_fn,
         auto_start_fn,
         query_ids_fn,
+        properties_fn,
         start_fn,
         stop_fn,
         status_fn,

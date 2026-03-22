@@ -328,7 +328,20 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        HashMap::new()
+        let mut props = HashMap::new();
+        if !self.config.routes.is_empty() {
+            props.insert(
+                "routes".to_string(),
+                serde_json::to_value(&self.config.routes).unwrap_or_default(),
+            );
+        }
+        if let Some(ref default_template) = self.config.default_template {
+            props.insert(
+                "default_template".to_string(),
+                serde_json::to_value(default_template).unwrap_or_default(),
+            );
+        }
+        props
     }
 
     fn query_ids(&self) -> Vec<String> {

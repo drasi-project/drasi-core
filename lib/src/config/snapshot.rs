@@ -80,6 +80,17 @@ pub struct SourceSnapshot {
     pub auto_start: bool,
     /// Configuration properties reported by the source plugin
     pub properties: HashMap<String, serde_json::Value>,
+    /// Bootstrap provider configuration, if one is attached to this source
+    pub bootstrap_provider: Option<BootstrapSnapshot>,
+}
+
+/// Snapshot of a bootstrap provider's configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapSnapshot {
+    /// Bootstrap provider kind (e.g., "postgres", "scriptfile", "noop")
+    pub kind: String,
+    /// Configuration properties for the bootstrap provider
+    pub properties: HashMap<String, serde_json::Value>,
 }
 
 /// Snapshot of a query component's configuration.
@@ -102,6 +113,8 @@ pub struct ReactionSnapshot {
     pub reaction_type: String,
     /// Lifecycle status at the time of snapshot
     pub status: ComponentStatus,
+    /// Whether the reaction was configured to auto-start
+    pub auto_start: bool,
     /// Query IDs this reaction subscribes to
     pub queries: Vec<String>,
     /// Configuration properties reported by the reaction plugin

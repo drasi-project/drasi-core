@@ -201,6 +201,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn auto_start_fn(state: *const) -> bool,
         fn dispatch_mode_fn(state: *const) -> FfiDispatchMode,
 
+        // Configuration inspection
+        /// Returns the source's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
+
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
         fn stop_fn(state: *mut) -> FfiResult,
@@ -231,6 +235,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn type_name_fn(state: *const) -> FfiStr,
         fn auto_start_fn(state: *const) -> bool,
         fn query_ids_fn(state: *const) -> FfiStringArray,
+
+        // Configuration inspection
+        /// Returns the reaction's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
 
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,

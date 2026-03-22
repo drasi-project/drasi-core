@@ -369,6 +369,28 @@ impl Reaction for GrpcReaction {
             "timeout_ms".to_string(),
             serde_json::Value::Number(self.config.timeout_ms.into()),
         );
+        props.insert(
+            "batch_flush_timeout_ms".to_string(),
+            serde_json::Value::from(self.config.batch_flush_timeout_ms),
+        );
+        props.insert(
+            "max_retries".to_string(),
+            serde_json::Value::from(self.config.max_retries),
+        );
+        props.insert(
+            "connection_retry_attempts".to_string(),
+            serde_json::Value::from(self.config.connection_retry_attempts),
+        );
+        props.insert(
+            "initial_connection_timeout_ms".to_string(),
+            serde_json::Value::from(self.config.initial_connection_timeout_ms),
+        );
+        if !self.config.metadata.is_empty() {
+            props.insert(
+                "metadata".to_string(),
+                serde_json::to_value(&self.config.metadata).unwrap_or_default(),
+            );
+        }
         props
     }
 

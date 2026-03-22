@@ -134,8 +134,8 @@ pub use managers::{init_tracing, try_init_tracing};
 pub use config::snapshot::QuerySnapshot;
 /// Configuration types
 pub use config::{
-    ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage, QueryRuntime,
-    ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
+    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
+    QueryRuntime, ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
     SourceSubscriptionSettings,
 };
 

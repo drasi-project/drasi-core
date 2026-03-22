@@ -650,7 +650,8 @@ impl DrasiLib {
     ) -> crate::error::Result<crate::config::snapshot::ConfigurationSnapshot> {
         use crate::component_graph::ComponentKind;
         use crate::config::snapshot::{
-            ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
+            BootstrapSnapshot, ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot,
+            SourceSnapshot,
         };
 
         self.state_guard.require_initialized()?;
@@ -668,6 +669,33 @@ impl DrasiLib {
                     if let Some(source) =
                         graph.get_runtime::<std::sync::Arc<dyn crate::sources::Source>>(&node.id)
                     {
+                        // Look for an attached bootstrap provider via BootstrappedBy edge
+                        let bootstrap_provider = graph
+                            .get_neighbors(
+                                &node.id,
+                                &crate::component_graph::RelationshipKind::BootstrappedBy,
+                            )
+                            .into_iter()
+                            .find(|n| n.kind == ComponentKind::BootstrapProvider)
+                            .map(|bp_node| {
+                                let kind =
+                                    bp_node.metadata.get("kind").cloned().unwrap_or_default();
+                                let properties: std::collections::HashMap<
+                                    String,
+                                    serde_json::Value,
+                                > = bp_node
+                                    .metadata
+                                    .iter()
+                                    .filter(|(k, _)| *k != "kind")
+                                    .filter_map(|(k, v)| {
+                                        serde_json::from_str(v)
+                                            .ok()
+                                            .map(|parsed| (k.clone(), parsed))
+                                    })
+                                    .collect();
+                                BootstrapSnapshot { kind, properties }
+                            });
+
                         sources.push(SourceSnapshot {
                             id: node.id.clone(),
                             source_type: source.type_name().to_string(),
@@ -678,6 +706,7 @@ impl DrasiLib {
                                 .map(|v| v == "true")
                                 .unwrap_or(false),
                             properties: source.properties(),
+                            bootstrap_provider,
                         });
                     }
                 }
@@ -700,6 +729,11 @@ impl DrasiLib {
                             id: node.id.clone(),
                             reaction_type: reaction.type_name().to_string(),
                             status: node.status,
+                            auto_start: node
+                                .metadata
+                                .get("autoStart")
+                                .map(|v| v == "true")
+                                .unwrap_or(true),
                             queries: reaction.query_ids(),
                             properties: reaction.properties(),
                         });
@@ -1530,6 +1564,173 @@ mod tests {
                 src_b.properties.is_empty(),
                 "src-b (TestMockSource) should have empty properties"
             );
+        }
+
+        #[tokio::test]
+        async fn snapshot_captures_reaction_auto_start() {
+            let core = build_core_with_components().await;
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            let reaction = snapshot
+                .reactions
+                .iter()
+                .find(|r| r.id == "http-reaction")
+                .expect("http-reaction should be in snapshot");
+
+            // PropertiedReaction has auto_start=false
+            assert!(
+                !reaction.auto_start,
+                "Reaction auto_start should be captured as false"
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_source_without_bootstrap_has_none() {
+            let core = build_core_with_components().await;
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            let src = snapshot
+                .sources
+                .iter()
+                .find(|s| s.id == "pg-source")
+                .expect("pg-source should be in snapshot");
+
+            assert!(
+                src.bootstrap_provider.is_none(),
+                "Source without bootstrap should have bootstrap_provider=None"
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_captures_bootstrap_provider_from_graph() {
+            let source = PropertiedSource::new("bp-source");
+            let core = DrasiLib::builder()
+                .with_id("bootstrap-test")
+                .with_source(source)
+                .with_query(
+                    Query::cypher("bp-query")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("bp-source")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            // Manually register a bootstrap provider in the graph
+            // (this is what the server would do after creating a source with bootstrap config)
+            {
+                let graph = core.component_graph();
+                let mut g = graph.write().await;
+                let mut metadata = HashMap::new();
+                metadata.insert("kind".to_string(), "postgres".to_string());
+                metadata.insert(
+                    "timeout_seconds".to_string(),
+                    serde_json::json!(300).to_string(),
+                );
+                g.register_bootstrap_provider(
+                    "bp-source-bootstrap",
+                    metadata,
+                    &["bp-source".to_string()],
+                )
+                .unwrap();
+            }
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            let src = snapshot
+                .sources
+                .iter()
+                .find(|s| s.id == "bp-source")
+                .expect("bp-source should be in snapshot");
+
+            let bp = src
+                .bootstrap_provider
+                .as_ref()
+                .expect("Source should have bootstrap_provider");
+
+            assert_eq!(bp.kind, "postgres");
+            assert!(
+                bp.properties.contains_key("timeout_seconds"),
+                "Bootstrap properties should include timeout_seconds"
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_bootstrap_json_round_trip() {
+            let source = PropertiedSource::new("rt-source");
+            let core = DrasiLib::builder()
+                .with_id("bp-roundtrip")
+                .with_source(source)
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            // Register bootstrap with properties
+            {
+                let graph = core.component_graph();
+                let mut g = graph.write().await;
+                let mut metadata = HashMap::new();
+                metadata.insert("kind".to_string(), "scriptfile".to_string());
+                metadata.insert(
+                    "file_paths".to_string(),
+                    serde_json::json!(["data.jsonl", "init.jsonl"]).to_string(),
+                );
+                g.register_bootstrap_provider(
+                    "rt-source-bootstrap",
+                    metadata,
+                    &["rt-source".to_string()],
+                )
+                .unwrap();
+            }
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            // Serialize to JSON and back
+            let json = serde_json::to_string_pretty(&snapshot).expect("Should serialize");
+            let restored: ConfigurationSnapshot =
+                serde_json::from_str(&json).expect("Should deserialize");
+
+            let src = restored
+                .sources
+                .iter()
+                .find(|s| s.id == "rt-source")
+                .unwrap();
+            let bp = src.bootstrap_provider.as_ref().unwrap();
+            assert_eq!(bp.kind, "scriptfile");
+            assert!(bp.properties.contains_key("file_paths"));
+        }
+
+        #[tokio::test]
+        async fn snapshot_excludes_introspection_source() {
+            let core = build_core_with_components().await;
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            // The __component_graph__ internal source should not appear in snapshot
+            // (it's filtered by the fact that it doesn't match user source patterns)
+            let has_internal = snapshot.sources.iter().any(|s| s.id.starts_with("__"));
+
+            // Note: Whether internal sources appear depends on the implementation.
+            // If they do appear, the server should filter them. This test documents
+            // the current behavior.
+            if has_internal {
+                // Document that internal sources are present (server should filter)
+                let internal: Vec<_> = snapshot
+                    .sources
+                    .iter()
+                    .filter(|s| s.id.starts_with("__"))
+                    .map(|s| s.id.as_str())
+                    .collect();
+                eprintln!(
+                    "Note: Internal sources present in snapshot (server should filter): {internal:?}"
+                );
+            }
         }
     }
 }

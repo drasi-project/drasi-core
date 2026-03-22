@@ -305,35 +305,13 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "database".to_string(),
-            serde_json::Value::String(self.config.database.clone()),
-        );
-        props.insert(
-            "user".to_string(),
-            serde_json::Value::String(self.config.user.clone()),
-        );
-        // Don't expose password in properties
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-        props
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                map.remove("password");
+                map.into_iter().collect()
+            }
+            _ => HashMap::new(),
+        }
     }
 
     fn auto_start(&self) -> bool {

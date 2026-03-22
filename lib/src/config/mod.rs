@@ -26,4 +26,6 @@ pub use runtime::{QueryRuntime, ReactionRuntime, RuntimeConfig, SourceRuntime};
 pub use schema::*;
 
 // Re-export snapshot types
-pub use snapshot::{ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot};
+pub use snapshot::{
+    BootstrapSnapshot, ConfigurationSnapshot, QuerySnapshot, ReactionSnapshot, SourceSnapshot,
+};

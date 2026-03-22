@@ -251,6 +251,12 @@ impl Reaction for HttpReaction {
             "timeout_ms".to_string(),
             serde_json::Value::Number(self.config.timeout_ms.into()),
         );
+        if !self.config.routes.is_empty() {
+            props.insert(
+                "routes".to_string(),
+                serde_json::to_value(&self.config.routes).unwrap_or_default(),
+            );
+        }
         props
     }
 
