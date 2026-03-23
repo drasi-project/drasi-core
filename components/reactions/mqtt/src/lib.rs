@@ -55,11 +55,11 @@
 //! );
 //! ```
 
+mod adaptive_batcher;
+mod client;
 pub mod config;
 mod mqtt;
-mod adaptive_batcher;
 mod processor;
-mod client;
 
 use config::{
     default_broker_addr, default_clean_session, default_connection_timeout,
@@ -67,9 +67,9 @@ use config::{
     default_pending_throttle, default_port, default_request_channel_capacity, default_topic,
     MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, MqttTransportMode,
 };
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
-use drasi_lib::reactions::common::AdaptiveBatchConfig;
 
 /// Builder for MQTT reaction
 ///
@@ -250,7 +250,6 @@ impl MqttReactionBuilder {
         self.queries.push(query.into());
         self
     }
-
 
     /// Adaptive configuration setters
     pub fn with_adaptive_config(mut self, adaptive_config: AdaptiveBatchConfig) -> Self {
@@ -541,11 +540,76 @@ mod tests {
             pending_throttle: 100,
             max_packet_size: 2 * 1024,
             request_channel_capacity: 20,
+            adaptive: None,
+        };
+
+        let reaction = MqttReactionBuilder::new("config-reaction")
+            .with_config(config.clone())
+            .with_queries(vec!["query1".to_string()])
+            .build()
+            .expect("Failed to build MQTT reaction with config");
+
+        assert_eq!(reaction.id(), "config-reaction");
+        let props = reaction.properties();
+        assert_eq!(
+            props.get("auth_mode").unwrap(),
+            &serde_json::Value::String(format!("{:?}", config.auth_mode))
+        );
+        assert_eq!(
+            props.get("broker_addr").unwrap(),
+            &serde_json::Value::String(config.broker_addr)
+        );
+        assert_eq!(
+            props.get("port").unwrap(),
+            &serde_json::Value::Number(config.port.into())
+        );
+        assert_eq!(
+            props.get("connection_timeout").unwrap(),
+            &serde_json::Value::Number(config.connection_timeout.into())
+        );
+        assert_eq!(
+            props.get("event_channel_capacity").unwrap(),
+            &serde_json::Value::Number(config.event_channel_capacity.into())
+        );
+
+        assert_eq!(
+            props.get("transport_mode").unwrap(),
+            &serde_json::Value::String(format!("{:?}", config.transport_mode))
+        );
+
+        assert_eq!(
+            props.get("max_packet_size").unwrap(),
+            &serde_json::Value::Number(config.max_packet_size.into())
+        );
+
+        assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
+    }
+
+    #[test]
+    fn test_mqtt_reaction_builder_with_config_adaptive() {
+        let config = MqttReactionConfig {
+            broker_addr: "mqtt.example.com".to_string(),
+            port: 1883,
+            default_topic: "test/topic".to_string(),
+            connection_timeout: 5000,
+            query_configs: Default::default(),
+            event_channel_capacity: 40,
+            auth_mode: MqttAuthMode::UsernamePassword {
+                username: "user".to_string(),
+                password: "pass".to_string(),
+            },
+            clean_session: true,
+            keep_alive: 60,
+            max_inflight: 30,
+            transport_mode: MqttTransportMode::TCP,
+            pending_throttle: 100,
+            max_packet_size: 2 * 1024,
+            request_channel_capacity: 20,
             adaptive: Some(AdaptiveBatchConfig {
                 adaptive_min_batch_size: 10,
-                adaptive_max_batch_size: 1000,
-                adaptive_window_size: 50,
-                adaptive_batch_timeout_ms: 500,
+                adaptive_max_batch_size: 100,
+                adaptive_window_size: 5,
+                adaptive_batch_timeout_ms: 2000,
             }),
         };
 

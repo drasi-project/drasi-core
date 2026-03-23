@@ -1,16 +1,15 @@
-use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions, EventLoop};
-use drasi_lib::reactions::ReactionBase;
-use drasi_lib::reactions::ReactionBaseParams;
-use tokio::runtime::Handle;
 use crate::config::MqttReactionConfig;
+use crate::config::{MqttCallSpec, RetainPolicy};
+use crate::MqttAuthMode;
 use crate::MqttTransportMode;
 use anyhow::Result;
-use crate::MqttAuthMode;
-use std::time::Duration;
+use drasi_lib::reactions::ReactionBase;
+use drasi_lib::reactions::ReactionBaseParams;
 use log::{error, info, warn};
+use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, EventLoop, Incoming, MqttOptions};
 use std::sync::Arc;
-use crate::config::{MqttCallSpec, RetainPolicy};
-
+use std::time::Duration;
+use tokio::runtime::Handle;
 
 pub struct MqttClient {
     pub(crate) client_id: String,
@@ -19,14 +18,17 @@ pub struct MqttClient {
 }
 
 impl MqttClient {
-    pub async fn new(id: impl Into<String>, config: &MqttReactionConfig, mut shutdown_rx: tokio::sync::mpsc::Receiver<()>) -> Result<Self> {
-
+    pub async fn new(
+        id: impl Into<String>,
+        config: &MqttReactionConfig,
+        mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
+    ) -> Result<Self> {
         let reaction_name = id.into();
         let mqttoptions = match Self::generate_mqtt_options(reaction_name.clone(), config) {
             Ok(options) => options,
             Err(e) => {
-                error!("[{reaction_name}] Failed to generate MQTT options: {:?}", e);
-                anyhow::bail!("Failed to generate MQTT options: {:?}", e);
+                error!("[{reaction_name}] Failed to generate MQTT options: {e:?}");
+                anyhow::bail!("Failed to generate MQTT options: {e:?}");
             }
         };
 
@@ -43,7 +45,11 @@ impl MqttClient {
         Ok(mqtt_client)
     }
 
-    pub async fn start_event_loop(&mut self, mut shutdown_rx: tokio::sync::mpsc::Receiver<()>, mut eventloop: EventLoop) {
+    pub async fn start_event_loop(
+        &mut self,
+        mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
+        mut eventloop: EventLoop,
+    ) {
         let reaction_name_eventloop = self.client_id.clone();
         self.event_loop_handle = Some(tokio::spawn(async move {
             loop {
@@ -65,12 +71,22 @@ impl MqttClient {
         }))
     }
 
-    pub async fn publish(&self, topic: &str, payload: Vec<u8>, qos: QoS, retain: bool) -> Result<()> {
+    pub async fn publish(
+        &self,
+        topic: &str,
+        payload: Vec<u8>,
+        qos: QoS,
+        retain: bool,
+    ) -> Result<()> {
         self.client.publish(topic, qos, retain, payload).await?;
         Ok(())
     }
 
-    pub async fn publish_from_call_spec(&self, call_spec: &MqttCallSpec, body: String) -> Result<()> {
+    pub async fn publish_from_call_spec(
+        &self,
+        call_spec: &MqttCallSpec,
+        body: String,
+    ) -> Result<()> {
         let topic = call_spec.topic.clone();
         let qos = match call_spec.qos {
             crate::config::QualityOfService::AtMostOnce => QoS::AtMostOnce,
@@ -83,11 +99,14 @@ impl MqttClient {
             RetainPolicy::NoRetain => false,
         };
 
-        self.publish(&topic, body.as_bytes().to_vec(), qos, retain).await
+        self.publish(&topic, body.as_bytes().to_vec(), qos, retain)
+            .await
     }
 
-    
-    fn generate_mqtt_options(reaction_name: impl Into<String>, config: &MqttReactionConfig) -> Result<MqttOptions> {
+    fn generate_mqtt_options(
+        reaction_name: impl Into<String>,
+        config: &MqttReactionConfig,
+    ) -> Result<MqttOptions> {
         let broker_addr = config.broker_addr.clone();
         let port = config.port;
         let transport_mode = config.transport_mode.clone();

@@ -12,20 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::MqttReactionBuilder;
-use crate::config::{
-    MqttAuthMode, MqttQueryConfig, MqttReactionConfig, MqttTransportMode,
-    RetainPolicy,
-};
-use drasi_lib::reactions::common::AdaptiveBatchConfig;
-use std::{default, sync::Arc};
 use super::processor::Processor;
+use super::MqttReactionBuilder;
+use crate::adaptive_batcher::AdaptiveBatchConfig;
+use crate::config::{
+    MqttAuthMode, MqttQueryConfig, MqttReactionConfig, MqttTransportMode, RetainPolicy,
+};
 use anyhow::Result;
-pub struct MqttReaction {
-    base: ReactionBase,
-    config: MqttReactionConfig,
-    adaptive_config: Option<AdaptiveBatchConfig>,
-}
 use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
     channels::{ComponentStatus, ResultDiff},
@@ -33,6 +26,7 @@ use drasi_lib::{
     Reaction,
 };
 use log::{debug, error, info, warn};
+use std::{default, sync::Arc};
 
 use async_trait::async_trait;
 use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
@@ -41,6 +35,13 @@ use std::{collections::HashMap, os::unix::process, sync::RwLock, time::Duration}
 
 use handlebars::{template, Handlebars};
 use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
+
+pub struct MqttReaction {
+    base: ReactionBase,
+    config: MqttReactionConfig,
+    adaptive_config: AdaptiveBatchConfig,
+}
+
 impl MqttReaction {
     // Create a builder for MqttReaction
     pub fn builder(id: impl Into<String>) -> MqttReactionBuilder {
@@ -52,13 +53,7 @@ impl MqttReaction {
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
     pub fn new(id: impl Into<String>, queries: Vec<String>, config: MqttReactionConfig) -> Self {
-        let id = id.into();
-        let params = ReactionBaseParams::new(id, queries);
-        Self {
-            base: ReactionBase::new(params),
-            config: config.clone(),
-            adaptive_config: config.adaptive,
-        }
+        Self::create_internal(id.into(), queries, config, None, true)
     }
 
     /// Create a new MQTT reaction with custom priority queue capacity
@@ -71,14 +66,13 @@ impl MqttReaction {
         config: MqttReactionConfig,
         priority_queue_capacity: usize,
     ) -> Self {
-        let id = id.into();
-        let params = ReactionBaseParams::new(id, queries)
-            .with_priority_queue_capacity(priority_queue_capacity);
-        Self {
-            base: ReactionBase::new(params),
-            config: config.clone(),
-            adaptive_config: config.adaptive,   
-        }
+        Self::create_internal(
+            id.into(),
+            queries,
+            config,
+            Some(priority_queue_capacity),
+            true,
+        )
     }
 
     /// Create from builder (internal method)
@@ -89,14 +83,50 @@ impl MqttReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Self {
+        Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
+    }
+
+    /// Internal Contructor
+    fn create_internal(
+        id: String,
+        queries: Vec<String>,
+        config: MqttReactionConfig,
+        priority_queue_capacity: Option<usize>,
+        auto_start: bool,
+    ) -> Self {
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
+        let adaptive_mqtt_config = match config.adaptive.clone() {
+            Some(adaptive_config) => {
+                // Adaptive batcher.
+                AdaptiveBatchConfig {
+                    min_batch_size: adaptive_config.adaptive_min_batch_size,
+                    max_batch_size: adaptive_config.adaptive_max_batch_size,
+                    throughput_window: Duration::from_millis(
+                        (adaptive_config.adaptive_window_size as u64) * 100,
+                    ),
+                    max_wait_time: Duration::from_millis(adaptive_config.adaptive_batch_timeout_ms),
+                    min_wait_time: Duration::from_millis(100), // Minimum wait time before sending a batch, even if min_batch_size is not reached.
+                    adaptive_enabled: true,
+                }
+            }
+            None => {
+                // Basic reaction without adaptive batcher.
+                AdaptiveBatchConfig {
+                    adaptive_enabled: false,
+                    ..Default::default()
+                }
+            }
+        };
+
+        let base = ReactionBase::new(params);
+
         Self {
-            base: ReactionBase::new(params),
+            base,
             config: config.clone(),
-            adaptive_config: config.adaptive,
+            adaptive_config: adaptive_mqtt_config,
         }
     }
 }
@@ -162,10 +192,10 @@ impl Reaction for MqttReaction {
             serde_json::Value::String(format!("{:?}", self.config.auth_mode)),
         );
 
-        if self.adaptive_config.is_some() {
+        if self.adaptive_config.adaptive_enabled {
             props.insert(
                 "adaptive_batching".to_string(),
-                serde_json::Value::String(format!("{:?}", self.adaptive_config)),
+                serde_json::Value::String(format!("{:?}", self.config.adaptive)),
             );
         }
 
@@ -217,12 +247,12 @@ impl Reaction for MqttReaction {
 
         // Spawn the main processing task
         let processing_task_handle = tokio::spawn(Processor::run_internal(
-                reaction_name,
-                shared_base,
-                adaptive_config,
-                config,
-                shutdown_rx,
-            ));
+            reaction_name,
+            shared_base,
+            adaptive_config,
+            config,
+            shutdown_rx,
+        ));
 
         // Store the processing task handle
         self.base.set_processing_task(processing_task_handle).await;
