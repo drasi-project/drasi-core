@@ -16,6 +16,7 @@
 //!
 //! This module contains configuration types for MQTT reaction and shared types.
 
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, default};
 
@@ -210,6 +211,10 @@ pub struct MqttReactionConfig {
     /// Query-specific call configurations
     #[serde(default)]
     pub query_configs: HashMap<String, MqttQueryConfig>,
+
+    /// Adaptive batching configuration (flattened into parent config)
+    #[serde(flatten)]
+    pub adaptive: Option<AdaptiveBatchConfig>,
 }
 impl Default for MqttReactionConfig {
     fn default() -> Self {
@@ -228,6 +233,7 @@ impl Default for MqttReactionConfig {
             max_inflight: default_inflight(),
             default_topic: default_topic(),
             query_configs: HashMap::new(),
+            adaptive: None, // default to no adaptive batching
         }
     }
 }
