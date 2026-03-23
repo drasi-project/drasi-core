@@ -209,7 +209,7 @@ impl Processor {
         // Wait for batcher to complete
         let _ = tokio::time::timeout(Duration::from_secs(5), batcher_handle).await;
 
-        info!("[{reaction_name}] Adaptive HTTP reaction completed");
+        info!("[{reaction_name}] Adaptive MQTT reaction completed");
     }
 
     // Process a batch of results, final process is done by the process_result function which is shared with basic processing.
