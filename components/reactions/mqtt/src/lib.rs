@@ -24,6 +24,7 @@
 //! ```rust,ignore
 //! use drasi_reaction_mqtt::{MqttReaction, MqttReactionConfig};
 //! use drasi_reaction_mqtt::config::{MqttAuthMode, MqttTransportMode};
+//! use drasi_lib::reactions::common::AdaptiveBatchConfig;
 //!
 //! // Create configuration
 //! let config = MqttReactionConfig {
@@ -44,6 +45,7 @@
 //!     max_inflight: 30,
 //!     default_topic: "test/topic".to_string(),
 //!     query_configs: Default::default(),
+//!     adaptive: Default::default(),
 //! };
 //!
 //! let reaction = MqttReaction::new(
@@ -55,6 +57,9 @@
 
 pub mod config;
 mod mqtt;
+mod adaptive_batcher;
+mod processor;
+mod client;
 
 use config::{
     default_broker_addr, default_clean_session, default_connection_timeout,
@@ -64,6 +69,7 @@ use config::{
 };
 pub use mqtt::MqttReaction;
 use std::collections::HashMap;
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 
 /// Builder for MQTT reaction
 ///
@@ -105,6 +111,8 @@ pub struct MqttReactionBuilder {
     max_inflight: u16,
     default_topic: String,
     query_configs: HashMap<String, MqttQueryConfig>,
+
+    adaptive_config: Option<AdaptiveBatchConfig>,
 }
 
 impl MqttReactionBuilder {
@@ -130,6 +138,8 @@ impl MqttReactionBuilder {
             max_inflight: default_inflight(),
             default_topic: default_topic(),
             query_configs: HashMap::new(),
+
+            adaptive_config: None,
         }
     }
 
@@ -241,6 +251,61 @@ impl MqttReactionBuilder {
         self
     }
 
+
+    /// Adaptive configuration setters
+    pub fn with_adaptive_config(mut self, adaptive_config: AdaptiveBatchConfig) -> Self {
+        self.adaptive_config = Some(adaptive_config);
+        self
+    }
+
+    pub fn with_min_adaptive_batch_size(mut self, size: usize) -> Self {
+        if let Some(ref mut config) = self.adaptive_config {
+            config.adaptive_min_batch_size = size;
+        } else {
+            self.adaptive_config = Some(AdaptiveBatchConfig {
+                adaptive_min_batch_size: size,
+                ..Default::default()
+            });
+        }
+        self
+    }
+
+    pub fn with_max_adaptive_batch_size(mut self, size: usize) -> Self {
+        if let Some(ref mut config) = self.adaptive_config {
+            config.adaptive_max_batch_size = size;
+        } else {
+            self.adaptive_config = Some(AdaptiveBatchConfig {
+                adaptive_max_batch_size: size,
+                ..Default::default()
+            });
+        }
+        self
+    }
+
+    pub fn with_adaptive_window_size(mut self, size: usize) -> Self {
+        if let Some(ref mut config) = self.adaptive_config {
+            config.adaptive_window_size = size;
+        } else {
+            self.adaptive_config = Some(AdaptiveBatchConfig {
+                adaptive_window_size: size,
+                ..Default::default()
+            });
+        }
+        self
+    }
+
+    pub fn with_adaptive_batch_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        if let Some(ref mut config) = self.adaptive_config {
+            config.adaptive_batch_timeout_ms = timeout_ms;
+        } else {
+            self.adaptive_config = Some(AdaptiveBatchConfig {
+                adaptive_batch_timeout_ms: timeout_ms,
+                ..Default::default()
+            });
+        }
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: MqttReactionConfig) -> Self {
         self.broker_addr = config.broker_addr;
@@ -257,6 +322,7 @@ impl MqttReactionBuilder {
         self.max_inflight = config.max_inflight;
         self.default_topic = config.default_topic;
         self.query_configs = config.query_configs;
+        self.adaptive_config = config.adaptive;
         self
     }
 
@@ -277,6 +343,7 @@ impl MqttReactionBuilder {
             max_inflight: self.max_inflight,
             default_topic: self.default_topic,
             query_configs: self.query_configs,
+            adaptive: self.adaptive_config,
         };
 
         Ok(MqttReaction::from_builder(
@@ -474,6 +541,12 @@ mod tests {
             pending_throttle: 100,
             max_packet_size: 2 * 1024,
             request_channel_capacity: 20,
+            adaptive: Some(AdaptiveBatchConfig {
+                adaptive_min_batch_size: 10,
+                adaptive_max_batch_size: 1000,
+                adaptive_window_size: 50,
+                adaptive_batch_timeout_ms: 500,
+            }),
         };
 
         let reaction = MqttReactionBuilder::new("config-reaction")
@@ -513,6 +586,11 @@ mod tests {
         assert_eq!(
             props.get("max_packet_size").unwrap(),
             &serde_json::Value::Number(config.max_packet_size.into())
+        );
+
+        assert_eq!(
+            props.get("adaptive_batching").unwrap(),
+            &serde_json::Value::String(format!("{:?}", config.adaptive))
         );
 
         assert_eq!(reaction.query_ids(), vec!["query1".to_string()]);
