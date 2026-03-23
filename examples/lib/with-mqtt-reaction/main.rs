@@ -51,6 +51,7 @@ use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_mqtt::config::{MqttAuthMode, MqttCallSpec, MqttQueryConfig, RetainPolicy};
 use drasi_reaction_mqtt::MqttReaction;
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use drasi_source_http::HttpSource;
 use std::collections::HashMap;
 #[tokio::main]
@@ -89,9 +90,9 @@ async fn main() -> Result<()> {
         .with_port(9000)
         .with_adaptive_enabled(true)
         .with_adaptive_max_batch_size(100)
-        .with_adaptive_min_batch_size(1)
-        .with_adaptive_max_wait_ms(50)
-        .with_adaptive_min_wait_ms(10)
+        .with_adaptive_min_batch_size(50)
+        .with_adaptive_max_wait_ms(100000)
+        .with_adaptive_min_wait_ms(10000)
         .with_bootstrap_provider(bootstrap_provider)
         .build()?;
 
@@ -200,6 +201,14 @@ async fn main() -> Result<()> {
             username: "ahmed".to_string(),
             password: "ahmed".to_string(),
         })
+        .with_adaptive_config(
+            AdaptiveBatchConfig {
+                adaptive_min_batch_size: 1,
+                adaptive_max_batch_size: 50,
+                adaptive_window_size: 30,  // 3 seconds
+                adaptive_batch_timeout_ms: 10,
+            }
+        )
         .build()
         .expect("Failed to build MQTT reaction");
 
