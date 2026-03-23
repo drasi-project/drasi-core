@@ -1,9 +1,8 @@
 
 use super::MqttReactionBuilder;
-use crate::config::{
-    MqttAuthMode, MqttQueryConfig, MqttReactionConfig, MqttTransportMode,
-    RetainPolicy, MqttCallSpec
-};
+use crate::{config::{
+    MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, MqttTransportMode, RetainPolicy
+}, mqtt};
 use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use std::{default, sync::Arc};
 use anyhow::Result;
@@ -53,7 +52,7 @@ impl Processor {
         let query_configs = config.query_configs.clone();
         let default_topic: String = config.default_topic.clone();
 
-        // Task to handle MQTT connection events
+        // Channels to handle MQTT connection events
         let (mut event_loop_shutdown_tx, mut event_loop_shutdown_rx) =
             tokio::sync::mpsc::channel(1);
 
@@ -66,21 +65,20 @@ impl Processor {
             }
         };
 
-        // // Main processing loop
-        // match adaptive_config{
-        //     None => Self::basic_processing(
-        //         reaction_name.clone(),
-        //         mqtt_client,
-        //         priority_queue,
-        //         Arc::clone(&status),
-        //         config,
-        //         shutdown_rx,
-        //         event_loop_shutdown_tx,
-        //     ).await,
-        //     Some(config) => {
+        // Main processing loop
+        match adaptive_config{
+            None => Self::basic_processing(
+                mqtt_client,
+                priority_queue,
+                Arc::clone(&status),
+                config,
+                shutdown_rx,
+                event_loop_shutdown_tx,
+            ).await,
+            Some(config) => {
 
-        //     }
-        // }
+            }
+        }
 
 
         info!("[{reaction_name}] MQTT reaction stopped");
@@ -90,34 +88,12 @@ impl Processor {
     ////////////////////////////////////////////////////////////////////////////////
     /// BASIC PROCESSING (NO ADAPTIVE BATCHING)
     ////////////////////////////////////////////////////////////////////////////////
-    
-    #[allow(clippy::too_many_arguments)]
-    async fn process_result(
-        id: impl Into<String>,
-        mqtt_client: &AsyncClient,
-        handlebars: &Handlebars<'_>,
-        result: &ResultDiff,
-        query_name: &str,
-        query_config: &MqttQueryConfig,
-    ) -> Result<()> {
-        match result {
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                debug!(
-                    "[{}] Received aggregation or noop result, skipping MQTT call",
-                    id.into()
-                );
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        let mut type_str = "";
+    fn extract_data_and_context(result: &ResultDiff, query_name: &str, query_config: &MqttQueryConfig) -> (Option<Value>, Map<String, Value>) {
         let mut context: Map<String, Value> = Map::new();
         let mut data = match result {
             ResultDiff::Add { data } => {
                 if let Some(spec) = query_config.added.as_ref() {
                     context.insert("after".to_string(), data.clone());
-                    type_str = "ADD";
                     Some(data.clone())
                 } else {
                     None
@@ -141,7 +117,6 @@ impl Processor {
                     } else {
                         context.insert("after".to_string(), data_to_process);
                     }
-                    type_str = "UPDATE";
                     Some(data)
                 } else {
                     None
@@ -150,7 +125,6 @@ impl Processor {
             ResultDiff::Delete { data } => {
                 if let Some(spec) = query_config.deleted.as_ref() {
                     context.insert("before".to_string(), data.clone());
-                    type_str = "DELETE";
                     Some(data.clone())
                 } else {
                     None
@@ -169,6 +143,31 @@ impl Processor {
 
         let type_str = result_type(result);
         context.insert("operation".to_string(), Value::String(type_str.to_string()));
+        (data, context)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_result(
+        mqtt_client: &MqttClient,
+        handlebars: &Handlebars<'_>,
+        result: &ResultDiff,
+        query_name: &str,
+        query_config: &MqttQueryConfig,
+    ) -> Result<()> {
+        match result {
+            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
+                debug!(
+                    "[{}] Received aggregation or noop result, skipping MQTT call",
+                    mqtt_client.client_id,
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        let (data, context) = Self::extract_data_and_context(result, query_name, query_config);
+
+        let type_str = result_type(result);
 
         let call_spec_result = match type_str {
             "ADD" => query_config.added.as_ref(),
@@ -183,23 +182,11 @@ impl Processor {
             } else {
                 serde_json::to_string(&data)?
             };
-            let topic = call_spec.topic.clone();
-            let qos = match call_spec.qos {
-                crate::config::QualityOfService::AtMostOnce => QoS::AtMostOnce,
-                crate::config::QualityOfService::AtLeastOnce => QoS::AtLeastOnce,
-                crate::config::QualityOfService::ExactlyOnce => QoS::ExactlyOnce,
-            };
-
-            let retain = match call_spec.retain {
-                RetainPolicy::Retain => true,
-                RetainPolicy::NoRetain => false,
-            };
-
-            match mqtt_client.publish(topic, qos, retain, body).await {
+            match mqtt_client.publish_from_call_spec(call_spec, body).await {
                 Ok(_) => {
                     debug!(
                         "[{}] Published MQTT message for {} operation on query '{}'",
-                        id.into(),
+                        mqtt_client.client_id,
                         type_str,
                         query_name
                     );
@@ -207,7 +194,7 @@ impl Processor {
                 Err(e) => {
                     error!(
                         "[{}] Failed to publish MQTT message for {} operation on query '{}': {}",
-                        id.into(),
+                        mqtt_client.client_id,
                         type_str,
                         query_name,
                         e
@@ -219,8 +206,7 @@ impl Processor {
     }
 
     async fn basic_processing(
-        reaction_name: String,
-        mqtt_client: AsyncClient,
+        mqtt_client: MqttClient,
         priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult>,
         status: Arc<tokio::sync::RwLock<ComponentStatus>>,
         config: MqttReactionConfig,
@@ -234,6 +220,7 @@ impl Processor {
 
         let default_topic = config.default_topic;
         let query_configs = config.query_configs;
+        let reaction_name = mqtt_client.client_id.clone();
 
         loop {
             let query_result_arc = tokio::select! {
@@ -249,6 +236,8 @@ impl Processor {
             };
 
             if !matches!(*status.read().await, ComponentStatus::Running) {
+                info!("[{reaction_name}] Status is not running, exiting processing loop");
+                event_loop_shutdown_tx.send(()).await;
                 break;
             }
 
@@ -262,7 +251,7 @@ impl Processor {
 
             // Check if we have a route configured for this query
             let route = query_configs.get(query_name).or_else(|| {
-                query_configs.get("*").or_else(|| {
+                query_configs.get("*").or_else(|| {  // * to handle cases of select-all
                     query_name
                         .split('.')
                         .next_back()
@@ -289,8 +278,7 @@ impl Processor {
 
             // Process each result
             for result in &query_result_ref.results {
-                if let Err(e) = Self::process_result(
-                    reaction_name.clone(),
+                if let Err(e) = Self::process_result(  
                     &mqtt_client,
                     &handlebars,
                     result,
@@ -304,50 +292,6 @@ impl Processor {
             }
         }
 
-    }
-
-    ////////////////////////////////////////////////////////////////////////////////
-    /// PRIVATE HELPER METHODS
-    ////////////////////////////////////////////////////////////////////////////////
-    
-
-    fn build_mqtt_options(reaction_name: impl Into<String>, config: &MqttReactionConfig) -> MqttOptions {
-        let broker_addr = config.broker_addr.clone();
-        let port = config.port;
-        let transport_mode = config.transport_mode.clone();
-        let keep_alive = config.keep_alive;
-        let clean_session = config.clean_session;
-        let auth_mode = config.auth_mode.clone();
-        let request_channel_capacity = config.request_channel_capacity;
-        let pending_throttle = config.pending_throttle;
-        let max_packet_size = config.max_packet_size;
-        let max_inflight = config.max_inflight;
-        let connection_timeout = config.connection_timeout;
-
-        let mut options = MqttOptions::new(reaction_name.into(), broker_addr.clone(), port);
-
-        match transport_mode {
-            MqttTransportMode::TCP => {
-                options.set_transport(rumqttc::Transport::Tcp);
-            }
-            MqttTransportMode::TLS => {
-                // TODO: Add TLS configuration options to MqttReactionConfig and set them here
-            }
-        }
-
-        if let MqttAuthMode::UsernamePassword { username, password } = auth_mode {
-            options.set_credentials(username, password);
-        }
-
-        options.set_outgoing_inflight_upper_limit(max_inflight);
-        options.set_keep_alive(Duration::from_secs(keep_alive));
-        options.set_clean_start(clean_session);
-        options.set_max_packet_size(Some(max_packet_size));
-        options.set_pending_throttle(Duration::from_micros(pending_throttle));
-        options.set_request_channel_capacity(request_channel_capacity);
-        options.set_connection_timeout(connection_timeout);
-
-        options
     }
 }
 

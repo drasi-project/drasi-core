@@ -1,6 +1,7 @@
 use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions, EventLoop};
 use drasi_lib::reactions::ReactionBase;
 use drasi_lib::reactions::ReactionBaseParams;
+use tokio::runtime::Handle;
 use crate::config::MqttReactionConfig;
 use crate::MqttTransportMode;
 use anyhow::Result;
@@ -8,9 +9,11 @@ use crate::MqttAuthMode;
 use std::time::Duration;
 use log::{error, info, warn};
 use std::sync::Arc;
+use crate::config::{MqttCallSpec, RetainPolicy};
+
 
 pub struct MqttClient {
-    client_id: String,
+    pub(crate) client_id: String,
     client: AsyncClient,
     event_loop_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -67,6 +70,21 @@ impl MqttClient {
         Ok(())
     }
 
+    pub async fn publish_from_call_spec(&self, call_spec: &MqttCallSpec, body: String) -> Result<()> {
+        let topic = call_spec.topic.clone();
+        let qos = match call_spec.qos {
+            crate::config::QualityOfService::AtMostOnce => QoS::AtMostOnce,
+            crate::config::QualityOfService::AtLeastOnce => QoS::AtLeastOnce,
+            crate::config::QualityOfService::ExactlyOnce => QoS::ExactlyOnce,
+        };
+
+        let retain = match call_spec.retain {
+            RetainPolicy::Retain => true,
+            RetainPolicy::NoRetain => false,
+        };
+
+        self.publish(&topic, body.as_bytes().to_vec(), qos, retain).await
+    }
 
     
     fn generate_mqtt_options(reaction_name: impl Into<String>, config: &MqttReactionConfig) -> Result<MqttOptions> {
