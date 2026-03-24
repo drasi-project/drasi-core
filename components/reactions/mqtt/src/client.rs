@@ -139,9 +139,9 @@ impl MqttClient {
             MqttTransportMode::TCP => {
                 options.set_transport(rumqttc::Transport::Tcp);
             }
-            MqttTransportMode::TLS => {
-                // TODO: Add TLS configuration options to MqttReactionConfig and set them here
-                anyhow::bail!("TLS transport mode is not yet supported");
+            MqttTransportMode::TLS { ca, alpn, client_auth } => {
+                let tls_config = rumqttc::TlsConfiguration::Simple { ca, alpn, client_auth };
+                options.set_transport(rumqttc::Transport::Tls(tls_config));
             }
         }
 

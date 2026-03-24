@@ -97,7 +97,14 @@ pub enum MqttAuthMode {
 pub enum MqttTransportMode {
     #[default]
     TCP,
-    TLS,
+    TLS{
+        /// ca certificate
+        ca: Vec<u8>,
+        /// alpn settings
+        alpn: Option<Vec<Vec<u8>>>,
+        /// tls client_authentication
+        client_auth: Option<(Vec<u8>, Vec<u8>)>,
+    },
 }
 
 /// Specification for an MQTT call, including topic, retain policy, headers, and body template.
