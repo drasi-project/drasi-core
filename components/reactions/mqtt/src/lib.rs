@@ -449,7 +449,11 @@ mod tests {
         let reaction = MqttReactionBuilder::new("props-reaction")
             .with_broker_addr("broker.internal")
             .with_port(1884)
-            .with_transport_mode(MqttTransportMode::TLS)
+            .with_transport_mode(MqttTransportMode::TLS {
+                ca: vec![1, 2, 3],
+                alpn: Some(vec![b"http/1.1".to_vec(), b"h2".to_vec()]),
+                client_auth: Some((vec![4, 5, 6], vec![7, 8, 9])),
+            })
             .with_keep_alive(42)
             .with_clean_session(false)
             .with_request_channel_capacity(16)

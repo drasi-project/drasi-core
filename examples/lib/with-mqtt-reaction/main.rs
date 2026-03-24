@@ -48,10 +48,10 @@ use axum::{
     Json, Router,
 };
 use drasi_bootstrap_scriptfile::ScriptFileBootstrapProvider;
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_mqtt::config::{MqttAuthMode, MqttCallSpec, MqttQueryConfig, RetainPolicy};
 use drasi_reaction_mqtt::MqttReaction;
-use drasi_lib::reactions::common::AdaptiveBatchConfig;
 use drasi_source_http::HttpSource;
 use std::collections::HashMap;
 #[tokio::main]
@@ -180,6 +180,8 @@ async fn main() -> Result<()> {
         }),
     };
 
+    let ca = std::fs::read("/home/ahmed-kamal/certs/ca.crt").unwrap();
+
     let mqtt_reaction = MqttReaction::builder("mqtt-reaction")
         .with_query("all-prices")
         .with_query("gainers")
@@ -190,8 +192,12 @@ async fn main() -> Result<()> {
             ("high-volume".to_string(), default_template.clone()),
         ])
         .with_broker_addr("localhost".to_string())
-        .with_port(1883)
-        .with_transport_mode(drasi_reaction_mqtt::config::MqttTransportMode::TCP)
+        .with_port(8883)
+        .with_transport_mode(drasi_reaction_mqtt::config::MqttTransportMode::TLS {
+            ca,
+            alpn: None,
+            client_auth: None,
+        })
         .with_keep_alive(30)
         .with_clean_session(true)
         .with_max_packet_size(10 * 1024) // 10 KB
@@ -201,14 +207,12 @@ async fn main() -> Result<()> {
             username: "ahmed".to_string(),
             password: "ahmed".to_string(),
         })
-        .with_adaptive_config(
-            AdaptiveBatchConfig {
-                adaptive_min_batch_size: 1,
-                adaptive_max_batch_size: 50,
-                adaptive_window_size: 30,  // 3 seconds
-                adaptive_batch_timeout_ms: 10,
-            }
-        )
+        .with_adaptive_config(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 1,
+            adaptive_max_batch_size: 50,
+            adaptive_window_size: 30, // 3 seconds
+            adaptive_batch_timeout_ms: 10,
+        })
         .build()
         .expect("Failed to build MQTT reaction");
 
