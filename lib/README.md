@@ -617,6 +617,15 @@ let config = Query::cypher("my-query")
 
 DrasiLib uses a trait-based plugin system. Sources, reactions, bootstrap providers, and index backends are all implemented as plugins.
 
+### Dynamic Plugin Loading
+
+When using cdylib plugins (shared libraries), the plugin loader discovers and loads them from a configured directory:
+
+- Plugins are matched by glob patterns (e.g., `libdrasi_source_*`, `libdrasi_reaction_*`)
+- Only cdylib shared libraries are loaded: `.dylib` (macOS), `.so` (Linux), `.dll` (Windows)
+- Non-cdylib Cargo artifacts (`.rlib`, `.rmeta`, `.d`) that may exist alongside the cdylib are silently ignored
+- Each plugin must have exactly one cdylib file; if multiple cdylib extensions exist for the same base name, the loader reports an ambiguity error
+
 ### Source Plugins
 
 A source implements the `Source` trait:

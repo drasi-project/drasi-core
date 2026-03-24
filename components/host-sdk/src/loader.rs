@@ -18,6 +18,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use libloading::{Library, Symbol};
 
 use drasi_plugin_sdk::ffi::{
@@ -73,6 +74,12 @@ impl Drop for LoadedPlugin {
     }
 }
 
+/// Known cdylib shared library extensions, in preference order.
+const CDYLIB_EXTENSIONS: &[&str] = &[".dylib", ".so", ".dll"];
+
+/// All extensions we might encounter (cdylib + Cargo build artifacts).
+const ALL_KNOWN_EXTENSIONS: &[&str] = &[".dylib", ".so", ".dll", ".rlib", ".rmeta", ".d"];
+
 /// Loads cdylib plugins from a directory.
 pub struct PluginLoader {
     config: PluginLoaderConfig,
@@ -84,6 +91,11 @@ impl PluginLoader {
     }
 
     /// Load all plugins matching the configured patterns.
+    ///
+    /// Discovers candidate files, groups them by plugin base name, then loads
+    /// exactly one cdylib per plugin. Non-cdylib artifacts (.rlib, .d, .rmeta)
+    /// are silently ignored. An error is logged if multiple cdylib extensions
+    /// exist for the same plugin (ambiguous).
     pub fn load_all(
         &self,
         log_ctx: *mut c_void,
@@ -99,46 +111,60 @@ impl PluginLoader {
             return Ok(plugins);
         }
 
-        for pattern in &self.config.file_patterns {
-            let glob_pattern = plugin_dir.join(pattern);
-            let glob_str = glob_pattern.to_string_lossy();
+        // Phase 1: Discover all candidate files and group by plugin name
+        let candidates = discover_plugin_candidates(plugin_dir, &self.config.file_patterns);
 
-            // Use simple directory iteration + pattern matching
-            if let Ok(entries) = std::fs::read_dir(plugin_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-                    let file_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
+        // Phase 2: For each plugin name, try loading from cdylib extensions
+        for (plugin_name, files) in &candidates {
+            let cdylib_files: Vec<&PathBuf> = files
+                .iter()
+                .filter(|p| {
+                    CDYLIB_EXTENSIONS
+                        .iter()
+                        .any(|ext| p.to_string_lossy().ends_with(ext))
+                })
+                .collect();
 
-                    if matches_pattern(&file_name, pattern) {
-                        match self.load_plugin(
-                            &path,
-                            log_ctx,
-                            log_callback,
-                            lifecycle_ctx,
-                            lifecycle_callback,
-                        ) {
-                            Ok(plugin) => {
-                                log::info!(
-                                    "Loaded plugin: {} ({})",
-                                    path.display(),
-                                    plugin.metadata_info.as_deref().unwrap_or("no metadata")
-                                );
-                                plugins.push(plugin);
-                            }
-                            Err(e) => {
-                                log::error!("Failed to load plugin {}: {}", path.display(), e);
-                            }
-                        }
-                    }
+            if cdylib_files.is_empty() {
+                log::debug!(
+                    "Plugin '{}': no cdylib files found (skipping {} non-cdylib file(s))",
+                    plugin_name,
+                    files.len()
+                );
+                continue;
+            }
+
+            if cdylib_files.len() > 1 {
+                log::error!(
+                    "Plugin '{}': found {} cdylib files — ambiguous. \
+                     Remove duplicates and keep only one: {:?}",
+                    plugin_name,
+                    cdylib_files.len(),
+                    cdylib_files
+                );
+                continue;
+            }
+
+            // Exactly one cdylib file — load it
+            let path = cdylib_files[0];
+            match self.load_plugin(
+                path,
+                log_ctx,
+                log_callback,
+                lifecycle_ctx,
+                lifecycle_callback,
+            ) {
+                Ok(plugin) => {
+                    log::info!(
+                        "Loaded plugin: {} ({})",
+                        path.display(),
+                        plugin.metadata_info.as_deref().unwrap_or("no metadata")
+                    );
+                    plugins.push(plugin);
                 }
-            } else {
-                log::warn!("Cannot read plugin directory for pattern: {glob_str}");
+                Err(e) => {
+                    log::error!("Failed to load plugin {}: {}", path.display(), e);
+                }
             }
         }
 
@@ -388,27 +414,60 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Simple glob-like pattern matching (supports `*` wildcards).
-fn matches_pattern(filename: &str, pattern: &str) -> bool {
-    let known_exts = [".dylib", ".so", ".dll"];
+/// Scan the plugin directory and group files by plugin base name.
+///
+/// Returns an ordered map of plugin_name → Vec<PathBuf> where plugin_name is
+/// the filename with all known extensions stripped (e.g., "libdrasi_source_mock").
+fn discover_plugin_candidates(dir: &Path, patterns: &[String]) -> IndexMap<String, Vec<PathBuf>> {
+    let mut groups: IndexMap<String, Vec<PathBuf>> = IndexMap::new();
 
-    // Strip known extension from filename and pattern so matching is platform-agnostic
-    let stem = known_exts
-        .iter()
-        .find_map(|ext| filename.strip_suffix(ext))
-        .unwrap_or(filename);
-    let pat = known_exts
-        .iter()
-        .find_map(|ext| pattern.strip_suffix(ext))
-        .unwrap_or(pattern);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return groups,
+    };
 
-    // Simple wildcard matching
-    if let Some(prefix) = pat.strip_suffix('*') {
-        stem.starts_with(prefix)
-    } else if let Some((prefix, suffix)) = pat.split_once('*') {
-        stem.starts_with(prefix) && stem.ends_with(suffix)
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        // Strip any known extension to get the base name
+        let base_name = ALL_KNOWN_EXTENSIONS
+            .iter()
+            .find_map(|ext| file_name.strip_suffix(ext))
+            .unwrap_or(&file_name)
+            .to_string();
+
+        // Check if the base name matches any of the configured patterns
+        let matched = patterns.iter().any(|pattern| {
+            let pat = ALL_KNOWN_EXTENSIONS
+                .iter()
+                .find_map(|ext| pattern.strip_suffix(ext))
+                .unwrap_or(pattern);
+            matches_glob(pat, &base_name)
+        });
+
+        if matched {
+            groups.entry(base_name).or_default().push(path);
+        }
+    }
+
+    groups
+}
+
+/// Simple glob matching: supports trailing `*` and middle `*`.
+fn matches_glob(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else if let Some((prefix, suffix)) = pattern.split_once('*') {
+        name.starts_with(prefix) && name.ends_with(suffix)
     } else {
-        stem == pat
+        name == pattern
     }
 }
 
@@ -426,38 +485,215 @@ pub fn plugin_path(dir: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// Create a temp dir with the given filenames (empty files).
+    fn setup_temp_dir(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for f in files {
+            fs::write(dir.path().join(f), b"").unwrap();
+        }
+        dir
+    }
+
+    // ── matches_glob tests ──
 
     #[test]
-    fn test_matches_pattern_prefix_wildcard() {
-        assert!(matches_pattern(
-            "libdrasi_source_mock.so",
-            "libdrasi_source_*"
+    fn test_matches_glob_prefix_wildcard() {
+        assert!(matches_glob("libdrasi_source_*", "libdrasi_source_mock"));
+        assert!(matches_glob("libdrasi_source_*", "libdrasi_source_http"));
+        assert!(!matches_glob("libdrasi_source_*", "libdrasi_reaction_log"));
+    }
+
+    #[test]
+    fn test_matches_glob_exact() {
+        assert!(matches_glob("libdrasi_source_mock", "libdrasi_source_mock"));
+        assert!(!matches_glob(
+            "libdrasi_source_mock",
+            "libdrasi_source_http"
         ));
-        assert!(matches_pattern(
+    }
+
+    #[test]
+    fn test_matches_glob_middle_wildcard() {
+        assert!(matches_glob("lib*mock", "libdrasi_source_mock"));
+        assert!(!matches_glob("lib*mock", "libdrasi_source_http"));
+    }
+
+    // ── discover_plugin_candidates tests ──
+
+    #[test]
+    fn test_discover_groups_by_base_name() {
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "libdrasi_source_mock.rlib",
+            "libdrasi_source_mock.d",
+        ]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+        assert_eq!(groups["libdrasi_source_mock"].len(), 3);
+    }
+
+    #[test]
+    fn test_discover_ignores_non_matching_files() {
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "unrelated_file.txt",
+            "libfoo.so",
+        ]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+    }
+
+    #[test]
+    fn test_discover_multiple_plugins() {
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "libdrasi_source_mock.rlib",
             "libdrasi_source_http.so",
-            "libdrasi_source_*"
-        ));
-        assert!(!matches_pattern(
+            "libdrasi_source_http.rmeta",
+        ]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+        assert!(groups.contains_key("libdrasi_source_http"));
+    }
+
+    #[test]
+    fn test_discover_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_discover_nonexistent_dir() {
+        let groups = discover_plugin_candidates(Path::new("/nonexistent"), &["libdrasi_*".into()]);
+        assert!(groups.is_empty());
+    }
+
+    // ── cdylib filtering tests ──
+
+    #[test]
+    fn test_cdylib_only_filtering() {
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
+            "libdrasi_source_mock.rlib",
+            "libdrasi_source_mock.d",
+        ]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+        let files = &groups["libdrasi_source_mock"];
+
+        let cdylib_files: Vec<&PathBuf> = files
+            .iter()
+            .filter(|p| {
+                CDYLIB_EXTENSIONS
+                    .iter()
+                    .any(|ext| p.to_string_lossy().ends_with(ext))
+            })
+            .collect();
+
+        assert_eq!(cdylib_files.len(), 1);
+        assert!(cdylib_files[0]
+            .to_string_lossy()
+            .ends_with("libdrasi_source_mock.dylib"));
+    }
+
+    #[test]
+    fn test_ambiguous_cdylib_detected() {
+        let dir = setup_temp_dir(&["libdrasi_source_mock.dylib", "libdrasi_source_mock.so"]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+        let files = &groups["libdrasi_source_mock"];
+
+        let cdylib_files: Vec<&PathBuf> = files
+            .iter()
+            .filter(|p| {
+                CDYLIB_EXTENSIONS
+                    .iter()
+                    .any(|ext| p.to_string_lossy().ends_with(ext))
+            })
+            .collect();
+
+        assert_eq!(
+            cdylib_files.len(),
+            2,
+            "Should detect 2 ambiguous cdylib files"
+        );
+    }
+
+    #[test]
+    fn test_no_cdylib_skips_silently() {
+        let dir = setup_temp_dir(&["libdrasi_source_mock.rlib", "libdrasi_source_mock.d"]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+        let files = &groups["libdrasi_source_mock"];
+
+        let cdylib_files: Vec<&PathBuf> = files
+            .iter()
+            .filter(|p| {
+                CDYLIB_EXTENSIONS
+                    .iter()
+                    .any(|ext| p.to_string_lossy().ends_with(ext))
+            })
+            .collect();
+
+        assert!(
+            cdylib_files.is_empty(),
+            "Should find no cdylib files when only .rlib and .d exist"
+        );
+    }
+
+    #[test]
+    fn test_discover_with_pattern_including_extension() {
+        let dir = setup_temp_dir(&["libdrasi_source_mock.dylib", "libdrasi_source_mock.rlib"]);
+        // Pattern includes an extension — should still match base name
+        let patterns = vec!["libdrasi_source_*.dylib".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+        assert_eq!(groups["libdrasi_source_mock"].len(), 2);
+    }
+
+    #[test]
+    fn test_discover_multiple_patterns() {
+        let dir = setup_temp_dir(&[
+            "libdrasi_source_mock.dylib",
             "libdrasi_reaction_log.so",
-            "libdrasi_source_*"
-        ));
+            "libdrasi_bootstrap_mock.dylib",
+        ]);
+        let patterns = vec![
+            "libdrasi_source_*".to_string(),
+            "libdrasi_reaction_*".to_string(),
+        ];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
+
+        assert_eq!(groups.len(), 2);
+        assert!(groups.contains_key("libdrasi_source_mock"));
+        assert!(groups.contains_key("libdrasi_reaction_log"));
+        assert!(!groups.contains_key("libdrasi_bootstrap_mock"));
     }
 
     #[test]
-    fn test_matches_pattern_exact() {
-        assert!(matches_pattern(
-            "libdrasi_source_mock.so",
-            "libdrasi_source_mock"
-        ));
-        assert!(!matches_pattern(
-            "libdrasi_source_http.so",
-            "libdrasi_source_mock"
-        ));
-    }
+    fn test_file_without_known_extension_matched_by_base() {
+        let dir = setup_temp_dir(&["libdrasi_source_mock"]);
+        let patterns = vec!["libdrasi_source_*".to_string()];
+        let groups = discover_plugin_candidates(dir.path(), &patterns);
 
-    #[test]
-    fn test_matches_pattern_middle_wildcard() {
-        assert!(matches_pattern("libdrasi_source_mock.so", "lib*mock.so"));
-        assert!(!matches_pattern("libdrasi_source_http.so", "lib*mock.so"));
+        // File has no known extension, so base_name == filename
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key("libdrasi_source_mock"));
     }
 }
