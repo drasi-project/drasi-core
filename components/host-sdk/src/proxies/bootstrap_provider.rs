@@ -186,6 +186,7 @@ pub struct BootstrapPluginProxy {
     cached_kind: String,
     cached_config_version: String,
     cached_config_schema_name: String,
+    plugin_id: String,
 }
 
 unsafe impl Send for BootstrapPluginProxy {}
@@ -204,7 +205,18 @@ impl BootstrapPluginProxy {
             cached_kind,
             cached_config_version,
             cached_config_schema_name,
+            plugin_id: String::new(),
         }
+    }
+
+    /// The unique identifier of the plugin that provided this descriptor.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Set the plugin identity for this descriptor.
+    pub fn set_plugin_id(&mut self, id: String) {
+        self.plugin_id = id;
     }
 }
 

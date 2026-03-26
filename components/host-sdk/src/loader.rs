@@ -482,6 +482,116 @@ pub fn plugin_path(dir: &Path, name: &str) -> PathBuf {
     }
 }
 
+// ── Shared naming / discovery helpers ──
+
+/// Default file patterns for discovering Drasi cdylib plugins.
+/// Includes both Unix (`lib` prefix) and Windows (no prefix) naming conventions.
+pub const DEFAULT_PLUGIN_FILE_PATTERNS: &[&str] = &[
+    "libdrasi_source_*",
+    "libdrasi_reaction_*",
+    "libdrasi_bootstrap_*",
+    "drasi_source_*",
+    "drasi_reaction_*",
+    "drasi_bootstrap_*",
+];
+
+/// Known shared library extensions for cdylib plugins.
+pub const PLUGIN_BINARY_EXTENSIONS: &[&str] = CDYLIB_EXTENSIONS;
+
+/// Check whether a filename looks like a Drasi plugin binary.
+pub fn is_plugin_binary(name: &str) -> bool {
+    CDYLIB_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+}
+
+/// Extract a `"type/kind"` string from a Drasi plugin filename.
+///
+/// For example:
+/// - `"libdrasi_source_postgres.so"` → `Some("source/postgres")`
+/// - `"drasi_reaction_log.dll"` → `Some("reaction/log")`
+/// - `"not_a_plugin.txt"` → `None`
+///
+/// Underscores in the kind portion are converted to hyphens.
+pub fn plugin_kind_from_filename(filename: &str) -> Option<String> {
+    let stem = if let Some(stem) = filename.strip_suffix(".so") {
+        stem.strip_prefix("lib")?
+    } else if let Some(stem) = filename.strip_suffix(".dll") {
+        stem
+    } else if let Some(stem) = filename.strip_suffix(".dylib") {
+        stem.strip_prefix("lib")?
+    } else {
+        return None;
+    };
+
+    let stem = stem.strip_prefix("drasi_")?;
+    let mut parts = stem.splitn(2, '_');
+    let ptype = parts.next()?;
+    let kind = parts.next()?.replace('_', "-");
+    Some(format!("{ptype}/{kind}"))
+}
+
+/// Summary of a plugin's metadata read without full initialization.
+///
+/// Obtained by calling only `drasi_plugin_metadata()` — no tokio runtime
+/// is started and no `drasi_plugin_init()` is called.
+#[derive(Debug, Clone)]
+pub struct PluginMetadataSummary {
+    pub plugin_id: String,
+    pub version: String,
+    pub sdk_version: String,
+    pub core_version: String,
+    pub target_triple: String,
+    pub git_commit: String,
+    pub build_timestamp: String,
+    pub file_path: PathBuf,
+}
+
+/// Read a plugin's metadata without fully initializing it.
+///
+/// This calls only `drasi_plugin_metadata()` via `dlopen` + symbol lookup.
+/// No tokio runtime is created and no `drasi_plugin_init()` is called, making
+/// this safe and fast for scanning/inspection flows.
+///
+/// Returns `None` if the library cannot be loaded or does not export metadata.
+pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
+    let lib = unsafe { Library::new(path).ok()? };
+    let meta_fn = unsafe {
+        lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata")
+            .ok()?
+    };
+    let meta_ptr = unsafe { meta_fn() };
+    if meta_ptr.is_null() {
+        return None;
+    }
+    let meta = unsafe { &*meta_ptr };
+    let sdk_version = unsafe { meta.sdk_version.to_string() };
+    let core_version = unsafe { meta.core_version.to_string() };
+    let plugin_version = unsafe { meta.plugin_version.to_string() };
+    let target_triple = unsafe { meta.target_triple.to_string() };
+    let git_commit = unsafe { meta.git_commit.to_string() };
+    let build_timestamp = unsafe { meta.build_timestamp.to_string() };
+
+    // Derive a plugin_id from the filename using the naming convention.
+    let plugin_id = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .and_then(plugin_kind_from_filename)
+        .unwrap_or_default();
+
+    // Leak the library to avoid dlclose (same safety model as LoadedPlugin).
+    std::mem::forget(lib);
+
+    Some(PluginMetadataSummary {
+        plugin_id,
+        version: plugin_version,
+        sdk_version,
+        core_version,
+        target_triple,
+        git_commit,
+        build_timestamp,
+        file_path: path.to_path_buf(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,5 +805,60 @@ mod tests {
         // File has no known extension, so base_name == filename
         assert_eq!(groups.len(), 1);
         assert!(groups.contains_key("libdrasi_source_mock"));
+    }
+
+    // ── Naming / discovery helper tests ──
+
+    #[test]
+    fn test_plugin_kind_from_filename_unix() {
+        assert_eq!(
+            plugin_kind_from_filename("libdrasi_source_postgres.so"),
+            Some("source/postgres".to_string())
+        );
+        assert_eq!(
+            plugin_kind_from_filename("libdrasi_reaction_log.dylib"),
+            Some("reaction/log".to_string())
+        );
+        assert_eq!(
+            plugin_kind_from_filename("libdrasi_bootstrap_postgres.so"),
+            Some("bootstrap/postgres".to_string())
+        );
+    }
+
+    #[test]
+    fn test_plugin_kind_from_filename_windows() {
+        assert_eq!(
+            plugin_kind_from_filename("drasi_source_postgres.dll"),
+            Some("source/postgres".to_string())
+        );
+    }
+
+    #[test]
+    fn test_plugin_kind_from_filename_underscore_to_hyphen() {
+        assert_eq!(
+            plugin_kind_from_filename("libdrasi_source_postgres_replication.so"),
+            Some("source/postgres-replication".to_string())
+        );
+    }
+
+    #[test]
+    fn test_plugin_kind_from_filename_not_a_plugin() {
+        assert_eq!(plugin_kind_from_filename("random_lib.so"), None);
+        assert_eq!(plugin_kind_from_filename("not_a_plugin.txt"), None);
+    }
+
+    #[test]
+    fn test_is_plugin_binary() {
+        assert!(is_plugin_binary("libdrasi_source_mock.so"));
+        assert!(is_plugin_binary("drasi_reaction_log.dll"));
+        assert!(is_plugin_binary("libdrasi_bootstrap_postgres.dylib"));
+        assert!(!is_plugin_binary("plugin.rlib"));
+        assert!(!is_plugin_binary("readme.md"));
+    }
+
+    #[test]
+    #[allow(clippy::const_is_empty)]
+    fn test_default_patterns_not_empty() {
+        assert!(!DEFAULT_PLUGIN_FILE_PATTERNS.is_empty());
     }
 }

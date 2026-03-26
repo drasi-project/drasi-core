@@ -47,6 +47,19 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
+        self.add_reaction_with_metadata(reaction, HashMap::new())
+            .await
+    }
+
+    /// Add a reaction to a running server with additional metadata.
+    ///
+    /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub async fn add_reaction_with_metadata(
+        &self,
+        reaction: impl Reaction + 'static,
+        extra_metadata: HashMap<String, String>,
+    ) -> Result<()> {
         self.state_guard.require_initialized()?;
 
         // Capture auto_start and id before transferring ownership
@@ -61,6 +74,7 @@ impl DrasiLib {
             let mut metadata = HashMap::new();
             metadata.insert("kind".to_string(), reaction_type);
             metadata.insert("autoStart".to_string(), should_auto_start.to_string());
+            metadata.extend(extra_metadata);
             graph
                 .register_reaction(&reaction_id, metadata, &query_ids)
                 .map_err(|e| {

@@ -47,6 +47,18 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
+        self.add_source_with_metadata(source, HashMap::new()).await
+    }
+
+    /// Add a source to a running server with additional metadata.
+    ///
+    /// Same as [`add_source`](Self::add_source) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub async fn add_source_with_metadata(
+        &self,
+        source: impl Source + 'static,
+        extra_metadata: HashMap<String, String>,
+    ) -> Result<()> {
         self.state_guard.require_initialized()?;
 
         // Capture auto_start and id before transferring ownership
@@ -60,6 +72,7 @@ impl DrasiLib {
             let mut metadata = HashMap::new();
             metadata.insert("kind".to_string(), source_type);
             metadata.insert("autoStart".to_string(), should_auto_start.to_string());
+            metadata.extend(extra_metadata);
             graph.register_source(&source_id, metadata).map_err(|e| {
                 DrasiError::operation_failed(
                     "source",

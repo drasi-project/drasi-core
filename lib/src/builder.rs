@@ -121,8 +121,14 @@ pub struct DrasiLibBuilder {
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
-    source_instances: Vec<Box<dyn SourceTrait>>,
-    reaction_instances: Vec<Box<dyn ReactionTrait>>,
+    source_instances: Vec<(
+        Box<dyn SourceTrait>,
+        std::collections::HashMap<String, String>,
+    )>,
+    reaction_instances: Vec<(
+        Box<dyn ReactionTrait>,
+        std::collections::HashMap<String, String>,
+    )>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
 }
@@ -237,7 +243,22 @@ impl DrasiLibBuilder {
     ///     .await?;
     /// ```
     pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
-        self.source_instances.push(Box::new(source));
+        self.source_instances
+            .push((Box::new(source), std::collections::HashMap::new()));
+        self
+    }
+
+    /// Add a source instance with additional component metadata.
+    ///
+    /// Like [`with_source`](Self::with_source) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub fn with_source_metadata(
+        mut self,
+        source: impl SourceTrait + 'static,
+        extra_metadata: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.source_instances
+            .push((Box::new(source), extra_metadata));
         self
     }
 
@@ -261,7 +282,22 @@ impl DrasiLibBuilder {
     ///     .await?;
     /// ```
     pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
-        self.reaction_instances.push(Box::new(reaction));
+        self.reaction_instances
+            .push((Box::new(reaction), std::collections::HashMap::new()));
+        self
+    }
+
+    /// Add a reaction instance with additional component metadata.
+    ///
+    /// Like [`with_reaction`](Self::with_reaction) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub fn with_reaction_metadata(
+        mut self,
+        reaction: impl ReactionTrait + 'static,
+        extra_metadata: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.reaction_instances
+            .push((Box::new(reaction), extra_metadata));
         self
     }
 
@@ -350,7 +386,7 @@ impl DrasiLibBuilder {
 
         // Inject pre-built source instances BEFORE initialize.
         // Queries reference sources by ID, so sources must be in the graph first.
-        for source in self.source_instances {
+        for (source, extra_metadata) in self.source_instances {
             let source_id = source.id().to_string();
             let source_type = source.type_name().to_string();
             let auto_start = source.auto_start();
@@ -360,6 +396,7 @@ impl DrasiLibBuilder {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("kind".to_string(), source_type);
                 metadata.insert("autoStart".to_string(), auto_start.to_string());
+                metadata.extend(extra_metadata);
                 graph.register_source(&source_id, metadata).map_err(|e| {
                     DrasiError::operation_failed(
                         "source",
@@ -385,7 +422,7 @@ impl DrasiLibBuilder {
         core.initialize().await?;
 
         // Inject pre-built reaction instances
-        for reaction in self.reaction_instances {
+        for (reaction, extra_metadata) in self.reaction_instances {
             let reaction_id = reaction.id().to_string();
             let reaction_type = reaction.type_name().to_string();
             let query_ids = reaction.query_ids();
@@ -395,6 +432,7 @@ impl DrasiLibBuilder {
                 let mut graph = core.component_graph.write().await;
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("kind".to_string(), reaction_type);
+                metadata.extend(extra_metadata);
                 graph
                     .register_reaction(&reaction_id, metadata, &query_ids)
                     .map_err(|e| {
