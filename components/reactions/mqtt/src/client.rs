@@ -139,8 +139,16 @@ impl MqttClient {
             MqttTransportMode::TCP => {
                 options.set_transport(rumqttc::Transport::Tcp);
             }
-            MqttTransportMode::TLS { ca, alpn, client_auth } => {
-                let tls_config = rumqttc::TlsConfiguration::Simple { ca, alpn, client_auth };
+            MqttTransportMode::TLS {
+                ca,
+                alpn,
+                client_auth,
+            } => {
+                let tls_config = rumqttc::TlsConfiguration::Simple {
+                    ca,
+                    alpn,
+                    client_auth,
+                };
                 options.set_transport(rumqttc::Transport::Tls(tls_config));
             }
         }
