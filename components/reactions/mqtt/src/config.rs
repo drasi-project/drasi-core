@@ -97,7 +97,7 @@ pub enum MqttAuthMode {
 pub enum MqttTransportMode {
     #[default]
     TCP,
-    TLS{
+    TLS {
         /// ca certificate
         ca: Vec<u8>,
         /// alpn settings
