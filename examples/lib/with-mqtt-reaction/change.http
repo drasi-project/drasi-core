@@ -1,0 +1,331 @@
+### ============================================================================
+### DrasiLib Stock Monitor - REST Client
+### ============================================================================
+### Use with VS Code REST Client extension or similar tools.
+###
+### The HTTP source listens on port 9000 and accepts events at:
+###   POST /sources/stock-prices/events       (single event)
+###   POST /sources/stock-prices/events/batch (multiple events)
+###
+### Each event can be: insert, update, or delete
+### ============================================================================
+
+### Health check - verify the HTTP source is running
+GET http://localhost:9000/health
+
+###
+
+### ============================================================================
+### INSERT OPERATIONS
+### ============================================================================
+
+### Insert a new stock (AMZN)
+### This will appear in all-prices query, and potentially gainers/high-volume
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "insert",
+  "element": {
+    "type": "node",
+    "id": "price_AMZN",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "AMZN",
+      "price": 178.25,
+      "previous_close": 175.00,
+      "volume": 4200000
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### UPDATE OPERATIONS
+### ============================================================================
+
+### Update AAPL price (price increase)
+### This will trigger the gainers query since price > previous_close
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_AAPL",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "AAPL",
+      "price": 178.50,
+      "previous_close": 173.00,
+      "volume": 6500000
+    }
+  }
+}
+
+###
+
+### Update MSFT price (price decrease)
+### This will remove MSFT from gainers query (if it was there)
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_MSFT",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "MSFT",
+      "price": 378.00,
+      "previous_close": 382.00,
+      "volume": 2800000
+    }
+  }
+}
+
+###
+
+### Update NVDA with high volume
+### This will appear in high-volume query (volume > 1M)
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_NVDA",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "NVDA",
+      "price": 535.00,
+      "previous_close": 515.00,
+      "volume": 12000000
+    }
+  }
+}
+
+###
+
+### Update TSLA - make it a gainer
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "update",
+  "element": {
+    "type": "node",
+    "id": "price_TSLA",
+    "labels": ["stock_prices"],
+    "properties": {
+      "symbol": "TSLA",
+      "price": 265.00,
+      "previous_close": 250.00,
+      "volume": 9500000
+    }
+  }
+}
+
+###
+
+### ============================================================================
+### DELETE OPERATIONS
+### ============================================================================
+
+### Delete TSLA from the system
+### This will remove it from all queries
+POST http://localhost:9000/sources/stock-prices/events
+Content-Type: application/json
+
+{
+  "operation": "delete",
+  "id": "price_TSLA",
+  "labels": ["stock_prices"]
+}
+
+###
+
+### ============================================================================
+### BATCH OPERATIONS
+### ============================================================================
+
+### Batch update - update multiple stocks in a single request
+### More efficient for high-throughput scenarios
+POST http://localhost:9000/sources/stock-prices/events/batch
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_AAPL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "AAPL",
+          "price": 180.00,
+          "previous_close": 173.00,
+          "volume": 7500000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_GOOGL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "GOOGL",
+          "price": 145.50,
+          "previous_close": 140.50,
+          "volume": 1500000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_MSFT",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "MSFT",
+          "price": 385.00,
+          "previous_close": 382.00,
+          "volume": 3100000
+        }
+      }
+    }
+  ]
+}
+
+###
+
+### ============================================================================
+### SIMULATED MARKET SCENARIOS
+### ============================================================================
+
+### Scenario: Market Rally - All stocks go up
+POST http://localhost:9000/sources/stock-prices/events/batch
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_AAPL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "AAPL",
+          "price": 185.00,
+          "previous_close": 173.00,
+          "volume": 10000000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_MSFT",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "MSFT",
+          "price": 395.00,
+          "previous_close": 382.00,
+          "volume": 5000000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_GOOGL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "GOOGL",
+          "price": 150.00,
+          "previous_close": 140.50,
+          "volume": 3000000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_NVDA",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "NVDA",
+          "price": 550.00,
+          "previous_close": 515.00,
+          "volume": 8000000
+        }
+      }
+    }
+  ]
+}
+
+###
+
+### Scenario: Low volume day - All stocks below 1M volume
+### This will clear the high-volume query
+POST http://localhost:9000/sources/stock-prices/events/batch
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_AAPL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "AAPL",
+          "price": 176.00,
+          "previous_close": 173.00,
+          "volume": 500000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_MSFT",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "MSFT",
+          "price": 383.00,
+          "previous_close": 382.00,
+          "volume": 800000
+        }
+      }
+    },
+    {
+      "operation": "update",
+      "element": {
+        "type": "node",
+        "id": "price_GOOGL",
+        "labels": ["stock_prices"],
+        "properties": {
+          "symbol": "GOOGL",
+          "price": 141.00,
+          "previous_close": 140.50,
+          "volume": 400000
+        }
+      }
+    }
+  ]
+}
