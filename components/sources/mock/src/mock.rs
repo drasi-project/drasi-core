@@ -154,36 +154,28 @@ impl Source for MockSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "interval_ms".to_string(),
-            serde_json::Value::Number(self.config.interval_ms.into()),
-        );
-        match &self.config.data_type {
-            DataType::Counter => {
-                props.insert(
-                    "data_type".to_string(),
-                    serde_json::Value::String("counter".to_string()),
-                );
-            }
-            DataType::SensorReading { sensor_count } => {
-                props.insert(
-                    "data_type".to_string(),
-                    serde_json::Value::String("sensor_reading".to_string()),
-                );
-                props.insert(
-                    "sensor_count".to_string(),
-                    serde_json::Value::Number((*sensor_count).into()),
-                );
-            }
-            DataType::Generic => {
-                props.insert(
-                    "data_type".to_string(),
-                    serde_json::Value::String("generic".to_string()),
-                );
-            }
+        // Serialize through the DTO to get camelCase naming and structured output
+        // matching the creation schema and config file format
+        use crate::descriptor::{DataTypeDto, MockSourceConfigDto};
+        use drasi_plugin_sdk::ConfigValue;
+
+        let data_type_dto = match &self.config.data_type {
+            DataType::Counter => DataTypeDto::Counter,
+            DataType::SensorReading { sensor_count } => DataTypeDto::SensorReading {
+                sensor_count: *sensor_count,
+            },
+            DataType::Generic => DataTypeDto::Generic,
+        };
+
+        let dto = MockSourceConfigDto {
+            data_type: data_type_dto,
+            interval_ms: ConfigValue::Static(self.config.interval_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props
     }
 
     fn auto_start(&self) -> bool {
