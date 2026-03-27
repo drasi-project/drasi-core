@@ -68,7 +68,7 @@ members = [
   "shared-tests",
   "query-perf",
   "examples/query",
-  "lib-integration-tests", "components/reactions/mqtt",
+  "lib-integration-tests",
   ]
 
 # Exclude internal crates from workspace packaging
