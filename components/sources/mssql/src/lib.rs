@@ -185,35 +185,62 @@ impl Source for MsSqlSource {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        let mut props = std::collections::HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "database".to_string(),
-            serde_json::Value::String(self.config.database.clone()),
-        );
-        props.insert(
-            "user".to_string(),
-            serde_json::Value::String(self.config.user.clone()),
-        );
-        // Don't expose password
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-        props
+        use crate::descriptor::{
+            AuthModeDto, EncryptionModeDto, MsSqlSourceConfigDto, StartPositionDto,
+            TableKeyConfigDto,
+        };
+        use drasi_plugin_sdk::ConfigValue;
+
+        let auth_mode_dto = match self.config.auth_mode {
+            crate::AuthMode::SqlServer => AuthModeDto::SqlServer,
+            crate::AuthMode::Windows => AuthModeDto::Windows,
+            crate::AuthMode::AzureAd => AuthModeDto::AzureAd,
+        };
+
+        let encryption_dto = match self.config.encryption {
+            crate::EncryptionMode::Off => EncryptionModeDto::Off,
+            crate::EncryptionMode::On => EncryptionModeDto::On,
+            crate::EncryptionMode::NotSupported => EncryptionModeDto::NotSupported,
+        };
+
+        let start_position_dto = match self.config.start_position {
+            crate::StartPosition::Beginning => StartPositionDto::Beginning,
+            crate::StartPosition::Current => StartPositionDto::Current,
+        };
+
+        let table_keys_dto: Vec<TableKeyConfigDto> = self
+            .config
+            .table_keys
+            .iter()
+            .map(|tk| TableKeyConfigDto {
+                table: tk.table.clone(),
+                key_columns: tk.key_columns.clone(),
+            })
+            .collect();
+
+        let dto = MsSqlSourceConfigDto {
+            host: ConfigValue::Static(self.config.host.clone()),
+            port: ConfigValue::Static(self.config.port),
+            database: ConfigValue::Static(self.config.database.clone()),
+            user: ConfigValue::Static(self.config.user.clone()),
+            password: ConfigValue::Static(self.config.password.clone()),
+            auth_mode: ConfigValue::Static(auth_mode_dto),
+            tables: self.config.tables.clone(),
+            poll_interval_ms: ConfigValue::Static(self.config.poll_interval_ms),
+            encryption: ConfigValue::Static(encryption_dto),
+            trust_server_certificate: ConfigValue::Static(self.config.trust_server_certificate),
+            table_keys: table_keys_dto,
+            start_position: ConfigValue::Static(start_position_dto),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                // Don't expose password
+                map.remove("password");
+                map.into_iter().collect()
+            }
+            _ => std::collections::HashMap::new(),
+        }
     }
 
     fn auto_start(&self) -> bool {

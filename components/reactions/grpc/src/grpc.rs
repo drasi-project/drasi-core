@@ -356,42 +356,28 @@ impl Reaction for GrpcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "endpoint".to_string(),
-            serde_json::Value::String(self.config.endpoint.clone()),
-        );
-        props.insert(
-            "batch_size".to_string(),
-            serde_json::Value::Number(self.config.batch_size.into()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props.insert(
-            "batch_flush_timeout_ms".to_string(),
-            serde_json::Value::from(self.config.batch_flush_timeout_ms),
-        );
-        props.insert(
-            "max_retries".to_string(),
-            serde_json::Value::from(self.config.max_retries),
-        );
-        props.insert(
-            "connection_retry_attempts".to_string(),
-            serde_json::Value::from(self.config.connection_retry_attempts),
-        );
-        props.insert(
-            "initial_connection_timeout_ms".to_string(),
-            serde_json::Value::from(self.config.initial_connection_timeout_ms),
-        );
-        if !self.config.metadata.is_empty() {
-            props.insert(
-                "metadata".to_string(),
-                serde_json::to_value(&self.config.metadata).unwrap_or_default(),
-            );
+        use crate::descriptor::GrpcReactionConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = GrpcReactionConfigDto {
+            endpoint: ConfigValue::Static(self.config.endpoint.clone()),
+            timeout_ms: Some(ConfigValue::Static(self.config.timeout_ms)),
+            batch_size: Some(ConfigValue::Static(self.config.batch_size)),
+            batch_flush_timeout_ms: Some(ConfigValue::Static(self.config.batch_flush_timeout_ms)),
+            max_retries: Some(ConfigValue::Static(self.config.max_retries)),
+            connection_retry_attempts: Some(ConfigValue::Static(
+                self.config.connection_retry_attempts,
+            )),
+            initial_connection_timeout_ms: Some(ConfigValue::Static(
+                self.config.initial_connection_timeout_ms,
+            )),
+            metadata: self.config.metadata.clone(),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -444,16 +444,58 @@ impl Reaction for AdaptiveHttpReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.config.base_url.clone()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props
+        use crate::descriptor::{CallSpecDto, HttpAdaptiveReactionConfigDto, HttpQueryConfigDto};
+        use drasi_plugin_sdk::ConfigValue;
+
+        fn map_call_to_dto(cs: &drasi_reaction_http::CallSpec) -> CallSpecDto {
+            CallSpecDto {
+                url: cs.url.clone(),
+                method: cs.method.clone(),
+                body: cs.body.clone(),
+                headers: cs.headers.clone(),
+            }
+        }
+
+        fn map_qc_to_dto(qc: &drasi_reaction_http::QueryConfig) -> HttpQueryConfigDto {
+            HttpQueryConfigDto {
+                added: qc.added.as_ref().map(map_call_to_dto),
+                updated: qc.updated.as_ref().map(map_call_to_dto),
+                deleted: qc.deleted.as_ref().map(map_call_to_dto),
+            }
+        }
+
+        let dto = HttpAdaptiveReactionConfigDto {
+            base_url: ConfigValue::Static(self.config.base_url.clone()),
+            token: self
+                .config
+                .token
+                .as_ref()
+                .map(|t| ConfigValue::Static(t.clone())),
+            timeout_ms: Some(ConfigValue::Static(self.config.timeout_ms)),
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+            adaptive_min_batch_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_min_batch_size,
+            )),
+            adaptive_max_batch_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_max_batch_size,
+            )),
+            adaptive_window_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_window_size,
+            )),
+            adaptive_batch_timeout_ms: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_batch_timeout_ms,
+            )),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -93,9 +93,10 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
     }
 
@@ -108,7 +109,7 @@ mod properties {
         let props = source.properties();
 
         assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(2000.into()))
         );
     }
@@ -121,10 +122,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(
-            props.get("sensor_count"),
-            Some(&serde_json::Value::Number(10.into()))
-        );
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), Some(&serde_json::json!(10)));
     }
 
     #[test]
@@ -135,7 +134,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(props.get("sensor_count"), None);
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -146,7 +146,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(props.get("sensor_count"), None);
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -231,16 +232,14 @@ mod builder {
         let source = MockSourceBuilder::new("test").build().unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("type"), Some(&serde_json::json!("generic")));
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("generic".to_string()))
-        );
-        assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(5000.into()))
         );
-        // sensor_count should not be present for generic
-        assert_eq!(props.get("sensor_count"), None);
+        // sensorCount should not be present for generic
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -252,18 +251,16 @@ mod builder {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
         assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(1000.into()))
         );
-        assert_eq!(
-            props.get("sensor_count"),
-            Some(&serde_json::Value::Number(10.into()))
-        );
+        assert_eq!(data_type.get("sensorCount"), Some(&serde_json::json!(10)));
     }
 
     #[test]
@@ -275,9 +272,10 @@ mod builder {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
     }
 
@@ -1220,12 +1218,10 @@ mod builder_advanced {
 
         assert_eq!(source.id(), "test-static-builder");
         let props = source.properties();
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("type"), Some(&serde_json::json!("generic")));
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("generic".to_string()))
-        );
-        assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(2000.into()))
         );
     }

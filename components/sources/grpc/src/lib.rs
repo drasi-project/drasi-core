@@ -246,26 +246,24 @@ impl Source for GrpcSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        if let Some(ref endpoint) = self.config.endpoint {
-            props.insert(
-                "endpoint".to_string(),
-                serde_json::Value::String(endpoint.clone()),
-            );
+        use crate::descriptor::GrpcSourceConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = GrpcSourceConfigDto {
+            host: ConfigValue::Static(self.config.host.clone()),
+            port: ConfigValue::Static(self.config.port),
+            endpoint: self
+                .config
+                .endpoint
+                .as_ref()
+                .map(|e| ConfigValue::Static(e.clone())),
+            timeout_ms: ConfigValue::Static(self.config.timeout_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props
     }
 
     fn auto_start(&self) -> bool {

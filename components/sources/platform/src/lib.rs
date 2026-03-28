@@ -1055,34 +1055,26 @@ impl Source for PlatformSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "redis_url".to_string(),
-            serde_json::Value::String(self.config.redis_url.clone()),
-        );
-        props.insert(
-            "stream_key".to_string(),
-            serde_json::Value::String(self.config.stream_key.clone()),
-        );
-        props.insert(
-            "consumer_group".to_string(),
-            serde_json::Value::String(self.config.consumer_group.clone()),
-        );
-        if let Some(ref consumer_name) = self.config.consumer_name {
-            props.insert(
-                "consumer_name".to_string(),
-                serde_json::Value::String(consumer_name.clone()),
-            );
+        use crate::descriptor::PlatformSourceConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = PlatformSourceConfigDto {
+            redis_url: ConfigValue::Static(self.config.redis_url.clone()),
+            stream_key: ConfigValue::Static(self.config.stream_key.clone()),
+            consumer_group: ConfigValue::Static(self.config.consumer_group.clone()),
+            consumer_name: self
+                .config
+                .consumer_name
+                .as_ref()
+                .map(|n| ConfigValue::Static(n.clone())),
+            batch_size: ConfigValue::Static(self.config.batch_size),
+            block_ms: ConfigValue::Static(self.config.block_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props.insert(
-            "batch_size".to_string(),
-            serde_json::Value::Number(self.config.batch_size.into()),
-        );
-        props.insert(
-            "block_ms".to_string(),
-            serde_json::Value::Number(self.config.block_ms.into()),
-        );
-        props
     }
 
     fn auto_start(&self) -> bool {

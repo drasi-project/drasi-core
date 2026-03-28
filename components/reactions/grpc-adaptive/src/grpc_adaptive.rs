@@ -436,20 +436,38 @@ impl Reaction for AdaptiveGrpcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "endpoint".to_string(),
-            serde_json::Value::String(self.config.endpoint.clone()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props.insert(
-            "max_retries".to_string(),
-            serde_json::Value::Number(self.config.max_retries.into()),
-        );
-        props
+        use crate::descriptor::GrpcAdaptiveReactionConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = GrpcAdaptiveReactionConfigDto {
+            endpoint: ConfigValue::Static(self.config.endpoint.clone()),
+            timeout_ms: Some(ConfigValue::Static(self.config.timeout_ms)),
+            max_retries: Some(ConfigValue::Static(self.config.max_retries)),
+            connection_retry_attempts: Some(ConfigValue::Static(
+                self.config.connection_retry_attempts,
+            )),
+            initial_connection_timeout_ms: Some(ConfigValue::Static(
+                self.config.initial_connection_timeout_ms,
+            )),
+            metadata: self.config.metadata.clone(),
+            adaptive_min_batch_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_min_batch_size,
+            )),
+            adaptive_max_batch_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_max_batch_size,
+            )),
+            adaptive_window_size: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_window_size,
+            )),
+            adaptive_batch_timeout_ms: Some(ConfigValue::Static(
+                self.config.adaptive.adaptive_batch_timeout_ms,
+            )),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -328,20 +328,36 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        if !self.config.routes.is_empty() {
-            props.insert(
-                "routes".to_string(),
-                serde_json::to_value(&self.config.routes).unwrap_or_default(),
-            );
+        use crate::descriptor::{LogReactionConfigDto, QueryConfigDto, TemplateSpecDto};
+
+        fn map_spec_to_dto(spec: &crate::TemplateSpec) -> TemplateSpecDto {
+            TemplateSpecDto {
+                template: spec.template.clone(),
+            }
         }
-        if let Some(ref default_template) = self.config.default_template {
-            props.insert(
-                "default_template".to_string(),
-                serde_json::to_value(default_template).unwrap_or_default(),
-            );
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> QueryConfigDto {
+            QueryConfigDto {
+                added: qc.added.as_ref().map(map_spec_to_dto),
+                updated: qc.updated.as_ref().map(map_spec_to_dto),
+                deleted: qc.deleted.as_ref().map(map_spec_to_dto),
+            }
         }
-        props
+
+        let dto = LogReactionConfigDto {
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+            default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -242,22 +242,46 @@ impl Reaction for HttpReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.config.base_url.clone()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        if !self.config.routes.is_empty() {
-            props.insert(
-                "routes".to_string(),
-                serde_json::to_value(&self.config.routes).unwrap_or_default(),
-            );
+        use crate::descriptor::{CallSpecDto, HttpQueryConfigDto, HttpReactionConfigDto};
+        use drasi_plugin_sdk::ConfigValue;
+
+        fn map_call_to_dto(cs: &crate::CallSpec) -> CallSpecDto {
+            CallSpecDto {
+                url: cs.url.clone(),
+                method: cs.method.clone(),
+                body: cs.body.clone(),
+                headers: cs.headers.clone(),
+            }
         }
-        props
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> HttpQueryConfigDto {
+            HttpQueryConfigDto {
+                added: qc.added.as_ref().map(map_call_to_dto),
+                updated: qc.updated.as_ref().map(map_call_to_dto),
+                deleted: qc.deleted.as_ref().map(map_call_to_dto),
+            }
+        }
+
+        let dto = HttpReactionConfigDto {
+            base_url: ConfigValue::Static(self.config.base_url.clone()),
+            token: self
+                .config
+                .token
+                .as_ref()
+                .map(|t| ConfigValue::Static(t.clone())),
+            timeout_ms: Some(ConfigValue::Static(self.config.timeout_ms)),
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

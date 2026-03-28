@@ -44,7 +44,7 @@ fn plugin_dir() -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    workspace_root.join("target").join("debug")
+    workspace_root.join("target").join("debug").join("plugins")
 }
 
 /// Get the platform-specific plugin filename.
