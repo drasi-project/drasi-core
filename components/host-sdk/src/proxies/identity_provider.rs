@@ -75,7 +75,10 @@ impl IdentityProvider for HostIdentityProviderProxy {
     }
 
     fn clone_box(&self) -> Box<dyn IdentityProvider> {
-        assert!(!self.vtable.state.is_null(), "IdentityProvider state is null during clone");
+        assert!(
+            !self.vtable.state.is_null(),
+            "IdentityProvider state is null during clone"
+        );
         let cloned_state = (self.vtable.clone_fn)(self.vtable.state as *const c_void);
         let cloned_vtable = drasi_plugin_sdk::ffi::identity::IdentityProviderVtable {
             state: cloned_state,

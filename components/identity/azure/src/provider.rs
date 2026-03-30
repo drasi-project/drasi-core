@@ -153,7 +153,8 @@ mod tests {
 
     #[test]
     fn test_with_default_credentials_creates_provider() {
-        let result = AzureIdentityProvider::with_default_credentials("devuser@tenant.onmicrosoft.com");
+        let result =
+            AzureIdentityProvider::with_default_credentials("devuser@tenant.onmicrosoft.com");
         assert!(result.is_ok());
         let provider = result.unwrap();
         assert_eq!(provider.identity_name, "devuser@tenant.onmicrosoft.com");
@@ -163,7 +164,8 @@ mod tests {
     #[test]
     fn test_with_workload_identity_creates_provider() {
         // WorkloadIdentityCredential may fail without AKS env vars, but should not panic.
-        let _result = AzureIdentityProvider::with_workload_identity("workload@tenant.onmicrosoft.com");
+        let _result =
+            AzureIdentityProvider::with_workload_identity("workload@tenant.onmicrosoft.com");
     }
 
     // ---- Scope tests ----
