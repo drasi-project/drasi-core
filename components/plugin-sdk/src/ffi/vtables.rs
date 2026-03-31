@@ -383,6 +383,10 @@ unsafe impl Sync for StateStoreVtable {}
 
 /// FFI-safe plugin registration returned by `drasi_plugin_init()`.
 /// Contains factory vtables for all plugin types this shared library provides.
+///
+/// **ABI note**: This struct is `#[repr(C)]`. New fields must always be appended
+/// at the end so that plugins compiled against an older SDK layout remain
+/// compatible (the host simply treats trailing fields as absent).
 #[repr(C)]
 pub struct FfiPluginRegistration {
     pub source_plugins: *mut SourcePluginVtable,
@@ -391,8 +395,6 @@ pub struct FfiPluginRegistration {
     pub reaction_plugin_count: usize,
     pub bootstrap_plugins: *mut BootstrapPluginVtable,
     pub bootstrap_plugin_count: usize,
-    pub identity_provider_plugins: *mut IdentityProviderPluginVtable,
-    pub identity_provider_plugin_count: usize,
     /// Host calls this to provide a log callback with an opaque context pointer.
     /// The plugin stores both the callback and context, passing context back on every call.
     pub set_log_callback:
@@ -402,4 +404,9 @@ pub struct FfiPluginRegistration {
         ctx: *mut ::std::ffi::c_void,
         callback: super::callbacks::LifecycleCallbackFn,
     ),
+    // --- Fields below were added after the initial ABI. They MUST remain at
+    // the end so that older plugin binaries (which allocate a smaller struct)
+    // are still layout-compatible with the host.
+    pub identity_provider_plugins: *mut IdentityProviderPluginVtable,
+    pub identity_provider_plugin_count: usize,
 }
