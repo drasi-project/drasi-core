@@ -48,8 +48,9 @@ pub use metadata::{
     PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,
 };
 pub use types::{
-    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiDispatchMode,
-    FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,
+    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult,
+    FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr,
+    SendPtr,
 };
 pub use vtable_gen::{
     build_bootstrap_plugin_vtable, build_bootstrap_provider_vtable, build_reaction_plugin_vtable,

@@ -388,7 +388,13 @@ impl SourcePluginDescriptor for SourcePluginProxy {
 
         let state = self.vtable.state;
         let create_fn = self.vtable.create_source_fn;
-        let vtable_ptr = (create_fn)(state, id_ffi, config_ffi, auto_start);
+        let result = (create_fn)(state, id_ffi, config_ffi, auto_start);
+
+        let vtable_ptr = unsafe {
+            result
+                .into_result::<SourceVtable>()
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        };
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(

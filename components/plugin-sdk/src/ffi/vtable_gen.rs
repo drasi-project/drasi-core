@@ -1586,7 +1586,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         id: FfiStr,
         config_json: FfiStr,
         auto_start: bool,
-    ) -> *mut SourceVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const SourcePluginWrapper<T>) };
         let id_str = unsafe { id.to_string() };
         let config_str = unsafe { config_json.to_string() };
@@ -1594,8 +1594,9 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse config JSON for source '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse config JSON for source '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1618,11 +1619,12 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
                     w.lifecycle_emitter,
                     w.runtime_handle,
                 );
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create source '{id_str}': {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create source '{id_str}': {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }
@@ -1710,7 +1712,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         query_ids_json: FfiStr,
         config_json: FfiStr,
         auto_start: bool,
-    ) -> *mut ReactionVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
         let id_str = unsafe { id.to_string() };
         let query_ids_str = unsafe { query_ids_json.to_string() };
@@ -1719,16 +1721,18 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         let query_ids: Vec<String> = match serde_json::from_str(&query_ids_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse config JSON for reaction '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse config JSON for reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1751,11 +1755,12 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
                     w.lifecycle_emitter,
                     w.runtime_handle,
                 );
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create reaction '{id_str}': {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }
@@ -1842,7 +1847,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         state: *mut c_void,
         config_json: FfiStr,
         source_config_json: FfiStr,
-    ) -> *mut BootstrapProviderVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const BootstrapPluginWrapper<T>) };
         let config_str = unsafe { config_json.to_string() };
         let source_config_str = unsafe { source_config_json.to_string() };
@@ -1850,16 +1855,18 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse bootstrap config JSON: {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse bootstrap config JSON: {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
         let source_config_value: serde_json::Value = match serde_json::from_str(&source_config_str)
         {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse source config JSON: {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse source config JSON: {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1876,11 +1883,12 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         match result {
             Ok(provider) => {
                 let vtable = build_bootstrap_provider_vtable(provider, w.executor);
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create bootstrap provider: {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create bootstrap provider: {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }

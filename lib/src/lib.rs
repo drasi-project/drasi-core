@@ -79,6 +79,9 @@ pub mod profiling;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
+#[cfg(test)]
+mod lifecycle_events_tests;
+
 // ============================================================================
 // Clean Public API - Everything Users Need
 // ============================================================================

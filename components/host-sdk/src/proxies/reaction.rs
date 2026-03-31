@@ -357,7 +357,13 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
 
         let state = self.vtable.state;
         let create_fn = self.vtable.create_reaction_fn;
-        let vtable_ptr = (create_fn)(state, id_ffi, query_ids_ffi, config_ffi, auto_start);
+        let result = (create_fn)(state, id_ffi, query_ids_ffi, config_ffi, auto_start);
+
+        let vtable_ptr = unsafe {
+            result
+                .into_result::<ReactionVtable>()
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        };
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(

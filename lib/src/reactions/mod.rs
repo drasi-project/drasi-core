@@ -17,7 +17,7 @@ pub mod manager;
 mod traits;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // Re-export the Reaction trait. QueryProvider is internal to ReactionManager.
 pub(crate) use traits::QueryProvider;

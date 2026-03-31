@@ -197,6 +197,76 @@ impl FfiResult {
 unsafe impl Send for FfiResult {}
 
 // ============================================================================
+// Factory create result — returns a vtable pointer OR an error message
+// ============================================================================
+
+/// Result of a factory create operation across the FFI boundary.
+///
+/// Used by `create_source_fn`, `create_reaction_fn`, and
+/// `create_bootstrap_provider_fn` to return either a vtable pointer on success
+/// or an error message on failure. This replaces the previous pattern of
+/// returning a raw pointer (null on error) which lost error details.
+#[repr(C)]
+pub struct FfiCreateResult {
+    /// Pointer to the created vtable, or null on error.
+    pub ptr: *mut c_void,
+    /// 0 on success, non-zero on error.
+    pub error_code: i32,
+    /// Error message (heap-allocated C string), or null on success.
+    pub error_msg: *mut c_char,
+}
+
+impl FfiCreateResult {
+    /// Create a successful result wrapping a vtable pointer.
+    pub fn ok<T>(vtable: *mut T) -> Self {
+        Self {
+            ptr: vtable as *mut c_void,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    /// Create a null/success result (used by bootstrap providers that may return null).
+    pub fn null_ok() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    /// Create an error result with a message.
+    pub fn err(msg: String) -> Self {
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            ptr: std::ptr::null_mut(),
+            error_code: 1,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+
+    /// Convert into a Result, consuming the error message.
+    ///
+    /// # Safety
+    /// Must only be called once if error_msg is non-null.
+    pub unsafe fn into_result<T>(self) -> Result<*mut T, String> {
+        if self.error_code == 0 {
+            Ok(self.ptr as *mut T)
+        } else if !self.error_msg.is_null() {
+            let msg = std::ffi::CString::from_raw(self.error_msg)
+                .into_string()
+                .unwrap_or_default();
+            Err(msg)
+        } else {
+            Err("unknown error".to_string())
+        }
+    }
+}
+
+// Safety: FfiCreateResult owns its error_msg pointer; it's only consumed once via into_result().
+unsafe impl Send for FfiCreateResult {}
+
+// ============================================================================
 // State store get result
 // ============================================================================
 

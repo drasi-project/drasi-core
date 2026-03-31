@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #[cfg(test)]
-mod manager_tests {
+pub(crate) mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::test_helpers::wait_for_component_status;
@@ -37,7 +37,7 @@ mod manager_tests {
     }
 
     /// A simple test mock reaction for unit testing the ReactionManager.
-    struct TestMockReaction {
+    pub struct TestMockReaction {
         id: String,
         queries: Vec<String>,
         auto_start: bool,
@@ -46,7 +46,7 @@ mod manager_tests {
     }
 
     impl TestMockReaction {
-        fn new(id: String, queries: Vec<String>) -> Self {
+        pub fn new(id: String, queries: Vec<String>) -> Self {
             let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
             Self {
                 id,
@@ -56,7 +56,7 @@ mod manager_tests {
             }
         }
 
-        fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
+        pub fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
             let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
             Self {
                 id,
@@ -135,7 +135,7 @@ mod manager_tests {
     }
 
     /// Helper to create a TestMockReaction instance
-    fn create_test_mock_reaction(id: String, queries: Vec<String>) -> TestMockReaction {
+    pub fn create_test_mock_reaction(id: String, queries: Vec<String>) -> TestMockReaction {
         TestMockReaction::new(id, queries)
     }
 
