@@ -112,6 +112,14 @@ fn convert_variable_value_to_json(value: &VariableValue) -> serde_json::Value {
             }
             serde_json::Value::Object(result)
         }
+        VariableValue::Date(d) => serde_json::Value::String(d.to_string()),
+        VariableValue::LocalTime(t) => serde_json::Value::String(t.to_string()),
+        VariableValue::ZonedTime(t) => serde_json::Value::String(t.to_string()),
+        VariableValue::LocalDateTime(dt) => serde_json::Value::String(dt.to_string()),
+        VariableValue::ZonedDateTime(dt) => {
+            serde_json::Value::String(dt.datetime().to_rfc3339())
+        }
+        VariableValue::Duration(d) => serde_json::Value::String(d.to_string()),
         // For complex types, convert to string representation
         _ => serde_json::Value::String(format!("{value:?}")),
     }
