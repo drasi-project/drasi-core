@@ -59,7 +59,7 @@ impl MySqlExecutor {
                      with PEM-based credentials. Use token or password authentication instead."
                 );
             }
-            credentials.into_auth_pair()
+            credentials.into_auth_pair()?
         } else {
             debug!("Using username/password for authentication");
             (config.user.clone(), config.password.clone())

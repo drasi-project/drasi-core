@@ -138,10 +138,10 @@ impl PostgresExecutor {
         // For username/password and token auth, extract the auth pair
         let (username, password) = if let Some(creds) = &credentials {
             if !creds.is_certificate() {
-                creds.clone().into_auth_pair()
+                creds.clone().into_auth_pair()?
             } else {
                 // Certificate auth: username is optional, password is not used
-                let (_, _, cert_username) = creds.clone().into_certificate();
+                let (_, _, cert_username) = creds.clone().into_certificate()?;
                 (cert_username.unwrap_or_default(), String::new())
             }
         } else {
@@ -181,7 +181,7 @@ impl PostgresExecutor {
             // Client certificate authentication (mTLS)
             let (cert_pem, key_pem, _) = credentials
                 .expect("credentials must exist when is_cert_auth is true")
-                .into_certificate();
+                .into_certificate()?;
 
             let identity = native_tls::Identity::from_pkcs8(
                 cert_pem.as_bytes(),

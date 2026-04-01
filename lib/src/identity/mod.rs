@@ -60,13 +60,14 @@ impl Credentials {
     /// # Panics
     /// Panics if called on `Certificate` credentials. Use [`into_certificate`](Self::into_certificate)
     /// for certificate-based authentication.
-    pub fn into_auth_pair(self) -> (String, String) {
+    pub fn into_auth_pair(self) -> Result<(String, String)> {
         match self {
-            Credentials::UsernamePassword { username, password } => (username, password),
-            Credentials::Token { username, token } => (username, token),
-            Credentials::Certificate { .. } => {
-                panic!("Certificate credentials cannot be converted to an auth pair. Use into_certificate() instead.")
+            Credentials::UsernamePassword { username, password } => Ok((username, password)),
+            Credentials::Token { username, token } => Ok((username, token)),
+            Credentials::Certificate { .. } => Err(DrasiError::InvalidConfig {
+                message: "Certificate credentials cannot be converted to an auth pair. Use into_certificate() instead.".to_string(),
             }
+            .into()),
         }
     }
 
@@ -76,14 +77,17 @@ impl Credentials {
     ///
     /// # Panics
     /// Panics if called on non-Certificate credentials.
-    pub fn into_certificate(self) -> (String, String, Option<String>) {
+    pub fn into_certificate(self) -> Result<(String, String, Option<String>)> {
         match self {
             Credentials::Certificate {
                 cert_pem,
                 key_pem,
                 username,
-            } => (cert_pem, key_pem, username),
-            _ => panic!("Not certificate credentials. Use into_auth_pair() instead."),
+            } => Ok((cert_pem, key_pem, username)),
+            _ => Err(DrasiError::InvalidConfig {
+                message: "CNot certificate credentials. Use into_auth_pair() instead.".to_string(),
+            }
+            .into()),
         }
     }
 
@@ -105,6 +109,8 @@ pub use azure::AzureIdentityProvider;
 mod aws;
 #[cfg(feature = "aws-identity")]
 pub use aws::AwsIdentityProvider;
+
+use crate::DrasiError;
 
 #[cfg(test)]
 mod tests {
