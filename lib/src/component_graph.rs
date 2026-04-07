@@ -162,16 +162,30 @@ impl ComponentStatusHandle {
     /// Set the component's status — updates local state AND notifies the graph.
     ///
     /// This is the single canonical way to change a component's status. It writes
-    /// to the local `Arc<RwLock<ComponentStatus>>` and sends a fire-and-forget
-    /// update to the graph update loop (if wired).
+    /// to the local `Arc<RwLock<ComponentStatus>>` and sends the update to the
+    /// graph update loop (if wired). The send awaits backpressure if the channel
+    /// is full, ensuring status transitions are never silently dropped.
     pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
-        *self.status.write().await = status;
+        // Update local state first, then release the lock before sending
+        // to avoid holding the RwLock during a potential channel backpressure wait.
+        {
+            *self.status.write().await = status;
+        }
+
         if let Some(tx) = self.update_tx.get() {
-            let _ = tx.try_send(ComponentUpdate::Status {
-                component_id: self.component_id.clone(),
-                status,
-                message,
-            });
+            if let Err(e) = tx
+                .send(ComponentUpdate::Status {
+                    component_id: self.component_id.clone(),
+                    status,
+                    message,
+                })
+                .await
+            {
+                log::warn!(
+                    "Status update for '{}' dropped (channel closed): {e}",
+                    self.component_id
+                );
+            }
         }
     }
 
