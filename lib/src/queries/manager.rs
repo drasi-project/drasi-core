@@ -197,7 +197,19 @@ async fn dispatch_query_results(
                     result_set.push(after.clone());
                 }
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+            ResultDiff::Aggregation { before, after } => {
+                if let Some(before) = before {
+                    if let Some(pos) = result_set.iter().position(|item| item == before) {
+                        result_set[pos] = after.clone();
+                    } else {
+                        result_set.retain(|item| item != before);
+                        result_set.push(after.clone());
+                    }
+                } else {
+                    result_set.push(after.clone());
+                }
+            }
+            ResultDiff::Noop => {}
         }
     }
     drop(result_set);
@@ -802,8 +814,21 @@ impl Query for DrasiQuery {
                                                         result_set.push(after_json);
                                                     }
                                                 }
-                                                QueryPartEvaluationContext::Aggregation { .. }
-                                                | QueryPartEvaluationContext::Noop => {}
+                                                QueryPartEvaluationContext::Aggregation { before, after, .. } => {
+                                                    let after_json = convert_query_variables_to_json(after);
+                                                    if let Some(before) = before {
+                                                        let before_json = convert_query_variables_to_json(before);
+                                                        if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
+                                                            result_set[pos] = after_json;
+                                                        } else {
+                                                            result_set.retain(|item| item != &before_json);
+                                                            result_set.push(after_json);
+                                                        }
+                                                    } else {
+                                                        result_set.push(after_json);
+                                                    }
+                                                }
+                                                QueryPartEvaluationContext::Noop => {}
                                             }
                                         }
                                         drop(result_set);
