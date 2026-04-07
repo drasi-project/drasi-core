@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use log::{info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
+use crate::error::DrasiError;
 use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
 use crate::inspection::InspectionAPI;
@@ -433,7 +434,7 @@ impl DrasiLib {
     ///
     /// Returns an error if:
     /// * The server is not initialized (`DrasiError::InvalidState`)
-    /// * The server is already running (`anyhow::Error`)
+    /// * The server is already running (`DrasiError::InvalidState`)
     /// * Any component fails to start (propagated from component)
     ///
     /// # Examples
@@ -453,18 +454,20 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self) -> crate::error::Result<()> {
         let mut running = self.running.write().await;
         if *running {
             warn!("Server is already running");
-            return Err(anyhow!("Server is already running"));
+            return Err(DrasiError::invalid_state("Server is already running"));
         }
 
         info!("Starting Drasi Server Core");
 
         // Ensure initialized
         if !self.state_guard.is_initialized() {
-            return Err(anyhow!("Server must be initialized before starting"));
+            return Err(DrasiError::invalid_state(
+                "Server must be initialized before starting",
+            ));
         }
 
         // Start all configured components
@@ -486,7 +489,7 @@ impl DrasiLib {
     /// # Errors
     ///
     /// Returns an error if:
-    /// * The server is not running (`anyhow::Error`)
+    /// * The server is not running (`DrasiError::InvalidState`)
     /// * Any component fails to stop (logged as error, but doesn't prevent other components from stopping)
     ///
     /// # Examples
@@ -506,11 +509,11 @@ impl DrasiLib {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stop(&self) -> Result<()> {
+    pub async fn stop(&self) -> crate::error::Result<()> {
         let mut running = self.running.write().await;
         if !*running {
             warn!("Server is already stopped");
-            return Err(anyhow!("Server is already stopped"));
+            return Err(DrasiError::invalid_state("Server is already stopped"));
         }
 
         info!("Stopping Drasi Server Core");

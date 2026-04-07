@@ -15,10 +15,30 @@
 //! Error types for drasi-lib operations.
 //!
 //! This module provides structured error types using `thiserror` for idiomatic Rust error handling.
-//! The pattern follows major Rust libraries like `tokio`, `reqwest`, and `sqlx`:
-//! - Public API returns `crate::error::Result<T>` with structured `DrasiError` variants
-//! - Internal code uses `anyhow::Result<T>` for flexibility
-//! - Error chains are preserved via `#[error(transparent)]` for debugging
+//! The pattern follows major Rust libraries like `tokio`, `reqwest`, and `sqlx`.
+//!
+//! # Error Handling Architecture
+//!
+//! drasi-lib uses a three-layer error strategy:
+//!
+//! | Layer | Error Type | When to Use |
+//! |-------|-----------|-------------|
+//! | **Public API** | `crate::error::Result<T>` / `DrasiError` | Methods on `DrasiLib`, `*_ops` modules, `InspectionAPI` |
+//! | **Internal modules** | `anyhow::Result<T>` | Lifecycle, managers, component_graph — use `.context()` for rich chains |
+//! | **Plugin traits** | `anyhow::Result<T>` | `Source`, `Reaction`, `BootstrapProvider` trait methods |
+//!
+//! ## Bridge: Internal → Public
+//!
+//! `DrasiError::Internal(#[from] anyhow::Error)` auto-converts internal `anyhow` errors
+//! at the public API boundary via the `?` operator. For errors with known semantics, use
+//! the structured variants directly (e.g., `DrasiError::invalid_state()`).
+//!
+//! ## Rules
+//!
+//! - **Public API methods** must return `crate::error::Result<T>` with `DrasiError` variants
+//! - **Internal modules** should use `anyhow::Result` with `.context("what failed")`
+//! - **Plugin trait implementations** should use `anyhow::Result` with `.context()`
+//! - **Never** use `anyhow!()` in public API methods — use `DrasiError` constructors
 //!
 //! # Example
 //!

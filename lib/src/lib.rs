@@ -12,6 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # drasi-lib
+//!
+//! Embedded library for running Drasi continuous queries with sources, queries, and reactions.
+//!
+//! ## Error Handling
+//!
+//! All public API methods return [`error::Result<T>`], which uses [`DrasiError`] —
+//! a structured enum that supports pattern matching on failure modes.
+//!
+//! Internal modules and plugin trait implementations use `anyhow::Result` for flexibility.
+//! The [`DrasiError::Internal`] variant (with `#[from] anyhow::Error`) auto-converts
+//! internal errors at the public API boundary via `?`.
+//!
+//! See the [`error`] module documentation for the full error handling architecture.
+
 // ============================================================================
 // Core Public Modules
 // ============================================================================
