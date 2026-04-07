@@ -1,16 +1,13 @@
 name: Test Issue Research
 
 on:
-  workflow_dispatch:
-    inputs:
-      issue_url:
-        description: "Issue URL to research"
-        required: true
-        type: string
+  push:
+    branches:
+      - workflow_call_test
 
 jobs:
   research:
     uses: drasi-project/.github/.github/workflows/drasi-issue-researcher.lock.yml@centralized-workflows
     with:
-      issue_url: ${{ inputs.issue_url }}
+      issue_url: "https://github.com/ruokun-niu/drasi-core/issues/6"
     secrets: inherit
