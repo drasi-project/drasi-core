@@ -160,7 +160,7 @@ pub struct SourceSubscriptionSettings {
     pub relations: HashSet<String>,
 }
 
-/// Root configuration for Drasi Server Core
+/// Root configuration for drasi-lib
 ///
 /// `DrasiLibConfig` is the top-level configuration structure for DrasiLib.
 /// It defines server settings, queries, and storage backends.

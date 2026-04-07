@@ -36,7 +36,7 @@ use std::collections::HashMap;
 ///
 /// # Usage Pattern
 ///
-/// 1. Get the handle from `DrasiServerCore::reaction_handle()`
+/// 1. Get the handle from `DrasiLib::reaction_handle()`
 /// 2. Choose a consumption pattern:
 ///    - **Subscription** (recommended): Use `subscribe_with_options()` for flexible result consumption
 ///    - **Async Stream**: Use `as_stream()` for async iteration

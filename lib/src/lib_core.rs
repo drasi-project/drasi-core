@@ -393,7 +393,7 @@ impl DrasiLib {
             return Ok(());
         }
 
-        info!("Initializing Drasi Server Core");
+        info!("Initializing drasi-lib");
 
         // Inject QueryManager into ReactionManager
         // This allows the host to subscribe reactions to query results
@@ -415,7 +415,7 @@ impl DrasiLib {
         self.lifecycle.load_configuration().await?;
 
         self.state_guard.mark_initialized();
-        info!("Drasi Server Core initialized successfully");
+        info!("drasi-lib initialized successfully");
         Ok(())
     }
 
@@ -461,7 +461,7 @@ impl DrasiLib {
             return Err(DrasiError::invalid_state("Server is already running"));
         }
 
-        info!("Starting Drasi Server Core");
+        info!("Starting drasi-lib");
 
         // Ensure initialized
         if !self.state_guard.is_initialized() {
@@ -474,7 +474,7 @@ impl DrasiLib {
         self.lifecycle.start_components().await?;
 
         *running = true;
-        info!("Drasi Server Core started successfully");
+        info!("drasi-lib started successfully");
 
         Ok(())
     }
@@ -516,14 +516,54 @@ impl DrasiLib {
             return Err(DrasiError::invalid_state("Server is already stopped"));
         }
 
-        info!("Stopping Drasi Server Core");
+        info!("Stopping drasi-lib");
 
         // Stop all components
         self.lifecycle.stop_all_components().await?;
 
         *running = false;
-        info!("Drasi Server Core stopped successfully");
+        info!("drasi-lib stopped successfully");
 
+        Ok(())
+    }
+
+    /// Shut down the server permanently, releasing all resources.
+    ///
+    /// Unlike [`stop()`](Self::stop), which allows the server to be restarted,
+    /// `shutdown()` performs a full teardown: it stops all components and aborts
+    /// the internal graph update loop. After `shutdown()`, the instance cannot
+    /// be restarted — create a new `DrasiLib` instance instead.
+    ///
+    /// This method is idempotent — calling it on an already-stopped server will
+    /// still clean up the graph update loop.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use drasi_lib::DrasiLib;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let core = DrasiLib::builder().build().await?;
+    /// core.start().await?;
+    /// // ... use the server ...
+    /// core.shutdown().await?; // full teardown, no restart possible
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn shutdown(&self) -> crate::error::Result<()> {
+        // Stop components if still running
+        if self.is_running().await {
+            self.stop().await?;
+        }
+
+        // Abort the graph update loop task to prevent leaked spawned tasks.
+        // The loop exits naturally when all senders are dropped, but abort
+        // ensures immediate cleanup even if references linger.
+        if let Some(handle) = self.graph_update_handle.lock().await.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        info!("drasi-lib shut down permanently");
         Ok(())
     }
 

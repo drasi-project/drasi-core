@@ -187,7 +187,7 @@ sources:
 
 **Script File Format**: JSONL (JSON Lines) with record types: Header (required first), Node, Relation, Comment (filtered), Label (checkpoint), and Finish (optional end). Supports multi-file reading in sequence.
 
-## Server Core Architecture
+## drasi-lib Architecture
 
 ### Modular Design
 The `DrasiLib` implementation has been refactored from a monolithic structure into specialized modules, each responsible for a specific concern:
