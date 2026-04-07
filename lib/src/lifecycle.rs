@@ -128,7 +128,14 @@ impl LifecycleManager {
     ///
     /// Components are stopped in reverse dependency order using the graph's
     /// topological ordering: Reactions → Queries → Sources.
-    /// Errors during shutdown are logged but don't prevent other components from stopping.
+    ///
+    /// # Error Semantics
+    ///
+    /// This method intentionally logs per-component stop errors and continues
+    /// to stop remaining components. It always returns `Ok(())` because partial
+    /// shutdown is preferable to aborting — a failure to stop one component
+    /// should not prevent others from being cleaned up. Check the logs for
+    /// individual component stop errors.
     pub async fn stop_all_components(&self) -> Result<()> {
         use log::error;
 

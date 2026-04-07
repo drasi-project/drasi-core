@@ -127,7 +127,7 @@ impl DrasiLib {
     pub async fn can_remove_component(&self, id: &str) -> Result<()> {
         let graph = self.component_graph.read().await;
         graph.can_remove(id).map_err(|dependent_ids| {
-            crate::error::DrasiError::Internal(anyhow::anyhow!(
+            crate::error::DrasiError::validation(format!(
                 "Cannot remove '{}': depended on by: {}",
                 id,
                 dependent_ids.join(", ")

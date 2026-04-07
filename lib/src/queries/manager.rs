@@ -130,7 +130,7 @@ pub trait Query: Send + Sync {
 
     /// Subscribe to query results for reactions
     /// Returns a broadcast receiver for Arc-wrapped QueryResults
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String>;
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
 }
 
 /// Bootstrap phase tracking for each source
@@ -1232,17 +1232,16 @@ impl Query for DrasiQuery {
         self
     }
 
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse> {
         debug!(
             "Reaction '{}' subscribing to query '{}'",
             reaction_id, self.base.config.id
         );
 
-        // Use QueryBase's subscribe method which returns QuerySubscriptionResponse
         self.base
             .subscribe(&reaction_id)
             .await
-            .map_err(|e| format!("Failed to subscribe: {e}"))
+            .context("Failed to subscribe to query")
     }
 }
 

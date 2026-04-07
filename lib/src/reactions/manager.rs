@@ -528,8 +528,7 @@ impl ReactionManager {
 
             let subscription = query
                 .subscribe(reaction_id.to_string())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+                .await?;
             let mut receiver = subscription.receiver;
 
             let reaction = reaction.clone();

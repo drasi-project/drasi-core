@@ -209,15 +209,25 @@ impl InspectionAPI {
         id: &str,
     ) -> crate::error::Result<Vec<serde_json::Value>> {
         self.state_guard.require_initialized()?;
-        self.query_manager.get_query_results(id).await.map_err(|e| {
-            if e.to_string().contains("not found") {
-                DrasiError::component_not_found("query", id)
-            } else if e.to_string().contains("not running") {
-                DrasiError::invalid_state(format!("Query '{id}' is not running"))
-            } else {
-                DrasiError::operation_failed("query", id, "get_results", e.to_string())
-            }
-        })
+
+        // Check preconditions explicitly instead of parsing error strings.
+        // First verify the query exists via its status.
+        let status = self
+            .query_manager
+            .get_query_status(id.to_string())
+            .await
+            .map_err(|_| DrasiError::component_not_found("query", id))?;
+
+        if status != crate::channels::ComponentStatus::Running {
+            return Err(DrasiError::invalid_state(format!(
+                "Query '{id}' is not running"
+            )));
+        }
+
+        self.query_manager
+            .get_query_results(id)
+            .await
+            .map_err(|e| DrasiError::operation_failed("query", id, "get_results", e.to_string()))
     }
 
     /// Get the full configuration for a specific query
