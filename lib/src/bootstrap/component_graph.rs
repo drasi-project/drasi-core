@@ -104,14 +104,20 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
             }
 
             let element = make_node(&node_id, &[label], props);
-            let _ = event_tx
+            if event_tx
                 .send(BootstrapEvent {
                     source_id: COMPONENT_GRAPH_SOURCE_ID.to_string(),
                     change: SourceChange::Insert { element },
                     timestamp: chrono::Utc::now(),
                     sequence: count,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                log::warn!(
+                    "Bootstrap node event dropped (channel closed) for source '{COMPONENT_GRAPH_SOURCE_ID}'"
+                );
+            }
             count += 1;
         }
 
@@ -184,14 +190,20 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
                 &out_node_id,
                 ElementPropertyMap::new(),
             );
-            let _ = event_tx
+            if event_tx
                 .send(BootstrapEvent {
                     source_id: COMPONENT_GRAPH_SOURCE_ID.to_string(),
                     change: SourceChange::Insert { element: rel },
                     timestamp: chrono::Utc::now(),
                     sequence: count,
                 })
-                .await;
+                .await
+                .is_err()
+            {
+                log::warn!(
+                    "Bootstrap edge event dropped (channel closed) for source '{COMPONENT_GRAPH_SOURCE_ID}'"
+                );
+            }
             count += 1;
         }
 

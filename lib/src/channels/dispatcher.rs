@@ -249,16 +249,16 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn recv(&mut self) -> Result<Arc<T>> {
-        match self.rx.recv().await {
-            Ok(change) => Ok(change),
-            Err(broadcast::error::RecvError::Closed) => {
-                Err(anyhow::anyhow!("Broadcast channel closed"))
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Log the lag but try to continue
-                log::warn!("Broadcast receiver lagged by {n} messages");
-                // Try to receive the next message
-                self.recv().await
+        loop {
+            match self.rx.recv().await {
+                Ok(change) => return Ok(change),
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("Broadcast channel closed"));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("Broadcast receiver lagged by {n} messages");
+                    // Continue the loop to receive the next available message
+                }
             }
         }
     }

@@ -455,25 +455,28 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start(&self) -> crate::error::Result<()> {
-        let mut running = self.running.write().await;
-        if *running {
-            warn!("Server is already running");
-            return Err(DrasiError::invalid_state("Server is already running"));
+        // Check preconditions under a brief read lock, then release before heavy work.
+        {
+            let running = self.running.read().await;
+            if *running {
+                warn!("Server is already running");
+                return Err(DrasiError::invalid_state("Server is already running"));
+            }
         }
 
-        info!("Starting drasi-lib");
-
-        // Ensure initialized
         if !self.state_guard.is_initialized() {
             return Err(DrasiError::invalid_state(
                 "Server must be initialized before starting",
             ));
         }
 
-        // Start all configured components
+        info!("Starting drasi-lib");
+
+        // Start all configured components (no lock held during this await)
         self.lifecycle.start_components().await?;
 
-        *running = true;
+        // Brief write lock to set the flag
+        *self.running.write().await = true;
         info!("drasi-lib started successfully");
 
         Ok(())
@@ -510,18 +513,22 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop(&self) -> crate::error::Result<()> {
-        let mut running = self.running.write().await;
-        if !*running {
-            warn!("Server is already stopped");
-            return Err(DrasiError::invalid_state("Server is already stopped"));
+        // Check precondition under a brief read lock, then release before heavy work.
+        {
+            let running = self.running.read().await;
+            if !*running {
+                warn!("Server is already stopped");
+                return Err(DrasiError::invalid_state("Server is already stopped"));
+            }
         }
 
         info!("Stopping drasi-lib");
 
-        // Stop all components
+        // Stop all components (no lock held during this await)
         self.lifecycle.stop_all_components().await?;
 
-        *running = false;
+        // Brief write lock to clear the flag
+        *self.running.write().await = false;
         info!("drasi-lib stopped successfully");
 
         Ok(())

@@ -545,7 +545,7 @@ impl SourceBase {
         self.dispatch_event(wrapper).await
     }
 
-    /// Create a test subscription to this source (synchronous wrapper)
+    /// Create a test subscription to this source (synchronous, fallible)
     ///
     /// This method is intended for use in tests to receive events from the source.
     /// It properly handles both Broadcast and Channel dispatch modes by delegating
@@ -555,16 +555,26 @@ impl SourceBase {
     /// For async contexts, prefer calling `create_streaming_receiver()` directly.
     ///
     /// # Returns
-    /// A receiver that will receive all events dispatched by this source
-    ///
-    /// # Panics
-    /// Panics if the receiver cannot be created (e.g., internal error)
-    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        // Use block_in_place to avoid nested executor issues in async tests
+    /// A receiver that will receive all events dispatched by this source,
+    /// or an error if the receiver cannot be created.
+    pub fn try_test_subscribe(
+        &self,
+    ) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
         })
-        .expect("Failed to create test subscription receiver")
+    }
+
+    /// Create a test subscription to this source (synchronous wrapper)
+    ///
+    /// Convenience wrapper around [`try_test_subscribe`](Self::try_test_subscribe)
+    /// that panics on failure. Prefer `try_test_subscribe()` in new code.
+    ///
+    /// # Panics
+    /// Panics if the receiver cannot be created.
+    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        self.try_test_subscribe()
+            .expect("Failed to create test subscription receiver")
     }
 
     /// Helper function to dispatch events from spawned tasks
