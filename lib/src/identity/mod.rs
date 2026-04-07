@@ -18,6 +18,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 /// Trait for identity providers that supply authentication credentials.
+///
+/// This is a plugin trait (Layer 3) — implementations return `anyhow::Result`
+/// and should use `.context()` for error chains. The framework wraps these
+/// into `DrasiError` at the public API boundary.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync {
     /// Fetch credentials for authentication.

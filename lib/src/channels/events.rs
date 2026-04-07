@@ -168,6 +168,7 @@ pub enum ComponentStatus {
     Error,
 }
 
+/// A source change event with metadata for dispatching to queries.
 #[derive(Debug, Clone)]
 pub struct SourceChangeEvent {
     pub source_id: String,
@@ -356,6 +357,10 @@ pub enum ResultDiff {
     Noop,
 }
 
+/// Result emitted by a continuous query when data changes.
+///
+/// Contains the diff (added, updated, deleted rows) plus metadata and
+/// optional profiling information. Dispatched to reactions via the priority queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
@@ -412,6 +417,10 @@ impl Timestamped for QueryResult {
 /// Arc-wrapped QueryResult for zero-copy distribution
 pub type ArcQueryResult = Arc<QueryResult>;
 
+/// Lifecycle event emitted when a component's status changes.
+///
+/// Broadcast via the component event channel to all subscribers.
+/// Used for monitoring, logging, and reactive lifecycle coordination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEvent {
     pub component_id: String,
@@ -421,6 +430,7 @@ pub struct ComponentEvent {
     pub message: Option<String>,
 }
 
+/// Control messages for component lifecycle management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Start(String),

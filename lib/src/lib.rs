@@ -138,7 +138,6 @@ pub use channels::DispatchMode;
 pub use managers::{LogLevel, LogMessage};
 
 /// Tracing initialization function - call to set up component log routing
-/// Tracing initialization function - call to set up component log routing
 pub use managers::get_or_init_global_registry;
 
 /// Deprecated tracing initialization functions — use `get_or_init_global_registry()` instead.
@@ -186,9 +185,9 @@ pub use state_store::{
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
 
+/// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
-/// Base implementations for source and reaction plugins
-/// These are used by plugin developers, not by drasi-lib itself
+/// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
 
 // ============================================================================

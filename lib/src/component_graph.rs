@@ -351,6 +351,14 @@ pub struct GraphEdge {
 /// Backed by `petgraph::stable_graph::StableGraph` which keeps node/edge indices
 /// stable across removals (critical for a graph that changes at runtime).
 ///
+/// # Error Handling
+///
+/// Mutation methods on this struct return `anyhow::Result`, following the Layer 2
+/// (internal module) error convention. The public API boundary in `DrasiLib` and
+/// `lib_core_ops` wraps these into `DrasiError` variants before returning to callers.
+/// External consumers should use `DrasiLib` methods rather than calling graph
+/// mutations directly.
+///
 /// # Event Emission
 ///
 /// The graph emits [`ComponentEvent`]s via a built-in broadcast channel whenever
