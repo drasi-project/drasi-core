@@ -83,33 +83,45 @@ pub async fn setup_mysql() -> MysqlGuard {
 async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfig) {
     use testcontainers::runners::AsyncRunner;
 
-    // Start MySQL container with mysql_native_password plugin for compatibility
-    // The testcontainers MySQL image uses root user with empty password by default
-    // We'll set a custom database and password for the test user
-    let mysql_image = Mysql::default()
-        .with_env_var("MYSQL_DATABASE", "test")
-        .with_env_var("MYSQL_USER", "test")
-        .with_env_var("MYSQL_PASSWORD", "test")
-        .with_env_var("MYSQL_ROOT_PASSWORD", "root")
-        .with_env_var("MYSQL_AUTHENTICATION_PLUGIN", "mysql_native_password");
+    // Docker Desktop has a known bug where `PublishAllPorts: true` sporadically
+    // fails to map exposed ports. Work around by retrying container creation.
+    for attempt in 0..5u32 {
+        let mysql_image = Mysql::default()
+            .with_env_var("MYSQL_DATABASE", "test")
+            .with_env_var("MYSQL_USER", "test")
+            .with_env_var("MYSQL_PASSWORD", "test")
+            .with_env_var("MYSQL_ROOT_PASSWORD", "root")
+            .with_env_var("MYSQL_AUTHENTICATION_PLUGIN", "mysql_native_password");
 
-    let container = mysql_image.start().await.unwrap();
-    let mysql_port = container.get_host_port_ipv4(3306).await.unwrap();
+        let container = mysql_image.start().await.unwrap();
 
-    // Use the credentials we configured above
-    let config = MysqlConfig {
-        // DevSkim: ignore DS137138
-        host: "localhost".to_string(),
-        port: mysql_port,
-        database: "test".to_string(),
-        user: "test".to_string(),
-        password: "test".to_string(),
-    };
+        match container.get_host_port_ipv4(3306).await {
+            Ok(mysql_port) => {
+                let config = MysqlConfig {
+                    // DevSkim: ignore DS137138
+                    host: "localhost".to_string(),
+                    port: mysql_port,
+                    database: "test".to_string(),
+                    user: "test".to_string(),
+                    password: "test".to_string(),
+                };
 
-    // Give MySQL a moment to fully initialize after the wait strategy completes
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                // Give MySQL a moment to fully initialize after the wait strategy completes
+                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
-    (container, config)
+                return (container, config);
+            }
+            Err(e) => {
+                log::warn!(
+                    "MySQL container port mapping failed (attempt {}/5): {e}. Retrying...",
+                    attempt + 1
+                );
+                let _ = container.stop().await;
+                drop(container);
+            }
+        }
+    }
+    panic!("Failed to start MySQL container with mapped port after 5 attempts");
 }
 
 /// Guard wrapper for MySQL container that ensures proper cleanup
