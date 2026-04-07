@@ -54,37 +54,81 @@ pub enum Credentials {
     },
 }
 
+// Manual Debug impl to redact sensitive fields (passwords, tokens, keys)
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credentials::UsernamePassword { username, .. } => f
+                .debug_struct("UsernamePassword")
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Credentials::Token { username, .. } => f
+                .debug_struct("Token")
+                .field("username", username)
+                .field("token", &"[REDACTED]")
+                .finish(),
+            Credentials::Certificate { username, .. } => f
+                .debug_struct("Certificate")
+                .field("cert_pem", &"[REDACTED]")
+                .field("key_pem", &"[REDACTED]")
+                .field("username", username)
+                .finish(),
+        }
+    }
+}
+
 impl Credentials {
     /// Extract username and password/token for connection string building.
     ///
-    /// # Panics
-    /// Panics if called on `Certificate` credentials. Use [`into_certificate`](Self::into_certificate)
-    /// for certificate-based authentication.
-    pub fn into_auth_pair(self) -> (String, String) {
+    /// Returns `Err(self)` if this is a `Certificate` variant.
+    pub fn try_into_auth_pair(self) -> std::result::Result<(String, String), Self> {
         match self {
-            Credentials::UsernamePassword { username, password } => (username, password),
-            Credentials::Token { username, token } => (username, token),
-            Credentials::Certificate { .. } => {
-                panic!("Certificate credentials cannot be converted to an auth pair. Use into_certificate() instead.")
-            }
+            Credentials::UsernamePassword { username, password } => Ok((username, password)),
+            Credentials::Token { username, token } => Ok((username, token)),
+            other => Err(other),
         }
     }
 
     /// Extract certificate and key for TLS client authentication.
     ///
-    /// Returns `(cert_pem, key_pem, optional_username)`.
-    ///
-    /// # Panics
-    /// Panics if called on non-Certificate credentials.
-    pub fn into_certificate(self) -> (String, String, Option<String>) {
+    /// Returns `Ok((cert_pem, key_pem, optional_username))` for `Certificate` credentials,
+    /// or `Err(self)` for other variants.
+    pub fn try_into_certificate(self) -> std::result::Result<(String, String, Option<String>), Self> {
         match self {
             Credentials::Certificate {
                 cert_pem,
                 key_pem,
                 username,
-            } => (cert_pem, key_pem, username),
-            _ => panic!("Not certificate credentials. Use into_auth_pair() instead."),
+            } => Ok((cert_pem, key_pem, username)),
+            other => Err(other),
         }
+    }
+
+    /// Extract username and password/token for connection string building.
+    ///
+    /// # Panics
+    /// Panics if called on `Certificate` credentials.
+    ///
+    /// # Deprecated
+    /// Use [`try_into_auth_pair`](Self::try_into_auth_pair) instead.
+    #[deprecated(note = "Use try_into_auth_pair() which returns Result instead of panicking")]
+    pub fn into_auth_pair(self) -> (String, String) {
+        self.try_into_auth_pair()
+            .unwrap_or_else(|_| panic!("Certificate credentials cannot be converted to an auth pair. Use try_into_auth_pair() or try_into_certificate() instead."))
+    }
+
+    /// Extract certificate and key for TLS client authentication.
+    ///
+    /// # Panics
+    /// Panics if called on non-Certificate credentials.
+    ///
+    /// # Deprecated
+    /// Use [`try_into_certificate`](Self::try_into_certificate) instead.
+    #[deprecated(note = "Use try_into_certificate() which returns Result instead of panicking")]
+    pub fn into_certificate(self) -> (String, String, Option<String>) {
+        self.try_into_certificate()
+            .unwrap_or_else(|_| panic!("Not certificate credentials. Use try_into_certificate() or try_into_auth_pair() instead."))
     }
 
     /// Returns `true` if this is a `Certificate` variant.
@@ -132,5 +176,64 @@ mod tests {
 
         let credentials = cloned.get_credentials().await.unwrap();
         assert!(matches!(credentials, Credentials::UsernamePassword { .. }));
+    }
+
+    #[test]
+    fn test_try_into_auth_pair_username_password() {
+        let creds = Credentials::UsernamePassword {
+            username: "user".into(),
+            password: "pass".into(),
+        };
+        let (u, p) = creds.try_into_auth_pair().unwrap();
+        assert_eq!(u, "user");
+        assert_eq!(p, "pass");
+    }
+
+    #[test]
+    fn test_try_into_auth_pair_token() {
+        let creds = Credentials::Token {
+            username: "user".into(),
+            token: "tok".into(),
+        };
+        let (u, t) = creds.try_into_auth_pair().unwrap();
+        assert_eq!(u, "user");
+        assert_eq!(t, "tok");
+    }
+
+    #[test]
+    fn test_try_into_auth_pair_rejects_certificate() {
+        let creds = Credentials::Certificate {
+            cert_pem: "cert".into(),
+            key_pem: "key".into(),
+            username: None,
+        };
+        let result = creds.try_into_auth_pair();
+        assert!(result.is_err());
+        // Verify the original credentials are returned in the Err
+        let returned = result.unwrap_err();
+        assert!(returned.is_certificate());
+    }
+
+    #[test]
+    fn test_try_into_certificate_success() {
+        let creds = Credentials::Certificate {
+            cert_pem: "cert".into(),
+            key_pem: "key".into(),
+            username: Some("user".into()),
+        };
+        let (c, k, u) = creds.try_into_certificate().unwrap();
+        assert_eq!(c, "cert");
+        assert_eq!(k, "key");
+        assert_eq!(u, Some("user".into()));
+    }
+
+    #[test]
+    fn test_try_into_certificate_rejects_password() {
+        let creds = Credentials::UsernamePassword {
+            username: "user".into(),
+            password: "pass".into(),
+        };
+        let result = creds.try_into_certificate();
+        assert!(result.is_err());
     }
 }
