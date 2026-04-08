@@ -92,16 +92,22 @@ impl DrasiLib {
             })?;
 
         // Step 3: Deregister from graph (remove node + edges, emit events)
+        // If this fails after teardown, the runtime is already gone. Rather than
+        // returning an error (which would leave an orphaned graph node with no
+        // runtime backing), set the component to Error state and log the failure.
         {
             let mut graph = self.component_graph.write().await;
-            graph.deregister(id).map_err(|e| {
-                DrasiError::operation_failed(
-                    "query",
+            if let Err(e) = graph.deregister(id) {
+                log::error!(
+                    "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
+                     Setting component to Error state."
+                );
+                let _ = graph.validate_and_transition(
                     id,
-                    "remove",
-                    format!("Deregister failed: {e}"),
-                )
-            })?;
+                    ComponentStatus::Error,
+                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
+                );
+            }
         }
 
         Ok(())
