@@ -24,20 +24,19 @@ use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
 use crate::state_guard::StateGuard;
 
-/// Classify an `anyhow::Error` from a manager call: if the message looks like a
-/// "not found" error, return `ComponentNotFound`; otherwise preserve the real
-/// failure as `OperationFailed`.
+/// Classify an `anyhow::Error` from a manager call: if it wraps a
+/// `ComponentNotFoundError`, return `ComponentNotFound`; otherwise preserve
+/// the real failure as `OperationFailed`.
 fn classify_component_error(
     e: anyhow::Error,
     component_type: &str,
     component_id: &str,
     operation: &str,
 ) -> DrasiError {
-    let msg = e.to_string();
-    if msg.contains("not found") || msg.contains("does not exist") {
-        DrasiError::component_not_found(component_type, component_id)
+    if let Some(not_found) = e.downcast_ref::<crate::managers::ComponentNotFoundError>() {
+        DrasiError::component_not_found(not_found.component_type, &not_found.component_id)
     } else {
-        DrasiError::operation_failed(component_type, component_id, operation, msg)
+        DrasiError::operation_failed(component_type, component_id, operation, e.to_string())
     }
 }
 
@@ -382,9 +381,9 @@ impl InspectionAPI {
 
         Ok(DrasiLibConfig {
             id: self.config.id.clone(),
-            priority_queue_capacity: None, // Already applied to queries
-            dispatch_buffer_capacity: None, // Already applied to queries
-            storage_backends: vec![],
+            priority_queue_capacity: self.config.global_priority_queue_capacity,
+            dispatch_buffer_capacity: self.config.global_dispatch_buffer_capacity,
+            storage_backends: self.config.storage_backends.clone(),
             queries,
         })
     }

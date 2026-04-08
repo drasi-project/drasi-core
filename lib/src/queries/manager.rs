@@ -497,13 +497,10 @@ impl Query for DrasiQuery {
                 }
             };
 
-        // Subscribe to each source sequentially
-        // Also includes FutureQueueSource for temporal query support
-
-        // Set up FutureQueueSource for temporal query support
-        // This creates a virtual source that polls the future queue and emits due elements
-        // as source events, integrating temporal queries into the standard source subscription
-        // mechanism. Events preserve their original source_id from the FutureElementRef.
+        // Set up FutureQueueSource for temporal query support.
+        // This creates a virtual source that polls the future queue and emits
+        // FuturesDue control signals, integrating temporal queries into the
+        // standard source subscription mechanism.
         debug!(
             "Query '{}' setting up FutureQueueSource for temporal queries",
             self.base.config.id
@@ -514,28 +511,14 @@ impl Query for DrasiQuery {
             self.base.config.id.clone(),
         ));
 
-        // Start the FutureQueueSource
-        if let Err(e) = future_queue_source.start().await {
-            error!(
-                "Query '{}' failed to start FutureQueueSource: {}",
-                self.base.config.id, e
-            );
-            self.base
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!("Failed to start FutureQueueSource: {e}")),
-                )
-                .await;
-            return Err(anyhow::anyhow!("Failed to start FutureQueueSource: {e}"));
-        }
+        // Subscribe BEFORE starting so the dispatcher exists when the polling loop runs
+        let fq_receiver = future_queue_source
+            .subscribe()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to FutureQueueSource: {e}"))?;
 
-        info!(
-            "Query '{}' FutureQueueSource started successfully",
-            self.base.config.id
-        );
-
-        // Store the FutureQueueSource for cleanup
-        *self.future_queue_source.write().await = Some(future_queue_source.clone());
+        // Store for lifecycle cleanup in stop()
+        *self.future_queue_source.write().await = Some(Arc::clone(&future_queue_source));
 
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
@@ -583,7 +566,11 @@ impl Query for DrasiQuery {
                             Some(format!("Source '{source_id}' not found")),
                         )
                         .await;
-                    return Err(anyhow::anyhow!("Source '{source_id}' not found"));
+                    return Err(crate::managers::ComponentNotFoundError::new(
+                        "source",
+                        source_id.as_str(),
+                    )
+                    .into());
                 }
             }
         }
@@ -955,17 +942,7 @@ impl Query for DrasiQuery {
             bootstrap_gate.notify_one();
         }
 
-        // Create and subscribe to FutureQueueSource (peek-only signaler)
-        let fq_source = crate::sources::future_queue_source::FutureQueueSource::new(
-            continuous_query.future_queue(),
-            self.base.config.id.clone(),
-        );
-        let fq_receiver = fq_source
-            .subscribe()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to subscribe to FutureQueueSource: {e}"))?;
-
-        // Spawn forwarder task (same pattern as other sources)
+        // Spawn FutureQueueSource forwarder task (same pattern as other sources)
         {
             let fq_priority_queue = self.priority_queue.clone();
             let fq_forwarder = tokio::spawn(async move {
@@ -986,6 +963,7 @@ impl Query for DrasiQuery {
         let priority_queue = self.priority_queue.clone();
         let instance_id = self.instance_id.clone();
         let reporter_for_processor = self.base.status_handle();
+        let fq_source_for_processor = Arc::clone(&future_queue_source);
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1037,8 +1015,15 @@ impl Query for DrasiQuery {
                 }
 
                 // Start FutureQueueSource after bootstrap completes
-                if let Err(e) = fq_source.start().await {
+                if let Err(e) = fq_source_for_processor.start().await {
                     error!("Query '{query_id}' failed to start FutureQueueSource: {e}");
+                    reporter_for_processor
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Future queue start failed: {e}")),
+                        )
+                        .await;
+                    return;
                 }
 
                 info!("Query '{query_id}' starting priority queue event processor");
@@ -1148,7 +1133,7 @@ impl Query for DrasiQuery {
                     }
                 }
 
-                fq_source.stop().await;
+                fq_source_for_processor.stop().await;
 
             info!("Query '{query_id}' processing task exited");
         }
@@ -1202,6 +1187,11 @@ impl Query for DrasiQuery {
         for handle in subscription_handles {
             handle.abort();
             let _ = handle.await;
+        }
+
+        // Stop the FutureQueueSource polling task
+        if let Some(fq) = self.future_queue_source.write().await.take() {
+            fq.stop().await;
         }
 
         // Use QueryBase common stop behavior to finish shutting down the processor task
@@ -1348,7 +1338,9 @@ impl QueryManager {
         let query =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
+                })?;
 
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
@@ -1357,7 +1349,9 @@ impl QueryManager {
         let query =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Query not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
+                })?;
 
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "query", &query).await
     }
@@ -1404,7 +1398,7 @@ impl QueryManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", &id).into())
         }
     }
 
@@ -1441,7 +1435,7 @@ impl QueryManager {
             )
             .await
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", &id).into())
         }
     }
 
@@ -1500,7 +1494,7 @@ impl QueryManager {
 
             Ok(drasi_query.get_current_results().await)
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", id).into())
         }
     }
 

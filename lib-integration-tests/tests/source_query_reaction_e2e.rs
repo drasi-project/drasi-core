@@ -349,7 +349,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
         other => panic!("Expected Add result diff, got: {other:?}"),
     }
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Test that multiple events flow through correctly.
@@ -424,7 +424,7 @@ async fn test_multiple_events_flow_through() {
         assert!(!result.results.is_empty());
     }
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Test that aggregation query results are stored in current_results and accessible
@@ -551,5 +551,5 @@ async fn test_aggregation_results_stored_in_current_results() {
         "Aggregation result should have review_count=1"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }

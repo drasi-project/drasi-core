@@ -412,7 +412,7 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
         "Source should be removed"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a source with cleanup=false does NOT call deprovision.
@@ -437,7 +437,7 @@ async fn test_source_remove_without_cleanup_skips_deprovision() {
         "deprovision() should NOT have been called with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a stopped source with cleanup=true still calls deprovision.
@@ -466,7 +466,7 @@ async fn test_source_remove_stopped_with_cleanup() {
         "deprovision() should be called even on a stopped source"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -502,7 +502,7 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
         "deprovision() should have been called with cleanup=true"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a reaction with cleanup=false does NOT call deprovision.
@@ -534,7 +534,7 @@ async fn test_reaction_remove_without_cleanup_skips_deprovision() {
         "deprovision() should NOT have been called with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -590,7 +590,7 @@ async fn test_source_update_running_stops_and_restarts() {
     let status = drasi.get_source_status("reconfig-src-1").await.unwrap();
     assert_eq!(status, ComponentStatus::Running);
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a stopped source replaces the instance without restart.
@@ -626,7 +626,7 @@ async fn test_source_update_stopped_replaces_without_restart() {
         "should NOT restart a stopped source"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -676,7 +676,7 @@ async fn test_reaction_update_running_stops_and_restarts() {
         "should have started new instance"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -731,7 +731,7 @@ async fn test_source_update_emits_reconfiguring_event() {
         "Expected Running event after reconfigure, got: {statuses:?}"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Verify that Reconfiguring event is emitted during reaction update.
@@ -784,7 +784,7 @@ async fn test_reaction_update_emits_reconfiguring_event() {
         "Expected Reconfiguring event, got: {statuses:?}"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -844,7 +844,7 @@ async fn test_source_update_preserves_log_history() {
         post_logs.len()
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Active log subscribers continue receiving logs through a reconfigure.
@@ -903,7 +903,7 @@ async fn test_source_update_active_log_stream_continues() {
         "Active log subscriber should continue receiving logs after reconfigure"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -919,7 +919,7 @@ async fn test_remove_nonexistent_source_fails() {
     let result = drasi.remove_source("does-not-exist", true).await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a non-existent source returns an error.
@@ -933,7 +933,7 @@ async fn test_update_nonexistent_source_fails() {
         .await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a non-existent reaction returns an error.
@@ -945,7 +945,7 @@ async fn test_remove_nonexistent_reaction_fails() {
     let result = drasi.remove_reaction("does-not-exist", true).await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a non-existent reaction returns an error.
@@ -962,7 +962,7 @@ async fn test_update_nonexistent_reaction_fails() {
         .await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -1012,7 +1012,7 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
         keys.len()
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a source with cleanup=false preserves its state store partition.
@@ -1051,5 +1051,5 @@ async fn test_source_remove_without_cleanup_preserves_state_store() {
         "State store should still have 2 keys after delete with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }

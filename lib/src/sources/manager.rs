@@ -163,7 +163,9 @@ impl SourceManager {
         let source =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Source not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
+                })?;
 
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "source", &source)
             .await
@@ -173,7 +175,9 @@ impl SourceManager {
         let source =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Source not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
+                })?;
 
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "source", &source)
             .await
@@ -211,7 +215,7 @@ impl SourceManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
     }
 
@@ -293,7 +297,7 @@ impl SourceManager {
             )
             .await
         } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
     }
 

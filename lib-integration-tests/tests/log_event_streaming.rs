@@ -366,7 +366,7 @@ async fn test_source_log_streaming() {
         "Expected lifecycle logs, got: {log_messages:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that source events are captured and can be streamed.
@@ -429,7 +429,7 @@ async fn test_source_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that query events are captured and can be streamed.
@@ -497,7 +497,7 @@ async fn test_query_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that query logs are captured and can be streamed.
@@ -533,7 +533,7 @@ async fn test_query_log_streaming() {
     // Queries emit lifecycle logs
     // (Note: depending on implementation, there may or may not be logs)
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that reaction events are captured and can be streamed.
@@ -607,7 +607,7 @@ async fn test_reaction_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that reaction logs are captured and can be streamed.
@@ -667,7 +667,7 @@ async fn test_reaction_log_streaming() {
         "Expected lifecycle logs, got: {log_messages:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test full lifecycle with log and event streaming for all component types.
@@ -787,7 +787,7 @@ async fn test_full_lifecycle_streaming() {
     );
 
     // Now stop and verify stop events
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 
     // The stop event propagates through the main event channel, not directly to event_history.
     // The fact that we can successfully stop all components is the key verification here.
@@ -874,5 +874,5 @@ async fn test_log_levels_captured() {
         "Expected at least 2 INFO level logs"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }

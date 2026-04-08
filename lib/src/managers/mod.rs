@@ -24,3 +24,23 @@ pub use component_log::*;
 pub use event_history::*;
 pub use logging::*;
 pub use tracing_layer::*;
+
+/// Typed "not found" error for component lookups.
+///
+/// Used inside managers (Layer 2) as an `anyhow` inner error so the public API
+/// boundary can `downcast_ref` instead of parsing error message strings.
+#[derive(Debug, thiserror::Error)]
+#[error("{component_type} not found: {component_id}")]
+pub struct ComponentNotFoundError {
+    pub component_type: &'static str,
+    pub component_id: String,
+}
+
+impl ComponentNotFoundError {
+    pub fn new(component_type: &'static str, component_id: impl Into<String>) -> Self {
+        Self {
+            component_type,
+            component_id: component_id.into(),
+        }
+    }
+}

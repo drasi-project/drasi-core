@@ -241,6 +241,12 @@ pub struct RuntimeConfig {
     pub state_store_provider: Arc<dyn StateStoreProvider>,
     /// Query configurations (sources/reactions are now instance-only)
     pub queries: Vec<QueryConfig>,
+    /// Original global priority queue capacity (before applying to queries)
+    pub global_priority_queue_capacity: Option<usize>,
+    /// Original global dispatch buffer capacity (before applying to queries)
+    pub global_dispatch_buffer_capacity: Option<usize>,
+    /// Original storage backend configurations
+    pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -250,6 +256,15 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("index_factory", &self.index_factory)
             .field("state_store_provider", &"<dyn StateStoreProvider>")
             .field("queries", &self.queries)
+            .field(
+                "global_priority_queue_capacity",
+                &self.global_priority_queue_capacity,
+            )
+            .field(
+                "global_dispatch_buffer_capacity",
+                &self.global_dispatch_buffer_capacity,
+            )
+            .field("storage_backends", &self.storage_backends)
             .finish()
     }
 }
@@ -274,9 +289,16 @@ impl RuntimeConfig {
         index_provider: Option<Arc<dyn IndexBackendPlugin>>,
         state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     ) -> Self {
+        // Preserve original global defaults for config snapshot round-tripping
+        let global_priority_queue_capacity = config.priority_queue_capacity;
+        let global_dispatch_buffer_capacity = config.dispatch_buffer_capacity;
+
         // Get the global defaults (or hardcoded fallbacks)
-        let global_priority_queue = config.priority_queue_capacity.unwrap_or(10000);
-        let global_dispatch_capacity = config.dispatch_buffer_capacity.unwrap_or(1000);
+        let global_priority_queue = global_priority_queue_capacity.unwrap_or(10000);
+        let global_dispatch_capacity = global_dispatch_buffer_capacity.unwrap_or(1000);
+
+        // Preserve original storage backends for config snapshot
+        let storage_backends = config.storage_backends.clone();
 
         // Create IndexFactory from storage backend configurations with optional plugin
         let index_factory = Arc::new(IndexFactory::new(config.storage_backends, index_provider));
@@ -305,6 +327,9 @@ impl RuntimeConfig {
             index_factory,
             state_store_provider,
             queries,
+            global_priority_queue_capacity,
+            global_dispatch_buffer_capacity,
+            storage_backends,
         }
     }
 }

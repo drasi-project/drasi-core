@@ -136,7 +136,11 @@ impl ReactionManager {
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Reaction not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+                        "reaction", &id,
+                    ))
+                })?;
 
         crate::managers::lifecycle_helpers::start_component(
             &self.graph,
@@ -164,7 +168,11 @@ impl ReactionManager {
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
                 .await
-                .ok_or_else(|| anyhow::anyhow!("Reaction not found: {id}"))?;
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+                        "reaction", &id,
+                    ))
+                })?;
 
         // Abort subscription forwarder tasks before stopping
         self.abort_subscription_tasks(&id).await;
@@ -201,7 +209,7 @@ impl ReactionManager {
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Reaction not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("reaction", &id).into())
         }
     }
 
@@ -293,7 +301,7 @@ impl ReactionManager {
             )
             .await
         } else {
-            Err(anyhow::anyhow!("Reaction not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("reaction", &id).into())
         }
     }
 

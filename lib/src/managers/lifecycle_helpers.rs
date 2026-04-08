@@ -91,12 +91,15 @@ impl ComponentRuntime for Arc<dyn crate::reactions::Reaction> {
 pub async fn get_component_status(
     graph: &Arc<RwLock<ComponentGraph>>,
     id: &str,
-    component_type: &str,
+    component_type: &'static str,
 ) -> Result<ComponentStatus> {
     let graph = graph.read().await;
-    let node = graph
-        .get_component(id)
-        .ok_or_else(|| anyhow::anyhow!("{component_type} not found: {id}"))?;
+    let node = graph.get_component(id).ok_or_else(|| {
+        anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+            component_type,
+            id,
+        ))
+    })?;
     Ok(node.status)
 }
 
@@ -215,7 +218,7 @@ pub async fn stop_component<R: ComponentRuntime>(
 pub async fn teardown_component<T: ComponentRuntime + Clone + 'static, F, Fut>(
     graph: &Arc<RwLock<ComponentGraph>>,
     id: &str,
-    component_type: &str,
+    component_type: &'static str,
     log_component_type: crate::channels::ComponentType,
     instance_id: &str,
     log_registry: &crate::managers::ComponentLogRegistry,
@@ -226,16 +229,22 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let runtime = get_runtime::<T>(graph, id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("{component_type} not found: {id}"))?;
+    let runtime = get_runtime::<T>(graph, id).await.ok_or_else(|| {
+        anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+            component_type,
+            id,
+        ))
+    })?;
 
     // Atomically read status and claim teardown intent under a single write lock.
     let needs_stop = {
         let mut g = graph.write().await;
-        let node = g
-            .get_component(id)
-            .ok_or_else(|| anyhow::anyhow!("{component_type} '{id}' not found in graph"))?;
+        let node = g.get_component(id).ok_or_else(|| {
+            anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+                component_type,
+                id,
+            ))
+        })?;
         let status = node.status;
 
         if matches!(
@@ -319,7 +328,7 @@ where
 pub async fn reconfigure_component<T, Fut1, Fut2, Fut3>(
     graph: &Arc<RwLock<ComponentGraph>>,
     id: &str,
-    component_type: &str,
+    component_type: &'static str,
     old_runtime: &T,
     pre_stop: impl FnOnce() -> Fut1,
     init_and_replace: impl FnOnce() -> Fut2,
@@ -334,9 +343,12 @@ where
     // Read status from the graph (source of truth) and determine if running
     let was_running = {
         let g = graph.read().await;
-        let node = g
-            .get_component(id)
-            .ok_or_else(|| anyhow::anyhow!("{component_type} '{id}' not found in graph"))?;
+        let node = g.get_component(id).ok_or_else(|| {
+            anyhow::Error::new(crate::managers::ComponentNotFoundError::new(
+                component_type,
+                id,
+            ))
+        })?;
         matches!(
             node.status,
             ComponentStatus::Running | ComponentStatus::Starting
