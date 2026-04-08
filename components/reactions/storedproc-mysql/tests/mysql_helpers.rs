@@ -115,9 +115,7 @@ async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfi
                 for retry in 0..30u32 {
                     match Conn::new(opts.clone()).await {
                         Ok(mut conn) => {
-                            if let Ok(Some(1i32)) =
-                                conn.query_first::<i32, _>("SELECT 1").await
-                            {
+                            if let Ok(Some(1i32)) = conn.query_first::<i32, _>("SELECT 1").await {
                                 drop(conn);
                                 ready = true;
                                 break;
@@ -125,10 +123,7 @@ async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfi
                             drop(conn);
                         }
                         Err(e) => {
-                            log::debug!(
-                                "MySQL not ready yet (retry {}/30): {e}",
-                                retry + 1
-                            );
+                            log::debug!("MySQL not ready yet (retry {}/30): {e}", retry + 1);
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
