@@ -24,6 +24,23 @@ use crate::reactions::ReactionManager;
 use crate::sources::SourceManager;
 use crate::state_guard::StateGuard;
 
+/// Classify an `anyhow::Error` from a manager call: if the message looks like a
+/// "not found" error, return `ComponentNotFound`; otherwise preserve the real
+/// failure as `OperationFailed`.
+fn classify_component_error(
+    e: anyhow::Error,
+    component_type: &str,
+    component_id: &str,
+    operation: &str,
+) -> DrasiError {
+    let msg = e.to_string();
+    if msg.contains("not found") || msg.contains("does not exist") {
+        DrasiError::component_not_found(component_type, component_id)
+    } else {
+        DrasiError::operation_failed(component_type, component_id, operation, msg)
+    }
+}
+
 /// Inspection API for querying server state and component information
 ///
 /// This module provides all inspection/listing methods for sources, queries, and reactions,
@@ -98,7 +115,7 @@ impl InspectionAPI {
         self.source_manager
             .get_source(id.to_string())
             .await
-            .map_err(|_e| DrasiError::component_not_found("source", id))
+            .map_err(|e| classify_component_error(e, "source", id, "get_info"))
     }
 
     /// Get the current status of a specific source
@@ -120,7 +137,7 @@ impl InspectionAPI {
         self.source_manager
             .get_source_status(id.to_string())
             .await
-            .map_err(|_| DrasiError::component_not_found("source", id))
+            .map_err(|e| classify_component_error(e, "source", id, "get_status"))
     }
 
     // ============================================================================
@@ -168,7 +185,7 @@ impl InspectionAPI {
         self.query_manager
             .get_query(id.to_string())
             .await
-            .map_err(|_e| DrasiError::component_not_found("query", id))
+            .map_err(|e| classify_component_error(e, "query", id, "get_info"))
     }
 
     /// Get the current status of a specific query
@@ -190,7 +207,7 @@ impl InspectionAPI {
         self.query_manager
             .get_query_status(id.to_string())
             .await
-            .map_err(|_| DrasiError::component_not_found("query", id))
+            .map_err(|e| classify_component_error(e, "query", id, "get_status"))
     }
 
     /// Get the current result set for a running query
@@ -216,7 +233,7 @@ impl InspectionAPI {
             .query_manager
             .get_query_status(id.to_string())
             .await
-            .map_err(|_| DrasiError::component_not_found("query", id))?;
+            .map_err(|e| classify_component_error(e, "query", id, "get_status"))?;
 
         if status != crate::channels::ComponentStatus::Running {
             return Err(DrasiError::invalid_state(format!(
@@ -300,7 +317,7 @@ impl InspectionAPI {
         self.reaction_manager
             .get_reaction(id.to_string())
             .await
-            .map_err(|_e| DrasiError::component_not_found("reaction", id))
+            .map_err(|e| classify_component_error(e, "reaction", id, "get_info"))
     }
 
     /// Get the current status of a specific reaction
@@ -322,7 +339,7 @@ impl InspectionAPI {
         self.reaction_manager
             .get_reaction_status(id.to_string())
             .await
-            .map_err(|_| DrasiError::component_not_found("reaction", id))
+            .map_err(|e| classify_component_error(e, "reaction", id, "get_status"))
     }
 
     // ============================================================================
