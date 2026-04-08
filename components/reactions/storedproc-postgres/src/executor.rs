@@ -138,11 +138,15 @@ impl PostgresExecutor {
         // For username/password and token auth, extract the auth pair
         let (username, password) = if let Some(creds) = &credentials {
             if !creds.is_certificate() {
-                creds.clone().try_into_auth_pair()
+                creds
+                    .clone()
+                    .try_into_auth_pair()
                     .map_err(|_| anyhow!("Unexpected credential type"))?
             } else {
                 // Certificate auth: username is optional, password is not used
-                let (_, _, cert_username) = creds.clone().try_into_certificate()
+                let (_, _, cert_username) = creds
+                    .clone()
+                    .try_into_certificate()
                     .map_err(|_| anyhow!("Expected certificate credentials"))?;
                 (cert_username.unwrap_or_default(), String::new())
             }

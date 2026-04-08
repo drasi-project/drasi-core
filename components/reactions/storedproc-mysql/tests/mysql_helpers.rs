@@ -106,10 +106,44 @@ async fn setup_mysql_raw() -> (testcontainers::ContainerAsync<Mysql>, MysqlConfi
                     password: "test".to_string(),
                 };
 
-                // Give MySQL a moment to fully initialize after the wait strategy completes
-                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                // MySQL may not accept connections immediately after the
+                // testcontainers wait-strategy completes.  Poll with retries
+                // instead of a fixed sleep so we tolerate slow CI hosts
+                // without adding unnecessary delay on fast ones.
+                let opts = config.connection_opts();
+                let mut ready = false;
+                for retry in 0..30u32 {
+                    match Conn::new(opts.clone()).await {
+                        Ok(mut conn) => {
+                            if let Ok(Some(1i32)) =
+                                conn.query_first::<i32, _>("SELECT 1").await
+                            {
+                                drop(conn);
+                                ready = true;
+                                break;
+                            }
+                            drop(conn);
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "MySQL not ready yet (retry {}/30): {e}",
+                                retry + 1
+                            );
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
 
-                return (container, config);
+                if ready {
+                    return (container, config);
+                }
+
+                log::warn!(
+                    "MySQL connection verification failed after 30 retries (attempt {}/5)",
+                    attempt + 1
+                );
+                let _ = container.stop().await;
+                drop(container);
             }
             Err(e) => {
                 log::warn!(

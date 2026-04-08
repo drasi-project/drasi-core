@@ -98,7 +98,9 @@ impl Credentials {
     ///
     /// Returns `Ok((cert_pem, key_pem, optional_username))` for `Certificate` credentials,
     /// or `Err(self)` for other variants.
-    pub fn try_into_certificate(self) -> std::result::Result<(String, String, Option<String>), Self> {
+    pub fn try_into_certificate(
+        self,
+    ) -> std::result::Result<(String, String, Option<String>), Self> {
         match self {
             Credentials::Certificate {
                 cert_pem,

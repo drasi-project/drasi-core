@@ -18,9 +18,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::channels::*;
-use crate::error::DrasiError;
 use crate::component_graph::{ComponentGraph, GraphSnapshot};
 use crate::config::{DrasiLibConfig, RuntimeConfig};
+use crate::error::DrasiError;
 use crate::inspection::InspectionAPI;
 use crate::lifecycle::LifecycleManager;
 use crate::managers::ComponentLogRegistry;

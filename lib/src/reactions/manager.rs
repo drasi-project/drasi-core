@@ -526,9 +526,7 @@ impl ReactionManager {
         for query_id in &query_ids {
             let query = query_provider.get_query_instance(query_id).await?;
 
-            let subscription = query
-                .subscribe(reaction_id.to_string())
-                .await?;
+            let subscription = query.subscribe(reaction_id.to_string()).await?;
             let mut receiver = subscription.receiver;
 
             let reaction = reaction.clone();
