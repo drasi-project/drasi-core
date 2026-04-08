@@ -14,14 +14,17 @@
 
 use log::{error, info};
 
+/// Log an info-level message indicating a component is starting.
 pub fn log_component_start(component: &str, id: &str) {
     info!("Starting {component} component: {id}");
 }
 
+/// Log an info-level message indicating a component is stopping.
 pub fn log_component_stop(component: &str, id: &str) {
     info!("Stopping {component} component: {id}");
 }
 
+/// Log an error-level message for a component failure.
 pub fn log_component_error(component: &str, id: &str, error: &str) {
     error!("Error in {component} component {id}: {error}");
 }

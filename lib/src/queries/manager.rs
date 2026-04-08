@@ -1268,6 +1268,10 @@ impl QueryManager {
         }
     }
 
+    /// Register and provision a new query from the given configuration.
+    ///
+    /// # Errors
+    /// Returns an error if provisioning fails (e.g., invalid config or duplicate ID).
     pub async fn add_query(&self, config: QueryConfig) -> Result<()> {
         self.provision_query(config).await
     }
@@ -1334,6 +1338,10 @@ impl QueryManager {
         Ok(())
     }
 
+    /// Start a query by ID, subscribing it to its sources and beginning event processing.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found or the start transition fails.
     pub async fn start_query(&self, id: String) -> Result<()> {
         let query =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
@@ -1345,6 +1353,10 @@ impl QueryManager {
         crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
+    /// Stop a running query by ID, unsubscribing it from sources and halting event processing.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found or the stop transition fails.
     pub async fn stop_query(&self, id: String) -> Result<()> {
         let query =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
@@ -1356,6 +1368,10 @@ impl QueryManager {
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "query", &query).await
     }
 
+    /// Return the current lifecycle status of the query with the given ID.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found in the component graph.
     pub async fn get_query_status(&self, id: String) -> Result<ComponentStatus> {
         crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Query").await
     }
@@ -1373,6 +1389,10 @@ impl QueryManager {
         }
     }
 
+    /// Retrieve the full runtime descriptor for a query, including its status and configuration.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found.
     pub async fn get_query(&self, id: String) -> Result<QueryRuntime> {
         let graph = self.graph.read().await;
         let query = graph.get_runtime::<Arc<dyn Query>>(&id).cloned();
@@ -1460,6 +1480,7 @@ impl QueryManager {
         .await
     }
 
+    /// List all registered queries with their current lifecycle status.
     pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
         crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Query)
             .await
@@ -1498,6 +1519,10 @@ impl QueryManager {
         }
     }
 
+    /// Start all queries that are configured for auto-start.
+    ///
+    /// # Errors
+    /// Returns an error if any query fails to start.
     pub async fn start_all(&self) -> Result<()> {
         crate::managers::lifecycle_helpers::start_all_components::<Arc<dyn Query>, _, _>(
             &self.graph,
@@ -1530,6 +1555,10 @@ impl QueryManager {
         .await
     }
 
+    /// Stop all currently running or starting queries.
+    ///
+    /// # Errors
+    /// Returns an error listing any queries that failed to stop.
     pub async fn stop_all(&self) -> Result<()> {
         let query_ids: Vec<String> = {
             let graph = self.graph.read().await;

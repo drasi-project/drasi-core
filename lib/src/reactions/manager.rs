@@ -164,6 +164,10 @@ impl ReactionManager {
         Ok(())
     }
 
+    /// Stop a running reaction and abort its subscription forwarder tasks.
+    ///
+    /// # Errors
+    /// Returns an error if the reaction is not found or the stop operation fails.
     pub async fn stop_reaction(&self, id: String) -> Result<()> {
         let reaction =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Reaction>>(&self.graph, &id)
@@ -181,10 +185,18 @@ impl ReactionManager {
             .await
     }
 
+    /// Returns the current status of a reaction (e.g. Running, Stopped, Error).
+    ///
+    /// # Errors
+    /// Returns an error if the reaction is not found.
     pub async fn get_reaction_status(&self, id: String) -> Result<ComponentStatus> {
         crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Reaction").await
     }
 
+    /// Retrieve a reaction's runtime descriptor, including its status, subscribed queries, and properties.
+    ///
+    /// # Errors
+    /// Returns an error if the reaction is not found.
     pub async fn get_reaction(&self, id: String) -> Result<ReactionRuntime> {
         let graph = self.graph.read().await;
         let reaction = graph.get_runtime::<Arc<dyn Reaction>>(&id).cloned();
@@ -305,6 +317,7 @@ impl ReactionManager {
         }
     }
 
+    /// List all registered reactions with their current statuses.
     pub async fn list_reactions(&self) -> Vec<(String, ComponentStatus)> {
         crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Reaction)
             .await
@@ -327,6 +340,10 @@ impl ReactionManager {
         .await
     }
 
+    /// Stop all currently running reactions.
+    ///
+    /// # Errors
+    /// Returns an error if any reaction fails to stop.
     pub async fn stop_all(&self) -> Result<()> {
         crate::managers::lifecycle_helpers::stop_all_components(
             &self.graph,

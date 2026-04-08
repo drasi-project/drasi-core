@@ -1606,9 +1606,12 @@ async fn test_wait_for_status_reaches_target_via_update() {
     }
 
     let graph_clone = Arc::clone(&graph);
-    // Spawn a task that transitions the component after a short delay
+    // Use Notify to ensure the updater waits until wait_for_status is listening
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let ready_clone = ready.clone();
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // Wait until the main task signals it's ready
+        ready_clone.notified().await;
         let mut g = graph_clone.write().await;
         g.apply_update(ComponentUpdate::Status {
             component_id: "source-1".into(),
@@ -1617,6 +1620,8 @@ async fn test_wait_for_status_reaches_target_via_update() {
         });
     });
 
+    // Signal the updater, then immediately start waiting
+    ready.notify_one();
     let result = wait_for_status(
         &graph,
         "source-1",

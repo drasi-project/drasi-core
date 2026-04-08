@@ -633,4 +633,186 @@ mod tests {
             .unwrap()
             .contains("removed"));
     }
+
+    // ========================================================================
+    // Error-path lifecycle tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_add_duplicate_source_fails() {
+        let core = create_test_core().await;
+        let s1 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
+        core.add_source(s1).await.unwrap();
+
+        let s2 = TestMockSource::with_auto_start("dup-src".to_string(), false).unwrap();
+        let result = core.add_source(s2).await;
+        assert!(result.is_err(), "Adding duplicate source should fail");
+    }
+
+    #[tokio::test]
+    async fn test_add_duplicate_query_fails() {
+        let source = TestMockSource::with_auto_start("dup-q-src".to_string(), false).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("dup-query-test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+
+        let config = Query::cypher("dup-q")
+            .query("MATCH (n) RETURN n")
+            .from_source("dup-q-src")
+            .auto_start(false)
+            .build();
+        core.add_query(config.clone()).await.unwrap();
+
+        let config2 = Query::cypher("dup-q")
+            .query("MATCH (n) RETURN n")
+            .from_source("dup-q-src")
+            .auto_start(false)
+            .build();
+        let result = core.add_query(config2).await;
+        assert!(result.is_err(), "Adding duplicate query should fail");
+    }
+
+    #[tokio::test]
+    async fn test_add_duplicate_reaction_fails() {
+        let core = create_test_core().await;
+        let r1 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
+        core.add_reaction(r1).await.unwrap();
+
+        let r2 = create_test_mock_reaction("dup-rxn".to_string(), vec![]);
+        let result = core.add_reaction(r2).await;
+        assert!(result.is_err(), "Adding duplicate reaction should fail");
+    }
+
+    #[tokio::test]
+    async fn test_start_already_running_source_fails() {
+        let core = create_test_core().await;
+        let source = TestMockSource::with_auto_start("run-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        core.start_source("run-src").await.unwrap();
+        let _ = collect_events_until(
+            &mut event_rx,
+            "run-src",
+            |evts| evts.iter().any(|e| e.status == ComponentStatus::Running),
+            EVENT_TIMEOUT,
+        )
+        .await;
+
+        let result = core.start_source("run-src").await;
+        assert!(
+            result.is_err(),
+            "Starting an already-running source should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_already_stopped_source_fails() {
+        let core = create_test_core().await;
+        let source = TestMockSource::with_auto_start("stop-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        // Source is in Stopped state; stopping again should fail
+        let result = core.stop_source("stop-src").await;
+        assert!(
+            result.is_err(),
+            "Stopping an already-stopped source should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_source_with_dependent_query_fails() {
+        let source = TestMockSource::with_auto_start("dep-src".to_string(), false).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("dep-test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+
+        let config = Query::cypher("dep-query")
+            .query("MATCH (n) RETURN n")
+            .from_source("dep-src")
+            .auto_start(false)
+            .build();
+        core.add_query(config).await.unwrap();
+
+        // Source has a dependent query — removal should fail
+        let result = core.remove_source("dep-src", false).await;
+        assert!(
+            result.is_err(),
+            "Removing a source with dependent queries should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_query_with_dependent_reaction_fails() {
+        let source = TestMockSource::with_auto_start("dep2-src".to_string(), false).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("dep2-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("dep2-query")
+                    .query("MATCH (n) RETURN n")
+                    .from_source("dep2-src")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let reaction = TestMockReaction::with_auto_start(
+            "dep2-rxn".to_string(),
+            vec!["dep2-query".to_string()],
+            false,
+        );
+        core.add_reaction(reaction).await.unwrap();
+
+        // Query has a dependent reaction — removal should fail
+        let result = core.remove_query("dep2-query").await;
+        assert!(
+            result.is_err(),
+            "Removing a query with dependent reactions should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_nonexistent_source_fails() {
+        let core = create_test_core().await;
+        let result = core.start_source("no-such-source").await;
+        assert!(result.is_err(), "Starting a nonexistent source should fail");
+    }
+
+    #[tokio::test]
+    async fn test_stop_nonexistent_source_fails() {
+        let core = create_test_core().await;
+        let result = core.stop_source("no-such-source").await;
+        assert!(result.is_err(), "Stopping a nonexistent source should fail");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_event_subscription_receives_same_events() {
+        let core = create_test_core().await;
+
+        // Two independent subscriptions
+        let mut rx1 = core.subscribe_all_component_events();
+        let mut rx2 = core.subscribe_all_component_events();
+
+        let source = TestMockSource::with_auto_start("sub-src".to_string(), false).unwrap();
+        core.add_source(source).await.unwrap();
+
+        // Both receivers should get the "added" event
+        let events1 =
+            collect_events_until(&mut rx1, "sub-src", |evts| evts.len() == 1, EVENT_TIMEOUT).await;
+        let events2 =
+            collect_events_until(&mut rx2, "sub-src", |evts| evts.len() == 1, EVENT_TIMEOUT).await;
+
+        assert_eq!(events1[0].component_id, "sub-src");
+        assert_eq!(events2[0].component_id, "sub-src");
+        assert_eq!(events1[0].status, events2[0].status);
+    }
 }

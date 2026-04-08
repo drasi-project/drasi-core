@@ -38,8 +38,11 @@ use crate::component_graph::{ComponentGraph, ComponentKind};
 /// higher-ranked lifetime issues when futures flow through axum handlers.
 #[async_trait]
 pub trait ComponentRuntime: Send + Sync + 'static {
+    /// Start the component, transitioning it to a running state.
     async fn start(&self) -> Result<()>;
+    /// Stop the component, transitioning it to a stopped state.
     async fn stop(&self) -> Result<()>;
+    /// Clean up resources held by the component before removal.
     async fn deprovision(&self) -> Result<()>;
 }
 

@@ -114,6 +114,9 @@ impl SourceManager {
         *self.state_store.write().await = Some(state_store);
     }
 
+    /// Get the runtime instance for a source by ID.
+    ///
+    /// Returns `None` if no runtime is registered for the given ID.
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
         let graph = self.graph.read().await;
         graph.get_runtime::<Arc<dyn Source>>(id).cloned()
@@ -159,6 +162,10 @@ impl SourceManager {
         Ok(())
     }
 
+    /// Start a source by ID, transitioning it to the Running state.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found or the start operation fails.
     pub async fn start_source(&self, id: String) -> Result<()> {
         let source =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
@@ -171,6 +178,10 @@ impl SourceManager {
             .await
     }
 
+    /// Stop a running source by ID, transitioning it to the Stopped state.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found or the stop operation fails.
     pub async fn stop_source(&self, id: String) -> Result<()> {
         let source =
             crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
@@ -183,15 +194,24 @@ impl SourceManager {
             .await
     }
 
+    /// Get the current status of a source by ID.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found in the component graph.
     pub async fn get_source_status(&self, id: String) -> Result<ComponentStatus> {
         crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Source").await
     }
 
+    /// List all registered sources with their current statuses.
     pub async fn list_sources(&self) -> Vec<(String, ComponentStatus)> {
         crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Source)
             .await
     }
 
+    /// Get the full runtime descriptor for a source, including its status and properties.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found.
     pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
         let graph = self.graph.read().await;
         let source = graph.get_runtime::<Arc<dyn Source>>(&id).cloned();
@@ -339,6 +359,10 @@ impl SourceManager {
         .await
     }
 
+    /// Stop all running sources.
+    ///
+    /// # Errors
+    /// Returns an error if any source fails to stop.
     pub async fn stop_all(&self) -> Result<()> {
         crate::managers::lifecycle_helpers::stop_all_components(
             &self.graph,

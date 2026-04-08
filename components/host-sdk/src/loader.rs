@@ -48,6 +48,8 @@ pub struct LoadedPlugin {
     pub bootstrap_plugins: Vec<BootstrapPluginProxy>,
     /// Plugin metadata string for diagnostics.
     pub metadata_info: Option<String>,
+    /// Path to the loaded plugin file.
+    pub file_path: PathBuf,
     /// Keep the library loaded.
     _library: Arc<Library>,
 }
@@ -302,6 +304,7 @@ pub fn load_plugin_from_path(
         reaction_plugins,
         bootstrap_plugins,
         metadata_info,
+        file_path: path.to_path_buf(),
         _library: lib,
     })
 }

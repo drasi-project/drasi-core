@@ -183,10 +183,14 @@ mod tests {
         assert!(!guard.is_initialized());
 
         // Spawn readers that will spin until initialized
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut handles = Vec::new();
         for _ in 0..10 {
             let guard_clone = guard.clone();
+            let started_clone = started.clone();
             handles.push(tokio::spawn(async move {
+                // Signal that this task is running
+                started_clone.fetch_add(1, std::sync::atomic::Ordering::Release);
                 // Wait for initialization (with timeout to prevent infinite loop)
                 let start = std::time::Instant::now();
                 while !guard_clone.is_initialized() {
@@ -200,8 +204,10 @@ mod tests {
             }));
         }
 
-        // Give spawned tasks time to start spinning
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // Wait until all tasks have started spinning (no sleep-based guessing)
+        while started.load(std::sync::atomic::Ordering::Acquire) < 10 {
+            tokio::task::yield_now().await;
+        }
 
         // Now mark as initialized - all waiting tasks should see this
         guard.mark_initialized();
