@@ -696,18 +696,32 @@ mod tests {
             TestMockReaction::with_auto_start("r-lifecycle".into(), vec!["q1".into()], false);
         core.add_reaction(reaction).await.unwrap();
 
+        // Subscribe to events before triggering actions
+        let mut event_rx = core.subscribe_all_component_events();
+
         // Start the reaction
         core.start_reaction("r-lifecycle").await.unwrap();
 
-        // Allow async status propagation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r-lifecycle",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = core.get_reaction_status("r-lifecycle").await.unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         // Stop the reaction
         core.stop_reaction("r-lifecycle").await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r-lifecycle",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = core.get_reaction_status("r-lifecycle").await.unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
     }

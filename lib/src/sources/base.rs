@@ -30,7 +30,7 @@
 //! 4. Implements the Source trait delegating to SourceBase methods
 
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -622,8 +622,8 @@ impl SourceBase {
         }
 
         // Wait for task to complete
-        if let Some(handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+        if let Some(mut handle) = self.task_handle.write().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     info!("Source '{}' task completed successfully", self.id);
                 }
@@ -631,7 +631,11 @@ impl SourceBase {
                     error!("Source '{}' task panicked: {}", self.id, e);
                 }
                 Err(_) => {
-                    error!("Source '{}' task did not complete within timeout", self.id);
+                    warn!(
+                        "Source '{}' task did not complete within timeout, aborting",
+                        self.id
+                    );
+                    handle.abort();
                 }
             }
         }

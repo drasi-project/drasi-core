@@ -258,8 +258,6 @@ pub struct DrasiQuery {
     instance_id: String,
     // Use QueryBase for common functionality
     base: QueryBase,
-    #[allow(dead_code)]
-    continuous_query: Option<ContinuousQuery>,
     current_results: Arc<RwLock<Vec<serde_json::Value>>>,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
@@ -297,7 +295,6 @@ impl DrasiQuery {
         Ok(Self {
             instance_id: instance_id.into(),
             base,
-            continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
             priority_queue,
             source_manager,
@@ -1433,71 +1430,16 @@ impl QueryManager {
                 ));
             }
 
-            // Read status from the graph (source of truth) and determine if running
-            let was_running = {
-                let graph = self.graph.read().await;
-                let node = graph
-                    .get_component(&id)
-                    .ok_or_else(|| anyhow::anyhow!("Query '{id}' not found in graph"))?;
-                matches!(
-                    node.status,
-                    ComponentStatus::Running | ComponentStatus::Starting
-                )
-            };
-
-            // Validate and set Reconfiguring atomically through the graph
-            {
-                let mut graph = self.graph.write().await;
-                graph.validate_and_transition(
-                    &id,
-                    ComponentStatus::Reconfiguring,
-                    Some("Reconfiguring query".to_string()),
-                )?;
-            }
-
-            // If running or starting, stop first
-            if was_running {
-                info!("Stopping query '{id}' for reconfiguration");
-                old_query.stop().await?;
-
-                // Wait for Stopped status (via graph) with timeout
-                crate::component_graph::wait_for_status(
-                    &self.graph,
-                    &id,
-                    &[ComponentStatus::Stopped, ComponentStatus::Error],
-                    std::time::Duration::from_secs(10),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Timed out waiting for query '{id}' to stop: {e}"))?;
-            }
-
-            // Provision the new query runtime
-            if let Err(e) = self.provision_query(new_config).await {
-                // Revert to Error state on provisioning failure
-                let mut graph = self.graph.write().await;
-                let _ = graph.validate_and_transition(
-                    &id,
-                    ComponentStatus::Error,
-                    Some(format!("Reconfiguration failed: {e}")),
-                );
-                return Err(e);
-            }
-
-            info!("Reconfigured query '{id}'");
-
-            // Restart if it was running before, otherwise transition back to Stopped
-            if was_running {
-                self.start_query(id).await?;
-            } else {
-                let mut graph = self.graph.write().await;
-                graph.validate_and_transition(
-                    &id,
-                    ComponentStatus::Stopped,
-                    Some("Reconfiguration complete".to_string()),
-                )?;
-            }
-
-            Ok(())
+            crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
+                &self.graph,
+                &id,
+                "query",
+                &old_query,
+                || async {},
+                || self.provision_query(new_config),
+                || self.start_query(id.clone()),
+            )
+            .await
         } else {
             Err(anyhow::anyhow!("Query not found: {id}"))
         }
@@ -1563,70 +1505,35 @@ impl QueryManager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
-        let queries_snapshot: Vec<(String, Arc<dyn Query>)> = {
-            let graph = self.graph.read().await;
-            graph
-                .list_by_kind(&ComponentKind::Query)
-                .iter()
-                .filter_map(|(id, _)| {
-                    graph
-                        .get_runtime::<Arc<dyn Query>>(id)
-                        .map(|q| (id.clone(), q.clone()))
-                })
-                .collect()
-        };
-
-        let mut failed_queries = Vec::new();
-
-        for (id, query) in queries_snapshot {
-            let config = query.get_config();
-            if config.auto_start {
-                info!("Auto-starting query: {id}");
-
+        crate::managers::lifecycle_helpers::start_all_components::<Arc<dyn Query>, _, _>(
+            &self.graph,
+            &ComponentKind::Query,
+            "query",
+            |q| q.get_config().auto_start,
+            |id, query| async move {
                 // Validate and apply Starting transition atomically through the graph
                 {
                     let mut graph = self.graph.write().await;
-                    if let Err(e) = graph.validate_and_transition(
+                    graph.validate_and_transition(
                         &id,
                         ComponentStatus::Starting,
                         Some("Starting query".to_string()),
-                    ) {
-                        log_component_error("Query", &id, &e.to_string());
-                        failed_queries.push((id.clone(), e.to_string()));
-                        continue;
-                    }
+                    )?;
                 }
 
                 if let Err(e) = query.start().await {
-                    // Revert graph status so the component isn't stuck at Starting
-                    {
-                        let mut graph = self.graph.write().await;
-                        let _ = graph.validate_and_transition(
-                            &id,
-                            ComponentStatus::Error,
-                            Some(format!("Start failed: {e}")),
-                        );
-                    }
-                    log_component_error("Query", &id, &e.to_string());
-                    failed_queries.push((id.clone(), e.to_string()));
-                    // Continue starting other queries instead of returning early
+                    let mut graph = self.graph.write().await;
+                    let _ = graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Error,
+                        Some(format!("Start failed: {e}")),
+                    );
+                    return Err(e);
                 }
-            } else {
-                info!("Query '{id}' has auto_start=false, skipping automatic startup");
-            }
-        }
-
-        // Return error only if any queries failed to start
-        if !failed_queries.is_empty() {
-            let error_msg = failed_queries
-                .iter()
-                .map(|(id, err)| format!("{id}: {err}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(anyhow::anyhow!("Failed to start some queries: {error_msg}"))
-        } else {
-            Ok(())
-        }
+                Ok(())
+            },
+        )
+        .await
     }
 
     pub async fn stop_all(&self) -> Result<()> {
@@ -1642,10 +1549,9 @@ impl QueryManager {
         let mut failed_queries = Vec::new();
 
         for id in query_ids {
-            // Check if the query is in a stoppable state before attempting
-            let (is_active, query) = {
+            let is_active = {
                 let graph = self.graph.read().await;
-                let active = graph
+                graph
                     .get_component(&id)
                     .map(|n| {
                         matches!(
@@ -1653,40 +1559,13 @@ impl QueryManager {
                             ComponentStatus::Running | ComponentStatus::Starting
                         )
                     })
-                    .unwrap_or(false);
-                let q = graph.get_runtime::<Arc<dyn Query>>(&id).cloned();
-                (active, q)
+                    .unwrap_or(false)
             };
 
             if is_active {
-                if let Some(query) = query {
-                    // Validate and apply Stopping transition atomically through the graph
-                    {
-                        let mut graph = self.graph.write().await;
-                        if let Err(e) = graph.validate_and_transition(
-                            &id,
-                            ComponentStatus::Stopping,
-                            Some("Stopping query".to_string()),
-                        ) {
-                            log_component_error("Query", &id, &e.to_string());
-                            failed_queries.push((id.clone(), e.to_string()));
-                            continue;
-                        }
-                    }
-
-                    if let Err(e) = query.stop().await {
-                        // Revert graph status so the component isn't stuck at Stopping
-                        {
-                            let mut graph = self.graph.write().await;
-                            let _ = graph.validate_and_transition(
-                                &id,
-                                ComponentStatus::Error,
-                                Some(format!("Stop failed: {e}")),
-                            );
-                        }
-                        log_component_error("Query", &id, &e.to_string());
-                        failed_queries.push((id.clone(), e.to_string()));
-                    }
+                if let Err(e) = self.stop_query(id.clone()).await {
+                    log_component_error("Query", &id, &e.to_string());
+                    failed_queries.push((id, e.to_string()));
                 }
             }
         }

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::future::Future;
 use tokio::sync::RwLock;
 
 use crate::channels::ComponentStatus;
@@ -297,6 +298,216 @@ where
     log_registry.remove_component_by_key(&log_key).await;
     log::info!("Teardown {component_type}: {id}");
 
+    Ok(())
+}
+
+/// Reconfigure a component: transition to Reconfiguring → stop if running →
+/// init/replace → restart or transition to Stopped.
+///
+/// This is the shared reconfiguration state machine used by all three managers.
+/// It fixes the stuck-in-Reconfiguring bug by reverting to `Error` on any failure
+/// after entering the `Reconfiguring` state.
+///
+/// # Arguments
+/// * `graph` — shared component graph
+/// * `id` — component ID
+/// * `component_type` — display name ("source", "query", "reaction")
+/// * `old_runtime` — reference to the old runtime (for calling stop)
+/// * `pre_stop` — async closure called before stop (e.g., abort subscription tasks)
+/// * `init_and_replace` — async closure that initializes the new runtime and replaces it in the graph
+/// * `restart` — async closure that restarts the component (e.g., start_source, start_reaction)
+pub async fn reconfigure_component<T, Fut1, Fut2, Fut3>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    id: &str,
+    component_type: &str,
+    old_runtime: &T,
+    pre_stop: impl FnOnce() -> Fut1,
+    init_and_replace: impl FnOnce() -> Fut2,
+    restart: impl FnOnce() -> Fut3,
+) -> Result<()>
+where
+    T: ComponentRuntime,
+    Fut1: Future<Output = ()>,
+    Fut2: Future<Output = Result<()>>,
+    Fut3: Future<Output = Result<()>>,
+{
+    // Read status from the graph (source of truth) and determine if running
+    let was_running = {
+        let g = graph.read().await;
+        let node = g
+            .get_component(id)
+            .ok_or_else(|| anyhow::anyhow!("{component_type} '{id}' not found in graph"))?;
+        matches!(
+            node.status,
+            ComponentStatus::Running | ComponentStatus::Starting
+        )
+    };
+
+    // Validate and set Reconfiguring atomically through the graph
+    {
+        let mut g = graph.write().await;
+        g.validate_and_transition(
+            id,
+            ComponentStatus::Reconfiguring,
+            Some(format!("Reconfiguring {component_type}")),
+        )?;
+    }
+
+    // If running or starting, stop first.
+    // Revert to Error on failure to prevent stuck Reconfiguring state.
+    if was_running {
+        log::info!("Stopping {component_type} '{id}' for reconfiguration");
+        pre_stop().await;
+
+        if let Err(e) = async {
+            old_runtime.stop().await?;
+            crate::component_graph::wait_for_status(
+                graph,
+                id,
+                &[ComponentStatus::Stopped, ComponentStatus::Error],
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Timed out waiting for {component_type} '{id}' to stop: {e}")
+            })
+        }
+        .await
+        {
+            let mut g = graph.write().await;
+            let _ = g.validate_and_transition(
+                id,
+                ComponentStatus::Error,
+                Some(format!("Reconfiguration failed during stop: {e}")),
+            );
+            return Err(e);
+        }
+    }
+
+    // Initialize and replace with the new runtime.
+    // Revert to Error on failure.
+    if let Err(e) = init_and_replace().await {
+        let mut g = graph.write().await;
+        let _ = g.validate_and_transition(
+            id,
+            ComponentStatus::Error,
+            Some(format!("Reconfiguration failed: {e}")),
+        );
+        return Err(e);
+    }
+
+    log::info!("Reconfigured {component_type} '{id}'");
+
+    // Restart if it was running before, otherwise transition back to Stopped
+    if was_running {
+        restart().await
+    } else {
+        let mut g = graph.write().await;
+        g.validate_and_transition(
+            id,
+            ComponentStatus::Stopped,
+            Some("Reconfiguration complete".to_string()),
+        )?;
+        Ok(())
+    }
+}
+
+/// Start all components of a given kind that have auto_start enabled.
+///
+/// Components are started via the provided `start_fn` closure, which allows
+/// each manager to use its own start logic (e.g., reactions need subscription setup).
+///
+/// Returns an error if any components failed to start, after attempting all.
+pub async fn start_all_components<T, F, Fut>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    kind: &ComponentKind,
+    component_type: &str,
+    auto_start_filter: impl Fn(&T) -> bool,
+    start_fn: F,
+) -> Result<()>
+where
+    T: Clone + 'static,
+    F: Fn(String, T) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let entries: Vec<(String, T)> = {
+        let g = graph.read().await;
+        g.list_by_kind(kind)
+            .iter()
+            .filter_map(|(id, _)| g.get_runtime::<T>(id).map(|r| (id.clone(), r.clone())))
+            .collect()
+    };
+
+    let mut failures = Vec::new();
+
+    for (id, runtime) in entries {
+        if !auto_start_filter(&runtime) {
+            log::info!("Skipping {component_type} '{id}' (auto_start=false)");
+            continue;
+        }
+
+        log::info!("Starting {component_type}: {id}");
+        if let Err(e) = start_fn(id.clone(), runtime).await {
+            log::error!("Failed to start {component_type} {id}: {e}");
+            failures.push((id, e.to_string()));
+        }
+    }
+
+    if !failures.is_empty() {
+        let error_msg = failures
+            .iter()
+            .map(|(id, err)| format!("{id}: {err}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(anyhow::anyhow!(
+            "Failed to start some {component_type}s: {error_msg}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Stop all active components of a given kind (best-effort).
+///
+/// Components in Running or Starting state are stopped via the provided `stop_fn`.
+/// Errors are logged but do not prevent stopping other components.
+pub async fn stop_all_components<F, Fut>(
+    graph: &Arc<RwLock<ComponentGraph>>,
+    kind: &ComponentKind,
+    component_type: &str,
+    stop_fn: F,
+) -> Result<()>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let ids: Vec<String> = {
+        let g = graph.read().await;
+        g.list_by_kind(kind)
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+
+    for id in ids {
+        let is_active = {
+            let g = graph.read().await;
+            g.get_component(&id)
+                .map(|n| {
+                    matches!(
+                        n.status,
+                        ComponentStatus::Running | ComponentStatus::Starting
+                    )
+                })
+                .unwrap_or(false)
+        };
+
+        if is_active {
+            if let Err(e) = stop_fn(id.clone()).await {
+                crate::managers::log_component_error(component_type, &id, &e.to_string());
+            }
+        }
+    }
     Ok(())
 }
 

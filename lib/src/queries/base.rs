@@ -44,7 +44,7 @@
 //! ```
 
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -149,7 +149,6 @@ impl QueryBase {
                 let dispatcher = ChannelChangeDispatcher::<QueryResult>::new(capacity);
                 let receiver = dispatcher.create_receiver().await?;
 
-                // Add the new dispatcher to our list
                 let mut dispatchers = self.dispatchers.write().await;
                 dispatchers.push(Box::new(dispatcher));
 
@@ -192,9 +191,6 @@ impl QueryBase {
             }
         } else {
             // Multiple dispatchers: fan out concurrently via join_all.
-            // We create the futures while holding the read lock, then await them.
-            // The futures borrow the dispatchers so the lock must stay held,
-            // but that's fine — no writes happen during dispatch.
             let futures: Vec<_> = dispatchers
                 .iter()
                 .map(|d| d.dispatch_change(arc_result.clone()))
@@ -228,8 +224,8 @@ impl QueryBase {
         }
 
         // Wait for task to complete
-        if let Some(handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+        if let Some(mut handle) = self.task_handle.write().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     info!("Query '{}' task completed successfully", self.config.id);
                 }
@@ -237,10 +233,11 @@ impl QueryBase {
                     error!("Query '{}' task panicked: {}", self.config.id, e);
                 }
                 Err(_) => {
-                    error!(
-                        "Query '{}' task did not complete within timeout",
+                    warn!(
+                        "Query '{}' task did not complete within timeout, aborting",
                         self.config.id
                     );
+                    handle.abort();
                 }
             }
         }
@@ -456,8 +453,8 @@ mod tests {
         base.set_task_handle(task).await;
 
         base.stop_common().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
+        // stop_common awaits the task handle, so the flag should already be set
         assert!(
             shutdown_received.load(Ordering::SeqCst),
             "Task should have received shutdown signal"

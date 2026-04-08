@@ -568,18 +568,32 @@ mod tests {
             .build();
         core.add_query(config).await.unwrap();
 
+        // Subscribe to events before triggering actions
+        let mut event_rx = core.subscribe_all_component_events();
+
         // Start the query
         core.start_query("q-lifecycle").await.unwrap();
 
-        // Allow async status propagation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q-lifecycle",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = core.get_query_status("q-lifecycle").await.unwrap();
         assert_eq!(status, ComponentStatus::Running);
 
         // Stop the query
         core.stop_query("q-lifecycle").await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q-lifecycle",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
         let status = core.get_query_status("q-lifecycle").await.unwrap();
         assert_eq!(status, ComponentStatus::Stopped);
     }

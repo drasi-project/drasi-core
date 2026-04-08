@@ -146,7 +146,16 @@ impl ReactionManager {
         )
         .await?;
 
-        self.subscribe_reaction_to_queries(&id, reaction).await?;
+        if let Err(e) = self.subscribe_reaction_to_queries(&id, reaction).await {
+            // Revert to Error since the reaction can't receive data without subscriptions
+            let mut graph = self.graph.write().await;
+            let _ = graph.validate_and_transition(
+                &id,
+                ComponentStatus::Error,
+                Some(format!("Subscription setup failed: {e}")),
+            );
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -249,84 +258,40 @@ impl ReactionManager {
                 ));
             }
 
-            // Read status from the graph (source of truth) and determine if running
-            let was_running = {
-                let graph = self.graph.read().await;
-                let node = graph
-                    .get_component(&id)
-                    .ok_or_else(|| anyhow::anyhow!("Reaction '{id}' not found in graph"))?;
-                matches!(
-                    node.status,
-                    ComponentStatus::Running | ComponentStatus::Starting
-                )
-            };
+            let graph = &self.graph;
+            let instance_id = &self.instance_id;
+            let state_store = &self.state_store;
+            let update_tx = &self.update_tx;
 
-            // Validate and set Reconfiguring atomically through the graph
-            {
-                let mut graph = self.graph.write().await;
-                graph.validate_and_transition(
-                    &id,
-                    ComponentStatus::Reconfiguring,
-                    Some("Reconfiguring reaction".to_string()),
-                )?;
-            }
-
-            // If running or starting, stop first
-            if was_running {
-                info!("Stopping reaction '{id}' for reconfiguration");
-                self.abort_subscription_tasks(&id).await;
-                old_reaction.stop().await?;
-
-                // Wait for Stopped status (via graph) with timeout
-                crate::component_graph::wait_for_status(
-                    &self.graph,
-                    &id,
-                    &[ComponentStatus::Stopped, ComponentStatus::Error],
-                    std::time::Duration::from_secs(10),
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Timed out waiting for reaction '{id}' to stop: {e}")
-                })?;
-            }
-
-            // Initialize the new reaction with runtime context
-            let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let context = ReactionRuntimeContext::new(
-                &self.instance_id,
+            crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Reaction>, _, _, _>(
+                graph,
                 &id,
-                self.state_store.read().await.clone(),
-                self.update_tx.clone(),
-                None,
-            );
-            new_reaction.initialize(context).await;
+                "reaction",
+                &old_reaction,
+                || self.abort_subscription_tasks(&id),
+                || async {
+                    let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
+                    let context = ReactionRuntimeContext::new(
+                        instance_id,
+                        &id,
+                        state_store.read().await.clone(),
+                        update_tx.clone(),
+                        None,
+                    );
+                    new_reaction.initialize(context).await;
 
-            // Replace in the graph runtime store
-            {
-                let mut graph = self.graph.write().await;
-                if !graph.has_runtime(&id) {
-                    return Err(anyhow::anyhow!(
-                        "Reaction '{id}' was concurrently deleted during reconfiguration"
-                    ));
-                }
-                graph.set_runtime(&id, Box::new(new_reaction))?;
-            }
-
-            info!("Reconfigured reaction '{id}'");
-
-            // Restart if it was running before, otherwise transition back to Stopped
-            if was_running {
-                self.start_reaction(id).await?;
-            } else {
-                let mut graph = self.graph.write().await;
-                graph.validate_and_transition(
-                    &id,
-                    ComponentStatus::Stopped,
-                    Some("Reconfiguration complete".to_string()),
-                )?;
-            }
-
-            Ok(())
+                    let mut g = graph.write().await;
+                    if !g.has_runtime(&id) {
+                        return Err(anyhow::anyhow!(
+                            "Reaction '{id}' was concurrently deleted during reconfiguration"
+                        ));
+                    }
+                    g.set_runtime(&id, Box::new(new_reaction))?;
+                    Ok(())
+                },
+                || self.start_reaction(id.clone()),
+            )
+            .await
         } else {
             Err(anyhow::anyhow!("Reaction not found: {id}"))
         }
@@ -344,81 +309,24 @@ impl ReactionManager {
     ///
     /// Only reactions with `auto_start() == true` will be started.
     pub async fn start_all(&self) -> Result<()> {
-        let reaction_entries: Vec<(String, Arc<dyn Reaction>)> = {
-            let graph = self.graph.read().await;
-            graph
-                .list_by_kind(&ComponentKind::Reaction)
-                .iter()
-                .filter_map(|(id, _)| {
-                    graph
-                        .get_runtime::<Arc<dyn Reaction>>(id)
-                        .map(|r| (id.clone(), r.clone()))
-                })
-                .collect()
-        };
-
-        let mut failed_reactions = Vec::new();
-
-        for (reaction_id, reaction) in reaction_entries {
-            if !reaction.auto_start() {
-                info!("Skipping reaction '{reaction_id}' (auto_start=false)");
-                continue;
-            }
-
-            info!("Starting reaction: {reaction_id}");
-            if let Err(e) = self.start_reaction(reaction_id.clone()).await {
-                error!("Failed to start reaction {reaction_id}: {e}");
-                failed_reactions.push((reaction_id, e.to_string()));
-            }
-        }
-
-        // Return error only if any reactions failed to start
-        if !failed_reactions.is_empty() {
-            let error_msg = failed_reactions
-                .iter()
-                .map(|(id, err)| format!("{id}: {err}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(anyhow::anyhow!(
-                "Failed to start some reactions: {error_msg}"
-            ))
-        } else {
-            Ok(())
-        }
+        crate::managers::lifecycle_helpers::start_all_components::<Arc<dyn Reaction>, _, _>(
+            &self.graph,
+            &ComponentKind::Reaction,
+            "reaction",
+            |r| r.auto_start(),
+            |id, _reaction| self.start_reaction(id),
+        )
+        .await
     }
 
     pub async fn stop_all(&self) -> Result<()> {
-        let reaction_ids: Vec<String> = {
-            let graph = self.graph.read().await;
-            graph
-                .list_by_kind(&ComponentKind::Reaction)
-                .iter()
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
-
-        for id in reaction_ids {
-            // Check if the reaction is in a stoppable state before attempting
-            let is_active = {
-                let graph = self.graph.read().await;
-                graph
-                    .get_component(&id)
-                    .map(|n| {
-                        matches!(
-                            n.status,
-                            ComponentStatus::Running | ComponentStatus::Starting
-                        )
-                    })
-                    .unwrap_or(false)
-            };
-
-            if is_active {
-                if let Err(e) = self.stop_reaction(id.clone()).await {
-                    log_component_error("Reaction", &id, &e.to_string());
-                }
-            }
-        }
-        Ok(())
+        crate::managers::lifecycle_helpers::stop_all_components(
+            &self.graph,
+            &ComponentKind::Reaction,
+            "Reaction",
+            |id| self.stop_reaction(id),
+        )
+        .await
     }
 
     /// Record a component event in the history.

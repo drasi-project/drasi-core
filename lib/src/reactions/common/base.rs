@@ -304,9 +304,9 @@ impl ReactionBase {
 
         // Wait for the processing task to complete (with timeout), or abort it
         let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
+        if let Some(mut task) = processing_task.take() {
             // Give the task a short time to respond to the shutdown signal
-            match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
                 Ok(Ok(())) => {
                     debug!("[{}] Processing task completed gracefully", self.id);
                 }
@@ -316,11 +316,11 @@ impl ReactionBase {
                 }
                 Err(_) => {
                     // Timeout - task didn't respond to shutdown signal
-                    // This shouldn't happen if the task is using tokio::select! correctly
                     warn!(
-                        "[{}] Processing task did not respond to shutdown signal within timeout",
+                        "[{}] Processing task did not respond to shutdown signal within timeout, aborting",
                         self.id
                     );
+                    task.abort();
                 }
             }
         }
@@ -539,12 +539,10 @@ mod tests {
 
         base.set_processing_task(task).await;
 
-        // Call stop_common - should send shutdown signal
+        // Call stop_common - should send shutdown signal and await the task
         let _ = base.stop_common().await;
 
-        // Give task time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        // stop_common awaits the processing task, so the flag should already be set
         assert!(
             shutdown_received.load(Ordering::SeqCst),
             "Processing task should have received shutdown signal"
