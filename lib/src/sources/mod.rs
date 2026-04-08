@@ -15,6 +15,7 @@
 pub mod base;
 pub mod component_graph_source;
 pub mod future_queue_source;
+pub(crate) mod graph_elements;
 pub mod manager;
 mod traits;
 

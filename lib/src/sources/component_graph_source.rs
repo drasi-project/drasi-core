@@ -36,9 +36,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
-};
+use drasi_core::models::{ElementPropertyMap, ElementValue, SourceChange};
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,93 +48,13 @@ use crate::component_graph::ComponentGraph;
 use crate::config::SourceSubscriptionSettings;
 use crate::context::SourceRuntimeContext;
 use crate::sources::base::{SourceBase, SourceBaseParams};
+use crate::sources::graph_elements::{
+    build_props, make_delete_metadata, make_node, make_relation, status_str,
+};
 use crate::sources::Source;
 
 /// Well-known source ID for the component graph source
 pub const COMPONENT_GRAPH_SOURCE_ID: &str = "__component_graph__";
-
-// ============================================================================
-// Helper functions for building graph elements
-// ============================================================================
-
-/// Create a node Element with the given label, element_id, and properties
-fn make_node(element_id: &str, labels: &[&str], props: ElementPropertyMap) -> Element {
-    Element::Node {
-        metadata: ElementMetadata {
-            reference: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, element_id),
-            labels: labels
-                .iter()
-                .map(|l| Arc::from(*l))
-                .collect::<Vec<_>>()
-                .into(),
-            effective_from: now_ms(),
-        },
-        properties: props,
-    }
-}
-
-/// Create a relation Element
-fn make_relation(
-    element_id: &str,
-    labels: &[&str],
-    in_node_id: &str,
-    out_node_id: &str,
-    props: ElementPropertyMap,
-) -> Element {
-    Element::Relation {
-        metadata: ElementMetadata {
-            reference: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, element_id),
-            labels: labels
-                .iter()
-                .map(|l| Arc::from(*l))
-                .collect::<Vec<_>>()
-                .into(),
-            effective_from: now_ms(),
-        },
-        in_node: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, in_node_id),
-        out_node: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, out_node_id),
-        properties: props,
-    }
-}
-
-/// Create an ElementMetadata for delete operations
-fn make_delete_metadata(element_id: &str, labels: &[&str]) -> ElementMetadata {
-    ElementMetadata {
-        reference: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, element_id),
-        labels: labels
-            .iter()
-            .map(|l| Arc::from(*l))
-            .collect::<Vec<_>>()
-            .into(),
-        effective_from: now_ms(),
-    }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn status_str(status: &ComponentStatus) -> &'static str {
-    match status {
-        ComponentStatus::Stopped => "Stopped",
-        ComponentStatus::Starting => "Starting",
-        ComponentStatus::Running => "Running",
-        ComponentStatus::Stopping => "Stopping",
-        ComponentStatus::Reconfiguring => "Reconfiguring",
-        ComponentStatus::Error => "Error",
-    }
-}
-
-fn build_props(pairs: &[(&str, &str)]) -> ElementPropertyMap {
-    let mut props = ElementPropertyMap::new();
-    for (k, v) in pairs {
-        props.insert(k, ElementValue::String(Arc::from(*v)));
-    }
-    props
-}
 
 // --------------------------------------------------------------------------
 // ComponentGraphSource

@@ -21,9 +21,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
-};
+use drasi_core::models::{ElementPropertyMap, ElementValue, SourceChange};
 use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -33,6 +31,7 @@ use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, RelationshipKind};
 use crate::config::SourceSubscriptionSettings;
 use crate::sources::component_graph_source::COMPONENT_GRAPH_SOURCE_ID;
+use crate::sources::graph_elements::{make_node, make_relation, status_str};
 
 /// Bootstrap provider that generates a consistent snapshot from the [`ComponentGraph`].
 ///
@@ -215,69 +214,10 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
     }
 }
 
-// ============================================================================
-// Helper functions for building graph elements
-// ============================================================================
-
-fn make_node(element_id: &str, labels: &[&str], props: ElementPropertyMap) -> Element {
-    Element::Node {
-        metadata: ElementMetadata {
-            reference: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, element_id),
-            labels: labels
-                .iter()
-                .map(|l| Arc::from(*l))
-                .collect::<Vec<_>>()
-                .into(),
-            effective_from: now_ms(),
-        },
-        properties: props,
-    }
-}
-
-fn make_relation(
-    element_id: &str,
-    labels: &[&str],
-    in_node_id: &str,
-    out_node_id: &str,
-    props: ElementPropertyMap,
-) -> Element {
-    Element::Relation {
-        metadata: ElementMetadata {
-            reference: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, element_id),
-            labels: labels
-                .iter()
-                .map(|l| Arc::from(*l))
-                .collect::<Vec<_>>()
-                .into(),
-            effective_from: now_ms(),
-        },
-        in_node: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, in_node_id),
-        out_node: ElementReference::new(COMPONENT_GRAPH_SOURCE_ID, out_node_id),
-        properties: props,
-    }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn status_str(status: &ComponentStatus) -> &'static str {
-    match status {
-        ComponentStatus::Stopped => "Stopped",
-        ComponentStatus::Starting => "Starting",
-        ComponentStatus::Running => "Running",
-        ComponentStatus::Stopping => "Stopping",
-        ComponentStatus::Reconfiguring => "Reconfiguring",
-        ComponentStatus::Error => "Error",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drasi_core::models::Element;
     use std::collections::HashMap;
     use tokio::sync::mpsc;
 
