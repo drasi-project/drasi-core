@@ -844,10 +844,23 @@ async fn test_log_levels_captured() {
 
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Wait for at least one log to arrive (event-based instead of sleep)
-    let _ = timeout(Duration::from_secs(5), log_rx.recv())
-        .await
-        .expect("Timed out waiting for logs");
+    // Wait for multiple logs to arrive. The first log may arrive quickly but
+    // lifecycle logs (Starting, Running) trickle in asynchronously. Wait for
+    // up to 5 seconds, collecting logs until we have enough or time out.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut received_count = 0;
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), log_rx.recv()).await {
+            Ok(Ok(_)) => {
+                received_count += 1;
+                if received_count >= 2 {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break, // channel closed
+            Err(_) => continue,  // timeout, try again
+        }
+    }
 
     // Get log history
     let (history, _) = drasi

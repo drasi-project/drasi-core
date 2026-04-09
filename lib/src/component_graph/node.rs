@@ -48,7 +48,8 @@ pub enum ComponentUpdate {
 /// Sender half of the component update channel.
 ///
 /// Cloned and given to each component's `SourceBase`/`ReactionBase`/`QueryBase`.
-/// Fire-and-forget: `try_send()` never blocks.
+/// Uses `send().await` which applies backpressure if the channel is full,
+/// ensuring status transitions are never silently dropped.
 pub type ComponentUpdateSender = mpsc::Sender<ComponentUpdate>;
 
 /// Receiver half of the component update channel.

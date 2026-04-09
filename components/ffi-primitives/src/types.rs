@@ -236,8 +236,22 @@ impl FfiCreateResult {
     }
 
     /// Create an error result with a message.
+    ///
+    /// Interior NUL bytes are replaced with the Unicode replacement character (U+FFFD)
+    /// to avoid silently dropping the entire error message across the FFI boundary.
     pub fn err(msg: String) -> Self {
-        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        let sanitized = msg.replace('\0', "\u{FFFD}");
+        // sanitized is guaranteed NUL-free after replace, so CString::new cannot fail.
+        let c_msg = match std::ffi::CString::new(sanitized) {
+            Ok(c) => c,
+            Err(_) => {
+                // Unreachable after NUL replacement, but handle defensively.
+                // SAFETY: literal has no interior NUL bytes.
+                unsafe {
+                    std::ffi::CString::from_vec_unchecked(b"error message unavailable".to_vec())
+                }
+            }
+        };
         Self {
             ptr: std::ptr::null_mut(),
             error_code: 1,

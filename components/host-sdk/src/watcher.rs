@@ -199,7 +199,9 @@ impl PluginWatcher {
         let debounce = self.config.debounce;
 
         tokio::spawn(async move {
-            let mut known_files: std::collections::HashMap<PathBuf, u64> =
+            // Track both size and mtime to detect changes even when file size stays the same
+            // (common during rebuilds/strip operations).
+            let mut known_files: std::collections::HashMap<PathBuf, (u64, std::time::SystemTime)> =
                 std::collections::HashMap::new();
 
             // Initial scan
@@ -209,7 +211,8 @@ impl PluginWatcher {
                     let name = entry.file_name();
                     if is_plugin_binary(&name.to_string_lossy()) {
                         if let Ok(meta) = entry.metadata() {
-                            known_files.insert(path, meta.len());
+                            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                            known_files.insert(path, (meta.len(), mtime));
                         }
                     }
                 }
@@ -223,7 +226,7 @@ impl PluginWatcher {
                     }
                     _ = tokio::time::sleep(debounce) => {
                         // Poll for changes
-                        let mut current_files: std::collections::HashMap<PathBuf, u64> =
+                        let mut current_files: std::collections::HashMap<PathBuf, (u64, std::time::SystemTime)> =
                             std::collections::HashMap::new();
 
                         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -232,19 +235,20 @@ impl PluginWatcher {
                                 let name = entry.file_name();
                                 if is_plugin_binary(&name.to_string_lossy()) {
                                     if let Ok(meta) = entry.metadata() {
-                                        current_files.insert(path, meta.len());
+                                        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                                        current_files.insert(path, (meta.len(), mtime));
                                     }
                                 }
                             }
                         }
 
-                        // Detect additions and changes
-                        for (path, size) in &current_files {
+                        // Detect additions and changes (by size or mtime)
+                        for (path, (size, mtime)) in &current_files {
                             match known_files.get(path) {
                                 None => {
                                     let _ = event_tx.send(PluginFileEvent::Added(path.clone()));
                                 }
-                                Some(old_size) if old_size != size => {
+                                Some((old_size, old_mtime)) if old_size != size || old_mtime != mtime => {
                                     let _ = event_tx.send(PluginFileEvent::Changed(path.clone()));
                                 }
                                 _ => {}

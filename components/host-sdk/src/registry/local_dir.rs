@@ -55,7 +55,7 @@ impl LocalDirRegistry {
     /// Search for plugins matching a pattern (e.g., "source/*", "*", "reaction/log").
     ///
     /// The pattern is matched against the derived plugin reference (e.g., "source/postgres").
-    /// A `*` wildcard matches any character sequence within a single path segment.
+    /// A `*` wildcard matches any character sequence (including `/` path separators).
     pub fn search(&self, pattern: &str) -> Result<Vec<LocalPluginInfo>> {
         if !self.dir.exists() {
             bail!(
@@ -151,7 +151,7 @@ impl LocalDirRegistry {
 
 /// Simple wildcard pattern matching for plugin references.
 ///
-/// Supports `*` as a wildcard matching any characters within the matched segment.
+/// Supports `*` as a wildcard matching any characters (including `/`).
 /// A bare `*` matches everything.
 fn pattern_matches(pattern: &str, reference: &str) -> bool {
     if pattern == "*" {

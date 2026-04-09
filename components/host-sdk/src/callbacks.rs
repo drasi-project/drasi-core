@@ -391,7 +391,6 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
     // Send through the component graph update channel
     if !ctx.is_null() {
         let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-        let _component_type = parse_component_type(&component_type_str);
         let status = ffi_lifecycle_to_component_status(event_type);
 
         let update = ComponentUpdate::Status {

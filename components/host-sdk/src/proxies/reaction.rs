@@ -100,7 +100,16 @@ impl Reaction for ReactionProxy {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let owned = (self.vtable.properties_fn)(self.vtable.state as *const c_void);
         let json_str = unsafe { owned.into_string() };
-        serde_json::from_str(&json_str).unwrap_or_default()
+        match serde_json::from_str(&json_str) {
+            Ok(props) => props,
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse plugin properties for '{}': {e}",
+                    self.cached_id
+                );
+                HashMap::new()
+            }
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

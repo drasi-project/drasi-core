@@ -348,7 +348,8 @@ impl Source for GrpcSource {
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running, None).await;
+        // Note: Running status is set inside the spawned task with the
+        // informative "listening on {addr}" message. No duplicate set here.
 
         Ok(())
     }

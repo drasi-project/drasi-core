@@ -580,8 +580,10 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
         .and_then(plugin_kind_from_filename)
         .unwrap_or_default();
 
-    // Leak the library to avoid dlclose (same safety model as LoadedPlugin).
-    std::mem::forget(lib);
+    // Close the library — we only needed the metadata strings (already copied).
+    // Unlike LoadedPlugin (which keeps vtable pointers alive), scan_plugin_metadata
+    // has no dangling references after the strings are copied above.
+    drop(lib);
 
     Some(PluginMetadataSummary {
         plugin_id,
