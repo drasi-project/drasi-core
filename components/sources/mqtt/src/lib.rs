@@ -1,54 +1,59 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod adaptive_batcher;
 pub mod config;
 pub mod connection;
-pub mod model;
-mod time;
+pub mod schema;
 
 use adaptive_batcher::AdaptiveBatchConfig;
 use config::{
-    default_broker_addr, default_event_channel_capacity, default_port, default_qos,
-    MQTTSourceConfig, MqttConnectProperties, MqttSubscribeProperties, MqttTopicConfig,
-    MqttTransportMode, TopicMapping,
+    default_event_channel_capacity, default_host, default_port, default_qos, MqttConnectProperties,
+    MqttSourceConfig, MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
 };
-use drasi_core::evaluation::functions::async_trait;
 use drasi_lib::config::SourceSubscriptionSettings;
-use drasi_lib::queries::base;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::ComponentStatus;
-use drasi_lib::Source;
-use std::collections::HashMap;
 
 use anyhow::Result;
-use log::{debug, error, info, trace, warn};
-use serde::{Deserialize, Serialize};
+use log::error;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 
 use drasi_lib::channels::{ComponentType, *};
-use drasi_lib::SourceRuntimeContext;
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, Packet, QoS};
-use tracing::Instrument;
+use drasi_lib::{Source, SourceRuntimeContext};
 mod mqtt;
+mod pattern;
+mod processor;
+mod utils;
 
 pub use config::MqttQoS;
-pub use mqtt::MQTTSource;
+pub use mqtt::MqttSource;
+pub use schema::{MqttElement, MqttSourceChange};
 
-/// TODO: Complete the mqtt builder
-
-/// Builder for MQTTSource instances.
+/// Builder for MqttSource instances.
 ///
 /// Provides a fluent API for constructing MQTT sources with sensible defaults
 /// and adaptive batching settings. The builder takes the source ID at construction
-/// and returns a fully constructed `MQTTSource` from `build()`.
+/// and returns a fully constructed `MqttSource` from `build()`.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use drasi_source_mqtt::MQTTSource;
+/// use drasi_source_mqtt::MqttSource;
 ///
-/// let source = MQTTSource::builder("my-source")
+/// let source = MqttSource::builder("my-source")
 ///     .with_host("0.0.0.0")
 ///     .with_port(8080)
 ///     .with_topic("my/mqtt/topic")
@@ -57,20 +62,18 @@ pub use mqtt::MQTTSource;
 ///     .with_bootstrap_provider(my_provider)
 ///     .build()?;
 /// ```
-pub struct MQTTSourceBuilder {
+pub struct MqttSourceBuilder {
     id: String,
-    broker_addr: String,
+    host: String,
     port: u16,
     topics: Vec<MqttTopicConfig>,
     topic_mappings: Vec<TopicMapping>,
-    qos: MqttQoS,
     event_channel_capacity: usize,
     transport: Option<MqttTransportMode>,
     request_channel_capacity: Option<usize>,
     max_inflight: Option<u16>,
     keep_alive: Option<u64>,
     clean_start: Option<bool>,
-    max_request_batch: Option<usize>,
     max_incoming_packet_size: Option<usize>,
     max_outgoing_packet_size: Option<usize>,
     conn_timeout: Option<u64>,
@@ -89,39 +92,37 @@ pub struct MQTTSourceBuilder {
     auto_start: bool,
 }
 
-impl MQTTSourceBuilder {
+impl MqttSourceBuilder {
     /// Create a new MQTT source builder with the given source ID.
     pub fn new(id: impl Into<String>) -> Self {
-        let qos = default_qos();
         Self {
             id: id.into(),
-            broker_addr: default_broker_addr(),
+            host: default_host(),
             port: default_port(),
-            topics: vec![MqttTopicConfig {
-                topic: "mqtt/topic".to_string(),
-                qos: qos.clone(),
-            }],
-            topic_mappings: Vec::new(),
-            qos,
+            identity_provider: None,
+            topics: vec![],
+            topic_mappings: vec![],
             event_channel_capacity: default_event_channel_capacity(),
             transport: None,
             request_channel_capacity: None,
             max_inflight: None,
             keep_alive: None,
             clean_start: None,
-            max_request_batch: None,
-            max_incoming_packet_size: None,
-            max_outgoing_packet_size: None,
-            conn_timeout: Some(5_000),
-            connect_properties: None,
-            subscribe_properties: None,
-            identity_provider: None,
+
+            max_incoming_packet_size: None, // v3
+            max_outgoing_packet_size: None, // v3
+
+            conn_timeout: None,         // v5
+            connect_properties: None,   // v5
+            subscribe_properties: None, // v5
+
             adaptive_max_batch_size: None,
             adaptive_min_batch_size: None,
             adaptive_max_wait_ms: None,
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -130,7 +131,7 @@ impl MQTTSourceBuilder {
     }
 
     pub fn with_host(mut self, host: impl Into<String>) -> Self {
-        self.broker_addr = host.into();
+        self.host = host.into();
         self
     }
 
@@ -142,7 +143,7 @@ impl MQTTSourceBuilder {
     pub fn with_topic(mut self, topic: impl Into<String>) -> Self {
         self.topics = vec![MqttTopicConfig {
             topic: topic.into(),
-            qos: self.qos.clone(),
+            qos: default_qos(),
         }];
         self
     }
@@ -160,16 +161,8 @@ impl MQTTSourceBuilder {
         self
     }
 
-    pub fn with_qos(mut self, qos: MqttQoS) -> Self {
-        self.qos = qos.clone();
-        for topic in &mut self.topics {
-            topic.qos = qos.clone();
-        }
-        self
-    }
-
-    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.conn_timeout = Some(timeout_ms);
+    pub fn with_timeout_ms(mut self, timeout: u64) -> Self {
+        self.conn_timeout = Some(timeout);
         self
     }
 
@@ -231,6 +224,7 @@ impl MQTTSourceBuilder {
         self
     }
 
+    /// Set the identity provider for the source.
     pub fn with_identity_provider(
         mut self,
         identity_provider: impl drasi_lib::identity::IdentityProvider + 'static,
@@ -292,14 +286,13 @@ impl MQTTSourceBuilder {
         self
     }
 
-    pub fn with_config(mut self, config: MQTTSourceConfig) -> Self {
-        self.broker_addr = config.broker_addr;
+    pub fn with_config(mut self, config: MqttSourceConfig) -> Self {
+        self.host = config.host;
         self.port = config.port;
         self.identity_provider = config.identity_provider;
         self.topics = config.topics;
         self.topic_mappings = config.topic_mappings;
         self.event_channel_capacity = config.event_channel_capacity;
-        self.qos = config.qos;
         self.transport = config.transport;
         self.request_channel_capacity = config.request_channel_capacity;
         self.max_inflight = config.max_inflight;
@@ -319,15 +312,14 @@ impl MQTTSourceBuilder {
         self
     }
 
-    pub fn build(self) -> Result<MQTTSource> {
-        let config = MQTTSourceConfig {
-            broker_addr: self.broker_addr,
+    pub async fn build(self) -> Result<MqttSource> {
+        let config = MqttSourceConfig {
+            host: self.host,
             port: self.port,
             identity_provider: self.identity_provider,
             topics: self.topics,
             topic_mappings: self.topic_mappings,
             event_channel_capacity: self.event_channel_capacity,
-            qos: self.qos,
             transport: self.transport,
             request_channel_capacity: self.request_channel_capacity,
             max_inflight: self.max_inflight,
@@ -346,6 +338,8 @@ impl MQTTSourceBuilder {
             adaptive_enabled: self.adaptive_enabled,
         };
 
+        config.validate()?;
+
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
             params = params.with_dispatch_mode(mode);
@@ -358,6 +352,7 @@ impl MQTTSourceBuilder {
         }
 
         let mut adaptive_config = AdaptiveBatchConfig::default();
+
         if let Some(max_batch) = config.adaptive_max_batch_size {
             adaptive_config.max_batch_size = max_batch;
         }
@@ -377,37 +372,7 @@ impl MQTTSourceBuilder {
             adaptive_config.adaptive_enabled = enabled;
         }
 
-        Ok(MQTTSource::from_parts(
-            SourceBase::new(params)?,
-            config,
-            adaptive_config,
-        ))
-    }
-}
-
-impl MQTTSource {
-    /// Create a builder for MQTTSource with the given ID.
-    ///
-    /// This is the recommended way to construct an MQTTSource.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Unique identifier for the source instance
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let source = MQTTSource::builder("my-source")
-    ///     .with_host("0.0.0.0")
-    ///     .with_port(8080)
-    ///     .with_topic("my/mqtt/topic")
-    ///     .with_qos(MqttQoS::ONE)
-    ///     .with_adaptive_enabled(true)
-    ///     .with_bootstrap_provider(my_provider)
-    ///     .build()?;
-    /// ```
-    pub fn builder(id: impl Into<String>) -> MQTTSourceBuilder {
-        MQTTSourceBuilder::new(id)
+        MqttSource::from_parts(SourceBase::new(params)?, config, adaptive_config).await
     }
 }
 
@@ -418,30 +383,32 @@ mod tests {
     mod construction {
         use super::*;
 
-        #[test]
-        fn test_builder_with_valid_config() {
-            let source = MQTTSourceBuilder::new("test-source")
+        #[tokio::test]
+        async fn test_builder_with_valid_config() {
+            let source = MqttSourceBuilder::new("test-source")
                 .with_host("localhost")
                 .with_port(8080)
-                .build();
+                .build()
+                .await;
             assert!(source.is_ok());
         }
 
-        #[test]
-        fn test_builder_with_custom_config() {
-            let source = MQTTSourceBuilder::new("mqtt-source")
+        #[tokio::test]
+        async fn test_builder_with_custom_config() {
+            let source = MqttSourceBuilder::new("mqtt-source")
                 .with_host("0.0.0.0")
                 .with_port(9000)
                 .with_topic("my/mqtt/topic")
                 .build()
-                .unwrap();
-            assert_eq!(source.id(), "mqtt-source");
+                .await;
+            assert!(source.is_ok());
+            assert_eq!(source.unwrap().id(), "mqtt-source");
         }
 
-        #[test]
-        fn test_with_dispatch_creates_source() {
-            let config = MQTTSourceConfig {
-                broker_addr: "localhost".to_string(),
+        #[tokio::test]
+        async fn test_with_dispatch_creates_source() {
+            let config = MqttSourceConfig {
+                host: "localhost".to_string(),
                 port: 8080,
                 identity_provider: None,
                 topics: vec![MqttTopicConfig {
@@ -450,7 +417,6 @@ mod tests {
                 }],
                 topic_mappings: Vec::new(),
                 event_channel_capacity: 100,
-                qos: MqttQoS::TWO,
                 transport: None,
                 request_channel_capacity: None,
                 max_inflight: None,
@@ -468,12 +434,13 @@ mod tests {
                 adaptive_window_secs: None,
                 adaptive_enabled: None,
             };
-            let source = MQTTSource::with_dispatch(
+            let source = MqttSource::with_dispatch(
                 "dispatch-source",
                 config,
                 Some(DispatchMode::Channel),
                 Some(1000),
-            );
+            )
+            .await;
             assert!(source.is_ok());
             assert_eq!(source.unwrap().id(), "dispatch-source");
         }
@@ -482,35 +449,40 @@ mod tests {
     mod properties {
         use super::*;
 
-        #[test]
-        fn test_id_returns_correct_value() {
-            let source = MQTTSourceBuilder::new("my-mqtt-source")
+        #[tokio::test]
+        async fn test_id_returns_correct_value() {
+            let source = MqttSourceBuilder::new("my-mqtt-source")
                 .with_host("localhost")
                 .build()
-                .unwrap();
-            assert_eq!(source.id(), "my-mqtt-source");
+                .await;
+            assert!(source.is_ok());
+            assert_eq!(source.unwrap().id(), "my-mqtt-source");
         }
 
-        #[test]
-        fn test_type_name_returns_mqtt() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_type_name_returns_mqtt() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .build()
-                .unwrap();
-            assert_eq!(source.type_name(), "mqtt");
+                .await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            assert_eq!(unwrapped_source.type_name(), "mqtt");
         }
 
-        #[test]
-        fn test_properties_contains_host_and_port() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_properties_contains_host_and_port() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("192.168.1.1")
                 .with_port(9000)
                 .build()
-                .unwrap();
-            let props = source.properties();
+                .await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            let props = unwrapped_source.properties();
 
             assert_eq!(
-                props.get("broker_addr"),
+                props.get("host"),
                 Some(&serde_json::Value::String("192.168.1.1".to_string()))
             );
             assert_eq!(
@@ -519,30 +491,34 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_properties_includes_topic_when_set() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_properties_includes_topic_when_set() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_topic("my/mqtt/topic")
                 .build()
-                .unwrap();
-            let props = source.properties();
+                .await;
+
+            assert!(source.is_ok());
+            let props = source.unwrap().properties();
 
             assert_eq!(
                 props.get("topics"),
                 Some(&serde_json::Value::Array(vec![serde_json::Value::String(
-                    "my/mqtt/topic".to_string(),
+                    "my/mqtt/topic".to_string()
                 )]))
             );
         }
 
-        #[test]
-        fn test_properties_includes_topic_when_none() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_properties_includes_topic_when_none() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .build()
-                .unwrap();
-            let props = source.properties();
+                .await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            let props = unwrapped_source.properties();
 
             assert!(props.contains_key("topics"));
         }
@@ -553,44 +529,53 @@ mod tests {
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
-            let source = MQTTSourceBuilder::new("test")
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .build()
-                .unwrap();
-            assert_eq!(source.status().await, ComponentStatus::Stopped);
+                .await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            assert_eq!(unwrapped_source.status().await, ComponentStatus::Stopped);
         }
     }
 
     mod builder {
         use super::*;
 
-        #[test]
-        fn test_mqtt_builder_defaults() {
-            let source = MQTTSourceBuilder::new("test").build().unwrap();
-            assert_eq!(source.config().port, 1883);
-            assert_eq!(source.config().conn_timeout, Some(5000));
-            assert_eq!(source.config().topics[0].topic, "mqtt/topic".to_string());
+        #[tokio::test]
+        async fn test_mqtt_builder_defaults() {
+            let source = MqttSourceBuilder::new("test").build().await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            assert_eq!(unwrapped_source.config().port, 1883);
+            assert_eq!(unwrapped_source.config().topics.len(), 0);
         }
 
-        #[test]
-        fn test_mqtt_builder_custom_values() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_mqtt_builder_custom_values() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("api.example.com")
                 .with_port(9000)
                 .with_topic("/webhook")
                 .with_timeout_ms(5000)
                 .build()
-                .unwrap();
+                .await;
 
-            assert_eq!(source.config().broker_addr, "api.example.com");
-            assert_eq!(source.config().port, 9000);
-            assert_eq!(source.config().topics[0].topic, "/webhook".to_string());
-            assert_eq!(source.config().conn_timeout, Some(5000));
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+
+            assert_eq!(unwrapped_source.config().host, "api.example.com");
+            assert_eq!(unwrapped_source.config().port, 9000);
+            assert_eq!(
+                unwrapped_source.config().topics[0].topic,
+                "/webhook".to_string()
+            );
+            assert_eq!(unwrapped_source.config().conn_timeout, Some(5000));
         }
 
-        #[test]
-        fn test_mqtt_builder_adaptive_batching() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_mqtt_builder_adaptive_batching() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_adaptive_max_batch_size(1000)
                 .with_adaptive_min_batch_size(10)
@@ -599,30 +584,37 @@ mod tests {
                 .with_adaptive_window_secs(60)
                 .with_adaptive_enabled(true)
                 .build()
-                .unwrap();
+                .await;
 
-            assert_eq!(source.config().adaptive_max_batch_size, Some(1000));
-            assert_eq!(source.config().adaptive_min_batch_size, Some(10));
-            assert_eq!(source.config().adaptive_max_wait_ms, Some(500));
-            assert_eq!(source.config().adaptive_min_wait_ms, Some(50));
-            assert_eq!(source.config().adaptive_window_secs, Some(60));
-            assert_eq!(source.config().adaptive_enabled, Some(true));
+            assert_eq!(source.is_ok(), true);
+            let unwrapped_source = source.unwrap();
+
+            assert_eq!(
+                unwrapped_source.config().adaptive_max_batch_size,
+                Some(1000)
+            );
+            assert_eq!(unwrapped_source.config().adaptive_min_batch_size, Some(10));
+            assert_eq!(unwrapped_source.config().adaptive_max_wait_ms, Some(500));
+            assert_eq!(unwrapped_source.config().adaptive_min_wait_ms, Some(50));
+            assert_eq!(unwrapped_source.config().adaptive_window_secs, Some(60));
+            assert_eq!(unwrapped_source.config().adaptive_enabled, Some(true));
         }
 
-        #[test]
-        fn test_builder_id() {
-            let source = MQTTSource::builder("my-mqtt-source")
+        #[tokio::test]
+        async fn test_builder_id() {
+            let source = MqttSource::builder("my-mqtt-source")
                 .with_host("localhost")
                 .build()
-                .unwrap();
-
-            assert_eq!(source.id(), "my-mqtt-source");
+                .await;
+            assert!(source.is_ok());
+            let unwrapped_source = source.unwrap();
+            assert_eq!(unwrapped_source.id(), "my-mqtt-source");
         }
     }
 
     mod event_conversion {
-        use crate::model::convert_mqtt_to_source_change;
-        use crate::model::{MQTTElement, MqttSourceChange};
+        use crate::schema::convert_mqtt_to_source_change;
+        use crate::schema::{MqttElement, MqttSourceChange};
 
         use super::*;
 
@@ -636,12 +628,12 @@ mod tests {
             props.insert("age".to_string(), serde_json::Value::Number(30.into()));
 
             let mqtt_change = MqttSourceChange::Insert {
-                element: MQTTElement::Node {
+                element: MqttElement::Node {
                     id: "user-1".to_string(),
                     labels: vec!["User".to_string()],
                     properties: props,
                 },
-                timestamp: Some(1234567890000000000),
+                timestamp: Some(12345678900),
             };
 
             let result = convert_mqtt_to_source_change(&mqtt_change, "test-source");
@@ -655,7 +647,7 @@ mod tests {
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
                         assert_eq!(metadata.labels.len(), 1);
-                        // assert_eq!(metadata.effective_from, 1234567890000); // TODO
+                        assert_eq!(metadata.effective_from, 12345678900); // TODO
                         assert!(properties.get("name").is_some());
                         assert!(properties.get("age").is_some());
                     }
@@ -668,7 +660,7 @@ mod tests {
         #[test]
         fn test_convert_relation_insert() {
             let mqtt_change = MqttSourceChange::Insert {
-                element: MQTTElement::Relation {
+                element: MqttElement::Relation {
                     id: "follows-1".to_string(),
                     labels: vec!["FOLLOWS".to_string()],
                     from: "user-1".to_string(),
@@ -722,7 +714,7 @@ mod tests {
         #[test]
         fn test_convert_update() {
             let mqtt_change = MqttSourceChange::Update {
-                element: MQTTElement::Node {
+                element: MqttElement::Node {
                     id: "user-1".to_string(),
                     labels: vec!["User".to_string()],
                     properties: serde_json::Map::new(),
@@ -734,9 +726,13 @@ mod tests {
             assert!(result.is_ok());
 
             match result.unwrap() {
-                drasi_core::models::SourceChange::Update { .. } => {
-                    // Success
-                }
+                drasi_core::models::SourceChange::Update { element } => match element {
+                    drasi_core::models::Element::Node { metadata, .. } => {
+                        assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
+                        assert_eq!(metadata.labels.len(), 1);
+                    }
+                    _ => panic!("Expected Node element"),
+                },
                 _ => panic!("Expected Update operation"),
             }
         }
@@ -745,37 +741,41 @@ mod tests {
     mod adaptive_config {
         use super::*;
 
-        #[test]
-        fn test_adaptive_config_from_mqtt_config() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_adaptive_config_from_mqtt_config() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_topic("test/topic")
                 .with_adaptive_max_batch_size(500)
                 .with_adaptive_enabled(true)
                 .build()
-                .unwrap();
+                .await;
+            assert!(source.is_ok());
 
             // The adaptive config should be initialized from the mqtt config
-            assert_eq!(source.adaptive_config().max_batch_size, 500);
-            assert!(source.adaptive_config().adaptive_enabled);
+            let unwrapped_source = source.unwrap();
+            assert_eq!(unwrapped_source.adaptive_config().max_batch_size, 500);
+            assert!(unwrapped_source.adaptive_config().adaptive_enabled);
         }
 
-        #[test]
-        fn test_adaptive_config_uses_defaults_when_not_specified() {
-            let source = MQTTSourceBuilder::new("test")
+        #[tokio::test]
+        async fn test_adaptive_config_uses_defaults_when_not_specified() {
+            let source = MqttSourceBuilder::new("test")
                 .with_host("localhost")
                 .with_topic("test/topic")
                 .build()
-                .unwrap();
+                .await;
+            assert!(source.is_ok());
 
             // Should use AdaptiveBatchConfig defaults
             let default_config = AdaptiveBatchConfig::default();
+            let unwrapped_source = source.unwrap();
             assert_eq!(
-                source.adaptive_config().max_batch_size,
+                unwrapped_source.adaptive_config().max_batch_size,
                 default_config.max_batch_size
             );
             assert_eq!(
-                source.adaptive_config().min_batch_size,
+                unwrapped_source.adaptive_config().min_batch_size,
                 default_config.min_batch_size
             );
         }
