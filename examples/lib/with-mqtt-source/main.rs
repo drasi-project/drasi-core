@@ -1,9 +1,9 @@
-use drasi_source_mqtt::MQTTSource;
 use anyhow::Result;
 use drasi_reaction_log::{QueryConfig, TemplateSpec};
 use drasi_lib::Query;
 use drasi_reaction_log::LogReaction;
 use drasi_lib::DrasiLib;
+use drasi_source_mqtt::{MqttQoS, MQTTSource};
 use std::sync::Arc;
 
 use axum::{
@@ -31,9 +31,9 @@ async fn main() -> Result<()> {
 
     let mqtt_source = MQTTSource::builder("mqtt-source")
         .with_host("localhost")
-        .with_port(1883)
+        .with_port(9001)
         .with_topic("sensors/temperature")
-        .with_qos(drasi_source_mqtt::model::QualityOfService::AtLeastOnce)
+        .with_qos(MqttQoS::ONE)
         .with_adaptive_max_batch_size(3)
         .with_adaptive_min_batch_size(1)
         .with_adaptive_max_wait_ms(1000)
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
     println!("\n┌────────────────────────────────────────────┐");
     println!("│ Temperature Monitor Started!               │");
     println!("├────────────────────────────────────────────┤");
-    println!("│ MQTT Source: localhost:1883                │");
+    println!("│ MQTT Source: localhost:9001                │");
     println!("│   Topic: sensors/temperature               │");
     println!("├────────────────────────────────────────────┤");
     println!("│ Results API: http://localhost:8080         │");
