@@ -4,13 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::vec::Vec;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
-pub enum QualityOfService {
-    AtMostOnce,
-    AtLeastOnce,
-    ExactlyOnce,
-}
-
 /// Data schema for MQTT source events
 ///
 /// This schema closely mirrors drasi_core::models::SourceChange for efficient conversion
