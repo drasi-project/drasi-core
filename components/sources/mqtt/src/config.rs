@@ -1,50 +1,233 @@
-use crate::QualityOfService;
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Configuration types for MQTT source.
+//!
+//! This module contains configuration types for MQTT source and shared types.
+use bytes::Bytes;
+use drasi_lib::identity::IdentityProvider;
+use rumqttc::v5::MqttOptions as MqttOptionsV5;
 use rumqttc::{MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub fn default_broker_addr() -> String {
+    "localhost".to_string()
+}
+
+pub fn default_port() -> u16 {
+    1883
+}
+
+pub fn default_qos() -> MqttQoS {
+    MqttQoS::ONE
+}
+
+pub fn default_event_channel_capacity() -> usize {
+    20
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
-pub enum MQTTAuthMethod {
-    None,
-    UsernamePassword,
+pub enum MqttQoS {
+    ZERO,
+    ONE,
+    TWO,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MqttTopicConfig {
+    pub topic: String,
+    pub qos: MqttQoS,
+}
+
+/// Transport mode for MQTT connection.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MqttTransportMode {
+    #[default]
+    TCP,
+    TLS {
+        /// ca certificate
+        ca: Vec<u8>,
+        /// alpn settings
+        alpn: Option<Vec<Vec<u8>>>,
+        /// tls client_authentication
+        client_auth: Option<(Vec<u8>, Vec<u8>)>,
+    },
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MappingEntity {
+    pub label: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MappingProperties {
+    pub mode: String,
+    pub field_name: Option<String>,
+    pub inject: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MappingNode {
+    pub label: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MappingRelation {
+    pub label: String, // relation label
+    pub from: String,  // label if the source node
+    pub to: String,    // label of the destination node
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicMapping {
+    pub pattern: String,
+    pub entity: MappingEntity,
+    pub properties: MappingProperties,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<MappingNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<MappingRelation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MqttConnectProperties {
+    /// Expiry interval property after loosing connection
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_expiry_interval: Option<u32>,
+    /// Maximum simultaneous packets
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_maximum: Option<u16>,
+    /// Maximum packet size
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_packet_size: Option<u32>,
+    /// Maximum mapping integer for a topic
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_alias_max: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_response_info: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_problem_info: Option<u8>,
+    /// List of user properties
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_properties: Vec<(String, String)>,
+    /// Method of authentication
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_method: Option<String>,
+    /// Authentication data
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_data: Option<Vec<u8>>,
+}
+
+impl MqttConnectProperties {
+    pub fn to_connection_properties(&self) -> rumqttc::v5::mqttbytes::v5::ConnectProperties {
+        let mut props = rumqttc::v5::mqttbytes::v5::ConnectProperties {
+            session_expiry_interval: self.session_expiry_interval,
+            receive_maximum: self.receive_maximum,
+            max_packet_size: self.max_packet_size,
+            topic_alias_max: self.topic_alias_max,
+            request_response_info: self.request_response_info,
+            request_problem_info: self.request_problem_info,
+            user_properties: self.user_properties.clone(),
+            authentication_method: self.authentication_method.clone(),
+            authentication_data: self.authentication_data.clone().map(Bytes::from),
+        };
+        props
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MqttSubscribeProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_properties: Vec<(String, String)>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MQTTSourceConfig {
+    //...... Main config, mqtt-wide config parameters
     /// MQTT broker host address
-    #[serde(default = "default_host")]
-    pub host: String,
+    #[serde(default = "default_broker_addr")]
+    pub broker_addr: String,
 
     /// MQTT broker port
     #[serde(default = "default_port")]
     pub port: u16,
 
+    /// Identity provider for authentication (takes precedence over user/password)
+    #[serde(skip)]
+    pub identity_provider: Option<Box<dyn IdentityProvider>>,
+
     /// MQTT topic to subscribe to
-    #[serde(default = "default_topic")]
-    pub topic: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<MqttTopicConfig>,
 
-    /// Quality of Service level for MQTT messages
+    /// MQTT Topic mapping configuration: maps incoming MQTT topic hierarchy to Drasi entities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topic_mappings: Vec<TopicMapping>,
+
+    /// Capacity of the async channel
+    #[serde(default = "default_event_channel_capacity")] // for client creation and event loop
+    pub event_channel_capacity: usize,
+
+    /// Quality of Service level for MQTT messages // for subscribe
     #[serde(default = "default_qos")]
-    pub qos: QualityOfService,
+    pub qos: MqttQoS,
 
-    /// Optional username for MQTT authentication
-    pub username: Option<String>,
+    //...... Shared config parameters (used by both v3 and v5 clients)
+    /// MQTT transport protocol (e.g., "tcp", "tls")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<MqttTransportMode>,
 
-    /// Optional password for MQTT authentication
-    pub password: Option<String>,
+    /// Request (publish, subscribe) channel capacity
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_channel_capacity: Option<usize>,
 
-    /// Authentication method
-    #[serde(default = "default_auth_method")]
-    pub auth_method: MQTTAuthMethod,
+    /// Maximum number of outgoing inflight messages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inflight: Option<u16>,
 
-    /// Capacity of the internal channel buffer for incoming messages
-    #[serde(default = "default_channel_capacity")]
-    pub channel_capacity: usize,
+    /// Keep alive interval in Seconds (PingReq)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<u64>,
 
-    /// Optional timeout in milliseconds for MQTT operations
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
+    /// Clean or Persistent session for MQTT connection (default: true)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_start: Option<bool>,
 
+    //...... MQTT v3 specific config parameters (if any)
+    /// Max incoming packet size
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_incoming_packet_size: Option<usize>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_outgoing_packet_size: Option<usize>,
+
+    //...... MQTT v5 specific config parameters (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conn_timeout: Option<u64>, // Connection timeout in milliseconds for MQTT v5
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_properties: Option<MqttConnectProperties>, // MQTT v5 connect properties
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribe_properties: Option<MqttSubscribeProperties>, // MQTT v5 subscribe properties
+
+    //...... Adaptive batching config parameters
     /// Adaptive batching: maximum batch size
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_max_batch_size: Option<usize>,
@@ -66,243 +249,6 @@ pub struct MQTTSourceConfig {
     pub adaptive_window_secs: Option<u64>,
 
     /// Whether adaptive batching is enabled
-    #[serde(
-        default = "default_adaptive_enabled",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_enabled: Option<bool>,
-}
-
-pub fn default_host() -> String {
-    "localhost".to_string()
-}
-
-pub fn default_port() -> u16 {
-    1883
-}
-
-pub fn default_topic() -> String {
-    "mqtt/topic".to_string()
-}
-
-pub fn default_qos() -> QualityOfService {
-    QualityOfService::ExactlyOnce
-}
-
-pub fn default_channel_capacity() -> usize {
-    100
-}
-
-pub fn default_timeout_ms() -> u64 {
-    5000
-}
-
-pub fn default_auth_method() -> MQTTAuthMethod {
-    MQTTAuthMethod::None
-}
-
-pub fn default_adaptive_enabled() -> Option<bool> {
-    Some(false)
-}
-
-impl MQTTSourceConfig {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.host.trim().is_empty() {
-            return Err(anyhow::anyhow!(
-                "Validation error: host cannot be empty. \
-                 Please specify a valid host address for the MQTT broker."
-            ));
-        }
-        if self.port == 0 {
-            return Err(anyhow::anyhow!(
-                "Validation error: port cannot be 0. \
-                 Please specify a valid port number for the MQTT broker (1-65535)."
-            ));
-        }
-        if self.topic.trim().is_empty() {
-            return Err(anyhow::anyhow!(
-                "Validation error: topic cannot be empty. \
-                 Please specify a valid topic for the MQTT broker."
-            ));
-        }
-        if self.timeout_ms == 0 {
-            return Err(anyhow::anyhow!(
-                "Validation error: timeout_ms cannot be 0. \
-                 Please specify a positive timeout value in milliseconds."
-            ));
-        }
-
-        // Validate adaptive batching settings
-        if let (Some(min), Some(max)) = (self.adaptive_min_batch_size, self.adaptive_max_batch_size)
-        {
-            if min > max {
-                return Err(anyhow::anyhow!(
-                    "Validation error: adaptive_min_batch_size ({min}) cannot be greater than \
-                     adaptive_max_batch_size ({max})"
-                ));
-            }
-        }
-
-        if let (Some(min), Some(max)) = (self.adaptive_min_wait_ms, self.adaptive_max_wait_ms) {
-            if min > max {
-                return Err(anyhow::anyhow!(
-                    "Validation error: adaptive_min_wait_ms ({min}) cannot be greater than \
-                     adaptive_max_wait_ms ({max})"
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    // todo: add tests
-    pub fn to_mqtt_connection_config(&self, id: String) -> MQTTConnectionConfig {
-        let mut options = MqttOptions::new(id.clone(), self.host.clone(), self.port);
-        if let Some(username) = &self.username {
-            options.set_credentials(username, self.password.as_deref().unwrap_or(""));
-        }
-        MQTTConnectionConfig {
-            options,
-            qos: match self.qos {
-                QualityOfService::AtMostOnce => QoS::AtMostOnce,
-                QualityOfService::AtLeastOnce => QoS::AtLeastOnce,
-                QualityOfService::ExactlyOnce => QoS::ExactlyOnce,
-            },
-            channel_capacity: self.channel_capacity,
-            timeout_ms: self.timeout_ms,
-            topic: self.topic.clone(),
-            id: id.clone(),
-        }
-    }
-}
-
-pub struct MQTTConnectionConfig {
-    pub id: String,
-    pub options: MqttOptions,
-    pub qos: QoS,
-    pub channel_capacity: usize,
-    pub timeout_ms: u64,
-    pub topic: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_config_deserialization_minimal() {
-        let yaml = r#"
-        host: "localhost"
-        port: 1883
-        topic: "test/topic"
-        "#;
-        let config: MQTTSourceConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.host, "localhost");
-        assert_eq!(config.port, 1883);
-        assert_eq!(config.topic, "test/topic");
-        assert_eq!(config.qos, QualityOfService::ExactlyOnce);
-        assert_eq!(config.username, None);
-        assert_eq!(config.password, None);
-        assert_eq!(config.auth_method, MQTTAuthMethod::None);
-        assert_eq!(config.channel_capacity, 100);
-        assert_eq!(config.timeout_ms, 5000);
-        assert_eq!(config.adaptive_enabled, Some(false));
-    }
-
-    #[test]
-    fn test_config_serialization() {
-        let config = MQTTSourceConfig {
-            host: "localhost".to_string(),
-            port: 1883,
-            topic: "test/topic".to_string(),
-            qos: QualityOfService::AtLeastOnce,
-            username: Some("user".to_string()),
-            password: Some("pass".to_string()),
-            auth_method: MQTTAuthMethod::UsernamePassword,
-            channel_capacity: 200,
-            timeout_ms: 10000,
-            adaptive_enabled: Some(true),
-            adaptive_max_batch_size: Some(50),
-            adaptive_min_batch_size: Some(10),
-            adaptive_max_wait_ms: Some(500),
-            adaptive_min_wait_ms: Some(100),
-            adaptive_window_secs: Some(60),
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let deserialized_config: MQTTSourceConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(config, deserialized_config);
-    }
-
-    #[test]
-    fn test_config_adaptive_config_disabled() {
-        let yaml = r#"
-        host: "localhost"
-        port: 1883
-        topic: "test/topic"
-        adaptive_enabled: false
-        "#;
-        let config: MQTTSourceConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.adaptive_enabled, Some(false));
-    }
-
-    #[test]
-    fn test_config_default_values() {
-        let config = MQTTSourceConfig {
-            host: default_host(),
-            port: default_port(),
-            topic: default_topic(),
-            qos: default_qos(),
-            username: None,
-            password: None,
-            auth_method: default_auth_method(),
-            channel_capacity: default_channel_capacity(),
-            timeout_ms: default_timeout_ms(),
-            adaptive_enabled: default_adaptive_enabled(),
-            adaptive_max_batch_size: None,
-            adaptive_min_batch_size: None,
-            adaptive_max_wait_ms: None,
-            adaptive_min_wait_ms: None,
-            adaptive_window_secs: None,
-        };
-
-        assert_eq!(config.host, "localhost");
-        assert_eq!(config.port, 1883);
-        assert_eq!(config.topic, "mqtt/topic");
-        assert_eq!(config.qos, QualityOfService::ExactlyOnce);
-        assert_eq!(config.username, None);
-        assert_eq!(config.password, None);
-        assert_eq!(config.auth_method, MQTTAuthMethod::None);
-        assert_eq!(config.channel_capacity, 100);
-        assert_eq!(config.timeout_ms, 5000);
-        assert_eq!(config.adaptive_enabled, Some(false));
-    }
-
-    #[test]
-    fn test_config_port_range() {
-        // Test valid port
-        let yaml = r#"
-        host: "localhost"
-        port: 65535
-        "#;
-        let config: MQTTSourceConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.port, 65535);
-
-        // Test invalid port (0)
-        let yaml = r#"
-        host: "localhost"
-        port: 0
-        "#;
-        let result: Result<MQTTSourceConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_ok());
-        let config = result.unwrap();
-        let result = config.validate();
-        assert!(result.is_err());
-
-        // Test invalid port (> 65535 cannot be represented by u16, deserialization should fail)
-        let yaml = r#"
-        host: "localhost"
-        port: 70000
-        "#;
-        let result: Result<MQTTSourceConfig, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err());
-    }
 }
