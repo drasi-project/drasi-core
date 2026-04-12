@@ -366,6 +366,16 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
 
 /// Per-instance lifecycle callback that sends events through the SourceManager's
 /// event channel, so they flow through the same path as static source events.
+///
+/// # Delivery Guarantee
+///
+/// Status updates (Starting, Running, Stopped, Error) MUST NOT be dropped — a lost
+/// event leaves the component in a permanently stale "ghost" state that is invisible
+/// to the rest of the engine. Therefore this callback uses the host runtime handle
+/// to spawn a small async task that awaits `tx.send()` under backpressure instead
+/// of using the non-blocking `try_send`, which silently discards the message when
+/// the channel buffer is full.
+///
 /// # Safety
 /// `event` must be a valid pointer to an `FfiLifecycleEvent`. `ctx` may be null
 /// or must point to a valid `InstanceCallbackContext`.
@@ -397,7 +407,7 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         let status = ffi_lifecycle_to_component_status(event_type);
 
         let component_event = ComponentEvent {
-            component_id,
+            component_id: component_id.clone(),
             component_type,
             status,
             timestamp: chrono::Utc::now(),
@@ -409,11 +419,29 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         };
 
         let tx = context.event_tx.clone();
-        // Use try_send to avoid spawning an async task that may block
-        // the host runtime's current_thread scheduler during drop sequences.
-        if let Err(e) = tx.try_send(component_event) {
-            log::error!("Failed to send lifecycle event: {e}");
-        }
+        let runtime_handle = context.runtime_handle.clone();
+
+        // Spawn a small async task on the host runtime so we can use the
+        // *blocking* `tx.send().await` instead of the non-blocking `try_send`.
+        //
+        // `try_send` silently drops the message when the channel is full,
+        // leaving the engine with a stale view of the component's status
+        // ("ghost state"). Because status transitions are low-frequency and
+        // critical for correctness, it is safe to accept the backpressure of
+        // an awaited send; the spawned task will queue behind any pending
+        // consumer work and complete as soon as the receiver drains one slot.
+        runtime_handle.spawn(async move {
+            if let Err(e) = tx.send(component_event).await {
+                // The only way send() fails is if the receiver was dropped
+                // (i.e. the component manager has already shut down). This
+                // is expected during teardown, so we log at warn rather than
+                // error to avoid noise in normal shutdown paths.
+                log::warn!(
+                    "[lifecycle] Failed to deliver status event for '{}': receiver dropped ({e})",
+                    component_id
+                );
+            }
+        });
     }
 }
 

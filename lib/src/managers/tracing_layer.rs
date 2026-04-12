@@ -49,6 +49,7 @@
 //! }.instrument(span).await;
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -66,6 +67,24 @@ use std::sync::OnceLock;
 /// Default capacity for the log message channel.
 /// This provides backpressure when logging volume is high.
 const LOG_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Counter for log messages dropped due to a full channel.
+///
+/// This is intentionally a best-effort drop: the tracing layer must never
+/// block the async executor, so when the bounded channel is full the message
+/// is discarded. However, the drop is now *observable* — callers can inspect
+/// this counter via [`dropped_log_count()`] and alert on it.
+static DROPPED_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Return the total number of log messages dropped since process start
+/// because the internal log channel was full.
+///
+/// A non-zero value indicates that logging volume exceeded the channel
+/// capacity (`LOG_CHANNEL_CAPACITY = 10_000`). Consider increasing the
+/// capacity or reducing log verbosity if this grows steadily.
+pub fn dropped_log_count() -> u64 {
+    DROPPED_LOG_COUNT.load(Ordering::Relaxed)
+}
 
 /// Global log registry shared by all DrasiLib instances.
 /// Since tracing uses a single global subscriber, we need a single shared registry.
@@ -294,14 +313,34 @@ where
                 info.component_type,
             );
 
-            // Send to the log worker via bounded channel
-            // This provides backpressure instead of spawning unbounded tasks
+            // Send to the log worker via bounded channel.
+            // This provides backpressure instead of spawning unbounded tasks.
+            //
+            // NOTE: We intentionally use `try_send` here (non-blocking). The
+            // tracing layer's `on_event` is called synchronously from within the
+            // executor and must never block or await. If the channel is full the
+            // message is dropped, but the drop is now *observable*:
+            //   - `DROPPED_LOG_COUNT` is incremented so callers can alert on it.
+            //   - A warning is printed to stderr every 1 000 drops so operators
+            //     notice even without a metrics dashboard (eprintln! is used
+            //     instead of tracing::warn! to avoid infinite recursion).
+            //
+            // Status/lifecycle events (Starting, Running, Stopped, Error) flow
+            // through a separate channel with a guaranteed-delivery path and are
+            // NOT affected by this drop.
             if let Some(sender) = GLOBAL_LOG_SENDER.get() {
-                // Use try_send to avoid blocking in the tracing layer
-                // If channel is full, log is dropped (better than OOM)
                 if sender.try_send(log_message).is_err() {
-                    // Channel full or closed - log still goes to console via fmt layer
-                    // Could add a metric here for monitoring dropped logs
+                    let prev = DROPPED_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    // Emit a periodic stderr warning (every 1 000 drops) so the
+                    // issue surfaces even without external monitoring.
+                    if prev % 1_000 == 0 {
+                        eprintln!(
+                            "[drasi] WARNING: log channel full, {} component log message(s) \
+                             dropped so far. Consider increasing LOG_CHANNEL_CAPACITY or \
+                             reducing log verbosity.",
+                            prev + 1
+                        );
+                    }
                 }
             }
         }
