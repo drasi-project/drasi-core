@@ -82,12 +82,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
+      - name: Clear cargo registry index cache
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        run: rm -rf ~/.cargo/registry/index/github.com-*/ || true
+
       - name: Publish crates
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
         run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
       # Dry run mode - preview what would happen
       - name: Dry run - preview version bumps
