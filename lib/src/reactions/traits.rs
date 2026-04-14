@@ -39,9 +39,21 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::channels::{ComponentStatus, QueryResult};
 use crate::context::ReactionRuntimeContext;
+use crate::queries::Query;
+
+/// Trait for providing access to queries without requiring full DrasiLib dependency.
+///
+/// This trait provides a way for reactions to access query instances for subscription
+/// without needing a direct dependency on the server core.
+#[async_trait]
+pub trait QueryProvider: Send + Sync {
+    /// Get a query instance by ID
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>>;
+}
 
 /// Trait defining the interface for all reaction implementations.
 ///
@@ -67,7 +79,7 @@ use crate::context::ReactionRuntimeContext;
 /// # Example Implementation
 ///
 /// ```ignore
-/// use drasi_lib::{Reaction, QueryProvider};
+/// use drasi_lib::Reaction;
 /// use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
 /// use drasi_lib::context::ReactionRuntimeContext;
 ///
@@ -106,9 +118,13 @@ use crate::context::ReactionRuntimeContext;
 ///     }
 ///
 ///     async fn start(&self) -> Result<()> {
-///         self.base.subscribe_to_queries().await?;
-///         // ... start processing
+///         // Start processing loop — host handles query subscriptions
+///         // after start() returns successfully
 ///         Ok(())
+///     }
+///
+///     async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+///         self.base.enqueue_query_result(result).await
 ///     }
 ///
 ///     // ... implement other methods
@@ -171,13 +187,12 @@ pub trait Reaction: Send + Sync {
 
     /// Enqueue a query result for processing.
     ///
-    /// The host calls this to forward query results to the reaction.
-    /// The default implementation pushes to the reaction's priority queue
-    /// via `ReactionBase`.
-    ///
-    /// Returns `Ok(())` on success, or `Err` if the queue is closed or the
-    /// reaction has stopped accepting results.
-    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()>;
+    /// The host calls this to forward query results to the reaction after
+    /// subscribing on its behalf. The default implementation is a no-op.
+    /// Most reactions should delegate to `self.base.enqueue_query_result(result)`.
+    async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+        Ok(())
+    }
 
     /// Permanently clean up internal state when the reaction is being removed.
     ///

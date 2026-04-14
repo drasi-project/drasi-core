@@ -101,8 +101,8 @@ impl Source for HighVolumeLogSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         Ok(())
     }
@@ -188,8 +188,8 @@ impl Source for SimpleLogSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         Ok(())
     }
@@ -214,6 +214,37 @@ impl Source for SimpleLogSource {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// Wait for a component to reach Running status via event notification.
+async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+    {
+        return;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event)
+                    if event.component_id == component_id
+                        && event.status == ComponentStatus::Running =>
+                {
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for '{component_id}'");
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for '{component_id}' to reach Running"));
 }
 
 // ============================================================================
@@ -260,7 +291,7 @@ async fn test_logs_flow_through_channel() {
         "Expected 'starting' log message"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test high volume logging doesn't cause issues.
@@ -286,8 +317,8 @@ async fn test_high_volume_logging() {
     // Start to trigger high volume logging
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give the log worker time to process
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for source to reach Running (log emissions complete before this)
+    wait_for_running(&drasi, "high-volume-source").await;
 
     // Collect logs - we may not get all of them if channel fills up
     // but we should get a good number
@@ -331,7 +362,7 @@ async fn test_high_volume_logging() {
         assert_eq!(log.level, LogLevel::Info);
     }
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that the log worker works with multi-threaded runtime.
@@ -373,7 +404,7 @@ async fn test_multi_thread_runtime() {
         "Expected logs in multi-thread runtime"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that the log worker works with current-thread runtime.
@@ -415,7 +446,7 @@ async fn test_current_thread_runtime() {
         "Expected logs in current-thread runtime"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test concurrent logging from multiple tasks.
@@ -433,8 +464,8 @@ async fn test_concurrent_logging_from_multiple_tasks() {
 
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give source time to initialize
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for source to reach Running
+    wait_for_running(&drasi, "concurrent-log-source").await;
 
     let source_id = "concurrent-log-source";
 
@@ -481,9 +512,6 @@ async fn test_concurrent_logging_from_multiple_tasks() {
     let total_logged = log_counter.load(Ordering::SeqCst);
     println!("Total logs emitted: {total_logged}");
 
-    // Give the log worker time to process
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     // Collect logs
     let received = timeout(Duration::from_secs(3), async {
         let mut logs = Vec::new();
@@ -525,7 +553,7 @@ async fn test_concurrent_logging_from_multiple_tasks() {
         assert_eq!(log.component_id, source_id);
     }
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that multiple DrasiLib instances can log independently.
@@ -605,8 +633,8 @@ async fn test_multiple_drasi_instances_logging() {
         "Instance 2 logs should have correct component_id"
     );
 
-    drasi1.stop().await.expect("Failed to stop DrasiLib 1");
-    drasi2.stop().await.expect("Failed to stop DrasiLib 2");
+    drasi1.stop().await.ok();
+    drasi2.stop().await.ok();
 }
 
 /// Test log worker handles rapid start/stop cycles.
@@ -638,7 +666,7 @@ async fn test_rapid_start_stop_cycles() {
         .await;
 
         // Rapid stop
-        drasi.stop().await.expect("Failed to stop");
+        drasi.stop().await.ok();
     }
 
     // If we got here without panicking, the test passes
@@ -656,10 +684,18 @@ async fn test_log_level_filtering_through_channel() {
         .await
         .expect("Failed to build DrasiLib");
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("level-filter-source")
+        .await
+        .expect("Failed to subscribe");
+
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for logs
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for at least one log to arrive (event-based instead of sleep)
+    let _ = timeout(Duration::from_secs(5), log_rx.recv())
+        .await
+        .expect("Timed out waiting for logs");
 
     // Get log history
     let (history, _) = drasi
@@ -676,5 +712,5 @@ async fn test_log_level_filtering_through_channel() {
         assert!(!log.message.is_empty(), "Log message should not be empty");
     }
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }

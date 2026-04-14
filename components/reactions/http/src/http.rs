@@ -242,16 +242,46 @@ impl Reaction for HttpReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.config.base_url.clone()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props
+        use crate::descriptor::{CallSpecDto, HttpQueryConfigDto, HttpReactionConfigDto};
+        use drasi_plugin_sdk::ConfigValue;
+
+        fn map_call_to_dto(cs: &crate::CallSpec) -> CallSpecDto {
+            CallSpecDto {
+                url: cs.url.clone(),
+                method: cs.method.clone(),
+                body: cs.body.clone(),
+                headers: cs.headers.clone(),
+            }
+        }
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> HttpQueryConfigDto {
+            HttpQueryConfigDto {
+                added: qc.added.as_ref().map(map_call_to_dto),
+                updated: qc.updated.as_ref().map(map_call_to_dto),
+                deleted: qc.deleted.as_ref().map(map_call_to_dto),
+            }
+        }
+
+        let dto = HttpReactionConfigDto {
+            base_url: ConfigValue::Static(self.config.base_url.clone()),
+            token: self
+                .config
+                .token
+                .as_ref()
+                .map(|t| ConfigValue::Static(t.clone())),
+            timeout_ms: Some(ConfigValue::Static(self.config.timeout_ms)),
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -276,26 +306,26 @@ impl Reaction for HttpReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting HTTP reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("HTTP reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Spawn the main processing task
         let reaction_name = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let query_configs = self.config.routes.clone();
         let base_url = self.config.base_url.clone();
         let token = self.config.token.clone();
@@ -350,7 +380,7 @@ impl Reaction for HttpReaction {
                 };
                 let query_result = query_result_arc.as_ref();
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -477,7 +507,12 @@ impl Reaction for HttpReaction {
             }
 
             info!("[{reaction_name}] HTTP reaction stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("HTTP reaction processing task stopped".to_string()),
+                )
+                .await;
         });
 
         // Store the processing task handle
@@ -494,11 +529,11 @@ impl Reaction for HttpReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("HTTP reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

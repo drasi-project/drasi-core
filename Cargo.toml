@@ -136,3 +136,9 @@ large_enum_variant = "allow"
 [profile.release]
 codegen-units = 1
 lto = true
+
+[profile.dev]
+# Faster incremental dev builds: skip debug info for dependencies
+# Your code still gets full debug info; only third-party crates are stripped
+[profile.dev.package."*"]
+debug = false

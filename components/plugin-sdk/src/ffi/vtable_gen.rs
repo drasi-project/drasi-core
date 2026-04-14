@@ -30,9 +30,10 @@ use std::sync::Arc;
 use drasi_core::models::{ElementMetadata, SourceChange};
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::{
-    BootstrapEvent, BootstrapEventSender, ComponentEventReceiver, SourceEvent, SourceEventWrapper,
+    BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
 };
 use drasi_lib::channels::ChangeReceiver;
+use drasi_lib::component_graph::ComponentUpdateReceiver;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
@@ -180,7 +181,7 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
     /// Keeps the dummy status_rx alive so inner source's status_tx.send() doesn't error.
-    pub _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -208,6 +209,13 @@ pub fn build_source_vtable<T: Source + 'static>(
     extern "C" fn dispatch_mode_fn<T: Source + 'static>(state: *const c_void) -> FfiDispatchMode {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         dispatch_mode_to_ffi(w.inner.dispatch_mode())
+    }
+
+    extern "C" fn properties_fn<T: Source + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     /// Emit a lifecycle event, preferring per-instance callback over global.
@@ -475,6 +483,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         type_name_fn: type_name_fn::<T>,
         auto_start_fn: auto_start_fn::<T>,
         dispatch_mode_fn: dispatch_mode_fn::<T>,
+        properties_fn: properties_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -509,7 +518,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -530,6 +539,13 @@ pub fn build_source_vtable_from_boxed(
     extern "C" fn dispatch_mode_fn(state: *const c_void) -> FfiDispatchMode {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         dispatch_mode_to_ffi(w.inner.dispatch_mode())
+    }
+
+    extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_dyn_source_lifecycle(
@@ -787,6 +803,7 @@ pub fn build_source_vtable_from_boxed(
         type_name_fn,
         auto_start_fn,
         dispatch_mode_fn,
+        properties_fn,
         start_fn,
         stop_fn,
         status_fn,
@@ -814,7 +831,7 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
-    pub _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -842,6 +859,13 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     extern "C" fn query_ids_fn<T: Reaction + 'static>(state: *const c_void) -> FfiStringArray {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         FfiStringArray::from_vec(w.inner.query_ids())
+    }
+
+    extern "C" fn properties_fn<T: Reaction + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_reaction_lifecycle_for<T: Reaction + 'static>(
@@ -1078,6 +1102,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         type_name_fn: type_name_fn::<T>,
         auto_start_fn: auto_start_fn::<T>,
         query_ids_fn: query_ids_fn::<T>,
+        properties_fn: properties_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -1106,7 +1131,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentEventReceiver>>,
+        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1127,6 +1152,13 @@ pub fn build_reaction_vtable_from_boxed(
     extern "C" fn query_ids_fn(state: *const c_void) -> FfiStringArray {
         let w = unsafe { &*(state as *const DynReactionWrapper) };
         FfiStringArray::from_vec(w.inner.query_ids())
+    }
+
+    extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let props = w.inner.properties();
+        let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
     }
 
     fn emit_dyn_reaction_lifecycle(
@@ -1352,6 +1384,7 @@ pub fn build_reaction_vtable_from_boxed(
         type_name_fn,
         auto_start_fn,
         query_ids_fn,
+        properties_fn,
         start_fn,
         stop_fn,
         status_fn,
@@ -1553,7 +1586,7 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         id: FfiStr,
         config_json: FfiStr,
         auto_start: bool,
-    ) -> *mut SourceVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const SourcePluginWrapper<T>) };
         let id_str = unsafe { id.to_string() };
         let config_str = unsafe { config_json.to_string() };
@@ -1561,8 +1594,9 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse config JSON for source '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse config JSON for source '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1585,11 +1619,12 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
                     w.lifecycle_emitter,
                     w.runtime_handle,
                 );
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create source '{id_str}': {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create source '{id_str}': {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }
@@ -1677,7 +1712,7 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         query_ids_json: FfiStr,
         config_json: FfiStr,
         auto_start: bool,
-    ) -> *mut ReactionVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const ReactionPluginWrapper<T>) };
         let id_str = unsafe { id.to_string() };
         let query_ids_str = unsafe { query_ids_json.to_string() };
@@ -1686,16 +1721,18 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
         let query_ids: Vec<String> = match serde_json::from_str(&query_ids_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse query_ids JSON for reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse config JSON for reaction '{id_str}': {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse config JSON for reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1718,11 +1755,12 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
                     w.lifecycle_emitter,
                     w.runtime_handle,
                 );
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create reaction '{id_str}': {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create reaction '{id_str}': {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }
@@ -1809,7 +1847,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         state: *mut c_void,
         config_json: FfiStr,
         source_config_json: FfiStr,
-    ) -> *mut BootstrapProviderVtable {
+    ) -> FfiCreateResult {
         let w = unsafe { &*(state as *const BootstrapPluginWrapper<T>) };
         let config_str = unsafe { config_json.to_string() };
         let source_config_str = unsafe { source_config_json.to_string() };
@@ -1817,16 +1855,18 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse bootstrap config JSON: {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse bootstrap config JSON: {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
         let source_config_value: serde_json::Value = match serde_json::from_str(&source_config_str)
         {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to parse source config JSON: {e}");
-                return std::ptr::null_mut();
+                let msg = format!("Failed to parse source config JSON: {e}");
+                log::error!("{msg}");
+                return FfiCreateResult::err(msg);
             }
         };
 
@@ -1843,11 +1883,12 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
         match result {
             Ok(provider) => {
                 let vtable = build_bootstrap_provider_vtable(provider, w.executor);
-                Box::into_raw(Box::new(vtable))
+                FfiCreateResult::ok(Box::into_raw(Box::new(vtable)))
             }
             Err(e) => {
-                log::error!("Failed to create bootstrap provider: {e}");
-                std::ptr::null_mut()
+                let msg = format!("Failed to create bootstrap provider: {e}");
+                log::error!("{msg}");
+                FfiCreateResult::err(msg)
             }
         }
     }
@@ -1889,7 +1930,7 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
 /// Build a SourceRuntimeContext from FFI runtime context.
 fn build_source_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (SourceRuntimeContext, ComponentEventReceiver) {
+) -> (SourceRuntimeContext, ComponentUpdateReceiver) {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
     let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
@@ -1907,11 +1948,15 @@ fn build_source_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
+    // Create a dummy mpsc channel pair.
+    // The update_tx is provided to satisfy the SourceRuntimeContext signature.
+    // In the plugin-side context, status updates flow through the FFI lifecycle callback,
+    // not through this channel. The receiver is returned so it stays alive.
+    let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
-        status_tx,
+        update_tx,
         state_store,
         identity_provider,
     };
@@ -1920,7 +1965,7 @@ fn build_source_runtime_context(
 
 fn build_reaction_runtime_context(
     ffi_ctx: &FfiRuntimeContext,
-) -> (drasi_lib::ReactionRuntimeContext, ComponentEventReceiver) {
+) -> (drasi_lib::ReactionRuntimeContext, ComponentUpdateReceiver) {
     let instance_id = unsafe { ffi_ctx.instance_id.to_string() };
     let component_id = unsafe { ffi_ctx.component_id.to_string() };
     let state_store: Option<Arc<dyn StateStoreProvider>> = if ffi_ctx.state_store.is_null() {
@@ -1938,12 +1983,12 @@ fn build_reaction_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    let (status_tx, status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
         instance_id,
         reaction_id: component_id,
-        status_tx,
+        update_tx,
         state_store,
         identity_provider,
     };

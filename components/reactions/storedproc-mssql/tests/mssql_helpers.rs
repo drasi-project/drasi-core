@@ -182,19 +182,32 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
             };
 
             match result {
-                Ok(container_tuple) => {
-                    result_opt = Some(container_tuple);
-                    break;
+                Ok((container, init_time)) => {
+                    // Docker Desktop may sporadically fail to map exposed ports.
+                    // Verify port mapping before accepting this container.
+                    match container.get_host_port_ipv4(1433).await {
+                        Ok(_) => {
+                            result_opt = Some((container, init_time));
+                            break;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "MSSQL container port mapping failed (attempt {max_container_retries}): {e}. Retrying..."
+                            );
+                            last_error = Some(testcontainers::TestcontainersError::other(e));
+                            let _ = container.stop().await;
+                        }
+                    }
                 }
                 Err(e) => {
                     last_error = Some(e);
-
-                    if attempt < max_container_retries {
-                        // Exponential backoff: 1s, 2s, 4s
-                        let delay = std::time::Duration::from_secs(2u64.pow(attempt as u32 - 1));
-                        tokio::time::sleep(delay).await;
-                    }
                 }
+            }
+
+            if attempt < max_container_retries {
+                // Exponential backoff: 1s, 2s, 4s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt as u32 - 1));
+                tokio::time::sleep(delay).await;
             }
         }
 
@@ -205,7 +218,11 @@ async fn setup_mssql_raw() -> (MssqlContainer, MssqlConfig) {
         })
     };
 
-    let mssql_port = container.get_host_port_ipv4(1433).await.unwrap();
+    // Port mapping was already verified in the retry loop above
+    let mssql_port = container
+        .get_host_port_ipv4(1433)
+        .await
+        .expect("Port mapping should be available (verified during container creation)");
 
     // The testcontainers MSSQL module uses these default credentials
     let config = MssqlConfig {

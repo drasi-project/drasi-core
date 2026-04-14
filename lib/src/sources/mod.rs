@@ -13,7 +13,9 @@
 // limitations under the License.
 
 pub mod base;
+pub mod component_graph_source;
 pub mod future_queue_source;
+pub(crate) mod graph_elements;
 pub mod manager;
 mod traits;
 
@@ -37,5 +39,7 @@ pub trait Publisher: Send + Sync {
 pub use traits::Source;
 
 pub use base::{SourceBase, SourceBaseParams};
+pub use component_graph_source::{ComponentGraphSource, COMPONENT_GRAPH_SOURCE_ID};
+pub use future_queue_source::{FutureQueueSource, FUTURE_QUEUE_SOURCE_ID};
 pub use manager::SourceManager;
 pub use manager::{convert_json_to_element_properties, convert_json_to_element_value};

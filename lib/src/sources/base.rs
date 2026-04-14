@@ -30,13 +30,14 @@
 //! 4. Implements the Source trait delegating to SourceBase methods
 
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use crate::channels::*;
+use crate::component_graph::ComponentStatusHandle;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::profiling;
@@ -141,8 +142,8 @@ pub struct SourceBase {
     dispatch_buffer_capacity: usize,
     /// Whether this source should auto-start
     pub auto_start: bool,
-    /// Current component status
-    pub status: Arc<RwLock<ComponentStatus>>,
+    /// Component status handle — always available, wired to graph during initialize().
+    status_handle: ComponentStatusHandle,
     /// Dispatchers for sending source events to subscribers
     ///
     /// This is a vector of dispatchers that send source events to all registered
@@ -151,8 +152,6 @@ pub struct SourceBase {
     pub dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<SourceRuntimeContext>>>,
-    /// Channel for sending component status events (extracted from context for convenience)
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Handle to the source's main task
@@ -198,14 +197,13 @@ impl SourceBase {
             .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
 
         Ok(Self {
-            id: params.id,
+            id: params.id.clone(),
             dispatch_mode,
             dispatch_buffer_capacity,
             auto_start: params.auto_start,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
+            status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            status_tx: Arc::new(RwLock::new(None)), // Extracted from context
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -226,14 +224,14 @@ impl SourceBase {
     ///
     /// The context provides access to:
     /// - `source_id`: The source's unique identifier
-    /// - `status_tx`: Channel for reporting component status events
+    /// - `update_tx`: mpsc sender for fire-and-forget status updates to the component graph
     /// - `state_store`: Optional persistent state storage
     pub async fn initialize(&self, context: SourceRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
-        // Extract services for convenience
-        *self.status_tx.write().await = Some(context.status_tx.clone());
+        // Wire the status handle to the graph update channel
+        self.status_handle.wire(context.update_tx.clone()).await;
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -280,14 +278,12 @@ impl SourceBase {
         *self.identity_provider.write().await = Some(provider);
     }
 
-    /// Get the status channel Arc for internal use by spawned tasks
+    /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
-    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component status events.
-    ///
-    /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.status_tx.clone()
+    /// The handle can both read and write the component's status and automatically
+    /// notifies the graph on every status change (after `initialize()`).
+    pub fn status_handle(&self) -> ComponentStatusHandle {
+        self.status_handle.clone()
     }
 
     /// Clone the SourceBase with shared Arc references
@@ -300,10 +296,9 @@ impl SourceBase {
             dispatch_mode: self.dispatch_mode,
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             auto_start: self.auto_start,
-            status: self.status.clone(),
+            status_handle: self.status_handle.clone(),
             dispatchers: self.dispatchers.clone(),
             context: self.context.clone(),
-            status_tx: self.status_tx.clone(),
             state_store: self.state_store.clone(),
             task_handle: self.task_handle.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
@@ -550,7 +545,7 @@ impl SourceBase {
         self.dispatch_event(wrapper).await
     }
 
-    /// Create a test subscription to this source (synchronous wrapper)
+    /// Create a test subscription to this source (synchronous, fallible)
     ///
     /// This method is intended for use in tests to receive events from the source.
     /// It properly handles both Broadcast and Channel dispatch modes by delegating
@@ -560,16 +555,26 @@ impl SourceBase {
     /// For async contexts, prefer calling `create_streaming_receiver()` directly.
     ///
     /// # Returns
-    /// A receiver that will receive all events dispatched by this source
-    ///
-    /// # Panics
-    /// Panics if the receiver cannot be created (e.g., internal error)
-    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        // Use block_in_place to avoid nested executor issues in async tests
+    /// A receiver that will receive all events dispatched by this source,
+    /// or an error if the receiver cannot be created.
+    pub fn try_test_subscribe(
+        &self,
+    ) -> anyhow::Result<Box<dyn ChangeReceiver<SourceEventWrapper>>> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.create_streaming_receiver())
         })
-        .expect("Failed to create test subscription receiver")
+    }
+
+    /// Create a test subscription to this source (synchronous wrapper)
+    ///
+    /// Convenience wrapper around [`try_test_subscribe`](Self::try_test_subscribe)
+    /// that panics on failure. Prefer `try_test_subscribe()` in new code.
+    ///
+    /// # Panics
+    /// Panics if the receiver cannot be created.
+    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        self.try_test_subscribe()
+            .expect("Failed to create test subscription receiver")
     }
 
     /// Helper function to dispatch events from spawned tasks
@@ -617,8 +622,8 @@ impl SourceBase {
         }
 
         // Wait for task to complete
-        if let Some(handle) = self.task_handle.write().await.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+        if let Some(mut handle) = self.task_handle.write().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await {
                 Ok(Ok(())) => {
                     info!("Source '{}' task completed successfully", self.id);
                 }
@@ -626,12 +631,20 @@ impl SourceBase {
                     error!("Source '{}' task panicked: {}", self.id, e);
                 }
                 Err(_) => {
-                    error!("Source '{}' task did not complete within timeout", self.id);
+                    warn!(
+                        "Source '{}' task did not complete within timeout, aborting",
+                        self.id
+                    );
+                    handle.abort();
                 }
             }
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Source '{}' stopped", self.id)),
+        )
+        .await;
         info!("Source '{}' stopped", self.id);
         Ok(())
     }
@@ -659,24 +672,16 @@ impl SourceBase {
         Ok(())
     }
 
-    /// Get the current status
+    /// Get the current status.
     pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
-    /// Set the current status
-    pub async fn set_status(&self, status: ComponentStatus) {
-        *self.status.write().await = status;
-    }
-
-    /// Transition to a new status and send event
-    pub async fn set_status_with_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        *self.status.write().await = status.clone();
-        self.send_component_event(status, message).await
+    /// Set the component's status — updates local state AND notifies the graph.
+    ///
+    /// This is the single canonical way to change a source's status.
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status_handle.set_status(status, message).await;
     }
 
     /// Set the task handle
@@ -688,31 +693,115 @@ impl SourceBase {
     pub async fn set_shutdown_tx(&self, tx: tokio::sync::oneshot::Sender<()>) {
         *self.shutdown_tx.write().await = Some(tx);
     }
+}
 
-    /// Send a component event
-    ///
-    /// If the status channel has not been initialized yet, this method silently
-    /// succeeds without sending anything. This allows sources to be used
-    /// in a standalone fashion without DrasiLib if needed.
-    pub async fn send_component_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Source,
-            status,
-            timestamp: chrono::Utc::now(),
-            message,
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        if let Some(ref tx) = *self.status_tx.read().await {
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {e}");
-            }
-        }
-        // If status_tx is None, silently skip - initialization happens before start()
-        Ok(())
+    // =========================================================================
+    // SourceBaseParams tests
+    // =========================================================================
+
+    #[test]
+    fn test_params_new_defaults() {
+        let params = SourceBaseParams::new("test-source");
+        assert_eq!(params.id, "test-source");
+        assert!(params.dispatch_mode.is_none());
+        assert!(params.dispatch_buffer_capacity.is_none());
+        assert!(params.bootstrap_provider.is_none());
+        assert!(params.auto_start);
+    }
+
+    #[test]
+    fn test_params_with_dispatch_mode() {
+        let params = SourceBaseParams::new("s1").with_dispatch_mode(DispatchMode::Broadcast);
+        assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
+    }
+
+    #[test]
+    fn test_params_with_dispatch_buffer_capacity() {
+        let params = SourceBaseParams::new("s1").with_dispatch_buffer_capacity(50000);
+        assert_eq!(params.dispatch_buffer_capacity, Some(50000));
+    }
+
+    #[test]
+    fn test_params_with_auto_start_false() {
+        let params = SourceBaseParams::new("s1").with_auto_start(false);
+        assert!(!params.auto_start);
+    }
+
+    #[test]
+    fn test_params_builder_chaining() {
+        let params = SourceBaseParams::new("chained")
+            .with_dispatch_mode(DispatchMode::Broadcast)
+            .with_dispatch_buffer_capacity(2000)
+            .with_auto_start(false);
+
+        assert_eq!(params.id, "chained");
+        assert_eq!(params.dispatch_mode, Some(DispatchMode::Broadcast));
+        assert_eq!(params.dispatch_buffer_capacity, Some(2000));
+        assert!(!params.auto_start);
+    }
+
+    // =========================================================================
+    // SourceBase tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_new_defaults() {
+        let params = SourceBaseParams::new("my-source");
+        let base = SourceBase::new(params).unwrap();
+
+        assert_eq!(base.id, "my-source");
+        assert!(base.auto_start);
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_get_id() {
+        let base = SourceBase::new(SourceBaseParams::new("id-check")).unwrap();
+        assert_eq!(base.get_id(), "id-check");
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start() {
+        let base_default = SourceBase::new(SourceBaseParams::new("a")).unwrap();
+        assert!(base_default.get_auto_start());
+
+        let base_false =
+            SourceBase::new(SourceBaseParams::new("b").with_auto_start(false)).unwrap();
+        assert!(!base_false.get_auto_start());
+    }
+
+    #[tokio::test]
+    async fn test_get_status_initial() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_set_status() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+
+        base.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+
+        base.set_status(ComponentStatus::Error, Some("oops".into()))
+            .await;
+        assert_eq!(base.get_status().await, ComponentStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let base = SourceBase::new(SourceBaseParams::new("s")).unwrap();
+        let handle = base.status_handle();
+
+        // The handle should reflect the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // Mutating through the handle should be visible via SourceBase
+        handle.set_status(ComponentStatus::Starting, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Starting);
     }
 }

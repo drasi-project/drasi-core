@@ -35,14 +35,16 @@ use drasi_query_cypher::CypherParser;
 use drasi_query_gql::GQLParser;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceSubscriptionSettings;
 use crate::config::{QueryConfig, QueryLanguage, QueryRuntime};
 use crate::managers::{
-    is_operation_valid, log_component_error, log_component_start, log_component_stop,
-    ComponentEventHistory, ComponentLogKey, ComponentLogRegistry, Operation,
+    log_component_error, log_component_start, log_component_stop, ComponentLogKey,
+    ComponentLogRegistry,
 };
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
+use crate::sources::FutureQueueSource;
 use crate::sources::Source;
 use crate::sources::SourceManager;
 use tracing::Instrument;
@@ -128,7 +130,7 @@ pub trait Query: Send + Sync {
 
     /// Subscribe to query results for reactions
     /// Returns a broadcast receiver for Arc-wrapped QueryResults
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String>;
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
 }
 
 /// Bootstrap phase tracking for each source
@@ -256,8 +258,6 @@ pub struct DrasiQuery {
     instance_id: String,
     // Use QueryBase for common functionality
     base: QueryBase,
-    #[allow(dead_code)]
-    continuous_query: Option<ContinuousQuery>,
     current_results: Arc<RwLock<Vec<serde_json::Value>>>,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
@@ -273,13 +273,14 @@ pub struct DrasiQuery {
     index_factory: Arc<crate::indexes::IndexFactory>,
     // Middleware registry for query middleware
     middleware_registry: Arc<MiddlewareTypeRegistry>,
+    // FutureQueueSource for temporal query support
+    future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
 }
 
 impl DrasiQuery {
     pub fn new(
         instance_id: impl Into<String>,
         config: QueryConfig,
-        event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
@@ -289,12 +290,11 @@ impl DrasiQuery {
         let priority_queue = PriorityQueue::new(priority_capacity);
 
         // Create QueryBase for common functionality
-        let base = QueryBase::new(config, event_tx).context("Failed to create QueryBase")?;
+        let base = QueryBase::new(config).context("Failed to create QueryBase")?;
 
         Ok(Self {
             instance_id: instance_id.into(),
             base,
-            continuous_query: None,
             current_results: Arc::new(RwLock::new(Vec::new())),
             priority_queue,
             source_manager,
@@ -303,7 +303,16 @@ impl DrasiQuery {
             bootstrap_state: Arc::new(RwLock::new(HashMap::new())),
             index_factory,
             middleware_registry,
+            future_queue_source: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Initialize the query with runtime context.
+    ///
+    /// Wires the status handle to the component graph, following the same
+    /// pattern as Source and Reaction initialization.
+    pub async fn initialize(&self, context: crate::context::QueryRuntimeContext) {
+        self.base.initialize(context).await;
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
@@ -324,20 +333,30 @@ impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
         log_component_start("Query", &self.base.config.id);
 
-        *self.base.status.write().await = ComponentStatus::Starting;
         self.bootstrap_state.write().await.clear();
 
-        let event = ComponentEvent {
-            component_id: self.base.config.id.clone(),
-            component_type: ComponentType::Query,
-            status: ComponentStatus::Starting,
-            timestamp: chrono::Utc::now(),
-            message: Some("Starting query".to_string()),
-        };
-
-        if let Err(e) = self.base.event_tx.send(event).await {
-            error!("Failed to send component event: {e}");
-        }
+        // Set Starting on the local status handle. The manager has already validated
+        // and applied the Starting transition on the graph via validate_and_transition().
+        // This local update is needed because internal query logic (e.g., the bootstrap
+        // completion check at line ~983) reads the handle's local status to decide
+        // whether to transition to Running.
+        //
+        // INVARIANT: The graph must already be in Starting state before this point.
+        // The idempotency check in update_status_with_message() ensures the duplicate
+        // Starting update sent via mpsc is safely ignored.
+        debug_assert!(
+            matches!(
+                self.base.status_handle().get_status().await,
+                ComponentStatus::Stopped | ComponentStatus::Error | ComponentStatus::Starting
+            ),
+            "DrasiQuery::start() called but local handle is not in expected pre-start state"
+        );
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting query".to_string()),
+            )
+            .await;
 
         // Build and initialize the actual Drasi ContinuousQuery
         let query_str = self.base.config.query.clone();
@@ -426,19 +445,12 @@ impl Query for DrasiQuery {
             Ok(query) => query,
             Err(e) => {
                 error!("Failed to build query '{}': {}", self.base.config.id, e);
-                *self.base.status.write().await = ComponentStatus::Error;
-
-                let event = ComponentEvent {
-                    component_id: self.base.config.id.clone(),
-                    component_type: ComponentType::Query,
-                    status: ComponentStatus::Error,
-                    timestamp: chrono::Utc::now(),
-                    message: Some(format!("Failed to build query: {e}")),
-                };
-
-                if let Err(e) = self.base.event_tx.send(event).await {
-                    error!("Failed to send component event: {e}");
-                }
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Failed to build query: {e}")),
+                    )
+                    .await;
 
                 return Err(anyhow::anyhow!("Failed to build query: {e}"));
             }
@@ -472,19 +484,12 @@ impl Query for DrasiQuery {
                         "Failed to build subscription settings for query '{}': {}",
                         self.base.config.id, e
                     );
-                    *self.base.status.write().await = ComponentStatus::Error;
-
-                    let event = ComponentEvent {
-                        component_id: self.base.config.id.clone(),
-                        component_type: ComponentType::Query,
-                        status: ComponentStatus::Error,
-                        timestamp: chrono::Utc::now(),
-                        message: Some(format!("Failed to build subscription settings: {e}")),
-                    };
-
-                    if let Err(e) = self.base.event_tx.send(event).await {
-                        error!("Failed to send component event: {e}");
-                    }
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to build subscription settings: {e}")),
+                        )
+                        .await;
 
                     return Err(anyhow::anyhow!(
                         "Failed to build subscription settings: {e}"
@@ -492,7 +497,28 @@ impl Query for DrasiQuery {
                 }
             };
 
-        // Subscribe to each source sequentially
+        // Set up FutureQueueSource for temporal query support.
+        // This creates a virtual source that polls the future queue and emits
+        // FuturesDue control signals, integrating temporal queries into the
+        // standard source subscription mechanism.
+        debug!(
+            "Query '{}' setting up FutureQueueSource for temporal queries",
+            self.base.config.id
+        );
+
+        let future_queue_source = Arc::new(FutureQueueSource::new(
+            continuous_query.future_queue(),
+            self.base.config.id.clone(),
+        ));
+
+        // Subscribe BEFORE starting so the dispatcher exists when the polling loop runs
+        let fq_receiver = future_queue_source
+            .subscribe()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to FutureQueueSource: {e}"))?;
+
+        // Store for lifecycle cleanup in stop()
+        *self.future_queue_source.write().await = Some(Arc::clone(&future_queue_source));
 
         info!(
             "Query '{}' subscribing to {} sources: {:?}",
@@ -534,8 +560,17 @@ impl Query for DrasiQuery {
                         handle.abort();
                         let _ = handle.await;
                     }
-                    *self.base.status.write().await = ComponentStatus::Error;
-                    return Err(anyhow::anyhow!("Source '{source_id}' not found"));
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Source '{source_id}' not found")),
+                        )
+                        .await;
+                    return Err(crate::managers::ComponentNotFoundError::new(
+                        "source",
+                        source_id.as_str(),
+                    )
+                    .into());
                 }
             }
         }
@@ -553,7 +588,12 @@ impl Query for DrasiQuery {
                         handle.abort();
                         let _ = handle.await;
                     }
-                    *self.base.status.write().await = ComponentStatus::Error;
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to subscribe to source '{source_id}': {e}")),
+                        )
+                        .await;
                     return Err(anyhow::anyhow!(
                         "Failed to subscribe to source '{source_id}': {e}"
                     ));
@@ -856,8 +896,7 @@ impl Query for DrasiQuery {
             // bootstrap task would leave the gate closed forever.
             {
                 let bootstrap_gate_clone = bootstrap_gate.clone();
-                let status_clone = self.base.status.clone();
-                let event_tx_clone = self.base.event_tx.clone();
+                let reporter_clone = self.base.status_handle();
                 let query_id_clone = self.base.config.id.clone();
                 let instance_id_clone = self.instance_id.clone();
 
@@ -878,18 +917,10 @@ impl Query for DrasiQuery {
                                  transitioning to Error and opening gate"
                             );
 
-                            *status_clone.write().await = ComponentStatus::Error;
-
-                            let error_event = ComponentEvent {
-                                component_id: query_id_clone.clone(),
-                                component_type: ComponentType::Query,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!(
-                                    "Bootstrap failed: {panic_count} task(s) panicked"
-                                )),
-                            };
-                            let _ = event_tx_clone.send(error_event).await;
+                            reporter_clone.set_status(
+                                ComponentStatus::Error,
+                                Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
+                            ).await;
 
                             bootstrap_gate_clone.notify_one();
                         }
@@ -911,17 +942,7 @@ impl Query for DrasiQuery {
             bootstrap_gate.notify_one();
         }
 
-        // Create and subscribe to FutureQueueSource (peek-only signaler)
-        let fq_source = crate::sources::future_queue_source::FutureQueueSource::new(
-            continuous_query.future_queue(),
-            self.base.config.id.clone(),
-        );
-        let fq_receiver = fq_source
-            .subscribe()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to subscribe to FutureQueueSource: {e}"))?;
-
-        // Spawn forwarder task (same pattern as other sources)
+        // Spawn FutureQueueSource forwarder task (same pattern as other sources)
         {
             let fq_priority_queue = self.priority_queue.clone();
             let fq_forwarder = tokio::spawn(async move {
@@ -940,10 +961,9 @@ impl Query for DrasiQuery {
         let current_results = self.current_results.clone();
         let task_handle_clone = self.base.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
-        let status = self.base.status.clone();
         let instance_id = self.instance_id.clone();
-        let event_tx_for_processor = self.base.event_tx.clone();
-        let config_id_for_processor = self.base.config.id.clone();
+        let reporter_for_processor = self.base.status_handle();
+        let fq_source_for_processor = Arc::clone(&future_queue_source);
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -979,48 +999,41 @@ impl Query for DrasiQuery {
                 // Bootstrap complete — transition to Running only if still Starting.
                 // If stop() was called during bootstrap, status may already be
                 // Stopping and we must not overwrite it.
-                let should_run = {
-                    let mut guard = status.write().await;
-                    if matches!(*guard, ComponentStatus::Starting) {
-                        *guard = ComponentStatus::Running;
-                        true
-                    } else {
-                        warn!(
-                            "Query '{query_id}' bootstrap completed but status is {:?}, \
-                             skipping transition to Running",
-                            *guard
-                        );
-                        false
-                    }
-                };
+                let should_run = matches!(reporter_for_processor.get_status().await, ComponentStatus::Starting);
 
                 if should_run {
-                    let running_event = ComponentEvent {
-                        component_id: config_id_for_processor,
-                        component_type: ComponentType::Query,
-                        status: ComponentStatus::Running,
-                        timestamp: chrono::Utc::now(),
-                        message: Some("Query started successfully".to_string()),
-                    };
-
-                    if let Err(e) = event_tx_for_processor.send(running_event).await {
-                        error!("Failed to send component event: {e}");
-                    }
+                    reporter_for_processor.set_status(
+                        ComponentStatus::Running,
+                        Some("Query started successfully".to_string()),
+                    ).await;
+                } else {
+                    let current = reporter_for_processor.get_status().await;
+                    warn!(
+                        "Query '{query_id}' bootstrap completed but status is {current:?}, \
+                         skipping transition to Running"
+                    );
                 }
 
                 // Start FutureQueueSource after bootstrap completes
-                if let Err(e) = fq_source.start().await {
+                if let Err(e) = fq_source_for_processor.start().await {
                     error!("Query '{query_id}' failed to start FutureQueueSource: {e}");
+                    reporter_for_processor
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Future queue start failed: {e}")),
+                        )
+                        .await;
+                    return;
                 }
 
                 info!("Query '{query_id}' starting priority queue event processor");
 
                 loop {
                     // Check if query is still running
-                    let status_check = status.read().await.clone();
-                    if !matches!(status_check, ComponentStatus::Running) {
+                    let current_status = reporter_for_processor.get_status().await;
+                    if !matches!(current_status, ComponentStatus::Running) {
                         info!(
-                            "Query '{query_id}' status changed to non-running ({status_check:?}), exiting processing loop"
+                            "Query '{query_id}' status changed to non-running ({current_status:?}), exiting processing loop"
                         );
                         break;
                     }
@@ -1120,7 +1133,7 @@ impl Query for DrasiQuery {
                     }
                 }
 
-                fq_source.stop().await;
+                fq_source_for_processor.stop().await;
 
             info!("Query '{query_id}' processing task exited");
         }
@@ -1136,8 +1149,24 @@ impl Query for DrasiQuery {
     async fn stop(&self) -> Result<()> {
         log_component_stop("Query", &self.base.config.id);
 
+        // Set Stopping on the local status handle. The manager has already validated
+        // and applied the Stopping transition on the graph via validate_and_transition().
+        // This local update is needed because the event processing loop checks the
+        // handle's local status to decide when to exit.
+        //
+        // INVARIANT: The graph must already be in Stopping state before this point.
+        debug_assert!(
+            matches!(
+                self.base.status_handle().get_status().await,
+                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Stopping
+            ),
+            "DrasiQuery::stop() called but local handle is not in expected pre-stop state"
+        );
         self.base
-            .emit_status_event(ComponentStatus::Stopping, Some("Stopping query"))
+            .set_status(
+                ComponentStatus::Stopping,
+                Some("Stopping query".to_string()),
+            )
             .await;
 
         // Abort bootstrap tasks and supervisor
@@ -1160,18 +1189,26 @@ impl Query for DrasiQuery {
             let _ = handle.await;
         }
 
+        // Stop the FutureQueueSource polling task
+        if let Some(fq) = self.future_queue_source.write().await.take() {
+            fq.stop().await;
+        }
+
         // Use QueryBase common stop behavior to finish shutting down the processor task
         self.base.stop_common().await?;
 
         self.base
-            .emit_status_event(ComponentStatus::Stopped, Some("Query stopped successfully"))
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Query stopped successfully".to_string()),
+            )
             .await;
 
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.base.status.read().await.clone()
+        self.base.get_status().await
     }
 
     fn get_config(&self) -> &QueryConfig {
@@ -1182,104 +1219,115 @@ impl Query for DrasiQuery {
         self
     }
 
-    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse, String> {
+    async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse> {
         debug!(
             "Reaction '{}' subscribing to query '{}'",
             reaction_id, self.base.config.id
         );
 
-        // Use QueryBase's subscribe method which returns QuerySubscriptionResponse
         self.base
             .subscribe(&reaction_id)
             .await
-            .map_err(|e| format!("Failed to subscribe: {e}"))
+            .context("Failed to subscribe to query")
     }
 }
 
 pub struct QueryManager {
     instance_id: String,
-    queries: Arc<RwLock<HashMap<String, Arc<dyn Query>>>>,
-    event_tx: ComponentEventSender,
     source_manager: Arc<SourceManager>,
     index_factory: Arc<crate::indexes::IndexFactory>,
     middleware_registry: Arc<MiddlewareTypeRegistry>,
-    event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
+    /// Shared component graph — the single source of truth for component metadata,
+    /// state, relationships, runtime instances, AND event history.
+    graph: Arc<RwLock<ComponentGraph>>,
+    /// Channel sender for routing status updates through the graph update loop.
+    /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
+    /// the loop applies them to the graph and records events automatically.
+    update_tx: ComponentUpdateSender,
 }
 
 impl QueryManager {
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         source_manager: Arc<SourceManager>,
         index_factory: Arc<crate::indexes::IndexFactory>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            queries: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
             source_manager,
             index_factory,
             middleware_registry,
-            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            graph,
+            update_tx,
         }
     }
 
+    /// Register and provision a new query from the given configuration.
+    ///
+    /// # Errors
+    /// Returns an error if provisioning fails (e.g., invalid config or duplicate ID).
     pub async fn add_query(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config).await
+        self.provision_query(config).await
     }
 
     pub async fn add_query_without_save(&self, config: QueryConfig) -> Result<()> {
-        self.add_query_internal(config).await
+        self.provision_query(config).await
     }
 
     /// Add a pre-created query instance (for testing)
     pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
         let query_id = query.get_config().id.clone();
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
-        let mut queries = self.queries.write().await;
-        if queries.contains_key(&query_id) {
+        let mut graph = self.graph.write().await;
+        if graph.has_runtime(&query_id) {
             return Err(anyhow::anyhow!("Query with id '{query_id}' already exists"));
         }
-        queries.insert(query_id, query);
+        graph.set_runtime(&query_id, Box::new(query))?;
         Ok(())
     }
 
-    async fn add_query_internal(&self, config: QueryConfig) -> Result<()> {
-        // Create the query instance first (before acquiring lock)
+    /// Provision a query for runtime — create the DrasiQuery, initialize, and store it.
+    ///
+    /// This method handles runtime-only operations: creating the DrasiQuery instance,
+    /// initializing it with the runtime context, and storing it in the runtime map.
+    /// Graph registration (node creation, dependency edges) must be done by the caller
+    /// beforehand via `ComponentGraph::register_query()`.
+    pub async fn provision_query(&self, config: QueryConfig) -> Result<()> {
+        // Create the query instance
         let query = DrasiQuery::new(
             &self.instance_id,
             config.clone(),
-            self.event_tx.clone(),
             self.source_manager.clone(),
             self.index_factory.clone(),
             self.middleware_registry.clone(),
         )?;
+
+        // Wire status handle to graph via context (same pattern as Source/Reaction)
+        let context = crate::context::QueryRuntimeContext::new(
+            &self.instance_id,
+            &config.id,
+            self.update_tx.clone(),
+        );
+        query.initialize(context).await;
 
         let query: Arc<dyn Query> = Arc::new(query);
 
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance in the graph
         {
-            let mut queries = self.queries.write().await;
-            if queries.contains_key(&config.id) {
-                return Err(anyhow::anyhow!(
-                    "Query with id '{}' already exists",
-                    config.id
-                ));
-            }
-            queries.insert(config.id.clone(), query);
+            let mut graph = self.graph.write().await;
+            graph.set_runtime(&config.id, Box::new(query))?;
         }
 
-        info!("Added query: {} with bootstrap support", config.id);
+        info!("Provisioned query: {} with bootstrap support", config.id);
 
         // Note: Auto-start is handled by the caller (server.add_query)
         // which has access to the data router for subscriptions
@@ -1290,58 +1338,49 @@ impl QueryManager {
         Ok(())
     }
 
+    /// Start a query by ID, subscribing it to its sources and beginning event processing.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found or the start transition fails.
     pub async fn start_query(&self, id: String) -> Result<()> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let query =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
+                })?;
 
-        if let Some(query) = query {
-            let status = query.status().await;
-            is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            query.start().await?;
-        } else {
-            return Err(anyhow::anyhow!("Query not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "query", &query).await
     }
 
+    /// Stop a running query by ID, unsubscribing it from sources and halting event processing.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found or the stop transition fails.
     pub async fn stop_query(&self, id: String) -> Result<()> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let query =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Query>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("query", &id))
+                })?;
 
-        if let Some(query) = query {
-            let status = query.status().await;
-            is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
-            query.stop().await?;
-        } else {
-            return Err(anyhow::anyhow!("Query not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "query", &query).await
     }
 
+    /// Return the current lifecycle status of the query with the given ID.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found in the component graph.
     pub async fn get_query_status(&self, id: String) -> Result<ComponentStatus> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
-
-        if let Some(query) = query {
-            Ok(query.status().await)
-        } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
-        }
+        crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Query").await
     }
 
     /// Get a query instance for subscription by reactions
     /// Returns Arc<dyn Query> which reactions can use to subscribe to query results
     pub async fn get_query_instance(&self, query_id: &str) -> Result<Arc<dyn Query>, String> {
-        let queries = self.queries.read().await;
-        if let Some(query) = queries.get(query_id) {
+        let graph = self.graph.read().await;
+        if let Some(query) = graph.get_runtime::<Arc<dyn Query>>(query_id) {
             Ok(Arc::clone(query))
         } else {
             Err(format!(
@@ -1350,150 +1389,114 @@ impl QueryManager {
         }
     }
 
+    /// Retrieve the full runtime descriptor for a query, including its status and configuration.
+    ///
+    /// # Errors
+    /// Returns an error if the query is not found.
     pub async fn get_query(&self, id: String) -> Result<QueryRuntime> {
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
+        let graph = self.graph.read().await;
+        let query = graph.get_runtime::<Arc<dyn Query>>(&id).cloned();
 
         if let Some(query) = query {
-            let status = query.status().await;
+            let status = graph
+                .get_component(&id)
+                .map(|n| n.status)
+                .unwrap_or(ComponentStatus::Stopped);
             let config = query.get_config();
             let error_message = match &status {
-                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                ComponentStatus::Error => graph.get_last_error(&id),
                 _ => None,
             };
+            drop(graph);
             let runtime = QueryRuntime {
                 id: config.id.clone(),
                 query: config.query.clone(),
-                status: status.clone(),
+                status,
                 error_message,
                 source_subscriptions: config.sources.clone(),
                 joins: config.joins.clone(),
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", &id).into())
         }
     }
 
-    pub async fn update_query(&self, id: String, config: QueryConfig) -> Result<()> {
-        let (query, was_running) = {
-            let queries = self.queries.read().await;
-            let query = queries.get(&id).cloned();
-            if let Some(ref q) = query {
-                let status = q.status().await;
-                let was_running =
-                    matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
-                (query, was_running)
-            } else {
-                return Err(anyhow::anyhow!("Query not found: {id}"));
-            }
+    /// Update a query by replacing it with a new configuration.
+    ///
+    /// Flow: validate exists → validate status → set Reconfiguring via graph →
+    /// stop if running/starting → wait for stopped → provision new →
+    /// replace runtime (if still exists) → restart if was running.
+    /// Graph node, edges, and event history are preserved.
+    pub async fn update_query(&self, id: String, new_config: QueryConfig) -> Result<()> {
+        let old_query = {
+            let graph = self.graph.read().await;
+            graph.get_runtime::<Arc<dyn Query>>(&id).cloned()
         };
 
-        if let Some(query) = query {
-            // If running, we need to stop it first
-            if was_running {
-                self.stop_query(id.clone()).await?;
-                // Validate the operation after stop
-                let status = query.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            } else {
-                let status = query.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(old_query) = old_query {
+            // Verify the new config has the same ID
+            if new_config.id != id {
+                return Err(anyhow::anyhow!(
+                    "New query ID '{}' does not match existing query ID '{}'",
+                    new_config.id,
+                    id
+                ));
             }
 
-            // For now, update means remove and re-add
-            self.delete_query(id.clone()).await?;
-            self.add_query(config).await?;
-
-            // If it was running, restart it
-            if was_running {
-                // Query will subscribe directly to sources when started
-                self.start_query(id).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn delete_query(&self, id: String) -> Result<()> {
-        // First check if the query exists
-        let query = {
-            let queries = self.queries.read().await;
-            queries.get(&id).cloned()
-        };
-
-        if let Some(query) = query {
-            let status = query.status().await;
-
-            // If the query is running or starting, stop it first
-            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
-                info!("Stopping query '{id}' before deletion");
-                if let Err(e) = query.stop().await {
-                    warn!(
-                        "Failed to stop query '{id}' during deletion (may already be stopped): {e}"
-                    );
-                }
-
-                // Wait a bit to ensure the query has fully stopped
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                // Verify it's stopped - accept Stopped or Error
-                let new_status = query.status().await;
-                if !matches!(
-                    new_status,
-                    ComponentStatus::Stopped | ComponentStatus::Error
-                ) {
-                    warn!("Query '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
-                }
-            } else {
-                // Still validate the operation for non-running states
-                is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // Now remove the query
-            self.queries.write().await.remove(&id);
-            // Clean up event history for this query
-            self.event_history.write().await.remove_component(&id);
-            // Clean up log resources for this query
-            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Query, &id);
-            self.log_registry.remove_component_by_key(&log_key).await;
-            info!("Deleted query: {id}");
-
-            Ok(())
+            crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Query>, _, _, _>(
+                &self.graph,
+                &id,
+                "query",
+                &old_query,
+                || async {},
+                || self.provision_query(new_config),
+                || self.start_query(id.clone()),
+            )
+            .await
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", &id).into())
         }
     }
 
+    /// Teardown a query's runtime state — stop and remove from runtime map.
+    ///
+    /// This method handles runtime-only operations. Graph deregistration
+    /// (node removal, edge cleanup) must be done by the caller afterwards via
+    /// `ComponentGraph::deregister()`.
+    ///
+    /// The caller should validate dependencies via `graph.can_remove()` before calling this.
+    pub async fn teardown_query(&self, id: String) -> Result<()> {
+        crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Query>, _, _>(
+            &self.graph,
+            &id,
+            "query",
+            ComponentType::Query,
+            &self.instance_id,
+            &self.log_registry,
+            false,
+            || async {},
+        )
+        .await
+    }
+
+    /// List all registered queries with their current lifecycle status.
     pub async fn list_queries(&self) -> Vec<(String, ComponentStatus)> {
-        let queries_snapshot = {
-            let queries = self.queries.read().await;
-            queries
-                .iter()
-                .map(|(id, query)| (id.clone(), Arc::clone(query)))
-                .collect::<Vec<_>>()
-        };
-
-        let mut result = Vec::new();
-        for (id, query) in queries_snapshot {
-            let status = query.status().await;
-            result.push((id, status));
-        }
-
-        result
+        crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Query)
+            .await
     }
 
     pub async fn get_query_config(&self, id: &str) -> Option<QueryConfig> {
-        let queries = self.queries.read().await;
-        queries.get(id).map(|q| q.get_config().clone())
+        let graph = self.graph.read().await;
+        graph
+            .get_runtime::<Arc<dyn Query>>(id)
+            .map(|q| q.get_config().clone())
     }
 
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         let query = {
-            let queries = self.queries.read().await;
-            queries.get(id).cloned()
+            let graph = self.graph.read().await;
+            graph.get_runtime::<Arc<dyn Query>>(id).cloned()
         };
 
         if let Some(query) = query {
@@ -1512,78 +1515,119 @@ impl QueryManager {
 
             Ok(drasi_query.get_current_results().await)
         } else {
-            Err(anyhow::anyhow!("Query not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("query", id).into())
         }
     }
 
+    /// Start all queries that are configured for auto-start.
+    ///
+    /// # Errors
+    /// Returns an error if any query fails to start.
     pub async fn start_all(&self) -> Result<()> {
-        let queries_snapshot = {
-            let queries = self.queries.read().await;
-            queries
+        crate::managers::lifecycle_helpers::start_all_components::<Arc<dyn Query>, _, _>(
+            &self.graph,
+            &ComponentKind::Query,
+            "query",
+            |q| q.get_config().auto_start,
+            |id, query| async move {
+                // Validate and apply Starting transition atomically through the graph
+                {
+                    let mut graph = self.graph.write().await;
+                    graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Starting,
+                        Some("Starting query".to_string()),
+                    )?;
+                }
+
+                if let Err(e) = query.start().await {
+                    let mut graph = self.graph.write().await;
+                    let _ = graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Error,
+                        Some(format!("Start failed: {e}")),
+                    );
+                    return Err(e);
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Stop all currently running or starting queries.
+    ///
+    /// # Errors
+    /// Returns an error listing any queries that failed to stop.
+    pub async fn stop_all(&self) -> Result<()> {
+        let query_ids: Vec<String> = {
+            let graph = self.graph.read().await;
+            graph
+                .list_by_kind(&ComponentKind::Query)
                 .iter()
-                .map(|(id, query)| (id.clone(), Arc::clone(query)))
-                .collect::<Vec<_>>()
+                .map(|(id, _)| id.clone())
+                .collect()
         };
 
         let mut failed_queries = Vec::new();
 
-        for (id, query) in queries_snapshot {
-            let config = query.get_config();
-            if config.auto_start {
-                info!("Auto-starting query: {id}");
-                if let Err(e) = query.start().await {
-                    error!("Failed to start query {id}: {e}");
-                    failed_queries.push((id.clone(), e.to_string()));
-                    // Continue starting other queries instead of returning early
+        for id in query_ids {
+            let is_active = {
+                let graph = self.graph.read().await;
+                graph
+                    .get_component(&id)
+                    .map(|n| {
+                        matches!(
+                            n.status,
+                            ComponentStatus::Running | ComponentStatus::Starting
+                        )
+                    })
+                    .unwrap_or(false)
+            };
+
+            if is_active {
+                if let Err(e) = self.stop_query(id.clone()).await {
+                    log_component_error("Query", &id, &e.to_string());
+                    failed_queries.push((id, e.to_string()));
                 }
-            } else {
-                info!("Query '{id}' has auto_start=false, skipping automatic startup");
             }
         }
 
-        // Return error only if any queries failed to start
         if !failed_queries.is_empty() {
             let error_msg = failed_queries
                 .iter()
                 .map(|(id, err)| format!("{id}: {err}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            Err(anyhow::anyhow!("Failed to start some queries: {error_msg}"))
+            Err(anyhow::anyhow!("Failed to stop some queries: {error_msg}"))
         } else {
             Ok(())
         }
     }
 
-    pub async fn stop_all(&self) -> Result<()> {
-        let queries = self.queries.read().await;
-        for query in queries.values() {
-            if let Err(e) = query.stop().await {
-                log_component_error("Query", &query.get_config().id, &e.to_string());
-            }
-        }
-        Ok(())
-    }
-
-    /// Record a component event in the history.
-    ///
-    /// This should be called by the event processing loop to track component
-    /// lifecycle events for later querying.
+    /// Record a component event — delegates to the graph's centralized event history.
     pub async fn record_event(&self, event: ComponentEvent) {
-        self.event_history.write().await.record_event(event);
+        let mut graph = self.graph.write().await;
+        graph.record_event(event);
     }
 
     /// Get events for a specific query.
     ///
     /// Returns events in chronological order (oldest first).
     pub async fn get_query_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_events(id)
+        self.graph.read().await.get_events(id)
     }
 
     /// Get all events across all queries.
     ///
     /// Returns events sorted by timestamp (oldest first).
     pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_all_events()
+        let graph = self.graph.read().await;
+        graph
+            .get_all_events()
+            .into_iter()
+            .filter(|e| e.component_type == ComponentType::Query)
+            .collect()
     }
 
     /// Subscribe to live logs for a query.
@@ -1597,10 +1641,10 @@ impl QueryManager {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        // Verify the query exists
+        // Verify the query exists in the graph
         {
-            let queries = self.queries.read().await;
-            if !queries.contains_key(id) {
+            let graph = self.graph.read().await;
+            if !graph.has_runtime(id) {
                 return None;
             }
         }
@@ -1620,14 +1664,19 @@ impl QueryManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        // Verify the query exists
-        {
-            let queries = self.queries.read().await;
-            if !queries.contains_key(id) {
-                return None;
-            }
+        let mut graph = self.graph.write().await;
+        if !graph.has_runtime(id) {
+            return None;
         }
+        Some(graph.subscribe_events(id))
+    }
+}
 
-        Some(self.event_history.write().await.subscribe(id))
+#[async_trait]
+impl crate::reactions::QueryProvider for QueryManager {
+    async fn get_query_instance(&self, id: &str) -> Result<Arc<dyn Query>> {
+        self.get_query_instance(id)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
