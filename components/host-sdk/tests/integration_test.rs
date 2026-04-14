@@ -44,7 +44,7 @@ fn plugin_dir() -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    workspace_root.join("target").join("debug")
+    workspace_root.join("target").join("debug").join("plugins")
 }
 
 /// Get the platform-specific plugin filename.
@@ -849,7 +849,7 @@ fn test_drop_loaded_plugin_does_not_crash() {
 //
 // These tests simulate the real DrasiLib flow:
 // 1. Load plugin → create source via factory
-// 2. Create a status_tx/status_rx channel (like SourceManager does)
+// 2. Create an update_tx/update_rx channel (like SourceManager does)
 // 3. Call source.initialize(SourceRuntimeContext) — this wires per-instance callbacks
 // 4. Start/stop the source
 // 5. Verify logs appear in ComponentLogRegistry and events arrive on status_rx
@@ -891,12 +891,18 @@ async fn test_plugin_logs_routed_to_log_registry() {
         .await
         .unwrap();
 
-    // Create a real status channel (like SourceManager does)
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
+    // Create a real update channel (like SourceManager does)
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
 
     // Initialize with a real SourceRuntimeContext — this wires per-instance callbacks
-    let context =
-        SourceRuntimeContext::new("log-test-instance", "log-test-source", status_tx, None);
+    let context = SourceRuntimeContext::new(
+        "log-test-instance",
+        "log-test-source",
+        None,
+        update_tx,
+        None,
+    );
     source.initialize(context).await;
 
     // Subscribe to logs BEFORE starting (like the API does)
@@ -940,8 +946,9 @@ async fn test_plugin_logs_routed_to_log_registry() {
 #[serial]
 async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     //! Verify that lifecycle events (Starting, Started, Stopping, Stopped) from a plugin
-    //! flow through the status_tx channel when source.initialize() is called with a real
+    //! flow through the update_tx channel when source.initialize() is called with a real
     //! SourceRuntimeContext. This is the same channel that LifecycleManager monitors.
+    use drasi_lib::component_graph::ComponentUpdate;
     use drasi_lib::context::SourceRuntimeContext;
     use drasi_lib::sources::Source;
     use drasi_lib::ComponentStatus;
@@ -971,14 +978,15 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
         .await
         .unwrap();
 
-    // Create a real status channel
-    let (status_tx, mut status_rx) = tokio::sync::mpsc::channel(100);
+    // Create a real update channel
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<ComponentUpdate>(100);
 
     // Initialize with a real SourceRuntimeContext
     let context = SourceRuntimeContext::new(
         "lifecycle-test-instance",
         "lifecycle-evt-source",
-        status_tx,
+        None,
+        update_tx,
         None,
     );
     source.initialize(context).await;
@@ -993,26 +1001,33 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
 
     // Drain all events from the channel
     let mut events = Vec::new();
-    while let Ok(event) = status_rx.try_recv() {
-        eprintln!(
-            "  Event: {} {:?} {:?} {}",
-            event.component_id,
-            event.component_type,
-            event.status,
-            event.message.as_deref().unwrap_or("")
-        );
+    while let Ok(event) = update_rx.try_recv() {
+        match &event {
+            ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            } => {
+                eprintln!(
+                    "  Event: {} {:?} {}",
+                    component_id,
+                    status,
+                    message.as_deref().unwrap_or("")
+                );
+            }
+        }
         events.push(event);
     }
 
     assert!(
         !events.is_empty(),
-        "Expected lifecycle events on status_rx channel"
+        "Expected lifecycle events on update_rx channel"
     );
 
     // Verify we got events for the right component
     let our_events: Vec<_> = events
         .iter()
-        .filter(|e| e.component_id == "lifecycle-evt-source")
+        .filter(|e| matches!(e, ComponentUpdate::Status { component_id, .. } if component_id == "lifecycle-evt-source"))
         .collect();
     assert!(
         !our_events.is_empty(),
@@ -1020,7 +1035,12 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     );
 
     // Verify we got at least Starting and Started (from start)
-    let statuses: Vec<_> = our_events.iter().map(|e| &e.status).collect();
+    let statuses: Vec<_> = our_events
+        .iter()
+        .map(|e| match e {
+            ComponentUpdate::Status { status, .. } => status,
+        })
+        .collect();
     assert!(
         statuses.contains(&&ComponentStatus::Starting),
         "Expected Starting event, got: {statuses:?}"
@@ -1242,9 +1262,15 @@ async fn test_per_instance_logs_include_correct_component_id() {
         .await
         .unwrap();
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
-    let context =
-        SourceRuntimeContext::new("cid-test-instance", "component-id-test", status_tx, None);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = SourceRuntimeContext::new(
+        "cid-test-instance",
+        "component-id-test",
+        None,
+        update_tx,
+        None,
+    );
     source.initialize(context).await;
 
     let registry = get_or_init_global_registry();
@@ -1650,11 +1676,12 @@ async fn test_source_with_null_identity_provider() {
         .await
         .expect("Should create source");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "null-ip-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1696,11 +1723,12 @@ async fn test_source_with_identity_provider_injection() {
             password: "injected-pass".to_string(),
         });
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "ip-inject-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: Some(provider),
     };
@@ -1743,11 +1771,12 @@ async fn test_reaction_enqueue_query_result() {
         .expect("Should create log reaction instance");
 
     // Initialize the reaction with a runtime context
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1803,11 +1832,12 @@ async fn test_reaction_enqueue_multiple_query_results() {
         .await
         .expect("Should create log reaction instance");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "multi-enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1858,11 +1888,12 @@ async fn test_reaction_enqueue_query_result_with_data() {
         .await
         .expect("Should create log reaction instance");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "data-enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1995,7 +2026,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Connect SSE client and collect events
-    let sse_url = format!("http://127.0.0.1:{}/events", sse_port);
+    let sse_url = format!("http://127.0.0.1:{sse_port}/events");
     let collected = collect_sse_events(&sse_url, 5, std::time::Duration::from_secs(10)).await;
 
     assert!(
@@ -2361,10 +2392,12 @@ async fn test_cdylib_source_dispatches_events() {
         .await
         .expect("Should create mock source");
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-instance",
         "dispatch-test",
+        None,
         event_tx,
         None,
     );

@@ -19,8 +19,8 @@
 //! from `drasi_ffi_primitives` directly where possible.
 
 pub use drasi_ffi_primitives::{
-    catch_panic_ffi, now_us, AsyncExecutorFn, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr,
-    FfiStringArray, SendMutPtr, SendPtr,
+    catch_panic_ffi, now_us, AsyncExecutorFn, FfiCreateResult, FfiGetResult, FfiOwnedStr,
+    FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,
 };
 
 // ============================================================================

@@ -25,13 +25,45 @@
 
 use anyhow::Result;
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentStatus, DrasiLib, Query};
 use drasi_reaction_application::ApplicationReactionBuilder;
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
+
+/// Wait for a component to reach Running status via event notification.
+async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+    // Subscribe BEFORE checking to avoid missing events
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+    {
+        return;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event)
+                    if event.component_id == component_id
+                        && event.status == ComponentStatus::Running =>
+                {
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for '{component_id}'");
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for '{component_id}' to reach Running"));
+}
 
 /// Test that validates correct relationship direction through end-to-end query execution.
 ///
@@ -94,7 +126,9 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // =========================================================================
     // Step 5: Wait for components to be ready
     // =========================================================================
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_running(&drasi, "test-app-source").await;
+    wait_for_running(&drasi, "relationship-test-query").await;
+    wait_for_running(&drasi, "test-app-reaction").await;
 
     // =========================================================================
     // Step 6: Subscribe to reaction results
@@ -261,7 +295,8 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
 
     drasi.add_reaction(reverse_reaction).await?;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_running(&drasi, "reverse-test-query").await;
+    wait_for_running(&drasi, "reverse-reaction").await;
 
     let mut reverse_subscription = reverse_handle
         .subscribe_with_options(Default::default())
@@ -328,7 +363,9 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
     // Start DrasiLib
     drasi.start().await?;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_running(&drasi, "multi-rel-source").await;
+    wait_for_running(&drasi, "multi-rel-query").await;
+    wait_for_running(&drasi, "multi-rel-reaction").await;
 
     let mut subscription = reaction_handle
         .subscribe_with_options(Default::default())

@@ -21,8 +21,8 @@
 use std::ffi::c_void;
 
 use super::types::{
-    AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiDispatchMode, FfiGetResult, FfiOwnedStr,
-    FfiResult, FfiStr, FfiStringArray,
+    AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult, FfiDispatchMode,
+    FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray,
 };
 
 // ============================================================================
@@ -201,6 +201,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn auto_start_fn(state: *const) -> bool,
         fn dispatch_mode_fn(state: *const) -> FfiDispatchMode,
 
+        // Configuration inspection
+        /// Returns the source's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
+
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
         fn stop_fn(state: *mut) -> FfiResult,
@@ -231,6 +235,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn type_name_fn(state: *const) -> FfiStr,
         fn auto_start_fn(state: *const) -> bool,
         fn query_ids_fn(state: *const) -> FfiStringArray,
+
+        // Configuration inspection
+        /// Returns the reaction's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
 
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
@@ -276,7 +284,7 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
-        fn create_source_fn(state: *mut, id: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut SourceVtable,
+        fn create_source_fn(state: *mut, id: FfiStr, config_json: FfiStr, auto_start: bool) -> FfiCreateResult,
     }
 }
 
@@ -289,7 +297,7 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
         /// Factory: create a ReactionVtable from JSON config.
-        fn create_reaction_fn(state: *mut, id: FfiStr, query_ids_json: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut ReactionVtable,
+        fn create_reaction_fn(state: *mut, id: FfiStr, query_ids_json: FfiStr, config_json: FfiStr, auto_start: bool) -> FfiCreateResult,
     }
 }
 
@@ -302,7 +310,7 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
         /// Factory: create a BootstrapProviderVtable from JSON config.
-        fn create_bootstrap_provider_fn(state: *mut, config_json: FfiStr, source_config_json: FfiStr) -> *mut BootstrapProviderVtable,
+        fn create_bootstrap_provider_fn(state: *mut, config_json: FfiStr, source_config_json: FfiStr) -> FfiCreateResult,
     }
 }
 

@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use log::{info, warn};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -25,6 +24,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::channels::*;
+use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
@@ -78,29 +78,40 @@ pub fn convert_json_to_element_properties(
 
 pub struct SourceManager {
     instance_id: String,
-    sources: Arc<RwLock<HashMap<String, Arc<dyn Source>>>>,
-    event_tx: ComponentEventSender,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
+    /// Shared component graph — the single source of truth for component metadata,
+    /// state, relationships, runtime instances, AND event history.
+    graph: Arc<RwLock<ComponentGraph>>,
+    /// Channel sender for routing status updates through the graph update loop.
+    /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
+    /// the loop applies them to the graph and records events automatically.
+    update_tx: ComponentUpdateSender,
 }
 
 impl SourceManager {
     /// Create a new SourceManager
+    ///
+    /// # Parameters
+    /// - `instance_id`: The DrasiLib instance ID for log routing
+    /// - `log_registry`: Shared log registry for component log streaming
+    /// - `graph`: Shared component graph for tracking component relationships and emitting events
     pub fn new(
         instance_id: impl Into<String>,
-        event_tx: ComponentEventSender,
         log_registry: Arc<ComponentLogRegistry>,
+        graph: Arc<RwLock<ComponentGraph>>,
+        update_tx: ComponentUpdateSender,
     ) -> Self {
         Self {
             instance_id: instance_id.into(),
-            sources: Arc::new(RwLock::new(HashMap::new())),
-            event_tx,
             state_store: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
             event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
+            graph,
+            update_tx,
         }
     }
 
@@ -119,31 +130,24 @@ impl SourceManager {
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
-        self.sources.read().await.get(id).cloned()
+        let graph = self.graph.read().await;
+        graph.get_runtime::<Arc<dyn Source>>(id).cloned()
     }
 
-    /// Add a source instance, taking ownership and wrapping it in an Arc internally.
+    /// Provision a source instance for runtime — initialize and store it.
+    ///
+    /// This method handles runtime-only operations: creating the runtime context,
+    /// initializing the source, and storing it in the runtime map. Graph registration
+    /// (node creation, ownership edges) must be done by the caller beforehand via
+    /// `ComponentGraph::register_source()`.
     ///
     /// # Parameters
-    /// - `source`: The source instance to add (ownership is transferred)
-    ///
-    /// # Returns
-    /// - `Ok(())` if the source was added successfully
-    /// - `Err` if a source with the same ID already exists
+    /// - `source`: The source instance to provision (ownership is transferred)
     ///
     /// # Note
     /// The source will NOT be auto-started. Call `start_source` separately
     /// if you need to start it after adding.
-    ///
-    /// The source is automatically initialized with the runtime context before
-    /// it is stored.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let source = MySource::new("my-source", config)?;
-    /// manager.add_source(source).await?;  // Ownership transferred
-    /// ```
-    pub async fn add_source(&self, source: impl Source + 'static) -> Result<()> {
+    pub async fn provision_source(&self, source: impl Source + 'static) -> Result<()> {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
@@ -151,185 +155,134 @@ impl SourceManager {
         let mut context = SourceRuntimeContext::new(
             &self.instance_id,
             &source_id,
-            self.event_tx.clone(),
             self.state_store.read().await.clone(),
+            self.update_tx.clone(),
+            None,
         );
         context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the source with its runtime context
         source.initialize(context).await;
 
-        // Use a single write lock to atomically check and insert
-        // This eliminates the TOCTOU race condition from separate read-then-write
+        // Store the runtime instance in the graph
         {
-            let mut sources = self.sources.write().await;
-            if sources.contains_key(&source_id) {
-                return Err(anyhow::anyhow!(
-                    "Source with id '{source_id}' already exists"
-                ));
-            }
-            sources.insert(source_id.clone(), source);
+            let mut graph = self.graph.write().await;
+            graph.set_runtime(&source_id, Box::new(source))?;
         }
 
-        info!("Added source: {source_id}");
+        info!("Provisioned source: {source_id}");
+
         Ok(())
     }
 
+    /// Start a source by ID, transitioning it to the Running state.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found or the start operation fails.
     pub async fn start_source(&self, id: String) -> Result<()> {
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
+        let source =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
+                })?;
 
-        if let Some(source) = source {
-            let status = source.status().await;
-            is_operation_valid(&status, &Operation::Start).map_err(|e| anyhow::anyhow!(e))?;
-            source.start().await?;
-        } else {
-            return Err(anyhow::anyhow!("Source not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::start_component(&self.graph, &id, "source", &source)
+            .await
     }
 
+    /// Stop a running source by ID, transitioning it to the Stopped state.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found or the stop operation fails.
     pub async fn stop_source(&self, id: String) -> Result<()> {
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
+        let source =
+            crate::managers::lifecycle_helpers::get_runtime::<Arc<dyn Source>>(&self.graph, &id)
+                .await
+                .ok_or_else(|| {
+                    anyhow::Error::new(crate::managers::ComponentNotFoundError::new("source", &id))
+                })?;
 
-        if let Some(source) = source {
-            let status = source.status().await;
-            is_operation_valid(&status, &Operation::Stop).map_err(|e| anyhow::anyhow!(e))?;
-            source.stop().await?;
-        } else {
-            return Err(anyhow::anyhow!("Source not found: {id}"));
-        }
-
-        Ok(())
+        crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "source", &source)
+            .await
     }
 
+    /// Get the current status of a source by ID.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found in the component graph.
     pub async fn get_source_status(&self, id: String) -> Result<ComponentStatus> {
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
-
-        if let Some(source) = source {
-            Ok(source.status().await)
-        } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
-        }
+        crate::managers::lifecycle_helpers::get_component_status(&self.graph, &id, "Source").await
     }
 
+    /// List all registered sources with their current statuses.
     pub async fn list_sources(&self) -> Vec<(String, ComponentStatus)> {
-        let sources: Vec<(String, Arc<dyn Source>)> = {
-            let sources = self.sources.read().await;
-            sources
-                .iter()
-                .map(|(id, source)| (id.clone(), source.clone()))
-                .collect()
-        };
-
-        let mut result = Vec::new();
-        for (id, source) in sources {
-            let status = source.status().await;
-            result.push((id, status));
-        }
-
-        result
+        crate::managers::lifecycle_helpers::list_components(&self.graph, &ComponentKind::Source)
+            .await
     }
 
+    /// Get the full runtime descriptor for a source, including its status and properties.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found.
     pub async fn get_source(&self, id: String) -> Result<SourceRuntime> {
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
+        let graph = self.graph.read().await;
+        let source = graph.get_runtime::<Arc<dyn Source>>(&id).cloned();
 
         if let Some(source) = source {
-            let status = source.status().await;
+            let status = graph
+                .get_component(&id)
+                .map(|n| n.status)
+                .unwrap_or(ComponentStatus::Stopped);
             let error_message = match &status {
-                ComponentStatus::Error => self.event_history.read().await.get_last_error(&id),
+                ComponentStatus::Error => graph.get_last_error(&id),
                 _ => None,
             };
+            drop(graph);
             let runtime = SourceRuntime {
                 id: source.id().to_string(),
                 source_type: source.type_name().to_string(),
-                status: status.clone(),
+                status,
                 error_message,
                 properties: source.properties(),
             };
             Ok(runtime)
         } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
     }
 
-    pub async fn delete_source(&self, id: String, cleanup: bool) -> Result<()> {
-        // First check if the source exists
-        let source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
-        };
-
-        if let Some(source) = source {
-            let status = source.status().await;
-
-            // If the source is running or starting, stop it first
-            if matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
-                info!("Stopping source '{id}' before deletion");
-                if let Err(e) = source.stop().await {
-                    warn!("Failed to stop source '{id}' during deletion (may already be stopped): {e}");
-                }
-
-                // Wait a bit to ensure the source has fully stopped
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                // Verify it's stopped - accept Stopped or Error
-                let new_status = source.status().await;
-                if !matches!(
-                    new_status,
-                    ComponentStatus::Stopped | ComponentStatus::Error
-                ) {
-                    warn!("Source '{id}' in unexpected state {new_status:?} after stop, proceeding with deletion");
-                }
-            } else {
-                // Still validate the operation for non-running states
-                is_operation_valid(&status, &Operation::Delete).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // Call deprovision if cleanup is requested
-            if cleanup {
-                if let Err(e) = source.deprovision().await {
-                    tracing::warn!("Deprovision failed for source '{id}': {e}");
-                }
-            }
-
-            // Now remove the source
-            self.sources.write().await.remove(&id);
-            // Clean up event history for this source
-            self.event_history.write().await.remove_component(&id);
-            // Clean up log history for this source
-            let log_key = ComponentLogKey::new(&self.instance_id, ComponentType::Source, &id);
-            self.log_registry.remove_component_by_key(&log_key).await;
-            info!("Deleted source: {id}");
-
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
-        }
+    /// Teardown a source's runtime state — stop, deprovision, and remove from runtime map.
+    ///
+    /// This method handles runtime-only operations. Graph deregistration
+    /// (node removal, edge cleanup) must be done by the caller afterwards via
+    /// `ComponentGraph::deregister()`.
+    ///
+    /// The caller should validate dependencies via `graph.can_remove()` before calling this.
+    pub async fn teardown_source(&self, id: String, cleanup: bool) -> Result<()> {
+        crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Source>, _, _>(
+            &self.graph,
+            &id,
+            "source",
+            ComponentType::Source,
+            &self.instance_id,
+            &self.log_registry,
+            cleanup,
+            || async {},
+        )
+        .await
     }
 
     /// Update a source by replacing it with a new instance.
     ///
-    /// Flow: validate exists → validate status → emit Reconfiguring event →
+    /// Flow: validate exists → validate status → set Reconfiguring via graph →
     /// stop if running/starting → wait for stopped → initialize new →
     /// replace (if still exists) → restart if was running.
     /// Log and event history are preserved.
     pub async fn update_source(&self, id: String, new_source: impl Source + 'static) -> Result<()> {
         let old_source = {
-            let sources = self.sources.read().await;
-            sources.get(&id).cloned()
+            let graph = self.graph.read().await;
+            graph.get_runtime::<Arc<dyn Source>>(&id).cloned()
         };
 
         if let Some(old_source) = old_source {
@@ -342,44 +295,32 @@ impl SourceManager {
                 ));
             }
 
-            let status = old_source.status().await;
-            let was_running =
-                matches!(status, ComponentStatus::Running | ComponentStatus::Starting);
+            let graph = &self.graph;
+            let instance_id = &self.instance_id;
+            let state_store = &self.state_store;
+            let update_tx = &self.update_tx;
 
-            // Validate that update is allowed in the current state
-            if was_running {
-                // Running/Starting components will be stopped, then validated
-            } else {
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            }
+            crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Source>, _, _, _>(
+                graph,
+                &id,
+                "source",
+                &old_source,
+                || async {},
+                || async {
+                    let new_source: Arc<dyn Source> = Arc::new(new_source);
+                    let context = SourceRuntimeContext::new(
+                        instance_id,
+                        &id,
+                        state_store.read().await.clone(),
+                        update_tx.clone(),
+                        None,
+                    );
+                    new_source.initialize(context).await;
 
-            // Emit Reconfiguring event
-            let _ = self
-                .event_tx
-                .send(ComponentEvent {
-                    component_id: id.clone(),
-                    component_type: ComponentType::Source,
-                    status: ComponentStatus::Reconfiguring,
-                    timestamp: chrono::Utc::now(),
-                    message: Some("Reconfiguring source".to_string()),
-                })
-                .await;
-
-            // If running or starting, stop first then validate
-            if was_running {
-                info!("Stopping source '{id}' for reconfiguration");
-                old_source.stop().await?;
-
-                // Poll for Stopped status with timeout
-                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
-                loop {
-                    let current = old_source.status().await;
-                    if matches!(current, ComponentStatus::Stopped | ComponentStatus::Error) {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
+                    let mut g = graph.write().await;
+                    if !g.has_runtime(&id) {
                         return Err(anyhow::anyhow!(
-                            "Timed out waiting for source '{id}' to stop"
+                            "Source '{id}' was concurrently deleted during reconfiguration"
                         ));
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -421,7 +362,7 @@ impl SourceManager {
 
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Source not found: {id}"))
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
     }
 
@@ -432,76 +373,80 @@ impl SourceManager {
     ///
     /// Only sources with `auto_start() == true` will be started.
     pub async fn start_all(&self) -> Result<()> {
-        let sources: Vec<Arc<dyn Source>> = {
-            let sources = self.sources.read().await;
-            sources.values().cloned().collect()
-        };
+        crate::managers::lifecycle_helpers::start_all_components::<Arc<dyn Source>, _, _>(
+            &self.graph,
+            &ComponentKind::Source,
+            "source",
+            |s| s.auto_start(),
+            |id, source| async move {
+                // Validate and apply Starting transition atomically through the graph
+                {
+                    let mut graph = self.graph.write().await;
+                    graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Starting,
+                        Some("Starting source".to_string()),
+                    )?;
+                }
 
-        let mut failed_sources = Vec::new();
-
-        for source in sources {
-            // Only start sources with auto_start enabled
-            if !source.auto_start() {
-                info!("Skipping source '{}' (auto_start=false)", source.id());
-                continue;
-            }
-
-            let source_id = source.id().to_string();
-            info!("Starting source: {source_id}");
-            if let Err(e) = source.start().await {
-                log_component_error("Source", &source_id, &e.to_string());
-                failed_sources.push((source_id, e.to_string()));
-                // Continue starting other sources instead of returning early
-            }
-        }
-
-        // Return error only if any sources failed to start
-        if !failed_sources.is_empty() {
-            let error_msg = failed_sources
-                .iter()
-                .map(|(id, err)| format!("{id}: {err}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(anyhow::anyhow!("Failed to start some sources: {error_msg}"))
-        } else {
-            Ok(())
-        }
+                if let Err(e) = source.start().await {
+                    let mut graph = self.graph.write().await;
+                    let _ = graph.validate_and_transition(
+                        &id,
+                        ComponentStatus::Error,
+                        Some(format!("Start failed: {e}")),
+                    );
+                    return Err(e);
+                }
+                Ok(())
+            },
+        )
+        .await
     }
 
+    /// Stop all running sources.
+    ///
+    /// # Errors
+    /// Returns an error if any source fails to stop.
     pub async fn stop_all(&self) -> Result<()> {
-        let sources: Vec<Arc<dyn Source>> = {
-            let sources = self.sources.read().await;
-            sources.values().cloned().collect()
-        };
-
-        for source in sources {
-            if let Err(e) = source.stop().await {
-                log_component_error("Source", source.id(), &e.to_string());
-            }
-        }
-        Ok(())
+        crate::managers::lifecycle_helpers::stop_all_components(
+            &self.graph,
+            &ComponentKind::Source,
+            "Source",
+            |id| self.stop_source(id),
+        )
+        .await
     }
 
     /// Record a component event in the history.
     ///
     /// This should be called by the event processing loop to track component
-    /// lifecycle events for later querying.
+    /// Record a component event — delegates to the graph's centralized event history.
+    ///
+    /// Note: In most cases, events are recorded automatically by `apply_update()`.
+    /// This method is retained for backward compatibility and edge cases.
     pub async fn record_event(&self, event: ComponentEvent) {
-        self.event_history.write().await.record_event(event);
+        let mut graph = self.graph.write().await;
+        graph.record_event(event);
     }
 
     /// Get events for a specific source.
     ///
     /// Returns events in chronological order (oldest first).
     pub async fn get_source_events(&self, id: &str) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_events(id)
+        self.graph.read().await.get_events(id)
     }
 
     /// Get all events across all sources.
     ///
     /// Returns events sorted by timestamp (oldest first).
     pub async fn get_all_events(&self) -> Vec<ComponentEvent> {
-        self.event_history.read().await.get_all_events()
+        let graph = self.graph.read().await;
+        graph
+            .get_all_events()
+            .into_iter()
+            .filter(|e| e.component_type == ComponentType::Source)
+            .collect()
     }
 
     /// Subscribe to live logs for a source.
@@ -515,10 +460,10 @@ impl SourceManager {
         Vec<crate::managers::LogMessage>,
         tokio::sync::broadcast::Receiver<crate::managers::LogMessage>,
     )> {
-        // Verify the source exists
+        // Verify the source exists in the graph
         {
-            let sources = self.sources.read().await;
-            if !sources.contains_key(id) {
+            let graph = self.graph.read().await;
+            if !graph.has_runtime(id) {
                 return None;
             }
         }
@@ -538,19 +483,10 @@ impl SourceManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        // Verify the source exists
-        {
-            let sources = self.sources.read().await;
-            if !sources.contains_key(id) {
-                return None;
-            }
+        let mut graph = self.graph.write().await;
+        if !graph.has_runtime(id) {
+            return None;
         }
-
-        Some(self.event_history.write().await.subscribe(id))
-    }
-
-    /// Get a shared reference to the event history.
-    pub fn event_history(&self) -> Arc<RwLock<ComponentEventHistory>> {
-        Arc::clone(&self.event_history)
+        Some(graph.subscribe_events(id))
     }
 }

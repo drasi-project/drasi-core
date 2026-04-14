@@ -98,7 +98,18 @@ impl Reaction for ReactionProxy {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        HashMap::new()
+        let owned = (self.vtable.properties_fn)(self.vtable.state as *const c_void);
+        let json_str = unsafe { owned.into_string() };
+        match serde_json::from_str(&json_str) {
+            Ok(props) => props,
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse plugin properties for '{}': {e}",
+                    self.cached_id
+                );
+                HashMap::new()
+            }
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -132,7 +143,7 @@ impl Reaction for ReactionProxy {
             instance_id: instance_id_str.clone(),
             runtime_handle: tokio::runtime::Handle::current(),
             log_registry: drasi_lib::managers::get_or_init_global_registry(),
-            event_tx: context.status_tx.clone(),
+            update_tx: context.update_tx.clone(),
         });
 
         let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
@@ -286,6 +297,7 @@ pub struct ReactionPluginProxy {
     cached_kind: String,
     cached_config_version: String,
     cached_config_schema_name: String,
+    plugin_id: String,
 }
 
 unsafe impl Send for ReactionPluginProxy {}
@@ -304,7 +316,18 @@ impl ReactionPluginProxy {
             cached_kind,
             cached_config_version,
             cached_config_schema_name,
+            plugin_id: String::new(),
         }
+    }
+
+    /// The unique identifier of the plugin that provided this descriptor.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Set the plugin identity for this descriptor.
+    pub fn set_plugin_id(&mut self, id: String) {
+        self.plugin_id = id;
     }
 }
 
@@ -343,7 +366,13 @@ impl ReactionPluginDescriptor for ReactionPluginProxy {
 
         let state = self.vtable.state;
         let create_fn = self.vtable.create_reaction_fn;
-        let vtable_ptr = (create_fn)(state, id_ffi, query_ids_ffi, config_ffi, auto_start);
+        let result = (create_fn)(state, id_ffi, query_ids_ffi, config_ffi, auto_start);
+
+        let vtable_ptr = unsafe {
+            result
+                .into_result::<ReactionVtable>()
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        };
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(
