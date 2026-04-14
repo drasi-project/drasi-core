@@ -37,8 +37,6 @@ pub struct ReactionManager {
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Identity provider for credential injection
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
-    /// Event history for tracking component lifecycle events
-    event_history: Arc<RwLock<ComponentEventHistory>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
     /// Handles to subscription forwarder tasks per reaction
@@ -70,7 +68,6 @@ impl ReactionManager {
             query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
-            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
             graph,
@@ -321,44 +318,12 @@ impl ReactionManager {
                             "Reaction '{id}' was concurrently deleted during reconfiguration"
                         ));
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-
-                let status = old_reaction.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // Initialize the new reaction with runtime context
-            let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-            let mut context = ReactionRuntimeContext::new(
-                &self.instance_id,
-                &id,
-                self.event_tx.clone(),
-                self.state_store.read().await.clone(),
-            );
-            context.identity_provider = self.identity_provider.read().await.clone();
-            new_reaction.initialize(context).await;
-
-            // Replace in the reactions map only if the entry still exists
-            // (guards against concurrent deletion)
-            {
-                let mut reactions = self.reactions.write().await;
-                if !reactions.contains_key(&id) {
-                    return Err(anyhow::anyhow!(
-                        "Reaction '{id}' was concurrently deleted during reconfiguration"
-                    ));
-                }
-                reactions.insert(id.clone(), new_reaction);
-            }
-
-            info!("Reconfigured reaction '{id}'");
-
-            // Restart if it was running before
-            if was_running {
-                self.start_reaction(id).await?;
-            }
-
-            Ok(())
+                    g.set_runtime(&id, Box::new(new_reaction))?;
+                    Ok(())
+                },
+                || self.start_reaction(id.clone()),
+            )
+            .await
         } else {
             Err(crate::managers::ComponentNotFoundError::new("reaction", &id).into())
         }

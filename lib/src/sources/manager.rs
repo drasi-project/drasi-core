@@ -28,10 +28,7 @@ use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSende
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
-use crate::managers::{
-    is_operation_valid, log_component_error, ComponentEventHistory, ComponentLogKey,
-    ComponentLogRegistry, Operation,
-};
+use crate::managers::{ComponentLogKey, ComponentLogRegistry};
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 
@@ -80,7 +77,6 @@ pub struct SourceManager {
     instance_id: String,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
-    event_history: Arc<RwLock<ComponentEventHistory>>,
     log_registry: Arc<ComponentLogRegistry>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
@@ -108,7 +104,6 @@ impl SourceManager {
             instance_id: instance_id.into(),
             state_store: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
-            event_history: Arc::new(RwLock::new(ComponentEventHistory::new())),
             log_registry,
             graph,
             update_tx,
@@ -323,44 +318,12 @@ impl SourceManager {
                             "Source '{id}' was concurrently deleted during reconfiguration"
                         ));
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-
-                let status = old_source.status().await;
-                is_operation_valid(&status, &Operation::Update).map_err(|e| anyhow::anyhow!(e))?;
-            }
-
-            // Initialize the new source with runtime context
-            let new_source: Arc<dyn Source> = Arc::new(new_source);
-            let mut context = SourceRuntimeContext::new(
-                &self.instance_id,
-                &id,
-                self.event_tx.clone(),
-                self.state_store.read().await.clone(),
-            );
-            context.identity_provider = self.identity_provider.read().await.clone();
-            new_source.initialize(context).await;
-
-            // Replace in the sources map only if the entry still exists
-            // (guards against concurrent deletion)
-            {
-                let mut sources = self.sources.write().await;
-                if !sources.contains_key(&id) {
-                    return Err(anyhow::anyhow!(
-                        "Source '{id}' was concurrently deleted during reconfiguration"
-                    ));
-                }
-                sources.insert(id.clone(), new_source);
-            }
-
-            info!("Reconfigured source '{id}'");
-
-            // Restart if it was running before
-            if was_running {
-                self.start_source(id).await?;
-            }
-
-            Ok(())
+                    g.set_runtime(&id, Box::new(new_source))?;
+                    Ok(())
+                },
+                || self.start_source(id.clone()),
+            )
+            .await
         } else {
             Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
