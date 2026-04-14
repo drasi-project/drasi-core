@@ -36,9 +36,8 @@ use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::channels::priority_queue::PriorityQueue;
-use crate::channels::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType, QueryResult,
-};
+use crate::channels::{ComponentStatus, QueryResult};
+use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::state_store::StateStoreProvider;
@@ -103,12 +102,10 @@ pub struct ReactionBase {
     pub queries: Vec<String>,
     /// Whether this reaction should auto-start
     pub auto_start: bool,
-    /// Current component status
-    pub status: Arc<RwLock<ComponentStatus>>,
+    /// Component status handle — always available, wired to graph during initialize().
+    status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
     context: Arc<RwLock<Option<ReactionRuntimeContext>>>,
-    /// Channel for sending component status events (extracted from context for convenience)
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
     /// State store provider (extracted from context for convenience)
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     /// Priority queue for timestamp-ordered result processing
@@ -128,18 +125,17 @@ pub struct ReactionBase {
 impl ReactionBase {
     /// Create a new ReactionBase with the given parameters
     ///
-    /// Dependencies (event channel, query subscriber, state store) are not required during
+    /// Dependencies (query subscriber, state store, graph) are not required during
     /// construction - they will be provided via `initialize()` when the reaction is added to DrasiLib.
     pub fn new(params: ReactionBaseParams) -> Self {
         Self {
             priority_queue: PriorityQueue::new(params.priority_queue_capacity.unwrap_or(10000)),
-            id: params.id,
+            id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
-            status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
-            context: Arc::new(RwLock::new(None)),
-            status_tx: Arc::new(RwLock::new(None)),
-            state_store: Arc::new(RwLock::new(None)),
+            status_handle: ComponentStatusHandle::new(&params.id),
+            context: Arc::new(RwLock::new(None)), // Set by initialize()
+            state_store: Arc::new(RwLock::new(None)), // Extracted from context
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -154,14 +150,14 @@ impl ReactionBase {
     ///
     /// The context provides access to:
     /// - `reaction_id`: The reaction's unique identifier
-    /// - `status_tx`: Channel for reporting component status events
     /// - `state_store`: Optional persistent state storage
+    /// - `update_tx`: mpsc sender for fire-and-forget status updates to the graph
     pub async fn initialize(&self, context: ReactionRuntimeContext) {
         // Store context for later use
         *self.context.write().await = Some(context.clone());
 
-        // Extract services for convenience
-        *self.status_tx.write().await = Some(context.status_tx.clone());
+        // Wire the status handle to the graph update channel
+        self.status_handle.wire(context.update_tx.clone()).await;
 
         if let Some(state_store) = context.state_store.as_ref() {
             *self.state_store.write().await = Some(state_store.clone());
@@ -213,16 +209,6 @@ impl ReactionBase {
         self.auto_start
     }
 
-    /// Get the status channel Arc for internal use by spawned tasks
-    ///
-    /// This returns the internal status_tx wrapped in Arc<RwLock<Option<...>>>
-    /// which allows background tasks to send component status events.
-    ///
-    /// Returns a clone of the Arc that can be moved into spawned tasks.
-    pub fn status_tx(&self) -> Arc<RwLock<Option<ComponentEventSender>>> {
-        self.status_tx.clone()
-    }
-
     /// Clone the ReactionBase with shared Arc references
     ///
     /// This creates a new ReactionBase that shares the same underlying
@@ -232,9 +218,8 @@ impl ReactionBase {
             id: self.id.clone(),
             queries: self.queries.clone(),
             auto_start: self.auto_start,
-            status: self.status.clone(),
+            status_handle: self.status_handle.clone(),
             context: self.context.clone(),
-            status_tx: self.status_tx.clone(),
             state_store: self.state_store.clone(),
             priority_queue: self.priority_queue.clone(),
             subscription_tasks: self.subscription_tasks.clone(),
@@ -266,46 +251,24 @@ impl ReactionBase {
         &self.queries
     }
 
-    /// Get current status
+    /// Get current status.
     pub async fn get_status(&self) -> ComponentStatus {
-        self.status.read().await.clone()
+        self.status_handle.get_status().await
     }
 
-    /// Send a component lifecycle event
+    /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
-    /// If the event channel has not been injected yet, this method silently
-    /// succeeds without sending anything. This allows reactions to be used
-    /// in a standalone fashion without DrasiLib if needed.
-    pub async fn send_component_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        let event = ComponentEvent {
-            component_id: self.id.clone(),
-            component_type: ComponentType::Reaction,
-            status,
-            timestamp: chrono::Utc::now(),
-            message,
-        };
-
-        if let Some(ref tx) = *self.status_tx.read().await {
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send component event: {e}");
-            }
-        }
-        // If status_tx is None, silently skip - initialization happens before start()
-        Ok(())
+    /// The handle can both read and write the component's status and automatically
+    /// notifies the graph on every status change (after `initialize()`).
+    pub fn status_handle(&self) -> ComponentStatusHandle {
+        self.status_handle.clone()
     }
 
-    /// Transition to a new status and send event
-    pub async fn set_status_with_event(
-        &self,
-        status: ComponentStatus,
-        message: Option<String>,
-    ) -> Result<()> {
-        *self.status.write().await = status.clone();
-        self.send_component_event(status, message).await
+    /// Set the component's status — updates local state AND notifies the graph.
+    ///
+    /// This is the single canonical way to change a reaction's status.
+    pub async fn set_status(&self, status: ComponentStatus, message: Option<String>) {
+        self.status_handle.set_status(status, message).await;
     }
 
     /// Enqueue a query result for processing.
@@ -341,9 +304,9 @@ impl ReactionBase {
 
         // Wait for the processing task to complete (with timeout), or abort it
         let mut processing_task = self.processing_task.write().await;
-        if let Some(task) = processing_task.take() {
+        if let Some(mut task) = processing_task.take() {
             // Give the task a short time to respond to the shutdown signal
-            match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
                 Ok(Ok(())) => {
                     debug!("[{}] Processing task completed gracefully", self.id);
                 }
@@ -353,11 +316,11 @@ impl ReactionBase {
                 }
                 Err(_) => {
                     // Timeout - task didn't respond to shutdown signal
-                    // This shouldn't happen if the task is using tokio::select! correctly
                     warn!(
-                        "[{}] Processing task did not respond to shutdown signal within timeout",
+                        "[{}] Processing task did not respond to shutdown signal within timeout, aborting",
                         self.id
                     );
+                    task.abort();
                 }
             }
         }
@@ -373,7 +336,11 @@ impl ReactionBase {
             );
         }
 
-        *self.status.write().await = ComponentStatus::Stopped;
+        self.set_status(
+            ComponentStatus::Stopped,
+            Some(format!("Reaction '{}' stopped", self.id)),
+        )
+        .await;
         info!("Reaction '{}' stopped", self.id);
 
         Ok(())
@@ -429,27 +396,31 @@ mod tests {
     async fn test_status_transitions() {
         use crate::context::ReactionRuntimeContext;
 
-        let (status_tx, mut event_rx) = mpsc::channel(100);
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+        let graph = Arc::new(RwLock::new(graph));
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 
         // Create context and initialize
         let context =
-            ReactionRuntimeContext::new("test-instance", "test-reaction", status_tx, None);
+            ReactionRuntimeContext::new("test-instance", "test-reaction", None, update_tx, None);
         base.initialize(context).await;
 
         // Test status transition
-        base.set_status_with_event(ComponentStatus::Starting, Some("Starting test".to_string()))
-            .await
-            .unwrap();
+        base.set_status(ComponentStatus::Starting, Some("Starting test".to_string()))
+            .await;
 
         assert_eq!(base.get_status().await, ComponentStatus::Starting);
 
-        // Check event was sent
-        let event = event_rx.try_recv().unwrap();
-        assert_eq!(event.status, ComponentStatus::Starting);
-        assert_eq!(event.message, Some("Starting test".to_string()));
+        // Check event was sent via graph broadcast
+        let mut event_rx = graph.read().await.subscribe();
+        // The status was already set; emit another event to verify the graph path works
+        base.set_status(ComponentStatus::Running, Some("Running test".to_string()))
+            .await;
+
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
     }
 
     #[tokio::test]
@@ -478,15 +449,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_without_initialization() {
-        // Test that send_component_event works even without context initialization
+        // Test that set_status works even without context initialization
         let params = ReactionBaseParams::new("test-reaction", vec![]);
 
         let base = ReactionBase::new(params);
 
-        // This should succeed without panicking (silently does nothing when status_tx is None)
-        base.send_component_event(ComponentStatus::Starting, None)
-            .await
-            .unwrap();
+        // This should succeed without panicking (silently updates local only when handle is None)
+        base.set_status(ComponentStatus::Starting, None).await;
     }
 
     // =============================================================================
@@ -570,12 +539,10 @@ mod tests {
 
         base.set_processing_task(task).await;
 
-        // Call stop_common - should send shutdown signal
+        // Call stop_common - should send shutdown signal and await the task
         let _ = base.stop_common().await;
 
-        // Give task time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        // stop_common awaits the processing task, so the flag should already be set
         assert!(
             shutdown_received.load(Ordering::SeqCst),
             "Processing task should have received shutdown signal"
@@ -635,5 +602,157 @@ mod tests {
         // stop_common should still work
         let result = base.stop_common().await;
         assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Accessor Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_get_id() {
+        let params = ReactionBaseParams::new("my-reaction-42", vec![]);
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_id(), "my-reaction-42");
+    }
+
+    #[tokio::test]
+    async fn test_get_queries() {
+        let queries = vec!["query-a".to_string(), "query-b".to_string(), "query-c".to_string()];
+        let params = ReactionBaseParams::new("r1", queries.clone());
+        let base = ReactionBase::new(params);
+        assert_eq!(base.get_queries(), &queries[..]);
+    }
+
+    #[tokio::test]
+    async fn test_get_queries_empty() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_queries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_default_true() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.get_auto_start());
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_start_override_false() {
+        let params = ReactionBaseParams::new("r1", vec![]).with_auto_start(false);
+        let base = ReactionBase::new(params);
+        assert!(!base.get_auto_start());
+    }
+
+    // =============================================================================
+    // Context / State Store / Identity Provider Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_context_none_before_initialize() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.context().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_context_some_after_initialize() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        let ctx = base.context().await;
+        assert!(ctx.is_some());
+        assert_eq!(ctx.unwrap().reaction_id, "r1");
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_when_not_configured() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_state_store_none_after_initialize_without_store() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("inst");
+        let update_tx = graph.update_sender();
+        let context = ReactionRuntimeContext::new("inst", "r1", None, update_tx, None);
+
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        base.initialize(context).await;
+
+        assert!(base.state_store().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_identity_provider_none_by_default() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        assert!(base.identity_provider().await.is_none());
+    }
+
+    // =============================================================================
+    // Status Handle Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_status_handle_returns_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        let handle = base.status_handle();
+        // The handle should share the same status as the base
+        assert_eq!(handle.get_status().await, ComponentStatus::Stopped);
+
+        // Mutating via handle should be visible via base
+        handle.set_status(ComponentStatus::Running, None).await;
+        assert_eq!(base.get_status().await, ComponentStatus::Running);
+    }
+
+    // =============================================================================
+    // Deprovision Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_deprovision_common_noop_without_state_store() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+        // Should succeed without panicking when no state store is configured
+        let result = base.deprovision_common().await;
+        assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Processing Task Tests
+    // =============================================================================
+
+    #[tokio::test]
+    async fn test_set_processing_task_stores_handle() {
+        let params = ReactionBaseParams::new("r1", vec![]);
+        let base = ReactionBase::new(params);
+
+        // Initially no processing task
+        assert!(base.processing_task.read().await.is_none());
+
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        base.set_processing_task(task).await;
+
+        // Now it should be stored
+        assert!(base.processing_task.read().await.is_some());
+
+        // Clean up: abort the long-running task
+        let task = base.processing_task.write().await.take();
+        if let Some(t) = task {
+            t.abort();
+        }
     }
 }

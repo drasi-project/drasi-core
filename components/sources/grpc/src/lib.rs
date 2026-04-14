@@ -246,22 +246,24 @@ impl Source for GrpcSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        if let Some(ref endpoint) = self.config.endpoint {
-            props.insert(
-                "endpoint".to_string(),
-                serde_json::Value::String(endpoint.clone()),
-            );
+        use crate::descriptor::GrpcSourceConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = GrpcSourceConfigDto {
+            host: ConfigValue::Static(self.config.host.clone()),
+            port: ConfigValue::Static(self.config.port),
+            endpoint: self
+                .config
+                .endpoint
+                .as_ref()
+                .map(|e| ConfigValue::Static(e.clone())),
+            timeout_ms: ConfigValue::Static(self.config.timeout_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props
     }
 
     fn auto_start(&self) -> bool {
@@ -271,13 +273,12 @@ impl Source for GrpcSource {
     async fn start(&self) -> Result<()> {
         log_component_start("gRPC Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting gRPC source".to_string()),
             )
-            .await?;
+            .await;
 
         // Get configuration
         let host = self.config.host.clone();
@@ -309,9 +310,8 @@ impl Source for GrpcSource {
         let svc = SourceServiceServer::new(service);
 
         // Start the gRPC server
-        let status = Arc::clone(&self.base.status);
         let source_id = self.base.id.clone();
-        let status_tx = self.base.status_tx();
+        let reporter = self.base.status_handle();
 
         let source_id_for_span = source_id.clone();
         let span = tracing::info_span!(
@@ -322,21 +322,12 @@ impl Source for GrpcSource {
         );
         let task = tokio::spawn(
             async move {
-                *status.write().await = ComponentStatus::Running;
-
-                let running_event = ComponentEvent {
-                    component_id: source_id.clone(),
-                    component_type: ComponentType::Source,
-                    status: ComponentStatus::Running,
-                    timestamp: chrono::Utc::now(),
-                    message: Some(format!("gRPC source listening on {addr}")),
-                };
-
-                if let Some(ref tx) = *status_tx.read().await {
-                    if let Err(e) = tx.send(running_event).await {
-                        error!("Failed to send component event: {e}");
-                    }
-                }
+                reporter
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some(format!("gRPC source listening on {addr}")),
+                    )
+                    .await;
 
                 // Run the server with graceful shutdown
                 let server =
@@ -351,13 +342,14 @@ impl Source for GrpcSource {
                     error!("gRPC server error: {e}");
                 }
 
-                *status.write().await = ComponentStatus::Stopped;
+                reporter.set_status(ComponentStatus::Stopped, None).await;
             }
             .instrument(span),
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
+        // Note: Running status is set inside the spawned task with the
+        // informative "listening on {addr}" message. No duplicate set here.
 
         Ok(())
     }

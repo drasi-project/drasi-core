@@ -71,22 +71,66 @@ pub async fn setup_postgres() -> PostgresGuard {
 async fn setup_postgres_raw() -> (testcontainers::ContainerAsync<Postgres>, PostgresConfig) {
     use testcontainers::runners::AsyncRunner;
 
-    // Start PostgreSQL container
-    let container = Postgres::default().start().await.unwrap();
-    let pg_port = container.get_host_port_ipv4(5432).await.unwrap();
+    // Docker Desktop has a known bug where `PublishAllPorts: true` sporadically
+    // fails to map exposed ports. Work around by retrying container creation.
+    for attempt in 0..5u32 {
+        let container = Postgres::default().start().await.unwrap();
 
-    let config = PostgresConfig {
-        host: "localhost".to_string(), // DevSkim: ignore DS137138
-        port: pg_port,
-        database: "postgres".to_string(),
-        user: "postgres".to_string(),
-        password: "postgres".to_string(),
-    };
+        match container.get_host_port_ipv4(5432).await {
+            Ok(pg_port) => {
+                let config = PostgresConfig {
+                    host: "localhost".to_string(), // DevSkim: ignore DS137138
+                    port: pg_port,
+                    database: "postgres".to_string(),
+                    user: "postgres".to_string(),
+                    password: "postgres".to_string(),
+                };
 
-    // Give PostgreSQL a moment to fully initialize after the wait strategy completes
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // Wait until PostgreSQL actually accepts connections.
+                // The testcontainers ready condition only checks log output;
+                // Docker Desktop port forwarding may lag behind.
+                let mut connected = false;
+                for retry in 0..20u32 {
+                    match tokio_postgres::connect(&config.connection_string(), NoTls).await {
+                        Ok((client, connection)) => {
+                            // Drive the connection future briefly then drop it
+                            let handle = tokio::spawn(connection);
+                            drop(client);
+                            handle.abort();
+                            connected = true;
+                            break;
+                        }
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                250 * (retry as u64 + 1).min(4),
+                            ))
+                            .await;
+                        }
+                    }
+                }
 
-    (container, config)
+                if connected {
+                    return (container, config);
+                }
+
+                log::warn!(
+                    "PostgreSQL container port mapped but connection failed (attempt {}/5). Retrying...",
+                    attempt + 1
+                );
+                let _ = container.stop().await;
+                drop(container);
+            }
+            Err(e) => {
+                log::warn!(
+                    "PostgreSQL container port mapping failed (attempt {}/5): {e}. Retrying...",
+                    attempt + 1
+                );
+                let _ = container.stop().await;
+                drop(container);
+            }
+        }
+    }
+    panic!("Failed to start PostgreSQL container with mapped port after 5 attempts");
 }
 
 /// Guard wrapper for PostgreSQL container that ensures proper cleanup
@@ -180,10 +224,10 @@ impl Drop for PostgresGuardInner {
 
                 // Block on cleanup to ensure it completes
                 let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // Try to get current runtime, if we're in one
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        // Spawn blocking task to stop container
-                        handle.block_on(async move {
+                        // We're inside a runtime — use spawn instead of block_on
+                        // to avoid "Cannot start a runtime from within a runtime" panic.
+                        handle.spawn(async move {
                             let _ = container.stop().await;
                             drop(container);
                         });

@@ -21,9 +21,8 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use drasi_lib::channels::events::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
-};
+use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
+use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::managers::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
 use drasi_plugin_sdk::ffi::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, LifecycleCallbackFn,
@@ -75,9 +74,8 @@ impl CallbackContext {
 /// Per-source/reaction-instance callback context.
 ///
 /// Created during `SourceProxy.initialize()` / `ReactionProxy.initialize()`.
-/// Uses the `ComponentEventSender` channel from the SourceRuntimeContext so
-/// lifecycle events flow through the same path as static sources (channel →
-/// LifecycleManager → SourceManager.event_history).
+/// Uses the `ComponentUpdateSender` channel from the runtime context so
+/// lifecycle events flow through the ComponentGraph update loop.
 pub struct InstanceCallbackContext {
     /// The DrasiLib instance ID.
     pub instance_id: String,
@@ -85,8 +83,8 @@ pub struct InstanceCallbackContext {
     pub runtime_handle: tokio::runtime::Handle,
     /// The global log registry.
     pub log_registry: Arc<ComponentLogRegistry>,
-    /// Channel for lifecycle events (same one the SourceManager monitors).
-    pub event_tx: ComponentEventSender,
+    /// Channel for status updates to the ComponentGraph.
+    pub update_tx: ComponentUpdateSender,
 }
 
 // Safety: contains only Arc and tokio mpsc::Sender (which is Send+Sync).
@@ -390,17 +388,14 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         });
     }
 
-    // Send through the event channel (same path as static sources)
+    // Send through the component graph update channel
     if !ctx.is_null() {
         let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-        let component_type = parse_component_type(&component_type_str);
         let status = ffi_lifecycle_to_component_status(event_type);
 
-        let component_event = ComponentEvent {
+        let update = ComponentUpdate::Status {
             component_id,
-            component_type,
             status,
-            timestamp: chrono::Utc::now(),
             message: if message.is_empty() {
                 None
             } else {
@@ -408,10 +403,10 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
             },
         };
 
-        let tx = context.event_tx.clone();
+        let tx = context.update_tx.clone();
         // Use try_send to avoid spawning an async task that may block
         // the host runtime's current_thread scheduler during drop sequences.
-        if let Err(e) = tx.try_send(component_event) {
+        if let Err(e) = tx.try_send(update) {
             log::error!("Failed to send lifecycle event: {e}");
         }
     }

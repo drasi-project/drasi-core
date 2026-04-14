@@ -101,17 +101,17 @@ mod properties {
         let props = source.properties();
 
         assert_eq!(
-            props.get("redis_url"),
+            props.get("redisUrl"),
             Some(&serde_json::Value::String(
                 "redis://192.168.1.1:6379".to_string()
             ))
         );
         assert_eq!(
-            props.get("stream_key"),
+            props.get("streamKey"),
             Some(&serde_json::Value::String("my-stream".to_string()))
         );
         assert_eq!(
-            props.get("consumer_group"),
+            props.get("consumerGroup"),
             Some(&serde_json::Value::String("my-group".to_string()))
         );
     }
@@ -127,7 +127,7 @@ mod properties {
         let props = source.properties();
 
         assert_eq!(
-            props.get("batch_size"),
+            props.get("batchSize"),
             Some(&serde_json::Value::Number(200.into()))
         );
     }
