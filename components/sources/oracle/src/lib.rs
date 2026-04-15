@@ -126,8 +126,8 @@ impl Source for OracleSource {
         }
 
         self.base
-            .set_status_with_event(ComponentStatus::Starting, None)
-            .await?;
+            .set_status(ComponentStatus::Starting, Some("Starting Oracle source".to_string()))
+            .await;
         log::info!("Starting Oracle source '{}'", self.base.id);
 
         self.bootstrap_sync.lock().await.pending_scn = None;
@@ -141,11 +141,11 @@ impl Source for OracleSource {
                 })?;
         if let Err(error) = validation_result {
             self.base
-                .set_status_with_event(
+                .set_status(
                     ComponentStatus::Error,
                     Some(format!("Oracle startup validation failed: {error}")),
                 )
-                .await?;
+                .await;
             return Err(error);
         }
 
@@ -174,7 +174,7 @@ impl Source for OracleSource {
             {
                 log::error!("Oracle LogMiner stream failed for {source_id}: {error}");
                 let _ = base
-                    .set_status_with_event(
+                    .set_status(
                         ComponentStatus::Error,
                         Some(format!("Oracle LogMiner stream failed: {error}")),
                     )
@@ -184,8 +184,8 @@ impl Source for OracleSource {
 
         *self.task_handle.write().await = Some(task_handle);
         self.base
-            .set_status_with_event(ComponentStatus::Running, None)
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Oracle source started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -210,7 +210,7 @@ impl Source for OracleSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base.set_status(ComponentStatus::Stopped, Some("Oracle source stopped".to_string())).await;
         Ok(())
     }
 
