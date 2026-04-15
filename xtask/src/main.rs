@@ -67,7 +67,7 @@ struct PluginArtifactMetadata {
 ///       "drasi-bootstrap-mssql" → ("bootstrap", "mssql")
 fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     let stripped = crate_name.strip_prefix("drasi-")?;
-    for prefix in &["source-", "reaction-", "bootstrap-"] {
+    for prefix in &["source-", "reaction-", "bootstrap-", "identity-"] {
         if let Some(kind) = stripped.strip_prefix(prefix) {
             let plugin_type = prefix.trim_end_matches('-');
             return Some((plugin_type.to_string(), kind.to_string()));
