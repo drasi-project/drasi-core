@@ -172,6 +172,9 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 /// Source trait for implementing source plugins
 pub use sources::Source;
 
+/// Structured error type for source operations (e.g., replay position unavailable)
+pub use sources::SourceError;
+
 /// Reaction traits for implementing reaction plugins
 pub use reactions::Reaction;
 

@@ -150,6 +150,8 @@ pub struct SourceSubscriptionConfig {
 ///     query_id: "my-query".to_string(),
 ///     nodes: ["Order", "Customer"].iter().map(|s| s.to_string()).collect(),
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
+///     resume_from: None,
+///     request_position_handle: false,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -159,6 +161,12 @@ pub struct SourceSubscriptionSettings {
     pub query_id: String,
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
+    /// If set, the subscribing query requests events replayed from this sequence position.
+    /// Only meaningful when the source returns `supports_replay() == true`.
+    pub resume_from: Option<u64>,
+    /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
+    /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
+    pub request_position_handle: bool,
 }
 
 /// Root configuration for drasi-lib

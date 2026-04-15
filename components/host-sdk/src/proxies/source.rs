@@ -222,6 +222,7 @@ impl Source for SourceProxy {
             source_id,
             receiver,
             bootstrap_receiver,
+            position_handle: None,
         })
     }
 

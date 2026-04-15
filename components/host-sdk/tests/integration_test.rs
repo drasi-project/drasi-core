@@ -2423,6 +2423,8 @@ async fn test_cdylib_source_dispatches_events() {
         query_id: "test-query".to_string(),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let receiver = sub.receiver;
@@ -2501,6 +2503,8 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
             query_id: format!("stress-query-{i}"),
             nodes: std::collections::HashSet::new(),
             relations: std::collections::HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
         };
         let sub = source.subscribe(settings).await.expect("Should subscribe");
         let mut receiver = sub.receiver;
