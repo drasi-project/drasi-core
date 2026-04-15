@@ -151,11 +151,11 @@ impl Source for Open511Source {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Open511 source".to_string()),
             )
-            .await?;
+            .await;
 
         let source_id = self.base.id.clone();
         let config = self.config.clone();
@@ -198,22 +198,22 @@ impl Source for Open511Source {
         *self.base.task_handle.write().await = Some(task);
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Open511 source running".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping Open511 source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(true);
@@ -228,11 +228,11 @@ impl Source for Open511Source {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Open511 source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
