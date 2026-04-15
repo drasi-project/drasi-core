@@ -33,7 +33,7 @@ use tempfile::TempDir;
 use tokio::time::sleep;
 
 async fn find_available_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     sleep(Duration::from_millis(50)).await;
@@ -196,7 +196,7 @@ async fn sqlite_rest_crud_and_batch_flow() {
             key_columns: vec!["id".to_string()],
         }])
         .with_rest_api(RestApiConfig {
-            host: "127.0.0.1".to_string(),
+            host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
             port: rest_port,
         })
         .build()
@@ -237,7 +237,7 @@ async fn sqlite_rest_crud_and_batch_flow() {
         .await
         .unwrap();
     let client = Client::new();
-    let base = format!("http://127.0.0.1:{rest_port}");
+    let base = format!("http://127.0.0.1:{rest_port}"); // DevSkim: ignore DS137138
 
     let insert_response = client
         .post(format!("{base}/api/tables/sensors"))

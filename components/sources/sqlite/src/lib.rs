@@ -332,11 +332,11 @@ impl Source for SqliteSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting SQLite source".to_string()),
             )
-            .await?;
+            .await;
 
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SqliteCommand>();
         *self.command_tx.write().await = Some(command_tx.clone());
@@ -417,11 +417,11 @@ impl Source for SqliteSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("SQLite source running".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -432,11 +432,11 @@ impl Source for SqliteSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping SQLite source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(rest_shutdown_tx) = self.rest_shutdown_tx.write().await.take() {
             let _ = rest_shutdown_tx.send(());
@@ -455,11 +455,11 @@ impl Source for SqliteSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("SQLite source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
