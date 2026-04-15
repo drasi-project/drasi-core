@@ -23,7 +23,7 @@ use crate::CloudflareRadarBootstrapProvider;
 // ── DTO types ────────────────────────────────────────────────────────────────
 
 /// Category configuration DTO.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::cloudflare_radar::CategoryConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CategoryConfigDto {
@@ -43,21 +43,6 @@ pub struct CategoryConfigDto {
     pub domain_rankings: bool,
     #[serde(default)]
     pub dns: bool,
-}
-
-impl Default for CategoryConfigDto {
-    fn default() -> Self {
-        Self {
-            outages: false,
-            bgp_hijacks: false,
-            bgp_leaks: false,
-            http_traffic: false,
-            attacks_l7: false,
-            attacks_l3: false,
-            domain_rankings: false,
-            dns: false,
-        }
-    }
 }
 
 fn default_api_base_url() -> ConfigValue<String> {

@@ -52,15 +52,14 @@ impl CloudflareRadarBootstrapProvider {
     }
 }
 
+#[derive(Default)]
 pub struct CloudflareRadarBootstrapProviderBuilder {
     config: CloudflareRadarBootstrapConfig,
 }
 
 impl CloudflareRadarBootstrapProviderBuilder {
     pub fn new() -> Self {
-        Self {
-            config: CloudflareRadarBootstrapConfig::default(),
-        }
+        Self::default()
     }
 
     pub fn with_api_token(mut self, token: impl Into<String>) -> Self {
@@ -84,7 +83,7 @@ impl CloudflareRadarBootstrapProviderBuilder {
             "domain_rankings" => self.config.categories.domain_rankings = enabled,
             "dns" => self.config.categories.dns = enabled,
             _ => {
-                log::warn!("Unknown Cloudflare Radar category: '{}'", name);
+                log::warn!("Unknown Cloudflare Radar category: '{name}'");
             }
         }
         self
@@ -467,7 +466,7 @@ fn build_client(api_token: &str) -> Result<Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_token))?,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_token}"))?,
     );
 
     let client = Client::builder()
@@ -489,8 +488,7 @@ async fn fetch_cloudflare<T: DeserializeOwned>(client: &Client, url: &str) -> Re
                     return Err(err.into());
                 }
                 warn!(
-                    "Cloudflare API request failed ({}); retrying in {:?}",
-                    err, delay
+                    "Cloudflare API request failed ({err}); retrying in {delay:?}"
                 );
                 sleep(delay).await;
                 delay *= 2;

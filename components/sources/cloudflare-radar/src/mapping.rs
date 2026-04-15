@@ -122,6 +122,7 @@ fn build_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_relation(
     source_id: &str,
     element_id: &str,
@@ -732,7 +733,7 @@ pub fn map_dns_summary(
         serde_json::Value::String(domain.to_string()),
     );
     let locations_value =
-        serde_json::to_value(locations).unwrap_or_else(|_| serde_json::Value::Null);
+        serde_json::to_value(locations).unwrap_or(serde_json::Value::Null);
     insert_json(&mut props, "topLocations", locations_value);
     build_node(
         source_id,

@@ -14,21 +14,16 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StartBehavior {
+    #[default]
     StartFromNow,
     StartFromBeginning,
     StartFromTimestamp(i64),
 }
 
-impl Default for StartBehavior {
-    fn default() -> Self {
-        StartBehavior::StartFromNow
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CategoryConfig {
     pub outages: bool,
     pub bgp_hijacks: bool,
@@ -38,21 +33,6 @@ pub struct CategoryConfig {
     pub attacks_l3: bool,
     pub domain_rankings: bool,
     pub dns: bool,
-}
-
-impl Default for CategoryConfig {
-    fn default() -> Self {
-        Self {
-            outages: false,
-            bgp_hijacks: false,
-            bgp_leaks: false,
-            http_traffic: false,
-            attacks_l7: false,
-            attacks_l3: false,
-            domain_rankings: false,
-            dns: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

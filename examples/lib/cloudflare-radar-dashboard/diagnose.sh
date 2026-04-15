@@ -31,7 +31,7 @@ if lsof -ti:8080 > /dev/null 2>&1; then
     for query_id in active-outages hijacks top-domains; do
         echo ""
         echo "Query results for ${query_id}:"
-        curl -s "http://localhost:8080/queries/${query_id}/results" | head -c 500
+        curl -s "http://localhost:8080/queries/${query_id}/results" | head -c 500 # DevSkim: ignore DS137138
         echo ""
     done
 else

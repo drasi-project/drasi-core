@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
         .with_state(api_core);
 
     let bind_addr = env::var("CF_RADAR_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        .unwrap_or_else(|_| "127.0.0.1:8080".to_string()); // DevSkim: ignore DS137138
 
     let api_handle = tokio::spawn(async move {
         let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
@@ -142,8 +142,8 @@ async fn main() -> Result<()> {
     });
 
     println!("Cloudflare Radar dashboard running.");
-    println!("Dashboard:   http://localhost:8080/");
-    println!("Results API: http://localhost:8080/queries/<query-id>/results");
+    println!("Dashboard:   http://localhost:8080/"); // DevSkim: ignore DS137138
+    println!("Results API: http://localhost:8080/queries/<query-id>/results"); // DevSkim: ignore DS137138
 
     tokio::signal::ctrl_c().await?;
     api_handle.abort();

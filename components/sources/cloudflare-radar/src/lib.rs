@@ -114,13 +114,12 @@ impl Source for CloudflareRadarSource {
     async fn start(&self) -> Result<()> {
         info!("[{}] Starting Cloudflare Radar source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Cloudflare Radar source".to_string()),
             )
-            .await?;
+            .await;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
@@ -148,13 +147,12 @@ impl Source for CloudflareRadarSource {
 
         *self.base.task_handle.write().await = Some(task);
 
-        self.base.set_status(ComponentStatus::Running).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Cloudflare Radar source running".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -162,13 +160,12 @@ impl Source for CloudflareRadarSource {
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping Cloudflare Radar source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping Cloudflare Radar source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -184,13 +181,12 @@ impl Source for CloudflareRadarSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Cloudflare Radar source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -281,7 +277,7 @@ impl CloudflareRadarSourceBuilder {
             "domain_rankings" => self.config.categories.domain_rankings = enabled,
             "dns" => self.config.categories.dns = enabled,
             _ => {
-                log::warn!("Unknown Cloudflare Radar category: '{}'", name);
+                log::warn!("Unknown Cloudflare Radar category: '{name}'");
             }
         }
         self
@@ -406,7 +402,7 @@ fn build_client(api_token: &str) -> Result<Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_token))?,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_token}"))?,
     );
 
     let client = Client::builder()
@@ -519,8 +515,7 @@ async fn fetch_cloudflare<T: DeserializeOwned>(client: &Client, url: &str) -> Re
                     return Err(err.into());
                 }
                 warn!(
-                    "Cloudflare API request failed ({}); retrying in {:?}",
-                    err, delay
+                    "Cloudflare API request failed ({err}); retrying in {delay:?}"
                 );
                 sleep(delay).await;
                 delay *= 2;
@@ -614,24 +609,22 @@ async fn poll_outages(
                     map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
                 dispatch_changes(source_id, dispatchers, changes).await?;
             }
-        } else if state.seen_outage_ids.get(&outage_id) != Some(&outage) {
-            if should_emit {
-                let changes =
-                    map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
-                dispatch_changes(source_id, dispatchers, changes).await?;
+        } else if state.seen_outage_ids.get(&outage_id) != Some(&outage) && should_emit {
+            let changes =
+                map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
+            dispatch_changes(source_id, dispatchers, changes).await?;
 
-                // Delete old relationships and insert new ones
-                if let Some(old_outage) = state.seen_outage_ids.get(&outage_id) {
-                    let old_rels = relation_element_ids_for_outage(&outage_id, old_outage);
-                    let del_changes = delete_relations(source_id, &old_rels);
-                    dispatch_changes(source_id, dispatchers, del_changes).await?;
-                }
-                let new_rels =
-                    map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
-                // Skip the first element (the node itself) and dispatch only relations/shared nodes
-                if new_rels.len() > 1 {
-                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
-                }
+            // Delete old relationships and insert new ones
+            if let Some(old_outage) = state.seen_outage_ids.get(&outage_id) {
+                let old_rels = relation_element_ids_for_outage(&outage_id, old_outage);
+                let del_changes = delete_relations(source_id, &old_rels);
+                dispatch_changes(source_id, dispatchers, del_changes).await?;
+            }
+            let new_rels =
+                map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
+            // Skip the first element (the node itself) and dispatch only relations/shared nodes
+            if new_rels.len() > 1 {
+                dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
             }
         }
     }
@@ -707,21 +700,19 @@ async fn poll_bgp_hijacks(
                     let changes = map_hijack(source_id, &event, ChangeAction::Insert, true);
                     dispatch_changes(source_id, dispatchers, changes).await?;
                 }
-            } else if state.seen_hijack_ids.get(&event.id) != Some(&event) {
-                if should_emit {
-                    let changes = map_hijack(source_id, &event, ChangeAction::Update, false);
-                    dispatch_changes(source_id, dispatchers, changes).await?;
+            } else if state.seen_hijack_ids.get(&event.id) != Some(&event) && should_emit {
+                let changes = map_hijack(source_id, &event, ChangeAction::Update, false);
+                dispatch_changes(source_id, dispatchers, changes).await?;
 
-                    // Delete old relationships and insert new ones
-                    if let Some(old_event) = state.seen_hijack_ids.get(&event.id) {
-                        let old_rels = relation_element_ids_for_hijack(old_event);
-                        let del_changes = delete_relations(source_id, &old_rels);
-                        dispatch_changes(source_id, dispatchers, del_changes).await?;
-                    }
-                    let new_rels = map_hijack(source_id, &event, ChangeAction::Insert, true);
-                    if new_rels.len() > 1 {
-                        dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
-                    }
+                // Delete old relationships and insert new ones
+                if let Some(old_event) = state.seen_hijack_ids.get(&event.id) {
+                    let old_rels = relation_element_ids_for_hijack(old_event);
+                    let del_changes = delete_relations(source_id, &old_rels);
+                    dispatch_changes(source_id, dispatchers, del_changes).await?;
+                }
+                let new_rels = map_hijack(source_id, &event, ChangeAction::Insert, true);
+                if new_rels.len() > 1 {
+                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
                 }
             }
         }
@@ -797,21 +788,19 @@ async fn poll_bgp_leaks(
                     let changes = map_leak(source_id, &event, ChangeAction::Insert, true);
                     dispatch_changes(source_id, dispatchers, changes).await?;
                 }
-            } else if state.seen_leak_ids.get(&event.id) != Some(&event) {
-                if should_emit {
-                    let changes = map_leak(source_id, &event, ChangeAction::Update, false);
-                    dispatch_changes(source_id, dispatchers, changes).await?;
+            } else if state.seen_leak_ids.get(&event.id) != Some(&event) && should_emit {
+                let changes = map_leak(source_id, &event, ChangeAction::Update, false);
+                dispatch_changes(source_id, dispatchers, changes).await?;
 
-                    // Delete old relationships and insert new ones
-                    if let Some(old_event) = state.seen_leak_ids.get(&event.id) {
-                        let old_rels = relation_element_ids_for_leak(old_event);
-                        let del_changes = delete_relations(source_id, &old_rels);
-                        dispatch_changes(source_id, dispatchers, del_changes).await?;
-                    }
-                    let new_rels = map_leak(source_id, &event, ChangeAction::Insert, true);
-                    if new_rels.len() > 1 {
-                        dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
-                    }
+                // Delete old relationships and insert new ones
+                if let Some(old_event) = state.seen_leak_ids.get(&event.id) {
+                    let old_rels = relation_element_ids_for_leak(old_event);
+                    let del_changes = delete_relations(source_id, &old_rels);
+                    dispatch_changes(source_id, dispatchers, del_changes).await?;
+                }
+                let new_rels = map_leak(source_id, &event, ChangeAction::Insert, true);
+                if new_rels.len() > 1 {
+                    dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
                 }
             }
         }
