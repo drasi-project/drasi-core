@@ -28,16 +28,12 @@ use log::info;
 use crate::config::KubernetesBootstrapConfig;
 
 pub struct KubernetesBootstrapProvider {
-    _config: KubernetesBootstrapConfig,
     source_config: KubernetesSourceConfig,
 }
 
 impl KubernetesBootstrapProvider {
-    pub fn new(config: KubernetesBootstrapConfig, source_config: KubernetesSourceConfig) -> Self {
-        Self {
-            _config: config,
-            source_config,
-        }
+    pub fn new(source_config: KubernetesSourceConfig) -> Self {
+        Self { source_config }
     }
 
     pub fn builder() -> KubernetesBootstrapProviderBuilder {
@@ -73,7 +69,7 @@ impl KubernetesBootstrapProviderBuilder {
             .source_config
             .ok_or_else(|| anyhow!("Kubernetes source configuration is required for bootstrap"))?;
         source_config.validate()?;
-        Ok(KubernetesBootstrapProvider::new(self.config, source_config))
+        Ok(KubernetesBootstrapProvider::new(source_config))
     }
 }
 
