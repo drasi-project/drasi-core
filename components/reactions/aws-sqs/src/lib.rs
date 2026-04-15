@@ -261,7 +261,7 @@ mod tests {
         let reaction = SqsReaction::builder("test")
             .with_queue_url("https://example.com/queue.fifo")
             .with_region("us-east-1")
-            .with_endpoint_url("http://localhost:9324")
+            .with_endpoint_url("http://localhost:9324") // DevSkim: ignore DS137138
             .with_fifo_queue(true)
             .with_message_group_id_template("{{query_id}}")
             .with_query("query-a")
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(
             props.get("endpoint_url"),
             Some(&serde_json::Value::String(
-                "http://localhost:9324".to_string()
+                "http://localhost:9324".to_string() // DevSkim: ignore DS137138
             ))
         );
         assert_eq!(

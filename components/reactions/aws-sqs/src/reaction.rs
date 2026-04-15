@@ -343,21 +343,21 @@ impl Reaction for SqsReaction {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting SQS reaction".to_string()),
             )
-            .await?;
+            .await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("SQS reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let queue_url = self.config.queue_url.clone();
@@ -391,7 +391,7 @@ impl Reaction for SqsReaction {
             Self::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     info!("[{reaction_id}] SQS reaction not running, breaking loop");
                     break;
                 }
@@ -509,11 +509,11 @@ impl Reaction for SqsReaction {
         self.base.stop_common().await?;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("SQS reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
