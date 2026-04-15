@@ -460,8 +460,7 @@ async fn test_queue_reaction_aggregation() {
     assert_eq!(
         last_total,
         Some(35.0),
-        "final aggregation total should be 35.0, got {:?}",
-        last_total
+        "final aggregation total should be 35.0, got {last_total:?}",
     );
 
     drasi.stop().await.expect("drasi should stop");

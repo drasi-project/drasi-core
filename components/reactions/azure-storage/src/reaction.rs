@@ -329,11 +329,11 @@ impl Reaction for AzureStorageReaction {
     async fn start(&self) -> Result<()> {
         log_component_start("Azure Storage Reaction", &self.base.id);
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Azure Storage reaction".to_string()),
             )
-            .await?;
+            .await;
 
         let credentials = azure_storage::StorageCredentials::access_key(
             self.config.account_name.clone(),
@@ -359,15 +359,15 @@ impl Reaction for AzureStorageReaction {
         };
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Azure Storage reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let priority_queue = self.base.priority_queue.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let config = self.config.clone();
         let target = self.config.target.clone();
         let reaction_name = self.base.id.clone();
@@ -402,7 +402,7 @@ impl Reaction for AzureStorageReaction {
                 };
                 let query_result = query_result_arc.as_ref();
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -463,7 +463,12 @@ impl Reaction for AzureStorageReaction {
             }
 
             info!("[{reaction_name}] Azure Storage reaction stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("Azure Storage reaction processing task stopped".to_string()),
+                )
+                .await;
         });
 
         self.base.set_processing_task(processing_task).await;
@@ -473,11 +478,11 @@ impl Reaction for AzureStorageReaction {
     async fn stop(&self) -> Result<()> {
         self.base.stop_common().await?;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Azure Storage reaction stopped".to_string()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
