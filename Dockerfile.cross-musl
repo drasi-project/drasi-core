@@ -5,9 +5,8 @@ FROM ubuntu:20.04
 # Remove symlink that conflicts with COPY from toolchain
 RUN rm -rf /usr/local/man
 
-# Copy musl cross-toolchain and runner script from the cross image
+# Copy musl cross-toolchain from the cross image
 COPY --from=toolchain /usr/local/ /usr/local/
-COPY --from=toolchain /linux-runner /linux-runner
 
 # Install build dependencies
 ENV DEBIAN_FRONTEND=noninteractive
