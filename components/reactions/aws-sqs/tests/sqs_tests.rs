@@ -38,7 +38,7 @@ fn test_config_round_trip_serialization() {
     let config = SqsReactionConfig {
         queue_url: "https://sqs.us-east-1.amazonaws.com/123/queue".to_string(),
         region: Some("us-east-1".to_string()),
-        endpoint_url: Some("http://localhost:9324".to_string()),
+        endpoint_url: Some("http://localhost:9324".to_string()), // DevSkim: ignore DS137138
         fifo_queue: true,
         message_group_id_template: Some("{{query_id}}".to_string()),
         access_key_id: None,
