@@ -237,7 +237,7 @@ mod tests {
                 key_columns: vec!["id".to_string()],
             }])
             .with_rest_api(RestApiConfig {
-                host: "127.0.0.1".to_string(),
+                host: "127.0.0.1".to_string(), // DevSkim: ignore DS137138
                 port: 9001,
             })
             .with_dispatch_mode(DispatchMode::Channel)
