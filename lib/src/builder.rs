@@ -485,6 +485,32 @@ impl DrasiLibBuilder {
             }
         }
 
+        // Register the identity provider in the component graph (if configured).
+        // This creates an IdentityProvider node with Authenticates edges to all
+        // sources and reactions that receive credentials from it.
+        if core.config.identity_provider.is_some() {
+            let mut graph = core.component_graph.write().await;
+            let component_ids: Vec<String> = graph
+                .list_by_kind(&crate::component_graph::ComponentKind::Source)
+                .into_iter()
+                .chain(graph.list_by_kind(&crate::component_graph::ComponentKind::Reaction))
+                .map(|(id, _)| id)
+                .collect();
+
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), "identity_provider".to_string());
+            graph
+                .register_identity_provider("identity-provider", metadata, &component_ids)
+                .map_err(|e| {
+                    DrasiError::operation_failed(
+                        "identity_provider",
+                        "identity-provider",
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
+                })?;
+        }
+
         Ok(core)
     }
 }
