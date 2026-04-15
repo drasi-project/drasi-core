@@ -361,18 +361,18 @@ impl Reaction for McpReaction {
         );
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting MCP reaction".to_string()),
             )
-            .await?;
+            .await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("MCP reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
@@ -403,7 +403,7 @@ impl Reaction for McpReaction {
 
         *self.server_task.lock().await = Some(server_task);
 
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let subscriptions = self.subscriptions.clone();
         let subscribers_by_uri = self.subscribers_by_uri.clone();
         let sessions = self.sessions.clone();
@@ -418,7 +418,7 @@ impl Reaction for McpReaction {
             register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -612,11 +612,11 @@ impl Reaction for McpReaction {
         }
         self.base.stop_common().await?;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("MCP reaction stopped".into()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
