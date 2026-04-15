@@ -540,18 +540,18 @@ impl Reaction for FileReaction {
         log_component_start("File Reaction", &self.base.id);
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting file reaction".to_string()),
             )
-            .await?;
+            .await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("File reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         let priority_queue = self.base.priority_queue.clone();
         let reaction_name = self.base.id.clone();
@@ -589,11 +589,11 @@ impl Reaction for FileReaction {
     async fn stop(&self) -> Result<()> {
         self.base.stop_common().await?;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("File reaction stopped".to_string()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
