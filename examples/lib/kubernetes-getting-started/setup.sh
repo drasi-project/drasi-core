@@ -47,7 +47,7 @@ done
 
 K3S_KUBECONFIG="$SCRIPT_DIR/k3s-kubeconfig"
 docker cp "$K3S_CONTAINER:/etc/rancher/k3s/k3s.yaml" "$K3S_KUBECONFIG"
-sed -i 's/127.0.0.1/localhost/g' "$K3S_KUBECONFIG"
+sed -i 's/127.0.0.1/localhost/g' "$K3S_KUBECONFIG" # DevSkim: ignore DS137138
 export KUBECONFIG="$K3S_KUBECONFIG"
 
 echo "Waiting for node readiness..."

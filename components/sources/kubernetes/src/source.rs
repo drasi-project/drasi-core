@@ -138,13 +138,14 @@ impl Source for KubernetesSource {
         }
 
         let source_id = self.base.id.clone();
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base
+            .set_status(ComponentStatus::Starting, None)
+            .await;
         info!("Starting Kubernetes source '{source_id}'");
 
         let config = self.config.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let status_tx = self.base.status_tx();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let state_store = self.resolve_state_store().await;
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         self.base.set_shutdown_tx(shutdown_tx).await;
@@ -171,39 +172,39 @@ impl Source for KubernetesSource {
 
                 if let Err(e) = run_result {
                     error!("Kubernetes source task failed for '{source_id}': {e}");
-                    *status.write().await = ComponentStatus::Error;
-                    if let Some(tx) = &*status_tx.read().await {
-                        let event = drasi_lib::channels::ComponentEvent {
-                            component_id: source_id.clone(),
-                            component_type: drasi_lib::channels::ComponentType::Source,
-                            status: ComponentStatus::Error,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("Kubernetes source task failed: {e}")),
-                        };
-                        if let Err(send_err) = tx.send(event).await {
-                            error!("Failed to send component error event: {send_err}");
-                        }
-                    }
+                    status_handle
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Kubernetes source task failed: {e}")),
+                        )
+                        .await;
                 } else {
-                    *status.write().await = ComponentStatus::Stopped;
+                    status_handle
+                        .set_status(ComponentStatus::Stopped, None)
+                        .await;
                 }
             }
             .instrument(span),
         );
 
         self.base.set_task_handle(task).await;
-        self.base.set_status(ComponentStatus::Running).await;
         self.base
-            .send_component_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(
+                ComponentStatus::Running,
+                Some("Kubernetes source started".to_string()),
+            )
+            .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.base.stop_common().await?;
         self.base
-            .send_component_event(ComponentStatus::Stopped, Some("Stopped".to_string()))
-            .await?;
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Kubernetes source stopped".to_string()),
+            )
+            .await;
         Ok(())
     }
 

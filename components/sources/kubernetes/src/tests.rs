@@ -23,10 +23,16 @@ use serde_json::json;
 
 fn sample_config() -> KubernetesSourceConfig {
     KubernetesSourceConfig {
-        resources: vec![crate::ResourceSpec {
-            api_version: "v1".to_string(),
-            kind: "Pod".to_string(),
-        }],
+        resources: vec![
+            crate::ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+            },
+            crate::ResourceSpec {
+                api_version: "apps/v1".to_string(),
+                kind: "ReplicaSet".to_string(),
+            },
+        ],
         namespaces: vec!["default".to_string()],
         include_owner_relations: true,
         exclude_annotations: default_annotation_excludes(),
@@ -272,6 +278,28 @@ fn test_owner_relation_construction() {
     let cfg = sample_config();
     let changes = build_insert_changes("src1", "Pod", &pod_obj(), &cfg).unwrap();
     assert!(changes.iter().any(|c| matches!(
+        c,
+        SourceChange::Update {
+            element: Element::Relation { .. }
+        }
+    )));
+}
+
+#[test]
+fn test_owner_relation_skipped_when_owner_kind_not_configured() {
+    let cfg = KubernetesSourceConfig {
+        resources: vec![crate::ResourceSpec {
+            api_version: "v1".to_string(),
+            kind: "Pod".to_string(),
+        }],
+        namespaces: vec!["default".to_string()],
+        include_owner_relations: true,
+        exclude_annotations: default_annotation_excludes(),
+        ..KubernetesSourceConfig::default()
+    };
+    // pod_obj() has ownerReferences to a ReplicaSet, which is not in the config
+    let changes = build_insert_changes("src1", "Pod", &pod_obj(), &cfg).unwrap();
+    assert!(!changes.iter().any(|c| matches!(
         c,
         SourceChange::Update {
             element: Element::Relation { .. }

@@ -45,12 +45,12 @@ impl K3sGuard {
             .read_kube_config()
             .map_err(|e| anyhow::anyhow!("Failed to read k3s kubeconfig: {e}"))?;
         kubeconfig = kubeconfig.replace(
-            "https://127.0.0.1:6443",
-            &format!("https://localhost:{host_port}"),
+            "https://127.0.0.1:6443", // DevSkim: ignore DS137138
+            &format!("https://localhost:{host_port}"), // DevSkim: ignore DS137138
         );
         kubeconfig = kubeconfig.replace(
-            "https://localhost:6443",
-            &format!("https://localhost:{host_port}"),
+            "https://localhost:6443", // DevSkim: ignore DS137138
+            &format!("https://localhost:{host_port}"), // DevSkim: ignore DS137138
         );
 
         Ok(Self {

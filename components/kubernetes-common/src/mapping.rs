@@ -32,7 +32,7 @@ pub fn build_insert_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj));
+        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config));
     }
 
     Ok(changes)
@@ -49,7 +49,7 @@ pub fn build_update_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj));
+        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config));
     }
 
     Ok(changes)
@@ -137,6 +137,7 @@ fn build_owner_relation_upserts(
     source_id: &str,
     child_kind: &str,
     obj: &DynamicObject,
+    config: &KubernetesSourceConfig,
 ) -> Vec<SourceChange> {
     let child_uid = match obj.metadata.uid.clone() {
         Some(uid) => uid,
@@ -146,6 +147,10 @@ fn build_owner_relation_upserts(
     let mut out = Vec::new();
     let owners = obj.metadata.owner_references.clone().unwrap_or_default();
     for owner in owners {
+        // Skip owner relations where the owner kind is not a configured resource
+        if !config.resources.iter().any(|r| r.kind == owner.kind) {
+            continue;
+        }
         let owner_uid = owner.uid.clone();
         let owner_kind = owner.kind.clone();
         let rel_element = build_owner_relation_element(
