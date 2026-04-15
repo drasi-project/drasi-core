@@ -129,11 +129,11 @@ impl Source for GtfsRtSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting GTFS-RT source".to_string()),
             )
-            .await?;
+            .await;
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         self.base.set_shutdown_tx(shutdown_tx).await;
@@ -224,20 +224,21 @@ impl Source for GtfsRtSource {
 
         self.base.set_task_handle(task).await;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("GTFS-RT source started".to_string()),
             )
-            .await
+            .await;
+        Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping GTFS-RT source".to_string()),
             )
-            .await?;
+            .await;
 
         self.base.stop_common().await
     }
