@@ -376,14 +376,14 @@ impl Reaction for RabbitMQReaction {
         );
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting RabbitMQ reaction".to_string()),
             )
-            .await?;
+            .await;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let query_configs = self.config.query_configs.clone();
         let exchange_type = self.config.exchange_type.clone();
         let exchange_durable = self.config.exchange_durable;
@@ -411,13 +411,13 @@ impl Reaction for RabbitMQReaction {
                 Ok(result) => result,
                 Err(e) => {
                     error!("[{reaction_name}] Failed to connect to RabbitMQ: {e}");
-                    *status.write().await = ComponentStatus::Error;
+                    status_handle.set_status(ComponentStatus::Error, Some(format!("Failed to connect: {e}"))).await;
                     return;
                 }
             };
 
             info!("[{reaction_name}] Connected to RabbitMQ successfully");
-            *status.write().await = ComponentStatus::Running;
+            status_handle.set_status(ComponentStatus::Running, Some("Connected to RabbitMQ".to_string())).await;
 
             let mut handlebars = Handlebars::new();
             Self::register_helpers(&mut handlebars);
@@ -434,7 +434,7 @@ impl Reaction for RabbitMQReaction {
 
                 let query_result = query_result_arc.as_ref();
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -486,7 +486,7 @@ impl Reaction for RabbitMQReaction {
                             error!(
                                 "[{reaction_name}] Failed to reconnect after 5 attempts, shutting down"
                             );
-                            *status.write().await = ComponentStatus::Error;
+                            status_handle.set_status(ComponentStatus::Error, Some("Failed to reconnect after 5 attempts".to_string())).await;
                         }
                         break;
                     }
@@ -645,7 +645,7 @@ impl Reaction for RabbitMQReaction {
             }
 
             info!("[{reaction_name}] RabbitMQ reaction stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle.set_status(ComponentStatus::Stopped, Some("RabbitMQ reaction stopped".to_string())).await;
         });
 
         self.base.set_processing_task(processing_task_handle).await;
@@ -659,11 +659,11 @@ impl Reaction for RabbitMQReaction {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("RabbitMQ reaction stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

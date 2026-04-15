@@ -21,7 +21,7 @@ fn test_config_defaults() {
     let config = RabbitMQReactionConfig::default();
     assert_eq!(
         config.connection_string,
-        "amqp://guest:guest@localhost:5672/%2f"
+        "amqp://guest:guest@localhost:5672/%2f" // DevSkim: ignore DS137138
     );
     assert_eq!(config.exchange_name, "drasi-events");
     assert_eq!(config.exchange_type, ExchangeType::Topic);
@@ -79,7 +79,7 @@ fn test_builder_rejects_invalid_template() {
 fn test_tls_requires_amqps() {
     let config = RabbitMQReactionConfig {
         tls_enabled: true,
-        connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+        connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(), // DevSkim: ignore DS137138
         ..Default::default()
     };
 

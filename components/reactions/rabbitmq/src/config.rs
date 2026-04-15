@@ -90,7 +90,7 @@ pub struct RabbitMQReactionConfig {
 impl Default for RabbitMQReactionConfig {
     fn default() -> Self {
         Self {
-            connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            connection_string: "amqp://guest:guest@localhost:5672/%2f".to_string(), // DevSkim: ignore DS137138
             exchange_name: "drasi-events".to_string(),
             exchange_type: ExchangeType::default(),
             exchange_durable: true,
