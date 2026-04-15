@@ -1,9 +1,21 @@
-FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:0.2.5 AS toolchain
 
-# Install build dependencies for vendored OpenSSL, protobuf, and jq
+FROM ubuntu:20.04
+
+# Remove symlink that conflicts with COPY from toolchain
+RUN rm -rf /usr/local/man
+
+# Copy musl cross-toolchain and runner script from the cross image
+COPY --from=toolchain /usr/local/ /usr/local/
+COPY --from=toolchain /linux-runner /linux-runner
+
+# Install build dependencies
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates gcc libc6-dev \
     perl make autoconf automake libtool \
     protobuf-compiler libprotobuf-dev \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build OpenSSL from source for musl
@@ -38,10 +50,15 @@ ENV LIBJQ_STATIC=1
 ENV LIBONIG_STATIC=1
 
 # Create a linker wrapper that appends necessary libraries at the end
-# to resolve symbol ordering issues with musl cross-compilation
-RUN printf '#!/bin/sh\nexec x86_64-linux-musl-gcc "$@" -Wl,--no-as-needed -lpthread -ldl -lm -lc\n' \
+# to resolve symbol ordering issues with musl cross-compilation.
+# Note: musl includes pthread/dl/m symbols in libc, so only -lc is needed.
+RUN printf '#!/bin/sh\nexec x86_64-linux-musl-gcc "$@" -Wl,--no-as-needed -lc\n' \
     > /usr/local/bin/musl-gcc-wrapper \
     && chmod +x /usr/local/bin/musl-gcc-wrapper
 
-# Override the linker to use our wrapper
+# Set cargo environment for cross-compilation
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc-wrapper
+ENV CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+ENV CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
+ENV AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=/usr/local/x86_64-linux-musl"
