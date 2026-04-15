@@ -417,22 +417,22 @@ impl Reaction for LokiReaction {
         );
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Loki reaction".to_string()),
             )
-            .await?;
+            .await;
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Loki reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let reaction_name = self.base.id.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let priority_queue = self.base.priority_queue.clone();
         let endpoint = self.config.endpoint.clone();
         let token = self.config.token.clone();
@@ -451,7 +451,7 @@ impl Reaction for LokiReaction {
                 Ok(c) => c,
                 Err(e) => {
                     error!("[{reaction_name}] failed to create HTTP client: {e}");
-                    *status.write().await = ComponentStatus::Error;
+                    status_handle.set_status(ComponentStatus::Error, Some(format!("Failed to create HTTP client: {e}"))).await;
                     return;
                 }
             };
@@ -488,7 +488,7 @@ impl Reaction for LokiReaction {
                     result = priority_queue.dequeue() => result,
                 };
 
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
                 }
 
@@ -618,7 +618,7 @@ impl Reaction for LokiReaction {
             }
 
             info!("[{reaction_name}] Loki reaction stopped");
-            *status.write().await = ComponentStatus::Stopped;
+            status_handle.set_status(ComponentStatus::Stopped, Some("Loki reaction processing task stopped".to_string())).await;
         });
 
         self.base.set_processing_task(processing_task).await;
@@ -629,11 +629,11 @@ impl Reaction for LokiReaction {
         info!("[{}] stopping Loki reaction", self.base.id);
         self.base.stop_common().await?;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Loki reaction stopped".to_string()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
