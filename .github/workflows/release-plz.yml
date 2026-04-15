@@ -54,7 +54,7 @@ jobs:
                   
       - name: Install release-plz
         run: |
-          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.120/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
+          curl -sSfL https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin
 
       - name: Install cargo-semver-checks
         run: |
@@ -82,6 +82,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
+      - name: Clear cargo registry index cache
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        run: rm -rf ~/.cargo/registry/index/github.com-*/ || true
+
       - name: Publish crates
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
         run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
