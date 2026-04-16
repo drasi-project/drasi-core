@@ -283,6 +283,19 @@ impl Drop for ReactionProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+
+        // Leak the push context Arc to prevent use-after-free. The forwarder's
+        // spawn_blocking callback may still be queued in the plugin's blocking
+        // thread pool with a raw pointer to this context. By leaking the Arc,
+        // the ResultPushContext stays alive; the callback finds rx=None and
+        // returns null harmlessly. Without this, macOS (which schedules blocking
+        // pool threads more lazily) can SIGSEGV when the callback executes
+        // after the context has been freed.
+        if let Ok(mut guard) = self._push_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
     }
 }
 
