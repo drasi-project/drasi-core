@@ -487,9 +487,7 @@ async fn fetch_cloudflare<T: DeserializeOwned>(client: &Client, url: &str) -> Re
                 if attempt >= 4 {
                     return Err(err.into());
                 }
-                warn!(
-                    "Cloudflare API request failed ({err}); retrying in {delay:?}"
-                );
+                warn!("Cloudflare API request failed ({err}); retrying in {delay:?}");
                 sleep(delay).await;
                 delay *= 2;
                 continue;

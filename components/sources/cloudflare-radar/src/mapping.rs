@@ -732,8 +732,7 @@ pub fn map_dns_summary(
         "domain",
         serde_json::Value::String(domain.to_string()),
     );
-    let locations_value =
-        serde_json::to_value(locations).unwrap_or(serde_json::Value::Null);
+    let locations_value = serde_json::to_value(locations).unwrap_or(serde_json::Value::Null);
     insert_json(&mut props, "topLocations", locations_value);
     build_node(
         source_id,

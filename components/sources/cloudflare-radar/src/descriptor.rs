@@ -51,7 +51,9 @@ pub enum StartBehaviorDto {
     #[default]
     StartFromNow,
     StartFromBeginning,
-    StartFromTimestamp { timestamp: i64 },
+    StartFromTimestamp {
+        timestamp: i64,
+    },
 }
 
 fn default_api_base_url() -> ConfigValue<String> {

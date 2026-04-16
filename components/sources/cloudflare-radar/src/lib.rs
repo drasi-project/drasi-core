@@ -514,9 +514,7 @@ async fn fetch_cloudflare<T: DeserializeOwned>(client: &Client, url: &str) -> Re
                 if attempt >= 4 {
                     return Err(err.into());
                 }
-                warn!(
-                    "Cloudflare API request failed ({err}); retrying in {delay:?}"
-                );
+                warn!("Cloudflare API request failed ({err}); retrying in {delay:?}");
                 sleep(delay).await;
                 delay *= 2;
                 continue;
@@ -610,8 +608,7 @@ async fn poll_outages(
                 dispatch_changes(source_id, dispatchers, changes).await?;
             }
         } else if state.seen_outage_ids.get(&outage_id) != Some(&outage) && should_emit {
-            let changes =
-                map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
+            let changes = map_outage(source_id, &outage_id, &outage, ChangeAction::Update, false);
             dispatch_changes(source_id, dispatchers, changes).await?;
 
             // Delete old relationships and insert new ones
@@ -620,8 +617,7 @@ async fn poll_outages(
                 let del_changes = delete_relations(source_id, &old_rels);
                 dispatch_changes(source_id, dispatchers, del_changes).await?;
             }
-            let new_rels =
-                map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
+            let new_rels = map_outage(source_id, &outage_id, &outage, ChangeAction::Insert, true);
             // Skip the first element (the node itself) and dispatch only relations/shared nodes
             if new_rels.len() > 1 {
                 dispatch_changes(source_id, dispatchers, new_rels[1..].to_vec()).await?;
