@@ -62,54 +62,64 @@ macro_rules! common_config_to_mqtt_options {
             $options.set_keep_alive(Duration::from_secs(keep_alive));
         }
 
-        // authentication with the identity provider
+        // authentication with the identity provider (higher precedence than static credentials from config if both are provided)
         let effective_provider = $identity_provider.as_ref().map(|p| p.as_ref());
         let config_provider = $config.identity_provider.as_deref();
 
-        let provider = effective_provider.or(config_provider);
-        let credentials = if let Some(provider) = provider {
-            provider.get_credentials().await
-        } else {
-            info!("No identity provider configured for MQTT authentication");
-            Err(anyhow::anyhow!("No identity provider configured for MQTT authentication"))
-        };
-
         let mut optional_mtls_client_auth = None;
-        match credentials {
-            Ok(creds) => {
-                match creds {
-                    drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
-                        $options.set_credentials(username, password);
-                    }
-                    drasi_lib::identity::Credentials::Token { username, token } => {
-                        $options.set_credentials(username, token);
-                    }
-                    drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, .. } => {
-                        optional_mtls_client_auth = Some((cert_pem.clone(), key_pem.clone()));
+        let provider = effective_provider.or(config_provider);
+        if let Some(provider) = provider {
+            let credentials = provider.get_credentials().await;
+            match credentials {
+                Ok(creds) => {
+                    info!("Successfully retrieved credentials from identity provider for MQTT authentication");
+                    match creds {
+                        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+                            $options.set_credentials(username, password);
+                        }
+                        drasi_lib::identity::Credentials::Token { username, token } => {
+                            $options.set_credentials(username, token);
+                        }
+                        drasi_lib::identity::Credentials::Certificate { cert_pem, key_pem, .. } => { // not currently implemented in the identity provider.
+                            optional_mtls_client_auth = Some((cert_pem.clone(), key_pem.clone()));
+                        }
                     }
                 }
+                Err(e) => {
+                    error!("Failed to retrieve credentials from identity provider for MQTT authentication: {e:?}");
+                }
             }
-            Err(e) => {}
+        } else {
+            info!("No identity provider configured for MQTT authentication, trying static credentials from config if provided");
+            if let (Some(username), Some(password)) = ($config.username.as_ref(), $config.password.as_ref()) {
+                info!("Using static credentials from config for MQTT authentication");
+                $options.set_credentials(username.clone(), password.clone());
+            } else {
+                info!("No static credentials provided in config for MQTT authentication, attempt to connect without authentication if the broker allows anonymous connections, otherwise connection will fail and be logged accordingly");
+            }
         }
 
         // TLS configuration - mTLS client auth from identity provider takes precedence over static config if both are provided
         if let Some(transport) = $config.transport.as_ref() {
             match transport {
-                MqttTransportMode::TLS { ca, alpn, client_auth } => {
+                MqttTransportMode::TLS{..} => {
+                    let resolved = transport
+                        .get_tls_config()?;
+
                     // mTLS client auth from identity provider takes precedence over static config if both are provided
                     if let Some((cert_pem, key_pem)) = optional_mtls_client_auth {
                         let tls_config = rumqttc::TlsConfiguration::Simple {
-                            ca: ca.clone(),
-                            alpn: alpn.clone(),
+                            ca: resolved.ca,
+                            alpn: resolved.alpn,
                             client_auth: Some((cert_pem.into_bytes(), key_pem.into_bytes())),
                         };
                         $options.set_transport(rumqttc::Transport::Tls(tls_config));
 
                     } else {
                         let tls_config = rumqttc::TlsConfiguration::Simple {
-                            ca: ca.clone(),
-                            alpn: alpn.clone(),
-                            client_auth: client_auth.clone(),
+                            ca: resolved.ca,
+                            alpn: resolved.alpn,
+                            client_auth: resolved.client_auth,
                         };
                         $options.set_transport(rumqttc::Transport::Tls(tls_config));
                     }
