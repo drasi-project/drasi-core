@@ -126,7 +126,10 @@ impl Source for OracleSource {
         }
 
         self.base
-            .set_status(ComponentStatus::Starting, Some("Starting Oracle source".to_string()))
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting Oracle source".to_string()),
+            )
             .await;
         log::info!("Starting Oracle source '{}'", self.base.id);
 
@@ -184,7 +187,10 @@ impl Source for OracleSource {
 
         *self.task_handle.write().await = Some(task_handle);
         self.base
-            .set_status(ComponentStatus::Running, Some("Oracle source started".to_string()))
+            .set_status(
+                ComponentStatus::Running,
+                Some("Oracle source started".to_string()),
+            )
             .await;
         Ok(())
     }
@@ -210,7 +216,12 @@ impl Source for OracleSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped, Some("Oracle source stopped".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Oracle source stopped".to_string()),
+            )
+            .await;
         Ok(())
     }
 
