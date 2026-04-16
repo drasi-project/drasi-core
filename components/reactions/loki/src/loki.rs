@@ -451,7 +451,12 @@ impl Reaction for LokiReaction {
                 Ok(c) => c,
                 Err(e) => {
                     error!("[{reaction_name}] failed to create HTTP client: {e}");
-                    status_handle.set_status(ComponentStatus::Error, Some(format!("Failed to create HTTP client: {e}"))).await;
+                    status_handle
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to create HTTP client: {e}")),
+                        )
+                        .await;
                     return;
                 }
             };
@@ -618,7 +623,12 @@ impl Reaction for LokiReaction {
             }
 
             info!("[{reaction_name}] Loki reaction stopped");
-            status_handle.set_status(ComponentStatus::Stopped, Some("Loki reaction processing task stopped".to_string())).await;
+            status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("Loki reaction processing task stopped".to_string()),
+                )
+                .await;
         });
 
         self.base.set_processing_task(processing_task).await;
