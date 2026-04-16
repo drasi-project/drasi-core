@@ -752,7 +752,10 @@ mod tests {
         let content = tokio::fs::read_to_string(output_file)
             .await
             .expect("read file");
-        assert!(content.contains("default-7"));
+        assert!(
+            content.contains("default-7"),
+            "expected rendered template 'default-7', got: {content}"
+        );
     }
 
     #[tokio::test]
@@ -795,7 +798,13 @@ mod tests {
         let content = tokio::fs::read_to_string(output_file)
             .await
             .expect("read file");
-        assert!(content.contains("route-9"));
-        assert!(!content.contains("default-9"));
+        assert!(
+            content.contains("route-9"),
+            "expected rendered template 'route-9', got: {content}"
+        );
+        assert!(
+            !content.contains("default-9"),
+            "should not contain default template output, got: {content}"
+        );
     }
 }
