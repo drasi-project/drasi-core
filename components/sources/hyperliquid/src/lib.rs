@@ -144,7 +144,12 @@ impl Source for HyperliquidSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting, Some("Starting Hyperliquid source".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting Hyperliquid source".to_string()),
+            )
+            .await;
         info!("Starting Hyperliquid source '{}'", self.base.id);
 
         let config = self.config.clone();
@@ -253,7 +258,12 @@ impl Source for HyperliquidSource {
         );
 
         *self.task_handle.write().await = Some(stream_task);
-        self.base.set_status(ComponentStatus::Running, Some("Hyperliquid source started".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("Hyperliquid source started".to_string()),
+            )
+            .await;
 
         Ok(())
     }
@@ -273,7 +283,12 @@ impl Source for HyperliquidSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped, Some("Hyperliquid source stopped".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Hyperliquid source stopped".to_string()),
+            )
+            .await;
         Ok(())
     }
 
