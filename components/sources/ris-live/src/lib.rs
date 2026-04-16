@@ -140,7 +140,12 @@ impl Source for RisLiveSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting, Some("Starting RIS Live source".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some("Starting RIS Live source".to_string()),
+            )
+            .await;
 
         let source_id = self.base.id.clone();
         let config = self.config.clone();
@@ -182,7 +187,12 @@ impl Source for RisLiveSource {
         *self.shutdown_tx.write().await = Some(shutdown_tx);
         *self.task_handle.write().await = Some(task_handle);
 
-        self.base.set_status(ComponentStatus::Running, Some("RIS Live source started".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some("RIS Live source started".to_string()),
+            )
+            .await;
         info!("[{}] RIS Live source started", self.base.id);
 
         Ok(())
@@ -193,7 +203,12 @@ impl Source for RisLiveSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Stopping, Some("Stopping RIS Live source".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Stopping,
+                Some("Stopping RIS Live source".to_string()),
+            )
+            .await;
 
         if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
             let _ = shutdown_tx.send(true);
@@ -214,7 +229,12 @@ impl Source for RisLiveSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped, Some("RIS Live source stopped".to_string())).await;
+        self.base
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("RIS Live source stopped".to_string()),
+            )
+            .await;
 
         Ok(())
     }
