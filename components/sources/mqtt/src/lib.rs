@@ -86,6 +86,8 @@ pub struct MqttSourceBuilder {
     adaptive_min_wait_ms: Option<u64>,
     adaptive_window_secs: Option<u64>,
     adaptive_enabled: Option<bool>,
+    username: Option<String>,
+    password: Option<String>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -122,6 +124,9 @@ impl MqttSourceBuilder {
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+
+            username: None,
+            password: None,
 
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -286,6 +291,16 @@ impl MqttSourceBuilder {
         self
     }
 
+    pub fn with_username(mut self, username: impl Into<String>) -> Self {
+        self.username = Some(username.into());
+        self
+    }
+
+    pub fn with_password(mut self, password: impl Into<String>) -> Self {
+        self.password = Some(password.into());
+        self
+    }
+
     pub fn with_config(mut self, config: MqttSourceConfig) -> Self {
         self.host = config.host;
         self.port = config.port;
@@ -309,6 +324,8 @@ impl MqttSourceBuilder {
         self.adaptive_min_wait_ms = config.adaptive_min_wait_ms;
         self.adaptive_window_secs = config.adaptive_window_secs;
         self.adaptive_enabled = config.adaptive_enabled;
+        self.username = config.username;
+        self.password = config.password;
         self
     }
 
@@ -336,6 +353,8 @@ impl MqttSourceBuilder {
             adaptive_min_wait_ms: self.adaptive_min_wait_ms,
             adaptive_window_secs: self.adaptive_window_secs,
             adaptive_enabled: self.adaptive_enabled,
+            username: self.username,
+            password: self.password,
         };
 
         config.validate()?;
@@ -433,6 +452,8 @@ mod tests {
                 adaptive_min_wait_ms: None,
                 adaptive_window_secs: None,
                 adaptive_enabled: None,
+                username: None,
+                password: None,
             };
             let source = MqttSource::with_dispatch(
                 "dispatch-source",
@@ -647,7 +668,7 @@ mod tests {
                     } => {
                         assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
                         assert_eq!(metadata.labels.len(), 1);
-                        assert_eq!(metadata.effective_from, 12345678900); // TODO
+                        assert_eq!(metadata.effective_from, 12345678900);
                         assert!(properties.get("name").is_some());
                         assert!(properties.get("age").is_some());
                     }

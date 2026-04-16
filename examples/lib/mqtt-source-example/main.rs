@@ -1,4 +1,5 @@
 use anyhow::Result;
+use drasi_lib::identity::PasswordIdentityProvider;
 use drasi_lib::DrasiLib;
 use drasi_lib::Query;
 use drasi_reaction_log::LogReaction;
@@ -21,11 +22,10 @@ async fn main() -> Result<()> {
     println!("║     DrasiLib Temperature Monitor Example   ║");
     println!("╚════════════════════════════════════════════╝\n");
 
-
     // Add MqttSource configuration
     let source_config_yaml = r#"
 broker_addr: "localhost"
-port: 9001
+port: 8883
 topics:
   - topic: "sensors/temperature"
     qos: 1
@@ -66,13 +66,25 @@ adaptive_min_batch_size: 30
 adaptive_max_wait_ms: 1000000
 adaptive_min_wait_ms: 100000
 adaptive_enabled: true
+transport:
+    mode: tls
+    config:
+        ca_path: "/var/certs-drasi/ca.crt"
+        client_cert_path: "/var/certs-drasi/client.crt"
+        client_key_path: "/var/certs-drasi/client.key"
 "#;
+
     let source_config: MqttSourceConfig = serde_yaml::from_str(source_config_yaml)?;
 
     // Build MqttSource with the configuration
     let mqtt_source = MqttSource::builder("mqtt-source")
         .with_config(source_config)
-        .build().await?;
+        .with_identity_provider(PasswordIdentityProvider::new(
+            "drasi".to_string(),
+            "drasi".to_string(),
+        ))
+        .build()
+        .await?;
 
     // Define the query to read all device readings
     let all_readings_query = Query::cypher("all-readings")
@@ -88,7 +100,6 @@ adaptive_enabled: true
         .enable_bootstrap(true)
         .build();
 
-    
     // Define a log reaction to print query results to console
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
@@ -111,7 +122,6 @@ adaptive_enabled: true
         .from_query("all-readings")
         .with_default_template(default_template)
         .build()?;
-
 
     // Build the DrasiLib core with the MQTT source, query, and reaction
     let core = Arc::new(

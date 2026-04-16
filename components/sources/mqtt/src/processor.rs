@@ -179,6 +179,8 @@ impl MqttProcessor {
             // send to the batcher
             Self::send_to_batcher(&source_id.clone(), &batch_tx, source_changes).await;
         }
+
+        info!("[{source_id}] MQTT processing loop stopped - source channel closed");
     }
 
     fn process(mapper: &PatternMatcher, packet: &MqttPacket) -> Vec<MqttSourceChange> {
