@@ -2429,11 +2429,9 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
             }
             1 => {
                 // Receive one event then drop
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(200),
-                    receiver.recv(),
-                )
-                .await;
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                        .await;
                 drop(receiver);
             }
             2 => {

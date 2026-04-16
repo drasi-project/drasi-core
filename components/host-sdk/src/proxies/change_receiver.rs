@@ -51,10 +51,7 @@ extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSo
     .unwrap_or(false)
 }
 
-fn change_push_callback_inner(
-    ctx: *mut std::ffi::c_void,
-    event: *mut FfiSourceEvent,
-) -> bool {
+fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
