@@ -22,6 +22,24 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs;
+use std::fmt::Debug;
+
+pub fn default_host() -> String {
+    "localhost".to_string()
+}
+
+pub fn default_port() -> u16 {
+    1883
+}
+
+pub fn default_qos() -> MqttQoS {
+    MqttQoS::ONE
+}
+
+pub fn default_event_channel_capacity() -> usize {
+    20
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize_repr, Deserialize_repr, Eq, Default)]
 #[repr(u8)]
@@ -40,17 +58,132 @@ pub struct MqttTopicConfig {
 
 /// Transport mode for MQTT connection.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase", tag = "mode", content = "config")]
 pub enum MqttTransportMode {
     #[default]
+    #[serde(rename = "tcp")]
     TCP,
+    /// TLS transport. Use `ca_path` / `client_cert_path` / `client_key_path` for
+    /// file-based configuration, or inline `ca` / `client_auth` bytes directly.
+    #[serde(rename = "tls")]
     TLS {
-        /// ca certificate
-        ca: Vec<u8>,
-        /// alpn settings
+        /// CA certificate bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca: Option<String>,
+        /// Path to CA certificate file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_path: Option<String>,
+        /// ALPN settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         alpn: Option<Vec<Vec<u8>>>,
-        /// tls client_authentication
+        /// TLS client authentication bytes: (cert, key).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         client_auth: Option<(Vec<u8>, Vec<u8>)>,
+        /// Path to client certificate file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_cert_path: Option<String>,
+        /// Path to client private key file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_key_path: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MqttTls {
+    pub ca: Vec<u8>,
+    pub alpn: Option<Vec<Vec<u8>>>,
+    pub client_auth: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+impl MqttTransportMode {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self {
+            MqttTransportMode::TCP => Ok(()),
+            MqttTransportMode::TLS {
+                ca,
+                ca_path,
+                alpn,
+                client_auth,
+                client_cert_path,
+                client_key_path,
+            } => {
+                match (ca, ca_path) {
+                    (Some(_), Some(_)) => {
+                        return Err(anyhow::anyhow!(
+                            "TLS transport: specify either 'ca' or 'ca_path', not both"
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(anyhow::anyhow!(
+                            "TLS transport requires either 'ca' bytes or 'ca_path'"
+                        ));
+                    }
+                    _ => {}
+                }
+
+                let has_inline_client_auth = client_auth.is_some();
+                let has_path_client_auth = client_cert_path.is_some() || client_key_path.is_some();
+
+                if has_inline_client_auth && has_path_client_auth {
+                    return Err(anyhow::anyhow!(
+                        "TLS transport: specify either 'client_auth' or ('client_cert_path' and 'client_key_path'), not both"
+                    ));
+                }
+
+                if client_cert_path.is_some() ^ client_key_path.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "TLS transport: 'client_cert_path' and 'client_key_path' must be set together"
+                    ));
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    pub fn get_tls_config(&self) -> anyhow::Result<MqttTls> {
+        self.validate()?;
+
+        match self {
+            MqttTransportMode::TCP => {
+                Err(anyhow::anyhow!("TCP transport does not have TLS config"))
+            }
+            MqttTransportMode::TLS {
+                ca,
+                ca_path,
+                alpn,
+                client_auth,
+                client_cert_path,
+                client_key_path,
+            } => {
+                let ca = match (ca, ca_path) {
+                    (Some(ca), None) => ca.clone().into_bytes(),
+                    (None, Some(path)) => Self::read_file(path, "ca_path")?,
+                    _ => unreachable!("validated above"),
+                };
+
+                let client_auth = match (client_auth, client_cert_path, client_key_path) {
+                    (Some(auth), None, None) => Some(auth.clone()),
+                    (None, Some(cert_path), Some(key_path)) => Some((
+                        Self::read_file(cert_path, "client_cert_path")?,
+                        Self::read_file(key_path, "client_key_path")?,
+                    )),
+                    (None, None, None) => None,
+                    _ => unreachable!("validated above"),
+                };
+
+                Ok(MqttTls {
+                    ca,
+                    alpn: alpn.clone(),
+                    client_auth,
+                })
+            }
+        }
+    }
+
+    fn read_file(path: &str, field: &str) -> anyhow::Result<Vec<u8>> {
+        fs::read(path).map_err(|e| anyhow::anyhow!("Failed to read TLS {field} at '{path}': {e}"))
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,22 +387,15 @@ pub struct MqttSourceConfig {
     /// Whether adaptive batching is enabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_enabled: Option<bool>,
-}
 
-pub fn default_host() -> String {
-    "localhost".to_string()
-}
+    //...... Authentication config parameters
+    /// Username for MQTT authentication (if not using identity provider)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 
-pub fn default_port() -> u16 {
-    1883
-}
-
-pub fn default_qos() -> MqttQoS {
-    MqttQoS::ONE
-}
-
-pub fn default_event_channel_capacity() -> usize {
-    20
+    /// Password for MQTT authentication (if not using identity provider)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 impl MqttSourceConfig {
@@ -328,6 +454,16 @@ impl MqttSourceConfig {
             }
 
             Self::validate_mapping_placeholders(topic_mapping)?;
+        }
+
+        if self.username.is_some() ^ self.password.is_some() {
+            return Err(anyhow::anyhow!(
+                "Both username and password must be set together for authentication"
+            ));
+        }
+
+        if let Some(transport) = &self.transport {
+            transport.validate()?;
         }
 
         Ok(())
@@ -489,7 +625,21 @@ impl Default for MqttSourceConfig {
             adaptive_min_wait_ms: None,
             adaptive_window_secs: None,
             adaptive_enabled: None,
+            username: None,
+            password: None,
         }
+    }
+}
+
+impl Debug for MqttSourceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MqttSourceConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("topics", &self.topics)
+            .field("topic_mappings", &self.topic_mappings)
+            .field("event_channel_capacity", &self.event_channel_capacity)
+            .finish()
     }
 }
 
@@ -553,6 +703,8 @@ mod tests {
             adaptive_min_wait_ms: Some(100),
             adaptive_window_secs: Some(5),
             adaptive_enabled: Some(true),
+            username: None,
+            password: None,
         }
     }
 
@@ -574,7 +726,6 @@ mod tests {
     #[test]
     fn valid_config_passes_validation() {
         let config = valid_config();
-
         assert!(config.validate().is_ok());
     }
 
@@ -854,5 +1005,184 @@ topic_mappings:
         );
         assert_eq!(props.authentication_method.as_deref(), Some("token"));
         assert_eq!(props.authentication_data, Some(Bytes::from(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn rejecting_conflicting_tls_sources() {
+        let mut config = valid_config();
+        config.transport = Some(MqttTransportMode::TLS {
+            ca: Some("ca-bytes".to_string()),
+            ca_path: Some("/tmp/ca.pem".to_string()),
+            alpn: None,
+            client_auth: None,
+            client_cert_path: None,
+            client_key_path: None,
+        });
+
+        let err = config
+            .validate()
+            .expect_err("ca and ca_path together should be invalid");
+        assert!(err.to_string().contains("specify either 'ca' or 'ca_path'"));
+    }
+
+    #[test]
+    fn yaml_deserializes_tls_transport_with_paths() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+
+        let base = std::env::temp_dir();
+        let ca_path = base.join(format!("drasi-mqtt-{unique}-ca.pem"));
+        let cert_path = base.join(format!("drasi-mqtt-{unique}-client.crt"));
+        let key_path = base.join(format!("drasi-mqtt-{unique}-client.key"));
+
+        fs::write(&ca_path, b"ca-bytes").expect("should write CA file");
+        fs::write(&cert_path, b"cert-bytes").expect("should write cert file");
+        fs::write(&key_path, b"key-bytes").expect("should write key file");
+
+        let yaml = format!(
+            r#"
+transport:
+    mode: tls
+    config:
+        ca_path: "{}"
+        client_cert_path: "{}"
+        client_key_path: "{}"
+"#,
+            ca_path.display(),
+            cert_path.display(),
+            key_path.display(),
+        );
+
+        let config: MqttSourceConfig = from_str(&yaml).expect("yaml should deserialize");
+        assert!(config.validate().is_ok());
+
+        let transport = config.transport.expect("transport should be set");
+        match transport {
+            MqttTransportMode::TLS {
+                ca,
+                ca_path,
+                alpn,
+                client_auth,
+                client_cert_path,
+                client_key_path,
+            } => {
+                assert!(ca.is_none());
+                assert!(ca_path.is_some());
+                assert!(client_auth.is_none());
+                assert_eq!(
+                    client_cert_path.as_deref(),
+                    Some(cert_path.to_string_lossy().as_ref())
+                );
+                assert_eq!(
+                    client_key_path.as_deref(),
+                    Some(key_path.to_string_lossy().as_ref())
+                );
+            }
+            MqttTransportMode::TCP => panic!("expected TLS transport"),
+        }
+
+        let transport = MqttTransportMode::TLS {
+            ca: None,
+            ca_path: Some(ca_path.to_string_lossy().to_string()),
+            alpn: None,
+            client_auth: None,
+            client_cert_path: Some(cert_path.to_string_lossy().to_string()),
+            client_key_path: Some(key_path.to_string_lossy().to_string()),
+        };
+
+        let resolved = transport.get_tls_config().expect("resolution should work");
+        assert_eq!(resolved.ca, b"ca-bytes".to_vec());
+        assert_eq!(
+            resolved.client_auth,
+            Some((b"cert-bytes".to_vec(), b"key-bytes".to_vec()))
+        );
+
+        // remove the temp files.
+        fs::remove_file(ca_path).expect("cleanup should remove ca file");
+        fs::remove_file(cert_path).expect("cleanup should remove cert file");
+        fs::remove_file(key_path).expect("cleanup should remove key file");
+    }
+
+    #[test]
+    fn yaml_deserialization_tcp_transport() {
+        let yaml = r#"
+transport:
+    mode: tcp
+"#;
+
+        let config: MqttSourceConfig = from_str(yaml).expect("yaml should deserialize");
+        assert!(config.validate().is_ok());
+
+        let transport = config.transport.expect("transport should be set");
+        match transport {
+            MqttTransportMode::TCP => {}
+            MqttTransportMode::TLS { .. } => panic!("expected TCP transport"),
+        }
+    }
+
+    #[test]
+    fn yaml_deserialization_rejects_conflicting_tls_fields() {
+        let yaml = r#"
+transport:
+    mode: tls
+    config:
+        ca: "ca-bytes"
+        ca_path: "/tmp/ca.pem"
+        client_cert_path: "/tmp/client.crt"
+        client_key_path: "/tmp/client.key"
+"#;
+        let config: MqttSourceConfig = from_str(yaml).expect("yaml should deserialize");
+        let err = config
+            .validate()
+            .expect_err("conflicting TLS fields should be rejected");
+        assert!(err.to_string().contains("specify either 'ca' or 'ca_path'"));
+    }
+
+    #[test]
+    fn yaml_username_without_password_is_invalid() {
+        let yaml = r#"
+username: "mqtt_user"
+"#;
+        let config: MqttSourceConfig = from_str(yaml).expect("yaml should deserialize");
+        let err = config
+            .validate()
+            .expect_err("username without password should be invalid");
+        assert!(err.to_string().contains("Both username and password must be set together"));
+    }
+
+    #[test]
+    fn yaml_password_without_username_is_invalid() {
+        let yaml = r#"
+password: "mqtt_pass"
+"#;
+        let config: MqttSourceConfig = from_str(yaml).expect("yaml should deserialize");
+        let err = config
+            .validate()
+            .expect_err("password without username should be invalid");
+        assert!(err.to_string().contains("Both username and password must be set together"));   
+    }
+
+    #[test]
+    fn yaml_wrong_input() {
+        let yaml = r#"
+host: "mqtt.example.com"
+port: "not a number"
+"#;
+        let err= serde_yaml::from_str::<MqttSourceConfig>(yaml).expect_err("yaml with wrong types should fail to deserialize");
+        assert!(err.to_string().contains("invalid type: string \"not a number\", expected u16 for at line 3 column 7"));
+    }
+
+    #[test]
+    fn yaml_wrong_tag() {
+        let yaml = r#"
+host: "mqtt.example.com"
+port: 1883
+transport:
+    mode: unknown
+"#;
+        let err = serde_yaml::from_str::<MqttSourceConfig>(yaml).expect_err("yaml with unknown transport mode should fail to deserialize");
+        assert!(err.to_string().contains("unknown variant `unknown`, expected `tcp` or `tls` at line 5 column 11"));
     }
 }
