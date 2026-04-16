@@ -1,0 +1,122 @@
+name: Cross-Platform FFI Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release/*
+    tags:
+      - v*
+  pull_request:
+    branches:
+      - main
+      - feature/*
+      - feature-lib
+      - release/*
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  ffi-test:
+    name: FFI Tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+            lib_prefix: lib
+            lib_ext: so
+          - os: macos-latest
+            name: macOS arm64
+            lib_prefix: lib
+            lib_ext: dylib
+          - os: windows-latest
+            name: Windows x86_64
+            lib_prefix: ""
+            lib_ext: dll
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo registry
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache Cargo build
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ffi-
+
+      - name: Build test plugins (cdylib)
+        shell: bash
+        run: |
+          echo "=== Building cdylib test plugins ==="
+          cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
+          cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+          cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
+
+      - name: Copy plugins to test directory
+        shell: bash
+        run: |
+          mkdir -p target/debug/plugins
+          PREFIX="${{ matrix.lib_prefix }}"
+          EXT="${{ matrix.lib_ext }}"
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse; do
+            SRC="target/debug/${PREFIX}${name}.${EXT}"
+            if [ -f "$SRC" ]; then
+              cp "$SRC" target/debug/plugins/
+              echo "  Copied: $SRC"
+            else
+              echo "  WARNING: Not found: $SRC"
+            fi
+          done
+
+      - name: Verify test plugins exist
+        shell: bash
+        run: |
+          PREFIX="${{ matrix.lib_prefix }}"
+          EXT="${{ matrix.lib_ext }}"
+          MISSING=0
+          for name in drasi_source_mock drasi_reaction_log drasi_reaction_sse; do
+            FILE="target/debug/plugins/${PREFIX}${name}.${EXT}"
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Expected plugin not found: $FILE"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -eq 1 ]; then
+            echo "Available files in target/debug/plugins/:"
+            ls -la target/debug/plugins/ || true
+            exit 1
+          fi
+          echo "All 3 test plugins verified."
+
+      - name: Run host-sdk FFI integration tests
+        shell: bash
+        run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
