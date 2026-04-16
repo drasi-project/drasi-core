@@ -2,17 +2,10 @@ name: Cross-Platform FFI Tests
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - release/*
-    tags:
-      - v*
   pull_request:
     branches:
       - main
       - feature/*
-      - feature-lib
       - release/*
 
 env:
