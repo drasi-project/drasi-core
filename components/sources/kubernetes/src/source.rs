@@ -138,9 +138,7 @@ impl Source for KubernetesSource {
         }
 
         let source_id = self.base.id.clone();
-        self.base
-            .set_status(ComponentStatus::Starting, None)
-            .await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting Kubernetes source '{source_id}'");
 
         let config = self.config.clone();
