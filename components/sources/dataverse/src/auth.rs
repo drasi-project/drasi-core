@@ -352,7 +352,10 @@ impl Clone for TokenManager {
 
 #[async_trait]
 impl IdentityProvider for TokenManager {
-    async fn get_credentials(&self) -> Result<Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> Result<Credentials> {
         let token = self.get_token().await?;
         Ok(Credentials::Token {
             username: "dataverse".to_string(),

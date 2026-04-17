@@ -556,13 +556,12 @@ impl Source for DataverseSource {
     async fn start(&self) -> Result<()> {
         log::info!("[{}] Starting Dataverse source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Dataverse source".to_string()),
             )
-            .await?;
+            .await;
 
         // Create token manager and client
         let base_url = self.config.environment_url.clone();
@@ -698,16 +697,15 @@ impl Source for DataverseSource {
             *lock = Some(bridge_tx);
         }
 
-        self.base.set_status(ComponentStatus::Running).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some(format!(
                     "Dataverse source running, monitoring {} entities",
                     self.config.entities.len()
                 )),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -715,13 +713,12 @@ impl Source for DataverseSource {
     async fn stop(&self) -> Result<()> {
         log::info!("[{}] Stopping Dataverse source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping Dataverse source".to_string()),
             )
-            .await?;
+            .await;
 
         // Send shutdown signal through the bridge
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
@@ -733,13 +730,12 @@ impl Source for DataverseSource {
             let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Dataverse source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

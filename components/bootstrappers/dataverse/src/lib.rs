@@ -107,7 +107,9 @@ impl DataverseBootstrapProvider {
     /// 3. OAuth2 client credentials flow
     async fn get_token(&self, http_client: &reqwest::Client) -> Result<String> {
         if let Some(ref provider) = self.identity_provider {
-            let creds = provider.get_credentials().await?;
+            let creds = provider
+                .get_credentials(&drasi_lib::identity::CredentialContext::default())
+                .await?;
             return match creds {
                 Credentials::Token { token, .. } => Ok(token),
                 _ => Err(anyhow::anyhow!(
