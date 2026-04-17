@@ -46,7 +46,8 @@ use super::state_store_proxy::FfiStateStoreProxy;
 use super::types::*;
 use super::vtables::*;
 use crate::descriptor::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
 };
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
@@ -2065,9 +2066,15 @@ fn wrap_subscription_response(
         let rt_handle = receiver.runtime_handle.clone();
         rt_handle.spawn(async move {
             let mut rx = receiver.inner.lock().await;
+            // Pin the Notified future so it persists across loop iterations.
+            // Recreating it each iteration is cancel-unsafe: if select! picks
+            // rx.recv() while a notification is pending, dropping the Notified
+            // loses the permit and the shutdown signal is never observed.
+            let shutdown_notified = shutdown.notified();
+            tokio::pin!(shutdown_notified);
             loop {
                 tokio::select! {
-                    _ = shutdown.notified() => {
+                    _ = &mut shutdown_notified => {
                         callback(ctx.as_ptr(), std::ptr::null_mut());
                         break;
                     }
@@ -2129,33 +2136,34 @@ fn wrap_subscription_response(
         }
 
         /// Convert a BootstrapEvent into a heap-allocated FfiBootstrapEvent.
+        ///
+        /// The `source_id` FfiStr borrows from the boxed record (kept alive
+        /// via `opaque`). The `label` and `entity_id` fields use static
+        /// empty strings — the host currently extracts the full event from
+        /// `opaque` and does not read these metadata fields.
         fn wrap_bootstrap_event(record: BootstrapEvent) -> *mut FfiBootstrapEvent {
-            let source_id_owned = record.source_id.clone();
             let timestamp_us = record
                 .timestamp
                 .timestamp_nanos_opt()
                 .map(|n| n / 1000)
                 .unwrap_or(0);
             let sequence = record.sequence;
-            let entity_id_str = source_change_metadata(&record.change)
-                .map(|m| m.reference.element_id.to_string())
-                .unwrap_or_default();
-            let label_str = source_change_metadata(&record.change)
-                .and_then(|m| m.labels.first().map(|l| l.to_string()))
-                .unwrap_or_default();
 
+            // Box the record first so FfiStr can borrow from the
+            // heap-stable data inside it (same pattern as wrap_source_event).
             let boxed = Box::new(record);
+            let source_id = FfiStr::from_str(&boxed.source_id);
             let opaque = Box::into_raw(boxed) as *mut c_void;
             extern "C" fn drop_bootstrap(ptr: *mut c_void) {
                 unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
             }
             Box::into_raw(Box::new(FfiBootstrapEvent {
                 opaque,
-                source_id: FfiStr::from_str(&source_id_owned),
+                source_id,
                 timestamp_us,
                 sequence,
-                label: FfiStr::from_str(&label_str),
-                entity_id: FfiStr::from_str(&entity_id_str),
+                label: FfiStr::from_str(""),
+                entity_id: FfiStr::from_str(""),
                 drop_fn: drop_bootstrap,
             }))
         }
@@ -2172,9 +2180,13 @@ fn wrap_subscription_response(
             let rt_handle = receiver.runtime_handle.clone();
             rt_handle.spawn(async move {
                 let mut rx = receiver.inner.lock().await;
+                // Pin the Notified future for cancel-safe shutdown
+                // (same rationale as change receiver forwarder).
+                let shutdown_notified = shutdown.notified();
+                tokio::pin!(shutdown_notified);
                 loop {
                     tokio::select! {
-                        _ = shutdown.notified() => {
+                        _ = &mut shutdown_notified => {
                             callback(ctx.as_ptr(), std::ptr::null_mut());
                             break;
                         }
@@ -2228,4 +2240,208 @@ fn wrap_subscription_response(
         receiver: Box::into_raw(ffi_rx),
         bootstrap_receiver,
     }))
+}
+
+// ============================================================================
+// Identity provider vtable generation — wraps Box<dyn IdentityProvider> into FFI
+// ============================================================================
+
+/// Build an `IdentityProviderVtable` from a `Box<dyn IdentityProvider>`.
+///
+/// This is used by identity provider plugins to wrap their provider instance
+/// into an FFI-safe vtable that the host can pass to source/reaction plugins.
+pub fn build_identity_provider_vtable_from_boxed(
+    provider: Box<dyn drasi_lib::identity::IdentityProvider>,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::identity::IdentityProviderVtable {
+    use super::identity::{FfiCredentialsResult, IdentityProviderVtable};
+
+    struct IdentityProviderWrapper {
+        inner: std::sync::Arc<dyn drasi_lib::identity::IdentityProvider>,
+        runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+    }
+
+    extern "C" fn get_credentials_fn(
+        state: *const c_void,
+        context_json: *const u8,
+        context_len: usize,
+    ) -> FfiCredentialsResult {
+        let w = unsafe { &*(state as *const IdentityProviderWrapper) };
+        let provider = w.inner.clone();
+
+        // Deserialize context from JSON
+        let context = if context_json.is_null() || context_len == 0 {
+            drasi_lib::identity::CredentialContext::default()
+        } else {
+            let json_bytes = unsafe { std::slice::from_raw_parts(context_json, context_len) };
+            let json_str = std::str::from_utf8(json_bytes).unwrap_or("{}");
+            let properties: std::collections::HashMap<String, String> =
+                match serde_json::from_str(json_str) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("Failed to deserialize credential context JSON: {e}");
+                        std::collections::HashMap::new()
+                    }
+                };
+            drasi_lib::identity::CredentialContext { properties }
+        };
+
+        // Reuse the plugin's existing tokio runtime via dispatch_to_runtime
+        let handle = (w.runtime_handle)().handle().clone();
+        let result =
+            dispatch_to_runtime(
+                &handle,
+                async move { provider.get_credentials(&context).await },
+            );
+
+        match result {
+            Ok(creds) => FfiCredentialsResult::ok(super::identity::credentials_to_ffi(creds)),
+            Err(e) => FfiCredentialsResult::err(e.to_string()),
+        }
+    }
+
+    extern "C" fn clone_fn(state: *const c_void) -> *mut c_void {
+        let w = unsafe { &*(state as *const IdentityProviderWrapper) };
+        let cloned = Box::new(IdentityProviderWrapper {
+            inner: w.inner.clone(),
+            runtime_handle: w.runtime_handle,
+        });
+        Box::into_raw(cloned) as *mut c_void
+    }
+
+    extern "C" fn drop_fn(state: *mut c_void) {
+        unsafe { drop(Box::from_raw(state as *mut IdentityProviderWrapper)) };
+    }
+
+    let wrapper = Box::new(IdentityProviderWrapper {
+        inner: std::sync::Arc::from(provider),
+        runtime_handle: runtime,
+    });
+
+    IdentityProviderVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        get_credentials_fn,
+        clone_fn,
+        drop_fn,
+    }
+}
+
+// ============================================================================
+// Identity provider plugin descriptor vtable generation
+// ============================================================================
+
+struct IdentityProviderPluginWrapper<T: IdentityProviderPluginDescriptor + 'static> {
+    inner: T,
+    cached_kind: String,
+    cached_config_version: String,
+    cached_schema_name: String,
+    runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+}
+
+/// Build an `IdentityProviderPluginVtable` from a type implementing
+/// `IdentityProviderPluginDescriptor`.
+pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor + 'static>(
+    descriptor: T,
+    executor: AsyncExecutorFn,
+    _lifecycle_emitter: LifecycleEmitterFn,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::vtables::IdentityProviderPluginVtable {
+    extern "C" fn kind_fn<T: IdentityProviderPluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const IdentityProviderPluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_kind)
+    }
+
+    extern "C" fn config_version_fn<T: IdentityProviderPluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const IdentityProviderPluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_config_version)
+    }
+
+    extern "C" fn config_schema_json_fn<T: IdentityProviderPluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const IdentityProviderPluginWrapper<T>) };
+        FfiOwnedStr::from_string(w.inner.config_schema_json())
+    }
+
+    extern "C" fn config_schema_name_fn<T: IdentityProviderPluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const IdentityProviderPluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_schema_name)
+    }
+
+    extern "C" fn create_identity_provider_fn<T: IdentityProviderPluginDescriptor + 'static>(
+        state: *mut c_void,
+        config_json: FfiStr,
+    ) -> *mut super::identity::IdentityProviderVtable {
+        let w = unsafe { &*(state as *const IdentityProviderPluginWrapper<T>) };
+        let config_str = unsafe { config_json.to_string() };
+
+        let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!(
+                    "Failed to parse config JSON for identity provider '{}': {e}",
+                    w.cached_kind
+                );
+                return std::ptr::null_mut();
+            }
+        };
+
+        let handle = (w.runtime_handle)().handle().clone();
+        let ptr = SendPtr(state as *const IdentityProviderPluginWrapper<T>);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_identity_provider(&config_value).await
+        });
+
+        match result {
+            Ok(provider) => {
+                let vtable = build_identity_provider_vtable_from_boxed(provider, w.runtime_handle);
+                Box::into_raw(Box::new(vtable))
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to create identity provider '{}': {e}",
+                    w.cached_kind
+                );
+                std::ptr::null_mut()
+            }
+        }
+    }
+
+    extern "C" fn drop_fn<T: IdentityProviderPluginDescriptor + 'static>(state: *mut c_void) {
+        unsafe {
+            drop(Box::from_raw(
+                state as *mut IdentityProviderPluginWrapper<T>,
+            ))
+        };
+    }
+
+    let cached_kind = descriptor.kind().to_string();
+    let cached_config_version = descriptor.config_version().to_string();
+    let cached_schema_name = descriptor.config_schema_name().to_string();
+
+    let wrapper = Box::new(IdentityProviderPluginWrapper {
+        inner: descriptor,
+        cached_kind,
+        cached_config_version,
+        cached_schema_name,
+        runtime_handle: runtime,
+    });
+
+    super::vtables::IdentityProviderPluginVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        executor,
+        kind_fn: kind_fn::<T>,
+        config_version_fn: config_version_fn::<T>,
+        config_schema_json_fn: config_schema_json_fn::<T>,
+        config_schema_name_fn: config_schema_name_fn::<T>,
+        create_identity_provider_fn: create_identity_provider_fn::<T>,
+        drop_fn: drop_fn::<T>,
+    }
 }

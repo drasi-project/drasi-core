@@ -44,6 +44,10 @@ members = [
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
 
+  # Identity Provider Plugins
+  "components/identity/azure",
+  "components/identity/aws",
+
   # Index Plugins
   "components/indexes/rocksdb",
   "components/indexes/garnet",
@@ -98,6 +102,8 @@ drasi-core = { version = "0.4.1", path = "core" }
 drasi-functions-cypher = { version = "0.4.1", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.4.1", path = "functions-gql" }
 drasi-middleware = { version = "0.4.1", path = "middleware" }
+drasi-identity-azure = { version = "0.1.0", path = "components/identity/azure" }
+drasi-identity-aws = { version = "0.1.0", path = "components/identity/aws" }
 drasi-lib = { version = "0.4.2", path = "lib" }
 drasi-ffi-primitives = { version = "0.4.3", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.4.3", path = "components/plugin-sdk" }
