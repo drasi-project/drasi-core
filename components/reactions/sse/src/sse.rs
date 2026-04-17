@@ -228,20 +228,10 @@ impl Reaction for SseReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "sse_path".to_string(),
-            serde_json::Value::String(self.config.sse_path.clone()),
-        );
-        props
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -261,25 +251,25 @@ impl Reaction for SseReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting SSE reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("SSE reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Spawn processing task
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
         let broadcasters = self.broadcasters.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
@@ -295,7 +285,7 @@ impl Reaction for SseReaction {
             super::register_json_helper(&mut handlebars);
 
             loop {
-                if !matches!(*status.read().await, ComponentStatus::Running) {
+                if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     info!("[{reaction_id}] SSE reaction not running, breaking loop");
                     break;
                 }
@@ -590,11 +580,11 @@ impl Reaction for SseReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("SSE reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

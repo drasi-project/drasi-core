@@ -121,10 +121,12 @@ impl MockSource {
 
         let source_name = self.base.id.clone();
         let base_dispatchers = self.base.dispatchers.clone();
-        let status = self.base.status.clone();
+        let status_handle = self.base.status_handle();
 
         let handle = tokio::spawn(async move {
-            *status.write().await = ComponentStatus::Running;
+            status_handle
+                .set_status(ComponentStatus::Running, Some("Mock source running".into()))
+                .await;
 
             while let Some(change) = rx.recv().await {
                 let mut profiling = ProfilingMetadata::new();
@@ -172,35 +174,35 @@ impl Source for MockSource {
 
     async fn start(&self) -> Result<()> {
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting mock source".into()),
             )
-            .await?;
+            .await;
         self.process_events().await?;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping mock source".into()),
             )
-            .await?;
+            .await;
 
         if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
         }
 
         self.base
-            .set_status_with_event(ComponentStatus::Stopped, Some("Mock source stopped".into()))
-            .await?;
+            .set_status(ComponentStatus::Stopped, Some("Mock source stopped".into()))
+            .await;
         Ok(())
     }
 
     async fn status(&self) -> ComponentStatus {
-        self.base.status.read().await.clone()
+        self.base.get_status().await
     }
 
     async fn subscribe(

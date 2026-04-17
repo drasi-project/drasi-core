@@ -23,7 +23,9 @@
 //! - `source_ops`: Source management operations (add, remove, start, stop)
 //! - `query_ops`: Query management operations (create, remove, start, stop)
 //! - `reaction_ops`: Reaction management operations (add, remove, start, stop)
+//! - `graph_ops`: Component graph operations (snapshot, dependencies, impact analysis)
 
+mod graph_ops;
 mod query_ops;
 mod reaction_ops;
 mod source_ops;

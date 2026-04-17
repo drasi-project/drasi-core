@@ -18,9 +18,10 @@
 //! starting, and stopping reactions.
 
 use futures::stream::Stream;
+use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
-use crate::component_ops::map_state_error;
+use crate::component_ops::map_component_error;
 use crate::config::ReactionRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
@@ -46,23 +47,67 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_reaction(&self, reaction: impl Reaction + 'static) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.add_reaction_with_metadata(reaction, HashMap::new())
+            .await
+    }
+
+    /// Add a reaction to a running server with additional metadata.
+    ///
+    /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub async fn add_reaction_with_metadata(
+        &self,
+        reaction: impl Reaction + 'static,
+        extra_metadata: HashMap<String, String>,
+    ) -> Result<()> {
+        self.state_guard.require_initialized()?;
 
         // Capture auto_start and id before transferring ownership
         let should_auto_start = reaction.auto_start();
         let reaction_id = reaction.id().to_string();
+        let reaction_type = reaction.type_name().to_string();
+        let query_ids = reaction.query_ids();
 
-        self.reaction_manager
-            .add_reaction(reaction)
-            .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add reaction: {e}")))?;
+        // Step 1: Register in the component graph (validates queries exist, creates node + edges)
+        {
+            let mut graph = self.component_graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("kind".to_string(), reaction_type);
+            metadata.insert("autoStart".to_string(), should_auto_start.to_string());
+            metadata.extend(extra_metadata);
+            graph
+                .register_reaction(&reaction_id, metadata, &query_ids)
+                .map_err(|e| {
+                    DrasiError::operation_failed(
+                        "reaction",
+                        &reaction_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
+                })?;
+        }
 
-        // If server is running and reaction wants auto-start, start it
+        // Step 2: Provision runtime (initialize + store)
+        if let Err(e) = self.reaction_manager.provision_reaction(reaction).await {
+            // Compensating rollback: remove from graph on runtime failure
+            let mut graph = self.component_graph.write().await;
+            let _ = graph.deregister(&reaction_id);
+            return Err(DrasiError::operation_failed(
+                "reaction",
+                &reaction_id,
+                "add",
+                format!("Failed to provision: {e}"),
+            ));
+        }
+
+        // Step 3: Auto-start if needed
         if self.is_running().await && should_auto_start {
             self.reaction_manager
-                .start_reaction(reaction_id)
+                .start_reaction(reaction_id.clone())
                 .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to start reaction: {e}")))?;
+                .map_err(|e| {
+                    DrasiError::operation_failed("reaction", &reaction_id, "start", format!("{e}"))
+                })?;
         }
 
         Ok(())
@@ -81,42 +126,68 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn remove_reaction(&self, id: &str, cleanup: bool) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
-        // Stop if running
-        let status = self
-            .reaction_manager
-            .get_reaction_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("reaction", id))?;
-
-        if matches!(status, ComponentStatus::Running) {
-            self.reaction_manager
-                .stop_reaction(id.to_string())
-                .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop reaction: {e}")))?;
+        // Step 1: Validate no dependents
+        {
+            let graph = self.component_graph.read().await;
+            if let Err(dependent_ids) = graph.can_remove(id) {
+                return Err(DrasiError::operation_failed(
+                    "reaction",
+                    id,
+                    "remove",
+                    format!("Depended on by: {}", dependent_ids.join(", ")),
+                ));
+            }
         }
 
-        // Delete the reaction
+        // Step 2: Teardown runtime (stop, deprovision, remove from runtime map)
         self.reaction_manager
-            .delete_reaction(id.to_string(), cleanup)
+            .teardown_reaction(id.to_string(), cleanup)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete reaction: {e}")))?;
+            .map_err(|e| {
+                DrasiError::operation_failed(
+                    "reaction",
+                    id,
+                    "remove",
+                    format!("Teardown failed: {e}"),
+                )
+            })?;
+
+        // Step 3: Deregister from graph (remove node + edges, emit events)
+        // If this fails after teardown, the runtime is already gone. Rather than
+        // returning an error (which would leave an orphaned graph node with no
+        // runtime backing), set the component to Error state and log the failure.
+        {
+            let mut graph = self.component_graph.write().await;
+            if let Err(e) = graph.deregister(id) {
+                log::error!(
+                    "Reaction '{id}' runtime was torn down but graph deregister failed: {e}. \
+                     Setting component to Error state."
+                );
+                let _ = graph.validate_and_transition(
+                    id,
+                    ComponentStatus::Error,
+                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
+                );
+            }
+        }
 
         Ok(())
     }
 
     /// Update a reaction by replacing it with a new instance.
     ///
-    /// This stops the old reaction, replaces it with the new one, and restarts
-    /// if it was running before. Log and event history are preserved.
+    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
+    /// and event history. The old reaction is stopped, the runtime is swapped, and the
+    /// reaction is restarted if it was running.
     ///
     /// The new reaction must have the same ID as the existing one.
     ///
     /// # Errors
     ///
     /// Returns an error if the reaction doesn't exist, if the IDs don't match,
-    /// or if the new reaction cannot be started.
+    /// if referenced queries don't exist, or if provisioning fails.
     ///
     /// # Example
     /// ```no_run
@@ -132,17 +203,28 @@ impl DrasiLib {
         id: &str,
         new_reaction: impl crate::reactions::Reaction + 'static,
     ) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
+        // Validate the new reaction has the same ID
+        if new_reaction.id() != id {
+            return Err(DrasiError::operation_failed(
+                "reaction",
+                id,
+                "update",
+                format!(
+                    "New reaction ID '{}' does not match existing reaction ID '{}'",
+                    new_reaction.id(),
+                    id
+                ),
+            ));
+        }
+
+        // Delegate to ReactionManager which uses the Reconfiguring transition,
+        // preserving the graph node, edges, and event history.
         self.reaction_manager
             .update_reaction(id.to_string(), new_reaction)
             .await
-            .map_err(|e| match e.downcast::<DrasiError>() {
-                Ok(drasi_err) => drasi_err,
-                Err(e) => DrasiError::provisioning(format!("Failed to update reaction: {e}")),
-            })?;
-
-        Ok(())
+            .map_err(|e| DrasiError::operation_failed("reaction", id, "update", e.to_string()))
     }
 
     /// Start a stopped reaction
@@ -159,13 +241,14 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start_reaction(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Start the reaction (QueryProvider was injected when reaction was added)
-        map_state_error(
+        map_component_error(
             self.reaction_manager.start_reaction(id.to_string()).await,
             "reaction",
             id,
+            "start",
         )
     }
 
@@ -180,13 +263,14 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop_reaction(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Stop the reaction (subscriptions managed by reaction itself)
-        map_state_error(
+        map_component_error(
             self.reaction_manager.stop_reaction(id.to_string()).await,
             "reaction",
             id,
+            "stop",
         )?;
 
         Ok(())
@@ -351,5 +435,312 @@ impl DrasiLib {
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
         self.inspection.subscribe_reaction_events(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::channels::{ComponentStatus, QueryResult};
+    use crate::error::DrasiError;
+    use crate::sources::tests::TestMockSource;
+    use crate::{DrasiLib, Query};
+    use anyhow::Result as AnyhowResult;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    // ========================================================================
+    // Mock reaction for testing
+    // ========================================================================
+
+    struct TestMockReaction {
+        id: String,
+        queries: Vec<String>,
+        auto_start: bool,
+        status_handle: crate::component_graph::ComponentStatusHandle,
+    }
+
+    impl TestMockReaction {
+        fn new(id: String, queries: Vec<String>) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+            Self {
+                id,
+                queries,
+                auto_start: true,
+                status_handle,
+            }
+        }
+
+        fn with_auto_start(id: String, queries: Vec<String>, auto_start: bool) -> Self {
+            let status_handle = crate::component_graph::ComponentStatusHandle::new(&id);
+            Self {
+                id,
+                queries,
+                auto_start,
+                status_handle,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for TestMockReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "test-log"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+
+        fn auto_start(&self) -> bool {
+            self.auto_start
+        }
+
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
+
+        async fn start(&self) -> AnyhowResult<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Starting,
+                    Some("Starting reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Running,
+                    Some("Reaction started".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> AnyhowResult<()> {
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopping,
+                    Some("Stopping reaction".to_string()),
+                )
+                .await;
+            self.status_handle
+                .set_status(
+                    ComponentStatus::Stopped,
+                    Some("Reaction stopped".to_string()),
+                )
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+
+        async fn enqueue_query_result(&self, _result: QueryResult) -> AnyhowResult<()> {
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    /// Build a started DrasiLib with a mock source and one query.
+    async fn build_core_with_query() -> DrasiLib {
+        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("test-source")
+                    .auto_start(false)
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    // ========================================================================
+    // add_reaction
+    // ========================================================================
+
+    #[tokio::test]
+    async fn add_reaction_happy_path() {
+        let core = build_core_with_query().await;
+
+        let reaction = TestMockReaction::with_auto_start("r1".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(reactions.iter().any(|(id, _)| id == "r1"));
+    }
+
+    #[tokio::test]
+    async fn add_reaction_duplicate_returns_error() {
+        let core = build_core_with_query().await;
+
+        let r1 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
+        core.add_reaction(r1).await.unwrap();
+
+        let r2 = TestMockReaction::with_auto_start("r-dup".into(), vec!["q1".into()], false);
+        let result = core.add_reaction(r2).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::OperationFailed { .. }),
+            "expected OperationFailed, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // remove_reaction
+    // ========================================================================
+
+    #[tokio::test]
+    async fn remove_reaction_happy_path() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-remove".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        core.remove_reaction("r-remove", false).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(!reactions.iter().any(|(id, _)| id == "r-remove"));
+    }
+
+    #[tokio::test]
+    async fn remove_reaction_nonexistent_returns_error() {
+        let core = build_core_with_query().await;
+
+        let result = core.remove_reaction("does-not-exist", false).await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // list_reactions
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_reactions_empty_then_populated() {
+        let core = build_core_with_query().await;
+
+        // Initially no reactions
+        let reactions = core.list_reactions().await.unwrap();
+        assert!(reactions.is_empty(), "expected no reactions initially");
+
+        // Add two reactions
+        let r1 = TestMockReaction::with_auto_start("r-list-1".into(), vec!["q1".into()], false);
+        let r2 = TestMockReaction::with_auto_start("r-list-2".into(), vec!["q1".into()], false);
+        core.add_reaction(r1).await.unwrap();
+        core.add_reaction(r2).await.unwrap();
+
+        let reactions = core.list_reactions().await.unwrap();
+        let ids: Vec<&str> = reactions.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"r-list-1"));
+        assert!(ids.contains(&"r-list-2"));
+        assert_eq!(reactions.len(), 2);
+    }
+
+    // ========================================================================
+    // get_reaction_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_reaction_status_returns_correct_status() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-status".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let status = core.get_reaction_status("r-status").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_reaction_status_nonexistent_returns_error() {
+        let core = build_core_with_query().await;
+
+        let result = core.get_reaction_status("ghost-reaction").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // start_reaction / stop_reaction lifecycle
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_and_stop_reaction_lifecycle() {
+        let core = build_core_with_query().await;
+
+        let reaction =
+            TestMockReaction::with_auto_start("r-lifecycle".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        // Subscribe to events before triggering actions
+        let mut event_rx = core.subscribe_all_component_events();
+
+        // Start the reaction
+        core.start_reaction("r-lifecycle").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r-lifecycle",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let status = core.get_reaction_status("r-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        // Stop the reaction
+        core.stop_reaction("r-lifecycle").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r-lifecycle",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let status = core.get_reaction_status("r-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // get_reaction_info
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_reaction_info_returns_correct_fields() {
+        let core = build_core_with_query().await;
+
+        let reaction = TestMockReaction::with_auto_start("r-info".into(), vec!["q1".into()], false);
+        core.add_reaction(reaction).await.unwrap();
+
+        let info = core.get_reaction_info("r-info").await.unwrap();
+        assert_eq!(info.id, "r-info");
+        assert_eq!(info.reaction_type, "test-log");
+        assert_eq!(info.status, ComponentStatus::Stopped);
+        assert_eq!(info.queries, vec!["q1".to_string()]);
     }
 }
