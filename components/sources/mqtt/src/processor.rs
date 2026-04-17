@@ -117,7 +117,8 @@ impl MqttProcessor {
 
             for (idx, event) in batch.into_iter().enumerate() {
                 debug!(
-                    "[{source_id}] Batch #{total_batches}, dispatching event {{idx + 1}}/{batch_size}"
+                    "[{source_id}] Batch #{total_batches}, dispatching event {}/{batch_size}",
+                    idx + 1
                 );
 
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
@@ -135,12 +136,12 @@ impl MqttProcessor {
                         .await
                 {
                     error!(
-                        "[{source_id}] Batch #{total_batches}, failed to dispatch event {{idx + 1}}/{batch_size} (no subscribers): {e}"
+                        "[{source_id}] Batch #{total_batches}, failed to dispatch event {}/{batch_size} (no subscribers): {e}", idx + 1
                     );
                     failed_count += 1;
                 } else {
                     debug!(
-                        "[{source_id}] Batch #{total_batches}, successfully dispatched event {{idx + 1}}/{batch_size}"
+                        "[{source_id}] Batch #{total_batches}, successfully dispatched event {}/{batch_size}", idx + 1
                     );
                     sent_count += 1;
                 }
@@ -204,12 +205,13 @@ impl MqttProcessor {
         let source_id = source_id.to_string();
         for (idx, change) in source_changes.into_iter().enumerate() {
             let timestamp = match change {
-                MqttSourceChange::Insert { timestamp, .. }
-                | MqttSourceChange::Update { timestamp, .. }
-                | MqttSourceChange::Delete { timestamp, .. } => timestamp.unwrap_or_else(|| {
+                MqttSourceChange::Update { timestamp, .. } => timestamp.unwrap_or_else(|| {
                     let now = std::time::SystemTime::now();
                     now.duration_since(std::time::UNIX_EPOCH)
-                        .expect("System time before UNIX EPOCH!")
+                        .unwrap_or_else(|e| {
+                            error!("System time is before UNIX EPOCH: {e}");
+                            std::time::Duration::from_millis(0)
+                        })
                         .as_millis() as u64
                 }),
             };

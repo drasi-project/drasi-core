@@ -46,7 +46,7 @@ pub use schema::{MqttElement, MqttSourceChange};
 ///
 /// Provides a fluent API for constructing MQTT sources with sensible defaults
 /// and adaptive batching settings. The builder takes the source ID at construction
-/// and returns a fully constructed `MqttSource` from `build()`.
+/// and returns a fully constructed `MqttSource` from async `build()`.
 ///
 /// # Example
 ///
@@ -54,13 +54,13 @@ pub use schema::{MqttElement, MqttSourceChange};
 /// use drasi_source_mqtt::MqttSource;
 ///
 /// let source = MqttSource::builder("my-source")
-///     .with_host("0.0.0.0")
-///     .with_port(8080)
+///     .with_host("localhost")
+///     .with_port(1883)
 ///     .with_topic("my/mqtt/topic")
-///     .with_qos(MqttQoS::ONE)
+///     .with_topic_config("my/other/topic", drasi_source_mqtt::MqttQoS::ONE)
 ///     .with_adaptive_enabled(true)
 ///     .with_bootstrap_provider(my_provider)
-///     .build()?;
+///     .build().await?;
 /// ```
 pub struct MqttSourceBuilder {
     id: String,
@@ -229,7 +229,6 @@ impl MqttSourceBuilder {
         self
     }
 
-    /// Set the identity provider for the source.
     pub fn with_identity_provider(
         mut self,
         identity_provider: impl drasi_lib::identity::IdentityProvider + 'static,
@@ -638,99 +637,6 @@ mod tests {
         use crate::schema::{MqttElement, MqttSourceChange};
 
         use super::*;
-
-        #[test]
-        fn test_convert_node_insert() {
-            let mut props = serde_json::Map::new();
-            props.insert(
-                "name".to_string(),
-                serde_json::Value::String("Alice".to_string()),
-            );
-            props.insert("age".to_string(), serde_json::Value::Number(30.into()));
-
-            let mqtt_change = MqttSourceChange::Insert {
-                element: MqttElement::Node {
-                    id: "user-1".to_string(),
-                    labels: vec!["User".to_string()],
-                    properties: props,
-                },
-                timestamp: Some(12345678900),
-            };
-
-            let result = convert_mqtt_to_source_change(&mqtt_change, "test-source");
-            assert!(result.is_ok());
-
-            match result.unwrap() {
-                drasi_core::models::SourceChange::Insert { element } => match element {
-                    drasi_core::models::Element::Node {
-                        metadata,
-                        properties,
-                    } => {
-                        assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
-                        assert_eq!(metadata.labels.len(), 1);
-                        assert_eq!(metadata.effective_from, 12345678900);
-                        assert!(properties.get("name").is_some());
-                        assert!(properties.get("age").is_some());
-                    }
-                    _ => panic!("Expected Node element"),
-                },
-                _ => panic!("Expected Insert operation"),
-            }
-        }
-
-        #[test]
-        fn test_convert_relation_insert() {
-            let mqtt_change = MqttSourceChange::Insert {
-                element: MqttElement::Relation {
-                    id: "follows-1".to_string(),
-                    labels: vec!["FOLLOWS".to_string()],
-                    from: "user-1".to_string(),
-                    to: "user-2".to_string(),
-                    properties: serde_json::Map::new(),
-                },
-                timestamp: None,
-            };
-
-            let result = convert_mqtt_to_source_change(&mqtt_change, "test-source");
-            assert!(result.is_ok());
-
-            match result.unwrap() {
-                drasi_core::models::SourceChange::Insert { element } => match element {
-                    drasi_core::models::Element::Relation {
-                        metadata,
-                        out_node,
-                        in_node,
-                        ..
-                    } => {
-                        assert_eq!(metadata.reference.element_id.as_ref(), "follows-1");
-                        assert_eq!(out_node.element_id.as_ref(), "user-1");
-                        assert_eq!(in_node.element_id.as_ref(), "user-2");
-                    }
-                    _ => panic!("Expected Relation element"),
-                },
-                _ => panic!("Expected Insert operation"),
-            }
-        }
-
-        #[test]
-        fn test_convert_delete() {
-            let mqtt_change = MqttSourceChange::Delete {
-                id: "user-1".to_string(),
-                labels: Some(vec!["User".to_string()]),
-                timestamp: Some(9999999999),
-            };
-
-            let result = convert_mqtt_to_source_change(&mqtt_change, "test-source");
-            assert!(result.is_ok());
-
-            match result.unwrap() {
-                drasi_core::models::SourceChange::Delete { metadata } => {
-                    assert_eq!(metadata.reference.element_id.as_ref(), "user-1");
-                    assert_eq!(metadata.labels.len(), 1);
-                }
-                _ => panic!("Expected Delete operation"),
-            }
-        }
 
         #[test]
         fn test_convert_update() {
