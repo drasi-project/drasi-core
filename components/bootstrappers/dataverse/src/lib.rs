@@ -115,11 +115,9 @@ impl DataverseBootstrapProvider {
                     format!("{}://{}/.default", u.scheme(), host)
                 })
                 .unwrap_or_else(|_| format!("{}/.default", self.config.environment_url));
-            let context = drasi_lib::identity::CredentialContext::new()
-                .with_property("scope", &scope);
-            let creds = provider
-                .get_credentials(&context)
-                .await?;
+            let context =
+                drasi_lib::identity::CredentialContext::new().with_property("scope", &scope);
+            let creds = provider.get_credentials(&context).await?;
             return match creds {
                 Credentials::Token { token, .. } => Ok(token),
                 _ => Err(anyhow::anyhow!(

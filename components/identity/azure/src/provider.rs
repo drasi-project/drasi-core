@@ -111,9 +111,7 @@ impl IdentityProvider for AzureIdentityProvider {
         // Use scope from context if provided, otherwise fall back to the default scope.
         // This allows components (e.g., Dataverse) to request resource-specific tokens
         // without requiring the user to configure the scope on the identity provider.
-        let scope = context
-            .get("scope")
-            .unwrap_or(&self.scope);
+        let scope = context.get("scope").unwrap_or(&self.scope);
 
         let token_response = self
             .credential

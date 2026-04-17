@@ -71,12 +71,9 @@ impl DataverseClient {
 
     /// Get a bearer token from the identity provider.
     async fn get_token(&self) -> Result<String> {
-        let context = drasi_lib::identity::CredentialContext::new()
-            .with_property("scope", &self.scope);
-        let creds = self
-            .identity_provider
-            .get_credentials(&context)
-            .await?;
+        let context =
+            drasi_lib::identity::CredentialContext::new().with_property("scope", &self.scope);
+        let creds = self.identity_provider.get_credentials(&context).await?;
         match creds {
             Credentials::Token { token, .. } => Ok(token),
             _ => {
