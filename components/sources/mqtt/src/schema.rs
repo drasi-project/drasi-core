@@ -15,6 +15,7 @@
 use anyhow::Result;
 use core::time;
 use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+use log::error;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::vec::Vec;
@@ -25,26 +26,11 @@ use std::vec::Vec;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "lowercase")]
 pub enum MqttSourceChange {
-    /// Insert a new element
-    #[serde(rename = "insert")]
-    Insert {
-        element: MqttElement,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-    },
+    // Currently we only support updates.
     /// Update an existing element
     #[serde(rename = "update")]
     Update {
         element: MqttElement,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timestamp: Option<u64>,
-    },
-    /// Delete an element
-    #[serde(rename = "delete")]
-    Delete {
-        id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        labels: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
     },
@@ -77,19 +63,6 @@ pub fn convert_mqtt_to_source_change(
     source_id: &str,
 ) -> Result<drasi_core::models::SourceChange> {
     match mqtt_change {
-        MqttSourceChange::Insert { element, timestamp } => {
-            let element = create_element_from_mqtt(
-                element,
-                source_id,
-                timestamp.unwrap_or_else(|| {
-                    let now = std::time::SystemTime::now(); // not reachable. timestamp should always be provided for inserts, but we default to current time just in case
-                    now.duration_since(std::time::UNIX_EPOCH)
-                        .expect("System time before UNIX EPOCH!")
-                        .as_millis() as u64
-                }),
-            )?;
-            Ok(SourceChange::Insert { element })
-        }
         MqttSourceChange::Update { element, timestamp } => {
             let element = create_element_from_mqtt(
                 element,
@@ -97,37 +70,16 @@ pub fn convert_mqtt_to_source_change(
                 timestamp.unwrap_or_else(|| {
                     let now = std::time::SystemTime::now(); // not reachable. timestamp should always be provided for updates, but we default to current time just in case
                     now.duration_since(std::time::UNIX_EPOCH)
-                        .expect("System time before UNIX EPOCH!")
+                        .unwrap_or_else(|e| {
+                            error!("System time is before UNIX EPOCH: {e}");
+                            std::time::Duration::from_millis(0)
+                        })
                         .as_millis() as u64
                 }),
             )?;
             Ok(SourceChange::Update { element })
         }
-        MqttSourceChange::Delete {
-            id,
-            labels,
-            timestamp,
-        } => {
-            let metadata = ElementMetadata {
-                reference: ElementReference {
-                    source_id: Arc::from(source_id),
-                    element_id: Arc::from(id.as_str()),
-                },
-                labels: Arc::from(
-                    labels
-                        .as_ref()
-                        .map(|l| l.iter().map(|s| Arc::from(s.as_str())).collect::<Vec<_>>())
-                        .unwrap_or_default(),
-                ),
-                effective_from: timestamp.unwrap_or_else(|| {
-                    let now = std::time::SystemTime::now(); // not reachable. timestamp should always be provided for deletes, but we default to current time just in case
-                    now.duration_since(std::time::UNIX_EPOCH)
-                        .expect("System time before UNIX EPOCH!")
-                        .as_millis() as u64
-                }),
-            };
-            Ok(SourceChange::Delete { metadata })
-        }
+        _ => Err(anyhow::anyhow!("Unsupported MQTT source change operation")),
     }
 }
 
@@ -194,12 +146,14 @@ fn create_element_from_mqtt(
                 metadata,
                 properties: prop_map,
                 in_node: ElementReference {
-                    source_id: Arc::from(source_id),
-                    element_id: Arc::from(to.as_str()),
-                },
-                out_node: ElementReference {
+                    // start node
                     source_id: Arc::from(source_id),
                     element_id: Arc::from(from.as_str()),
+                },
+                out_node: ElementReference {
+                    // end node
+                    source_id: Arc::from(source_id),
+                    element_id: Arc::from(to.as_str()),
                 },
             })
         }
@@ -261,59 +215,10 @@ mod tests {
     fn sample_relation(properties: serde_json::Map<String, serde_json::Value>) -> MqttElement {
         MqttElement::Relation {
             id: "rel-1".to_string(),
-            labels: vec!["CONNECTED_TO".to_string()],
+            labels: vec!["DEVICE_TO_ROOM".to_string()],
             from: "device-1".to_string(),
             to: "room-7".to_string(),
             properties,
-        }
-    }
-
-    #[test]
-    fn convert_insert_node_preserves_metadata_and_nested_properties() {
-        let mut properties = serde_json::Map::new();
-        properties.insert("enabled".to_string(), json!(true));
-        properties.insert("count".to_string(), json!(3));
-        properties.insert("ratio".to_string(), json!(1.5));
-        properties.insert("tags".to_string(), json!(["a", 2, false]));
-        properties.insert(
-            "details".to_string(),
-            json!({ "site": "north", "active": true }),
-        );
-
-        let mqtt_change = MqttSourceChange::Insert {
-            element: sample_node(properties),
-            timestamp: Some(1_717_171_717_000),
-        };
-
-        let converted = convert_mqtt_to_source_change(&mqtt_change, "test-source")
-            .expect("insert conversion should succeed");
-
-        match converted {
-            SourceChange::Insert { element } => match element {
-                Element::Node {
-                    metadata,
-                    properties,
-                } => {
-                    assert_eq!(metadata.reference.source_id.as_ref(), "test-source");
-                    assert_eq!(metadata.reference.element_id.as_ref(), "device-1");
-                    assert_eq!(metadata.labels.len(), 2);
-                    assert_eq!(metadata.effective_from, 1_717_171_717_000);
-                    assert_eq!(properties.get("enabled"), Some(&ElementValue::Bool(true)));
-                    assert_eq!(properties.get("count"), Some(&ElementValue::Integer(3)));
-                    assert_eq!(
-                        properties.get("ratio"),
-                        Some(&ElementValue::Float(OrderedFloat(1.5)))
-                    );
-                    assert!(
-                        matches!(properties.get("tags"), Some(ElementValue::List(values)) if values.len() == 3)
-                    );
-                    assert!(
-                        matches!(properties.get("details"), Some(ElementValue::Object(map)) if map.get("site") == Some(&ElementValue::String(Arc::from("north"))))
-                    );
-                }
-                _ => panic!("expected node element"),
-            },
-            _ => panic!("expected insert change"),
         }
     }
 
@@ -340,66 +245,13 @@ mod tests {
                 } => {
                     assert_eq!(metadata.reference.element_id.as_ref(), "rel-1");
                     assert_eq!(metadata.effective_from, 99);
-                    assert_eq!(out_node.element_id.as_ref(), "device-1");
-                    assert_eq!(in_node.element_id.as_ref(), "room-7");
+                    assert_eq!(out_node.element_id.as_ref(), "room-7");
+                    assert_eq!(in_node.element_id.as_ref(), "device-1");
                     assert_eq!(properties.get("weight"), Some(&ElementValue::Integer(42)));
                 }
                 _ => panic!("expected relation element"),
             },
             _ => panic!("expected update change"),
-        }
-    }
-
-    #[test]
-    fn convert_delete_preserves_labels_and_timestamp() {
-        let mqtt_change = MqttSourceChange::Delete {
-            id: "device-9".to_string(),
-            labels: Some(vec!["Device".to_string(), "Offline".to_string()]),
-            timestamp: Some(555),
-        };
-
-        let converted = convert_mqtt_to_source_change(&mqtt_change, "test-source")
-            .expect("delete conversion should succeed");
-
-        match converted {
-            SourceChange::Delete { metadata } => {
-                assert_eq!(metadata.reference.source_id.as_ref(), "test-source");
-                assert_eq!(metadata.reference.element_id.as_ref(), "device-9");
-                assert_eq!(metadata.labels.len(), 2);
-                assert_eq!(metadata.effective_from, 555);
-            }
-            _ => panic!("expected delete change"),
-        }
-    }
-
-    #[test]
-    fn convert_delete_without_timestamp_uses_current_time() {
-        let before = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_millis() as u64;
-
-        let mqtt_change = MqttSourceChange::Delete {
-            id: "device-10".to_string(),
-            labels: None,
-            timestamp: None,
-        };
-
-        let converted = convert_mqtt_to_source_change(&mqtt_change, "test-source")
-            .expect("delete conversion should succeed");
-
-        let after = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_millis() as u64;
-
-        match converted {
-            SourceChange::Delete { metadata } => {
-                assert!(metadata.effective_from >= before);
-                assert!(metadata.effective_from <= after);
-                assert!(metadata.labels.is_empty());
-            }
-            _ => panic!("expected delete change"),
         }
     }
 
@@ -421,8 +273,8 @@ mod tests {
                 assert_eq!(metadata.reference.source_id.as_ref(), "src-a");
                 assert_eq!(metadata.effective_from, 123);
                 assert_eq!(out_node.source_id.as_ref(), "src-a");
-                assert_eq!(out_node.element_id.as_ref(), "device-1");
-                assert_eq!(in_node.element_id.as_ref(), "room-7");
+                assert_eq!(out_node.element_id.as_ref(), "room-7");
+                assert_eq!(in_node.element_id.as_ref(), "device-1");
                 assert_eq!(properties.get("online"), Some(&ElementValue::Bool(false)));
             }
             _ => panic!("expected relation element"),

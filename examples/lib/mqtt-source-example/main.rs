@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     // Add MqttSource configuration
     let source_config_yaml = r#"
-broker_addr: "localhost"
+host: "localhost"
 port: 8883
 topics:
   - topic: "sensors/temperature"
@@ -48,24 +48,28 @@ topic_mappings:
     properties:
       mode: payload_as_field
       field_name: "reading"
+      inject_id: true
       inject:
-      - type: "{room}"
+      - room: "{room}"
+      - floor: "{floor}"
+      - device: "{device}"
     nodes:
       - label: "FLOOR"
         id: "{floor}"
       - label: "ROOM"
         id: "{room}"
     relations:
-      - label: "CONTAINS"
-        from: "FLOOR"
+      - label: "LOCATED_IN_FLOOR"
+        from: "ROOM"
+        to: "FLOOR"
+        id: "{room}_located_in_{floor}"
+      - label: "LOCATED_IN_ROOM"
+        from: "DEVICE"
         to: "ROOM"
-        id: "{floor}_contains_{room}"
+        id: "{device}_located_in_{room}"
 event_channel_capacity: 20
-adaptive_max_batch_size: 10000
-adaptive_min_batch_size: 30
-adaptive_max_wait_ms: 1000000
-adaptive_min_wait_ms: 100000
-adaptive_enabled: true
+keep_alive: 5
+conn_timeout: 5
 transport:
     mode: tls
     config:
@@ -77,22 +81,35 @@ transport:
     let source_config: MqttSourceConfig = serde_yaml::from_str(source_config_yaml)?;
 
     // Build MqttSource with the configuration
-    let mqtt_source = MqttSource::builder("mqtt-source")
+    let mqtt_source = match MqttSource::builder("mqtt-source")
         .with_config(source_config)
         .with_identity_provider(PasswordIdentityProvider::new(
             "drasi".to_string(),
             "drasi".to_string(),
         ))
         .build()
-        .await?;
+        .await
+    {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("Failed to build MQTT source: {e}");
+            return Err(e);
+        }
+    };
 
     // Define the query to read all device readings
-    let all_readings_query = Query::cypher("all-readings")
+    let all_readings_query = Query::cypher("floor_readings")
         .query(
             r#"
-            MATCH (rd:DEVICE)
-            RETURN rd.type AS type,
-                   rd.reading as val
+            MATCH (rd:DEVICE)-[:LOCATED_IN_ROOM]->(r:ROOM)-[:LOCATED_IN_FLOOR]->(f:FLOOR)
+            WHERE rd.id = 'r1:d2' AND r.id = 'r1' AND f.id = 'f2'
+            RETURN rd.reading as val,
+                   rd.room as room,
+                   rd.floor as floor,
+                   rd.device as device,
+                   rd.id as id,
+                   r.id as room_id,
+                   f.id as floor_id
         "#,
         )
         .from_source("mqtt-source")
@@ -103,23 +120,23 @@ transport:
     // Define a log reaction to print query results to console
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            template: "[{{query_name}}] + {{after.type}}: ${{after.val}}".to_string(),
+            template: "[{{query_name}}] + {{after.device}}: ${{after.val}} (Room: {{after.room}}, Floor: {{after.floor}}, Device: {{after.device}}, ID: {{after.id}}, Room ID: {{after.room_id}}, Floor ID: {{after.floor_id}})".to_string(),
             ..Default::default()
         }),
         updated: Some(TemplateSpec {
-            template: "[{{query_name}}] ~ {{after.type}}: ${{before.val}} -> ${{after.val}}"
+            template: "[{{query_name}}] ~ {{after.device}}: ${{before.val}} -> ${{after.val}} (Room: {{after.room}}, Floor: {{after.floor}}, Device: {{after.device}}, ID: {{after.id}}, Room ID: {{after.room_id}}, Floor ID: {{after.floor_id}})"
                 .to_string(),
             ..Default::default()
         }),
         deleted: Some(TemplateSpec {
-            template: "[{{query_name}}] - {{before.type}} removed".to_string(),
+            template: "[{{query_name}}] - {{before.device}} removed".to_string(),
             ..Default::default()
         }),
     };
 
     // Build the log reaction
     let log_reaction = LogReaction::builder("console-logger")
-        .from_query("all-readings")
+        .from_query("floor_readings")
         .with_default_template(default_template)
         .build()?;
 
