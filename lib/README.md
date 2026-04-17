@@ -33,7 +33,101 @@ drasi-lib = "0.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
-Minimal example:
+**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
+
+## Identity Providers
+
+DrasiLib includes a trait-based identity provider abstraction for authenticating with databases and external services. The core trait (`IdentityProvider`) and `PasswordIdentityProvider` are built into `drasi-lib`. Cloud-specific providers are available as separate crates.
+
+### Built-in: Password Authentication
+
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+
+let identity = PasswordIdentityProvider::new("myuser", "mypassword");
+```
+
+### Azure AD Authentication
+
+Add `drasi-identity-azure` to your dependencies:
+
+```toml
+[dependencies]
+drasi-identity-azure = "0.1"
+```
+
+```rust
+use drasi_identity_azure::AzureIdentityProvider;
+
+// System-assigned managed identity
+let identity = AzureIdentityProvider::new("user@tenant.onmicrosoft.com")?;
+
+// User-assigned managed identity
+let identity = AzureIdentityProvider::with_managed_identity(
+    "user@tenant.onmicrosoft.com",
+    "03bbedd2-cce5-45ab-9414-1c1cb82361f0",
+)?;
+
+// Workload identity (AKS)
+let identity = AzureIdentityProvider::with_workload_identity("user@tenant.onmicrosoft.com")?;
+
+// Developer tools (local development)
+let identity = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+```
+
+### AWS IAM Authentication
+
+Add `drasi-identity-aws` to your dependencies:
+
+```toml
+[dependencies]
+drasi-identity-aws = "0.1"
+```
+
+```rust
+use drasi_identity_aws::AwsIdentityProvider;
+
+// Region from environment
+let identity = AwsIdentityProvider::new("mydbuser").await?;
+
+// Explicit region
+let identity = AwsIdentityProvider::with_region("mydbuser", "us-west-2").await?;
+
+// Assumed role
+let identity = AwsIdentityProvider::with_assumed_role(
+    "mydbuser",
+    "arn:aws:iam::123456789012:role/my-role", None
+).await?;
+```
+
+### Using Identity Providers with Reactions
+
+All identity providers implement the `IdentityProvider` trait and can be passed to any reaction or source that supports it:
+
+```rust
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("mydb.postgres.database.azure.com")
+    .with_database("mydb")
+    .with_identity_provider(identity)
+    .build()
+    .await?;
+```
+
+---
+
+## Initialization Methods
+
+DrasiLib can be initialized in two ways:
+1. **Builder Pattern** (Recommended) - Fluent API for programmatic configuration
+2. **Config Struct** - Direct configuration for YAML/JSON loading scenarios
+
+---
+
+## Method 1: Builder Pattern (Recommended)
+
+The builder provides a fluent interface for configuring sources, queries, and reactions.
+
+### Basic Example
 
 ```rust
 use drasi_lib::{DrasiLib, Query};
