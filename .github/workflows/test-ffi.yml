@@ -112,4 +112,6 @@ jobs:
 
       - name: Run host-sdk FFI integration tests
         shell: bash
-        run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1
+        env:
+          RUST_BACKTRACE: full
+        run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1 --nocapture
