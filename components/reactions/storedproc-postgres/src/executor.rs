@@ -128,7 +128,10 @@ impl PostgresExecutor {
 
         let credentials = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
-            Some(provider.get_credentials().await?)
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &config.hostname)
+                .with_property("port", port.to_string());
+            Some(provider.get_credentials(&context).await?)
         } else {
             None
         };
@@ -138,10 +141,16 @@ impl PostgresExecutor {
         // For username/password and token auth, extract the auth pair
         let (username, password) = if let Some(creds) = &credentials {
             if !creds.is_certificate() {
-                creds.clone().into_auth_pair()
+                creds
+                    .clone()
+                    .try_into_auth_pair()
+                    .map_err(|_| anyhow!("Unexpected credential type"))?
             } else {
                 // Certificate auth: username is optional, password is not used
-                let (_, _, cert_username) = creds.clone().into_certificate();
+                let (_, _, cert_username) = creds
+                    .clone()
+                    .try_into_certificate()
+                    .map_err(|_| anyhow!("Expected certificate credentials"))?;
                 (cert_username.unwrap_or_default(), String::new())
             }
         } else {
@@ -181,7 +190,8 @@ impl PostgresExecutor {
             // Client certificate authentication (mTLS)
             let (cert_pem, key_pem, _) = credentials
                 .expect("credentials must exist when is_cert_auth is true")
-                .into_certificate();
+                .try_into_certificate()
+                .map_err(|_| anyhow!("Expected certificate credentials"))?;
 
             let identity = native_tls::Identity::from_pkcs8(
                 cert_pem.as_bytes(),

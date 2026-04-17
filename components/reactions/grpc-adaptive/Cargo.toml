@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-grpc-adaptive"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC Adaptive reaction plugin for Drasi"
@@ -56,4 +56,4 @@ tonic-build = "0.11"
 
 [features]
 # default = []
-dynamic-plugin = ["drasi-reaction-grpc/dynamic-plugin"]
+dynamic-plugin = []

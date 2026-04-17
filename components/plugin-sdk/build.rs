@@ -18,18 +18,34 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
     println!("cargo:rustc-env=TARGET_TRIPLE={target}");
 
-    // Capture the git commit SHA (short hash) for plugin provenance
-    let git_commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    // Capture the git commit SHA (short hash) for plugin provenance.
+    // In dev builds, use a stable placeholder to avoid cache invalidation on every commit.
+    let git_commit = if std::env::var("PROFILE").as_deref() == Ok("release")
+        || std::env::var("DRASI_EMBED_GIT_SHA").is_ok()
+    {
+        Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "dev".to_string()
+    };
     println!("cargo:rustc-env=GIT_COMMIT_SHA={git_commit}");
 
-    // Capture the build timestamp in RFC 3339 UTC format
-    let build_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Capture the build timestamp in RFC 3339 UTC format.
+    // In dev builds, use a stable placeholder to avoid invalidating the cache on every build.
+    // The timestamp changes every second, which would force recompilation of plugin-sdk
+    // and all 27+ downstream crates on every `cargo build`.
+    let build_timestamp = if std::env::var("PROFILE").as_deref() == Ok("release")
+        || std::env::var("DRASI_EMBED_BUILD_TIMESTAMP").is_ok()
+    {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    } else {
+        "dev-build".to_string()
+    };
     println!("cargo:rustc-env=BUILD_TIMESTAMP={build_timestamp}");
 
     // Compute build compatibility hash from rustc version, crate version,
@@ -47,9 +63,14 @@ fn main() {
 
     println!("cargo:rustc-env=DRASI_BUILD_HASH={hash}");
 
-    // Rerun if the compiler, profile, or git HEAD changes
+    // Rerun if the compiler or profile changes.
+    // In release builds, also rerun when git HEAD changes for accurate provenance.
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=PROFILE");
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-env-changed=DRASI_EMBED_BUILD_TIMESTAMP");
+    println!("cargo:rerun-if-env-changed=DRASI_EMBED_GIT_SHA");
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        println!("cargo:rerun-if-changed=.git/HEAD");
+    }
 }

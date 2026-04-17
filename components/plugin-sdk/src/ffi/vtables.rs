@@ -21,8 +21,8 @@
 use std::ffi::c_void;
 
 use super::types::{
-    AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiDispatchMode, FfiGetResult, FfiOwnedStr,
-    FfiResult, FfiStr, FfiStringArray,
+    AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult, FfiDispatchMode,
+    FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray,
 };
 
 // ============================================================================
@@ -201,6 +201,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn auto_start_fn(state: *const) -> bool,
         fn dispatch_mode_fn(state: *const) -> FfiDispatchMode,
 
+        // Configuration inspection
+        /// Returns the source's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
+
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
         fn stop_fn(state: *mut) -> FfiResult,
@@ -231,6 +235,10 @@ drasi_ffi_primitives::ffi_vtable! {
         fn type_name_fn(state: *const) -> FfiStr,
         fn auto_start_fn(state: *const) -> bool,
         fn query_ids_fn(state: *const) -> FfiStringArray,
+
+        // Configuration inspection
+        /// Returns the reaction's configuration properties as a JSON string.
+        fn properties_fn(state: *const) -> FfiOwnedStr,
 
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
@@ -276,7 +284,7 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
-        fn create_source_fn(state: *mut, id: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut SourceVtable,
+        fn create_source_fn(state: *mut, id: FfiStr, config_json: FfiStr, auto_start: bool) -> FfiCreateResult,
     }
 }
 
@@ -289,7 +297,7 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
         /// Factory: create a ReactionVtable from JSON config.
-        fn create_reaction_fn(state: *mut, id: FfiStr, query_ids_json: FfiStr, config_json: FfiStr, auto_start: bool) -> *mut ReactionVtable,
+        fn create_reaction_fn(state: *mut, id: FfiStr, query_ids_json: FfiStr, config_json: FfiStr, auto_start: bool) -> FfiCreateResult,
     }
 }
 
@@ -302,7 +310,22 @@ drasi_ffi_primitives::ffi_vtable! {
         fn config_schema_name_fn(state: *const) -> FfiStr,
 
         /// Factory: create a BootstrapProviderVtable from JSON config.
-        fn create_bootstrap_provider_fn(state: *mut, config_json: FfiStr, source_config_json: FfiStr) -> *mut BootstrapProviderVtable,
+        fn create_bootstrap_provider_fn(state: *mut, config_json: FfiStr, source_config_json: FfiStr) -> FfiCreateResult,
+    }
+}
+
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for an IdentityProviderPluginDescriptor (factory).
+    /// The host calls `create_identity_provider_fn` to construct an
+    /// `IdentityProviderVtable` from config JSON.
+    pub struct IdentityProviderPluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
+
+        /// Factory: create an IdentityProviderVtable from JSON config.
+        fn create_identity_provider_fn(state: *mut, config_json: FfiStr) -> *mut super::identity::IdentityProviderVtable,
     }
 }
 
@@ -368,6 +391,10 @@ unsafe impl Sync for StateStoreVtable {}
 
 /// FFI-safe plugin registration returned by `drasi_plugin_init()`.
 /// Contains factory vtables for all plugin types this shared library provides.
+///
+/// **ABI note**: This struct is `#[repr(C)]`. New fields must always be appended
+/// at the end so that plugins compiled against an older SDK layout remain
+/// compatible (the host simply treats trailing fields as absent).
 #[repr(C)]
 pub struct FfiPluginRegistration {
     pub source_plugins: *mut SourcePluginVtable,
@@ -385,4 +412,9 @@ pub struct FfiPluginRegistration {
         ctx: *mut ::std::ffi::c_void,
         callback: super::callbacks::LifecycleCallbackFn,
     ),
+    // --- Fields below were added after the initial ABI. They MUST remain at
+    // the end so that older plugin binaries (which allocate a smaller struct)
+    // are still layout-compatible with the host.
+    pub identity_provider_plugins: *mut IdentityProviderPluginVtable,
+    pub identity_provider_plugin_count: usize,
 }

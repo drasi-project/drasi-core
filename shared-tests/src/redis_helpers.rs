@@ -52,12 +52,29 @@ pub async fn setup_redis() -> RedisGuard {
 async fn setup_redis_raw() -> (testcontainers::ContainerAsync<Redis>, String) {
     use testcontainers::runners::AsyncRunner;
 
-    // Start Redis container
-    let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
-    let redis_port = container.get_host_port_ipv4(6379).await.unwrap();
-    let redis_url = format!("redis://127.0.0.1:{redis_port}");
+    // Docker Desktop has a known bug where `PublishAllPorts: true` sporadically
+    // fails to map exposed ports, returning an empty binding array even though the
+    // container is running and the port is listed in ExposedPorts. Work around this
+    // by retrying the entire container creation when port mapping fails.
+    for attempt in 0..5u32 {
+        let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
 
-    (container, redis_url)
+        match container.get_host_port_ipv4(6379).await {
+            Ok(redis_port) => {
+                let redis_url = format!("redis://127.0.0.1:{redis_port}");
+                return (container, redis_url);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Redis container port mapping failed (attempt {}/5): {e}. Retrying...",
+                    attempt + 1
+                );
+                let _ = container.stop().await;
+                drop(container);
+            }
+        }
+    }
+    panic!("Failed to start Redis container with mapped port after 5 attempts");
 }
 
 /// Guard wrapper for Redis container that ensures proper cleanup
@@ -136,10 +153,10 @@ impl Drop for RedisGuardInner {
 
                 // Block on cleanup to ensure it completes
                 let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    // Try to get current runtime, if we're in one
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        // Spawn blocking task to stop container
-                        handle.block_on(async move {
+                        // We're inside a runtime — use spawn instead of block_on
+                        // to avoid "Cannot start a runtime from within a runtime" panic.
+                        handle.spawn(async move {
                             let _ = container.stop().await;
                             drop(container);
                         });

@@ -14,9 +14,12 @@
 
 use anyhow::Result;
 use log::info;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use crate::channels::{ComponentStatus, ComponentType, EventReceivers};
+use crate::channels::ComponentStatus;
+use crate::component_graph::{ComponentGraph, ComponentKind};
 use crate::config::RuntimeConfig;
 use crate::queries::QueryManager;
 use crate::reactions::ReactionManager;
@@ -26,16 +29,18 @@ use crate::sources::SourceManager;
 ///
 /// This module handles:
 /// - Loading configuration and creating components
-/// - Starting event processors for component events
 /// - Starting components in dependency order (Sources → Queries → Reactions)
 /// - Stopping components in reverse order (Reactions → Queries → Sources)
+///
+/// Event recording (component status history) is handled by the graph update loop
+/// in [`DrasiLib`], which records events directly into each manager's
+/// [`ComponentEventHistory`] after applying status updates to the graph.
 pub(crate) struct LifecycleManager {
     config: Arc<RuntimeConfig>,
     source_manager: Arc<SourceManager>,
     query_manager: Arc<QueryManager>,
     reaction_manager: Arc<ReactionManager>,
-    // Event receivers - taken and consumed during initialization
-    event_receivers: Option<EventReceivers>,
+    graph: Arc<RwLock<ComponentGraph>>,
 }
 
 impl LifecycleManager {
@@ -45,14 +50,14 @@ impl LifecycleManager {
         source_manager: Arc<SourceManager>,
         query_manager: Arc<QueryManager>,
         reaction_manager: Arc<ReactionManager>,
-        event_receivers: Option<EventReceivers>,
+        graph: Arc<RwLock<ComponentGraph>>,
     ) -> Self {
         Self {
             config,
             source_manager,
             query_manager,
             reaction_manager,
-            event_receivers,
+            graph,
         }
     }
 
@@ -66,58 +71,28 @@ impl LifecycleManager {
         // Load queries (only queries use config-based creation)
         for query_config in &self.config.queries {
             let config = query_config.clone();
-            self.query_manager.add_query_without_save(config).await?;
+
+            // Step 1: Register in the component graph (sources must already exist)
+            {
+                let mut graph = self.graph.write().await;
+                let mut metadata = HashMap::new();
+                metadata.insert("query".to_string(), config.query.clone());
+                let source_ids: Vec<String> =
+                    config.sources.iter().map(|s| s.source_id.clone()).collect();
+                graph.register_query(&config.id, metadata, &source_ids)?;
+            }
+
+            // Step 2: Provision runtime (with rollback on failure)
+            let query_id = config.id.clone();
+            if let Err(e) = self.query_manager.provision_query(config).await {
+                let mut graph = self.graph.write().await;
+                let _ = graph.deregister(&query_id);
+                return Err(e);
+            }
         }
 
         info!("Configuration loaded successfully");
         Ok(())
-    }
-
-    /// Start event processors (one-time operation during initialization)
-    ///
-    /// This takes ownership of the event receivers and spawns background tasks
-    /// to process component events. Can only be called once.
-    pub async fn start_event_processors(&mut self) {
-        if let Some(receivers) = self.event_receivers.take() {
-            // Clone manager references for the event processor task
-            let source_manager = self.source_manager.clone();
-            let query_manager = self.query_manager.clone();
-            let reaction_manager = self.reaction_manager.clone();
-
-            // Start component event processor
-            let component_rx = receivers.component_event_rx;
-            tokio::spawn(async move {
-                let mut rx = component_rx;
-                while let Some(event) = rx.recv().await {
-                    info!(
-                        "Component Event - {:?} {}: {:?} - {}",
-                        event.component_type,
-                        event.component_id,
-                        event.status,
-                        event.message.clone().unwrap_or_default()
-                    );
-
-                    // Record the event in the appropriate manager's history
-                    match event.component_type {
-                        ComponentType::Source => {
-                            source_manager.record_event(event).await;
-                        }
-                        ComponentType::Query => {
-                            query_manager.record_event(event).await;
-                        }
-                        ComponentType::Reaction => {
-                            reaction_manager.record_event(event).await;
-                        }
-                    }
-                }
-            });
-
-            // DataRouter no longer needed - queries subscribe directly to sources
-            // control_signal_rx is no longer used
-            drop(receivers.control_signal_rx);
-
-            // SubscriptionRouter no longer needed - reactions subscribe directly to queries
-        }
     }
 
     /// Start all components with auto_start enabled
@@ -133,27 +108,9 @@ impl LifecycleManager {
         info!("All auto-start sources started successfully");
 
         // Start queries after sources
+        // QueryManager.start_all() reads from graph and checks auto_start internally
         info!("Starting auto-start queries");
-        for query_config in &self.config.queries {
-            let id = &query_config.id;
-
-            if query_config.auto_start {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                if matches!(status, Ok(ComponentStatus::Stopped)) {
-                    info!(
-                        "Starting query '{}' (auto_start={})",
-                        id, query_config.auto_start
-                    );
-                    self.query_manager.start_query(id.clone()).await?;
-                    info!("Query '{id}' started successfully");
-                } else {
-                    info!("Query '{id}' already started or starting, status: {status:?}");
-                }
-            } else {
-                let status = self.query_manager.get_query_status(id.to_string()).await;
-                info!("Skipping query '{id}' (auto_start=false), status: {status:?}");
-            }
-        }
+        self.query_manager.start_all().await?;
         info!("All auto-start queries started successfully");
 
         // Start reactions after queries
@@ -169,80 +126,224 @@ impl LifecycleManager {
 
     /// Stop all running components
     ///
-    /// Components are stopped in reverse dependency order: Reactions → Queries → Sources
-    /// Errors during shutdown are logged but don't prevent other components from stopping.
+    /// Components are stopped in reverse dependency order using the graph's
+    /// topological ordering: Reactions → Queries → Sources.
+    ///
+    /// All components are attempted even if some fail. Returns an aggregated
+    /// error listing all failures, or `Ok(())` if all stopped successfully.
     pub async fn stop_all_components(&self) -> Result<()> {
         use log::error;
 
-        // Stop all reactions first (reverse order)
-        info!("Stopping all reactions");
-        let reaction_ids: Vec<String> = self
-            .reaction_manager
-            .list_reactions()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in reaction_ids {
-            let status = self.reaction_manager.get_reaction_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.reaction_manager.stop_reaction(id.clone()).await {
-                    error!("Error stopping reaction {id}: {e}");
+        // Get a single consistent snapshot of components in reverse dependency order
+        let shutdown_order: Vec<(String, ComponentKind, ComponentStatus)> = {
+            let graph = self.graph.read().await;
+            match graph.topological_order() {
+                Ok(order) => order
+                    .into_iter()
+                    .rev()
+                    .map(|n| (n.id.clone(), n.kind.clone(), n.status))
+                    .collect(),
+                Err(e) => {
+                    error!("Failed to compute topological order: {e}, falling back to kind-based ordering");
+                    // Fallback: list by kind in reverse order
+                    let mut all = Vec::new();
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Reaction) {
+                        all.push((id, ComponentKind::Reaction, status));
+                    }
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Query) {
+                        all.push((id, ComponentKind::Query, status));
+                    }
+                    for (id, status) in graph.list_by_kind(&ComponentKind::Source) {
+                        all.push((id, ComponentKind::Source, status));
+                    }
+                    all
                 }
-                // Subscriptions are managed by the reaction itself - no router cleanup needed
+            }
+        };
+
+        let mut failures = Vec::new();
+
+        for (id, kind, status) in shutdown_order {
+            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+                continue;
+            }
+
+            let result = match kind {
+                ComponentKind::Reaction => {
+                    info!("Stopping reaction '{id}'");
+                    self.reaction_manager.stop_reaction(id.clone()).await
+                }
+                ComponentKind::Query => {
+                    info!("Stopping query '{id}'");
+                    self.query_manager.stop_query(id.clone()).await
+                }
+                ComponentKind::Source => {
+                    info!("Stopping source '{id}'");
+                    self.source_manager.stop_source(id.clone()).await
+                }
+                _ => continue,
+            };
+
+            if let Err(e) = result {
+                error!("Error stopping {kind} {id}: {e}");
+                failures.push((id, e.to_string()));
             }
         }
 
-        // Stop all queries
-        info!("Stopping all queries");
-        let query_ids: Vec<String> = self
-            .query_manager
-            .list_queries()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-
-        for id in query_ids {
-            let status = self.query_manager.get_query_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.query_manager.stop_query(id.clone()).await {
-                    error!("Error stopping query {id}: {e}");
-                }
-                // Query unsubscribes from sources automatically when stopped
-            }
+        if failures.is_empty() {
+            info!("All components stopped");
+            Ok(())
+        } else {
+            let error_msg = failures
+                .iter()
+                .map(|(id, err)| format!("{id}: {err}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow::anyhow!(
+                "Failed to stop some components: {error_msg}"
+            ))
         }
+    }
+}
 
-        // Stop all sources
-        info!("Stopping all sources");
-        let source_ids: Vec<String> = self
-            .source_manager
-            .list_sources()
-            .await
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+#[cfg(test)]
+mod tests {
+    use crate::channels::ComponentStatus;
+    use crate::lib_core::DrasiLib;
+    use crate::sources::tests::TestMockSource;
+    use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
+    use crate::test_helpers::wait_for_component_status;
+    use std::time::Duration;
 
-        for id in source_ids {
-            let status = self.source_manager.get_source_status(id.clone()).await;
-            if matches!(
-                status,
-                Ok(ComponentStatus::Running | ComponentStatus::Starting)
-            ) {
-                if let Err(e) = self.source_manager.stop_source(id.clone()).await {
-                    error!("Error stopping source {id}: {e}");
-                }
-            }
+    /// Helper: build a DrasiLib with the given sources (not yet started).
+    async fn build_with_sources(sources: Vec<TestMockSource>) -> DrasiLib {
+        let mut builder = DrasiLib::builder().with_id("lifecycle-test");
+        for s in sources {
+            builder = builder.with_source(s);
         }
+        builder.build().await.unwrap()
+    }
 
-        info!("All components stopped");
-        Ok(())
+    // ========================================================================
+    // start_components
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_components_starts_auto_start_sources() {
+        let source = TestMockSource::with_auto_start("auto-src".to_string(), true).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "auto-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("auto-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn start_components_skips_non_auto_start() {
+        let source = TestMockSource::with_auto_start("manual-src".to_string(), false).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        core.start().await.unwrap();
+
+        // Non-autostart source should remain Stopped
+        let status = core.get_source_status("manual-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // stop_all_components
+    // ========================================================================
+
+    #[tokio::test]
+    async fn stop_all_components_stops_running() {
+        let source = TestMockSource::with_auto_start("stop-src".to_string(), true).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        let mut event_rx = core.component_graph.read().await.subscribe();
+        core.start().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "stop-src",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // Now stop
+        core.stop().await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "stop-src",
+            ComponentStatus::Stopped,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        let status = core.get_source_status("stop-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_all_components_handles_already_stopped() {
+        let source = TestMockSource::with_auto_start("idle-src".to_string(), false).unwrap();
+        let core = build_with_sources(vec![source]).await;
+
+        core.start().await.unwrap();
+
+        // Source is not auto-started, so it's already Stopped.
+        // Stopping should succeed without errors for user components.
+        // Internal components may fail, so we just verify the server marks as stopped.
+        let _ = core.stop().await;
+
+        let status = core.get_source_status("idle-src").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // load_configuration
+    // ========================================================================
+
+    #[tokio::test]
+    async fn load_configuration_creates_queries_from_config() {
+        use crate::builder::Query;
+
+        // Build with a source and a query that references it
+        let source = TestMockSource::with_auto_start("cfg-src".to_string(), true).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("cfg-test")
+            .with_source(source)
+            .with_query(
+                Query::cypher("cfg-query")
+                    .query("MATCH (n:Person) RETURN n")
+                    .from_source("cfg-src")
+                    .build(),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // After build(), load_configuration has already run.
+        // The query should exist in the list.
+        let queries = core.list_queries().await.unwrap();
+        assert!(
+            queries.iter().any(|(id, _)| id == "cfg-query"),
+            "Query 'cfg-query' should exist after build; got: {queries:?}"
+        );
+
+        // Query should be in Stopped state (not yet started)
+        let (_, status) = queries.iter().find(|(id, _)| id == "cfg-query").unwrap();
+        assert_eq!(*status, ComponentStatus::Stopped);
     }
 }

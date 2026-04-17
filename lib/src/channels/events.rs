@@ -32,6 +32,8 @@ pub enum ComponentType {
     Source,
     Query,
     Reaction,
+    BootstrapProvider,
+    IdentityProvider,
 }
 
 /// Execution status of a Drasi component
@@ -156,7 +158,7 @@ pub enum ComponentType {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentStatus {
     Starting,
     Running,
@@ -166,6 +168,7 @@ pub enum ComponentStatus {
     Error,
 }
 
+/// A source change event with metadata for dispatching to queries.
 #[derive(Debug, Clone)]
 pub struct SourceChangeEvent {
     pub source_id: String,
@@ -354,6 +357,10 @@ pub enum ResultDiff {
     Noop,
 }
 
+/// Result emitted by a continuous query when data changes.
+///
+/// Contains the diff (added, updated, deleted rows) plus metadata and
+/// optional profiling information. Dispatched to reactions via the priority queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
@@ -410,6 +417,10 @@ impl Timestamped for QueryResult {
 /// Arc-wrapped QueryResult for zero-copy distribution
 pub type ArcQueryResult = Arc<QueryResult>;
 
+/// Lifecycle event emitted when a component's status changes.
+///
+/// Broadcast via the component event channel to all subscribers.
+/// Used for monitoring, logging, and reactive lifecycle coordination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEvent {
     pub component_id: String,
@@ -419,6 +430,7 @@ pub struct ComponentEvent {
     pub message: Option<String>,
 }
 
+/// Control messages for component lifecycle management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Start(String),
@@ -427,8 +439,12 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
+pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
+pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
+/// Backward-compatible mpsc channel types used by host-sdk plugin callbacks.
+/// New code should use `ComponentUpdateSender` from `component_graph` instead.
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
+pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
@@ -487,31 +503,26 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
     pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            component_event_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            component_event_rx,
             _control_rx: control_rx,
             control_signal_rx,
         };

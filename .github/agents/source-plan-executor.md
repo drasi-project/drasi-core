@@ -60,7 +60,8 @@ Implement components **exactly as specified** in the plan:
 - Refer to **postgres source** (`components/sources/postgres/`) for patterns
 - Follow Drasi coding standards
 - Use builder pattern for configuration
-- Implement proper error handling & logging
+- **Error handling:** Plugin trait methods (`start`, `stop`, `bootstrap`) return `anyhow::Result` — use `.context("what failed")` to build rich error chains. **Never** use `DrasiError` inside plugin implementations; the framework converts `anyhow` errors to structured `DrasiError` at the public API boundary. See `lib/src/error.rs` for details.
+- Implement proper logging with `log::info!`/`log::error!`
 - No deviations without documenting rationale
 
 ### 3. Core Implementation
