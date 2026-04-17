@@ -35,6 +35,8 @@ pub struct DataverseClient {
     api_version: String,
     identity_provider: Arc<dyn IdentityProvider>,
     http_client: reqwest::Client,
+    /// Dataverse token scope derived from the environment URL (e.g., `https://myorg.crm.dynamics.com/.default`).
+    scope: String,
 }
 
 impl DataverseClient {
@@ -51,19 +53,29 @@ impl DataverseClient {
         identity_provider: Arc<dyn IdentityProvider>,
     ) -> Self {
         let base_url = environment_url.trim_end_matches('/').to_string();
+        // Derive scope from the environment URL: https://myorg.crm.dynamics.com -> https://myorg.crm.dynamics.com/.default
+        let scope = if let Ok(url) = url::Url::parse(&base_url) {
+            let host = url.host_str().unwrap_or_default();
+            format!("{}://{}/.default", url.scheme(), host)
+        } else {
+            format!("{}/.default", base_url)
+        };
         Self {
             base_url,
             api_version: api_version.to_string(),
             identity_provider,
             http_client: reqwest::Client::new(),
+            scope,
         }
     }
 
     /// Get a bearer token from the identity provider.
     async fn get_token(&self) -> Result<String> {
+        let context = drasi_lib::identity::CredentialContext::new()
+            .with_property("scope", &self.scope);
         let creds = self
             .identity_provider
-            .get_credentials(&drasi_lib::identity::CredentialContext::default())
+            .get_credentials(&context)
             .await?;
         match creds {
             Credentials::Token { token, .. } => Ok(token),

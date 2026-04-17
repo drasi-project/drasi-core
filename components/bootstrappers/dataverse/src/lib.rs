@@ -107,8 +107,18 @@ impl DataverseBootstrapProvider {
     /// 3. OAuth2 client credentials flow
     async fn get_token(&self, http_client: &reqwest::Client) -> Result<String> {
         if let Some(ref provider) = self.identity_provider {
+            // Derive scope from environment URL so the identity provider
+            // can acquire a Dataverse-specific token automatically.
+            let scope = url::Url::parse(&self.config.environment_url)
+                .map(|u| {
+                    let host = u.host_str().unwrap_or_default();
+                    format!("{}://{}/.default", u.scheme(), host)
+                })
+                .unwrap_or_else(|_| format!("{}/.default", self.config.environment_url));
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("scope", &scope);
             let creds = provider
-                .get_credentials(&drasi_lib::identity::CredentialContext::default())
+                .get_credentials(&context)
                 .await?;
             return match creds {
                 Credentials::Token { token, .. } => Ok(token),
