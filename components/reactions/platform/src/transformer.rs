@@ -152,8 +152,20 @@ pub fn transform_query_result(
                     .clone();
                 deleted_results.push(data);
             }
-            ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                log::warn!("Unknown result type: aggregation/noop, skipping");
+            ResultDiff::Aggregation { before, after } => {
+                let before_map = before.as_ref().and_then(|b| b.as_object()).cloned();
+                let after_map = after
+                    .as_object()
+                    .ok_or_else(|| anyhow!("'after' field must be an object"))?
+                    .clone();
+
+                updated_results.push(UpdatePayload {
+                    before: before_map,
+                    after: Some(after_map),
+                    grouping_keys: None,
+                });
+            }
+            ResultDiff::Noop => {
                 continue;
             }
         }
