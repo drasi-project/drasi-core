@@ -17,6 +17,11 @@ name = "drasi-source-dataverse"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+authors = ["Drasi Project"]
+description = "Microsoft Dataverse source plugin for Drasi"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "dataverse"]
+categories = ["database"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
