@@ -67,7 +67,7 @@ struct PluginArtifactMetadata {
 ///       "drasi-bootstrap-mssql" → ("bootstrap", "mssql")
 fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     let stripped = crate_name.strip_prefix("drasi-")?;
-    for prefix in &["source-", "reaction-", "bootstrap-"] {
+    for prefix in &["source-", "reaction-", "bootstrap-", "identity-"] {
         if let Some(kind) = stripped.strip_prefix(prefix) {
             let plugin_type = prefix.trim_end_matches('-');
             return Some((plugin_type.to_string(), kind.to_string()));
@@ -471,6 +471,7 @@ fn build_plugins(args: &[String]) {
     fs::create_dir_all(&plugins_dir).expect("failed to create plugins directory");
 
     let lib_ext = plugin_lib_ext(target.as_deref());
+    let mut missing_binaries = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -484,6 +485,12 @@ fn build_plugins(args: &[String]) {
                 0
             });
             let _ = fs::remove_file(&src);
+        } else {
+            eprintln!(
+                "ERROR: expected cdylib not found after build: {}",
+                src.display()
+            );
+            missing_binaries.push(name.clone());
         }
 
         // Generate metadata.json alongside the plugin binary
@@ -507,6 +514,40 @@ fn build_plugins(args: &[String]) {
         });
 
         clean_build_artifacts(&build_dir, &lib_name);
+    }
+
+    if !missing_binaries.is_empty() {
+        eprintln!(
+            "\n=== {} of {} plugin binaries missing after build ===",
+            missing_binaries.len(),
+            result.plugins.len()
+        );
+        for name in &missing_binaries {
+            eprintln!("  - {name}");
+        }
+        eprintln!("\nContents of build directory ({}):", build_dir.display());
+        match fs::read_dir(&build_dir) {
+            Ok(entries) => {
+                let mut found_any = false;
+                for entry in entries.flatten() {
+                    let fname = entry.file_name();
+                    let fname = fname.to_string_lossy();
+                    if fname.ends_with(".so")
+                        || fname.ends_with(".dll")
+                        || fname.ends_with(".dylib")
+                        || fname.ends_with(".rlib")
+                    {
+                        eprintln!("  {fname}");
+                        found_any = true;
+                    }
+                }
+                if !found_any {
+                    eprintln!("  (no library files found)");
+                }
+            }
+            Err(e) => eprintln!("  Failed to list directory: {e}"),
+        }
+        std::process::exit(1);
     }
 
     println!("=== cdylib plugins output to {} ===", plugins_dir.display());

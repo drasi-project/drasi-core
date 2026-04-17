@@ -159,20 +159,16 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
 **AWS IAM Authentication (Amazon RDS for MySQL/Aurora MySQL):**
 
 ```rust
-use drasi_lib::identity::AwsIdentityProvider;
+use drasi_identity_aws::AwsIdentityProvider;
 
 // Using IAM user credentials
 let identity_provider = AwsIdentityProvider::new(
     "myuser",
-    "mydb.rds.amazonaws.com",
-    3306
 ).await?;
 
 // Or assuming an IAM role
 let identity_provider = AwsIdentityProvider::with_assumed_role(
     "myuser",
-    "mydb.rds.amazonaws.com",
-    3306,
     "arn:aws:iam::123456789012:role/RDSAccessRole",
     None
 ).await?;

@@ -1,4 +1,4 @@
-# Copyright 2025 The Drasi Authors.
+# Copyright 2026 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,47 +13,35 @@
 # limitations under the License.
 
 [package]
-name = "drasi-reaction-grpc-adaptive"
-version = "0.1.10"
+name = "drasi-identity-azure"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "gRPC Adaptive reaction plugin for Drasi"
+description = "Azure identity provider plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "grpc", "adaptive"]
-categories = ["network-programming"]
-
-[lints]
-workspace = true
+keywords = ["drasi", "plugin", "identity", "azure"]
+categories = ["authentication"]
 
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[lints]
+workspace = true
+
 [dependencies]
 drasi-lib.workspace = true
-drasi-reaction-grpc.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
-tonic = "0.11"
-prost = "0.12"
-tokio = { version = "1.0", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-prost-types = "0.12"
-ordered-float = "3.0"
-
-drasi-plugin-sdk = { workspace = true }
-utoipa = { workspace = true }
-
-[build-dependencies]
-tonic-build = "0.11"
-
+azure_identity = { version = "0.31", default-features = false, features = ["tokio"] }
+azure_core = { version = "0.31", default-features = false, features = ["tokio", "reqwest"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [features]
-# default = []
 dynamic-plugin = []
