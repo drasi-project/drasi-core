@@ -339,7 +339,8 @@ impl Reaction for SseReaction {
                             ResultDiff::Add { .. } => (config.added.as_ref(), "ADD"),
                             ResultDiff::Update { .. } => (config.updated.as_ref(), "UPDATE"),
                             ResultDiff::Delete { .. } => (config.deleted.as_ref(), "DELETE"),
-                            ResultDiff::Aggregation { .. } | ResultDiff::Noop => (None, "NOOP"),
+                            ResultDiff::Aggregation { .. } => (config.updated.as_ref(), "UPDATE"),
+                            ResultDiff::Noop => (None, "NOOP"),
                         };
 
                         if let Some(spec) = template_spec {
@@ -357,7 +358,13 @@ impl Reaction for SseReaction {
                                 ResultDiff::Delete { data } => {
                                     context.insert("before".to_string(), data.clone());
                                 }
-                                ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                                ResultDiff::Aggregation { before, after } => {
+                                    if let Some(b) = before {
+                                        context.insert("before".to_string(), b.clone());
+                                    }
+                                    context.insert("after".to_string(), after.clone());
+                                }
+                                ResultDiff::Noop => {}
                             }
 
                             context.insert(
