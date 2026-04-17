@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(reaction.id(), "test-reaction");
         let props = reaction.properties();
         assert_eq!(
-            props.get("base_url"),
+            props.get("baseUrl"),
             Some(&serde_json::Value::String("http://localhost".to_string())) // DevSkim: ignore DS137138
         );
     }

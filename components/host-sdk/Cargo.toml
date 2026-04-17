@@ -9,6 +9,7 @@ license = "Apache-2.0"
 default = []
 registry = ["oci-client", "semver", "tokio/fs", "x509-parser", "p256", "p384", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
+watcher = ["notify", "notify-debouncer-mini"]
 
 [dependencies]
 drasi-ffi-primitives = { workspace = true }
@@ -18,11 +19,14 @@ drasi-plugin-sdk = { workspace = true }
 libloading = "0.8"
 async-trait = "0.1"
 anyhow = "1.0"
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
+indexmap = "2"
 chrono = "0.4"
+sha2 = "0.10"
+toml = "0.8"
 
 # Optional: OCI registry support
 oci-client = { version = "0.16", optional = true }
@@ -36,6 +40,10 @@ base64 = { version = "0.22", optional = true }
 # Optional: HTTP fetching support
 reqwest = { version = "0.12", optional = true }
 url = { version = "2", optional = true }
+
+# Optional: filesystem watcher support
+notify = { version = "6", optional = true }
+notify-debouncer-mini = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

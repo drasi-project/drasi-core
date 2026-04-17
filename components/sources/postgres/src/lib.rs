@@ -187,6 +187,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -304,35 +305,13 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "database".to_string(),
-            serde_json::Value::String(self.config.database.clone()),
-        );
-        props.insert(
-            "user".to_string(),
-            serde_json::Value::String(self.config.user.clone()),
-        );
-        // Don't expose password in properties
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-        props
+        match serde_json::to_value(&self.config) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                map.remove("password");
+                map.into_iter().collect()
+            }
+            _ => HashMap::new(),
+        }
     }
 
     fn auto_start(&self) -> bool {
@@ -344,14 +323,13 @@ impl Source for PostgresReplicationSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting PostgreSQL replication source: {}", self.base.id);
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let status_tx = self.base.status_tx();
-        let status_clone = self.base.status.clone();
+        let reporter = self.base.status_handle();
 
         // Get instance_id from context for log routing isolation
         let instance_id = self
@@ -372,42 +350,28 @@ impl Source for PostgresReplicationSource {
 
         let task = tokio::spawn(
             async move {
-                if let Err(e) = run_replication(
-                    source_id.clone(),
-                    config,
-                    dispatchers,
-                    status_tx.clone(),
-                    status_clone.clone(),
-                )
-                .await
+                if let Err(e) =
+                    run_replication(source_id.clone(), config, dispatchers, reporter.clone()).await
                 {
                     error!("Replication task failed for {source_id}: {e}");
-                    *status_clone.write().await = ComponentStatus::Error;
-                    if let Some(ref tx) = *status_tx.read().await {
-                        let _ = tx
-                            .send(ComponentEvent {
-                                component_id: source_id,
-                                component_type: ComponentType::Source,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!("Replication failed: {e}")),
-                            })
-                            .await;
-                    }
+                    reporter
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Replication failed: {e}")),
+                        )
+                        .await;
                 }
             }
             .instrument(span),
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("PostgreSQL replication started".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -419,20 +383,19 @@ impl Source for PostgresReplicationSource {
 
         info!("Stopping PostgreSQL replication source: {}", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
+        self.base.set_status(ComponentStatus::Stopping, None).await;
 
         // Cancel the replication task
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("PostgreSQL replication stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -474,13 +437,11 @@ async fn run_replication(
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    status: Arc<RwLock<ComponentStatus>>,
+    status_handle: ComponentStatusHandle,
 ) -> Result<()> {
     info!("Starting replication for source {source_id}");
 
-    let mut stream =
-        stream::ReplicationStream::new(config, source_id, dispatchers, status_tx, status);
+    let mut stream = stream::ReplicationStream::new(config, source_id, dispatchers, status_handle);
 
     stream.run().await
 }

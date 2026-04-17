@@ -26,16 +26,39 @@ pub mod callbacks;
 #[cfg(feature = "fetcher")]
 pub mod fetcher;
 pub mod identity_bridge;
+pub mod lifecycle;
 pub mod loader;
+pub mod lockfile;
+pub mod plugin_registry;
+pub mod plugin_types;
 pub mod proxies;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod state_store_bridge;
+pub mod watcher;
 
 pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
 pub use identity_bridge::IdentityProviderVtableBuilder;
-pub use loader::{LoadedPlugin, PluginLoader, PluginLoaderConfig};
+pub use loader::{
+    is_plugin_binary, plugin_kind_from_filename, scan_plugin_metadata, LoadedPlugin, PluginLoader,
+    PluginLoaderConfig, PluginMetadataSummary, DEFAULT_PLUGIN_FILE_PATTERNS,
+    PLUGIN_BINARY_EXTENSIONS,
+};
 pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
 pub use state_store_bridge::StateStoreVtableBuilder;
+
+pub use plugin_types::{
+    PluginCategory, PluginEvent, PluginFileEvent, PluginKindEntry, PluginStatus,
+};
+
+pub use lockfile::{
+    compute_file_hash, FileIntegrityStatus, LockedPlugin, PluginLockfile, PluginSignatureInfo,
+};
+
+pub use plugin_registry::{PluginKindInfo, PluginRegistry, RegisteredDescriptor};
+
+pub use lifecycle::{LoadedPluginState, PluginLifecycleManager};
+
+pub use watcher::{PluginWatcher, PluginWatcherConfig};

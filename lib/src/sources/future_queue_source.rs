@@ -233,3 +233,168 @@ impl FutureQueueSource {
             .as_millis() as u64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::interface::{FutureElementRef, IndexError, PushType};
+    use drasi_core::models::{ElementReference, ElementTimestamp};
+
+    /// A minimal mock FutureQueue that always returns None from peek_due_time
+    struct MockFutureQueue;
+
+    #[async_trait::async_trait]
+    impl FutureQueue for MockFutureQueue {
+        async fn push(
+            &self,
+            _push_type: PushType,
+            _position_in_query: usize,
+            _group_signature: u64,
+            _element_ref: &ElementReference,
+            _original_time: ElementTimestamp,
+            _due_time: ElementTimestamp,
+        ) -> Result<bool, IndexError> {
+            Ok(true)
+        }
+
+        async fn remove(
+            &self,
+            _position_in_query: usize,
+            _group_signature: u64,
+        ) -> Result<(), IndexError> {
+            Ok(())
+        }
+
+        async fn pop(&self) -> Result<Option<FutureElementRef>, IndexError> {
+            Ok(None)
+        }
+
+        async fn peek_due_time(&self) -> Result<Option<ElementTimestamp>, IndexError> {
+            Ok(None)
+        }
+
+        async fn clear(&self) -> Result<(), IndexError> {
+            Ok(())
+        }
+    }
+
+    fn make_source(query_id: &str) -> FutureQueueSource {
+        let fq = Arc::new(MockFutureQueue);
+        FutureQueueSource::new(fq, query_id.to_string())
+    }
+
+    #[test]
+    fn new_creates_source_with_correct_query_id() {
+        let source = make_source("test-query-1");
+        assert_eq!(source.query_id, "test-query-1");
+    }
+
+    #[test]
+    fn source_id_constant_has_expected_value() {
+        assert_eq!(FUTURE_QUEUE_SOURCE_ID, "__future_queue__");
+    }
+
+    #[tokio::test]
+    async fn initial_status_is_stopped() {
+        let source = make_source("status-test");
+        let status = source.status.read().await;
+        assert_eq!(*status, FutureQueueSourceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn initial_task_handle_is_none() {
+        let source = make_source("handle-test");
+        let handle = source.task_handle.read().await;
+        assert!(handle.is_none());
+    }
+
+    #[tokio::test]
+    async fn initial_dispatcher_is_none() {
+        let source = make_source("dispatcher-test");
+        let dispatcher = source.dispatcher.read().await;
+        assert!(dispatcher.is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_returns_receiver() {
+        let source = make_source("subscribe-test");
+        let result = source.subscribe().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn subscribe_sets_dispatcher() {
+        let source = make_source("subscribe-dispatch-test");
+        let _ = source.subscribe().await.unwrap();
+        let dispatcher = source.dispatcher.read().await;
+        assert!(dispatcher.is_some());
+    }
+
+    #[tokio::test]
+    async fn start_sets_status_to_running() {
+        let source = make_source("start-test");
+        let _ = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+        {
+            let status = source.status.read().await;
+            assert_eq!(*status, FutureQueueSourceStatus::Running);
+        }
+        source.stop().await;
+    }
+
+    #[tokio::test]
+    async fn start_when_already_running_returns_error() {
+        let source = make_source("double-start-test");
+        let _ = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+        let result = source.start().await;
+        assert!(result.is_err());
+        source.stop().await;
+    }
+
+    #[tokio::test]
+    async fn stop_sets_status_to_stopped() {
+        let source = make_source("stop-test");
+        let _ = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+        source.stop().await;
+        let status = source.status.read().await;
+        assert_eq!(*status, FutureQueueSourceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_clears_dispatcher() {
+        let source = make_source("stop-dispatcher-test");
+        let _ = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+        source.stop().await;
+        let dispatcher = source.dispatcher.read().await;
+        assert!(dispatcher.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_when_already_stopped_is_noop() {
+        let source = make_source("stop-noop-test");
+        // Stopping a source that was never started should not panic
+        source.stop().await;
+        let status = source.status.read().await;
+        assert_eq!(*status, FutureQueueSourceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn can_restart_after_stop() {
+        let source = make_source("restart-test");
+        let _ = source.subscribe().await.unwrap();
+        source.start().await.unwrap();
+        source.stop().await;
+
+        // Re-subscribe and start again
+        let _ = source.subscribe().await.unwrap();
+        let result = source.start().await;
+        assert!(result.is_ok());
+        let status = source.status.read().await;
+        assert_eq!(*status, FutureQueueSourceStatus::Running);
+        drop(status);
+        source.stop().await;
+    }
+}
