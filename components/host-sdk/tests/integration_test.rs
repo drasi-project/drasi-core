@@ -530,10 +530,15 @@ fn test_plugin_loader_discovers_plugins_by_pattern() {
     }
     let dir = plugin_dir();
 
-    // Only scan for source plugins
+    // Only scan for source plugins (Windows DLLs lack the "lib" prefix)
+    let pattern = if cfg!(target_os = "windows") {
+        "drasi_source_mock*"
+    } else {
+        "libdrasi_source_mock*"
+    };
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir.clone(),
-        file_patterns: vec!["libdrasi_source_mock*".to_string()],
+        file_patterns: vec![pattern.to_string()],
     });
 
     let plugins = loader
@@ -568,10 +573,17 @@ fn test_plugin_loader_with_multiple_patterns() {
 
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir,
-        file_patterns: vec![
-            "libdrasi_source_mock*".to_string(),
-            "libdrasi_reaction_log*".to_string(),
-        ],
+        file_patterns: if cfg!(target_os = "windows") {
+            vec![
+                "drasi_source_mock*".to_string(),
+                "drasi_reaction_log*".to_string(),
+            ]
+        } else {
+            vec![
+                "libdrasi_source_mock*".to_string(),
+                "libdrasi_reaction_log*".to_string(),
+            ]
+        },
     });
 
     let plugins = loader
