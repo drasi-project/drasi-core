@@ -1795,9 +1795,7 @@ async fn test_reaction_enqueue_query_result() {
     reaction.initialize(context).await;
 
     // Start the reaction
-    eprintln!("[DIAG-TEST] calling start()");
     reaction.start().await.expect("Reaction should start");
-    eprintln!("[DIAG-TEST] start() returned OK");
 
     // Build a QueryResult and enqueue it via the host-managed path
     let query_result = drasi_lib::channels::QueryResult::new(
@@ -1810,18 +1808,14 @@ async fn test_reaction_enqueue_query_result() {
     // This is the critical path: host calls enqueue_query_result on the reaction proxy,
     // which transfers the QueryResult as an opaque pointer through FFI into the
     // reaction's priority queue.
-    eprintln!("[DIAG-TEST] calling enqueue_query_result");
     reaction
         .enqueue_query_result(query_result)
         .await
         .expect("enqueue_query_result should succeed");
-    eprintln!("[DIAG-TEST] enqueue_query_result returned OK");
 
     // If we get here without panic/crash, the opaque pointer transfer worked.
     // Stop the reaction cleanly.
-    eprintln!("[DIAG-TEST] calling stop()");
     reaction.stop().await.expect("Reaction should stop");
-    eprintln!("[DIAG-TEST] stop() returned OK, test function returning (drop will follow)");
 }
 
 /// Test that multiple QueryResults can be enqueued in sequence without issues.

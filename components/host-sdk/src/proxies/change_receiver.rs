@@ -31,20 +31,58 @@ use drasi_lib::channels::events::SourceEventWrapper;
 use drasi_lib::channels::ChangeReceiver;
 use drasi_plugin_sdk::ffi::{FfiChangeReceiver, FfiSourceEvent};
 
+/// Sentinel pointer value sent by the plugin forwarder after its loop exits.
+/// The callback recognises this non-null, obviously-invalid address and uses
+/// it to signal `forwarder_done`. Must match the value in `vtable_gen.rs`.
+const CHANGE_FORWARDER_SENTINEL: usize = 1;
+
+/// Tracks whether the plugin forwarder task has fully exited.
+struct ForwarderDone {
+    done: std::sync::Mutex<bool>,
+    cvar: std::sync::Condvar,
+}
+
+impl ForwarderDone {
+    fn new() -> Self {
+        Self {
+            done: std::sync::Mutex::new(false),
+            cvar: std::sync::Condvar::new(),
+        }
+    }
+
+    fn signal(&self) {
+        let mut done = self.done.lock().expect("forwarder_done mutex poisoned");
+        *done = true;
+        self.cvar.notify_all();
+    }
+
+    fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
+        let done = self.done.lock().expect("forwarder_done mutex poisoned");
+        if *done {
+            return true;
+        }
+        let (guard, _) = self
+            .cvar
+            .wait_timeout(done, timeout)
+            .expect("forwarder_done mutex poisoned");
+        *guard
+    }
+}
+
 /// Context passed to the push callback. Holds the std mpsc sender and a
 /// tokio Notify to wake the host receiver.
 struct PushCallbackContext {
     tx: std::sync::Mutex<Option<std::sync::mpsc::SyncSender<Arc<SourceEventWrapper>>>>,
     notify: Arc<tokio::sync::Notify>,
+    forwarder_done: Arc<ForwarderDone>,
 }
 
 /// The push callback invoked by the plugin forwarder for each event.
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
 extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     // Catch panics to prevent unwinding across the extern "C" boundary (which is UB).
-    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here
-    // because we cannot know which code path panicked. It will be reclaimed when the
-    // forwarder task exits (via the null-event callback or send failure).
+    // On panic, return false to signal shutdown. The forwarder will send a
+    // sentinel after its loop breaks, which signals forwarder_done.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         change_push_callback_inner(ctx, event)
     }))
@@ -52,19 +90,25 @@ extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSo
 }
 
 fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
+    // Sentinel check: the plugin forwarder sends this after its loop exits.
+    // Clone the ForwarderDone Arc before signaling so the Condvar remains
+    // alive even if the host drops PushCallbackContext in response.
+    if !event.is_null() && (event as usize) == CHANGE_FORWARDER_SENTINEL {
+        let context = unsafe { &*(ctx as *const PushCallbackContext) };
+        let forwarder_done = context.forwarder_done.clone();
+        forwarder_done.signal();
+        return false;
+    }
+
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
-        // Channel closed — drop the sender to signal the host receiver
-        {
-            let mut guard = context.tx.lock().expect("push callback mutex poisoned");
-            *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc, otherwise
-            // MutexGuard::drop runs after the PushCallbackContext is freed.
-        }
-        // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
-        unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
+        // Channel closed — drop the sender to signal the host receiver.
+        // The forwarder will send a sentinel after this, which signals
+        // forwarder_done. We do NOT free ctx here.
+        let mut guard = context.tx.lock().expect("push callback mutex poisoned");
+        *guard = None;
+        context.notify.notify_one();
         return false;
     }
 
@@ -80,14 +124,11 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
             context.notify.notify_one();
             true
         } else {
-            // Receiver was dropped — reclaim the leaked Arc
-            unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
+            // Receiver was dropped — forwarder will send sentinel next
             false
         }
     } else {
-        // Sender was already dropped — reclaim the leaked Arc
         drop(guard);
-        unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         false
     }
 }
@@ -118,13 +159,20 @@ impl Drop for FfiReceiverState {
 /// callback into a local `std::sync::mpsc` channel. The `recv()` method
 /// waits on a `tokio::sync::Notify` and then drains from the std channel,
 /// avoiding any cross-cdylib tokio usage.
+///
+/// On drop, the proxy closes the host channel, signals shutdown to the
+/// plugin forwarder, then waits for the forwarder to send a sentinel
+/// confirming it has fully exited before releasing any resources.
 pub struct ChangeReceiverProxy {
-    rx: std::sync::mpsc::Receiver<Arc<SourceEventWrapper>>,
+    rx: Option<std::sync::mpsc::Receiver<Arc<SourceEventWrapper>>>,
     notify: Arc<tokio::sync::Notify>,
-    /// Prevent the callback context from being freed while the plugin forwarder runs.
+    /// Keeps the callback context alive for the duration of the plugin forwarder.
+    /// The raw pointer passed to the plugin is derived via `Arc::as_ptr`.
     _callback_ctx: Arc<PushCallbackContext>,
-    /// Prevent the plugin-side FFI state from being freed while the forwarder runs.
-    _ffi_state: Arc<FfiReceiverState>,
+    /// Triggers plugin-side cleanup (shutdown + handle free) when dropped.
+    _ffi_state: Option<Arc<FfiReceiverState>>,
+    /// Shared flag signalled by the forwarder's sentinel callback.
+    forwarder_done: Arc<ForwarderDone>,
 }
 
 // Safety: All fields are Send+Sync safe
@@ -135,10 +183,12 @@ impl ChangeReceiverProxy {
     pub fn new(inner: FfiChangeReceiver) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel(256);
         let notify = Arc::new(tokio::sync::Notify::new());
+        let forwarder_done = Arc::new(ForwarderDone::new());
 
         let callback_ctx = Arc::new(PushCallbackContext {
             tx: std::sync::Mutex::new(Some(tx)),
             notify: notify.clone(),
+            forwarder_done: forwarder_done.clone(),
         });
 
         let ffi_state = Arc::new(FfiReceiverState {
@@ -146,22 +196,46 @@ impl ChangeReceiverProxy {
             state: inner.state,
         });
 
-        // Increment the Arc refcount for the plugin forwarder's use.
-        // This leaked reference is reclaimed in the callback when
-        // the channel closes (null event) or the callback returns false.
-        let ctx_for_plugin = callback_ctx.clone();
-        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut std::ffi::c_void;
+        // Pass a raw pointer derived from the Arc — the host retains ownership.
+        // The pointer is valid as long as `_callback_ctx` is alive.
+        let ctx_ptr = Arc::as_ptr(&callback_ctx) as *mut std::ffi::c_void;
 
         // Tell the plugin to start pushing events via the callback.
         // The plugin spawns a forwarder task on its own runtime.
         (inner.start_push_fn)(inner.state, change_push_callback, ctx_ptr);
 
         Self {
-            rx,
+            rx: Some(rx),
             notify,
             _callback_ctx: callback_ctx,
-            _ffi_state: ffi_state,
+            _ffi_state: Some(ffi_state),
+            forwarder_done,
         }
+    }
+}
+
+impl Drop for ChangeReceiverProxy {
+    fn drop(&mut self) {
+        // 1. Close the host channel so the forwarder's callback send fails.
+        self.rx.take();
+
+        // 2. Signal shutdown on the plugin side (triggers select! shutdown branch).
+        //    FfiReceiverState::drop → change_receiver_drop → notify_one.
+        self._ffi_state.take();
+
+        // 3. Wait for the forwarder to send its sentinel, confirming it has
+        //    exited the loop and will not touch the callback context again.
+        if !self
+            .forwarder_done
+            .wait_timeout(std::time::Duration::from_secs(5))
+        {
+            // Timeout — the forwarder is still alive. Leak the callback
+            // context to prevent use-after-free if it accesses ctx later.
+            std::mem::forget(self._callback_ctx.clone());
+        }
+        // After this, normal field drops run:
+        //   _callback_ctx → PushCallbackContext freed (safe, forwarder is done)
+        //   forwarder_done → ForwarderDone freed (safe, no more waiters)
     }
 }
 
@@ -169,8 +243,16 @@ impl ChangeReceiverProxy {
 impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
     async fn recv(&mut self) -> anyhow::Result<Arc<SourceEventWrapper>> {
         loop {
-            // Try to receive without blocking first
-            match self.rx.try_recv() {
+            // Scope the reference to `rx` so it doesn't live across the await.
+            // `std::sync::mpsc::Receiver` is not Sync, so `&Receiver` is not Send.
+            let try_result = {
+                let rx = self
+                    .rx
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Receiver closed"))?;
+                rx.try_recv()
+            };
+            match try_result {
                 Ok(event) => return Ok(event),
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     // Wait for the plugin to notify us of a new event
@@ -184,6 +266,9 @@ impl ChangeReceiver<SourceEventWrapper> for ChangeReceiverProxy {
     }
 }
 
+/// Sentinel pointer value for the bootstrap forwarder (same concept as change forwarder).
+const BOOTSTRAP_FORWARDER_SENTINEL: usize = 1;
+
 /// Context passed to the bootstrap push callback. Holds the std mpsc sender
 /// and a tokio Notify to wake the host receiver.
 struct BootstrapPushCallbackContext {
@@ -191,6 +276,7 @@ struct BootstrapPushCallbackContext {
         Option<std::sync::mpsc::SyncSender<drasi_lib::channels::events::BootstrapEvent>>,
     >,
     notify: Arc<tokio::sync::Notify>,
+    forwarder_done: Arc<ForwarderDone>,
 }
 
 /// The push callback invoked by the plugin forwarder for each bootstrap event.
@@ -209,21 +295,25 @@ fn bootstrap_push_callback_inner(
     ctx: *mut std::ffi::c_void,
     event: *mut drasi_plugin_sdk::ffi::FfiBootstrapEvent,
 ) -> bool {
+    // Sentinel check
+    if !event.is_null() && (event as usize) == BOOTSTRAP_FORWARDER_SENTINEL {
+        let context = unsafe { &*(ctx as *const BootstrapPushCallbackContext) };
+        let forwarder_done = context.forwarder_done.clone();
+        forwarder_done.signal();
+        return false;
+    }
+
     let context = unsafe { &*(ctx as *const BootstrapPushCallbackContext) };
 
     if event.is_null() {
-        // Stream exhausted — drop the sender to signal completion
-        {
-            let mut guard = context
-                .tx
-                .lock()
-                .expect("bootstrap push callback mutex poisoned");
-            *guard = None;
-            context.notify.notify_one();
-            // guard must be dropped BEFORE reclaiming the Arc
-        }
-        // Reclaim the leaked Arc reference
-        unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
+        // Stream exhausted — drop the sender to signal completion.
+        // Forwarder will send sentinel next.
+        let mut guard = context
+            .tx
+            .lock()
+            .expect("bootstrap push callback mutex poisoned");
+        *guard = None;
+        context.notify.notify_one();
         return false;
     }
 
@@ -244,12 +334,10 @@ fn bootstrap_push_callback_inner(
             context.notify.notify_one();
             true
         } else {
-            unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
             false
         }
     } else {
         drop(guard);
-        unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         false
     }
 }
@@ -280,10 +368,11 @@ impl Drop for FfiBootstrapReceiverState {
 /// `into_mpsc_receiver()` converts this into a `tokio::sync::mpsc::Receiver`
 /// by draining via `try_recv` + `Notify::notified().await`.
 pub struct BootstrapReceiverProxy {
-    rx: std::sync::mpsc::Receiver<drasi_lib::channels::events::BootstrapEvent>,
+    rx: Option<std::sync::mpsc::Receiver<drasi_lib::channels::events::BootstrapEvent>>,
     notify: Arc<tokio::sync::Notify>,
     _callback_ctx: Arc<BootstrapPushCallbackContext>,
-    _ffi_state: Arc<FfiBootstrapReceiverState>,
+    _ffi_state: Option<Arc<FfiBootstrapReceiverState>>,
+    forwarder_done: Arc<ForwarderDone>,
 }
 
 unsafe impl Send for BootstrapReceiverProxy {}
@@ -293,10 +382,12 @@ impl BootstrapReceiverProxy {
     pub fn new(inner: drasi_plugin_sdk::ffi::FfiBootstrapReceiver) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel(256);
         let notify = Arc::new(tokio::sync::Notify::new());
+        let forwarder_done = Arc::new(ForwarderDone::new());
 
         let callback_ctx = Arc::new(BootstrapPushCallbackContext {
             tx: std::sync::Mutex::new(Some(tx)),
             notify: notify.clone(),
+            forwarder_done: forwarder_done.clone(),
         });
 
         let ffi_state = Arc::new(FfiBootstrapReceiverState {
@@ -304,44 +395,52 @@ impl BootstrapReceiverProxy {
             state: inner.state,
         });
 
-        // Leak an Arc reference for the plugin forwarder; reclaimed in callback
-        let ctx_for_plugin = callback_ctx.clone();
-        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut std::ffi::c_void;
+        // Host-owned pointer — no Arc leak
+        let ctx_ptr = Arc::as_ptr(&callback_ctx) as *mut std::ffi::c_void;
 
         // Start push-based forwarding on the plugin runtime
         (inner.start_push_fn)(inner.state, bootstrap_push_callback, ctx_ptr);
 
         Self {
-            rx,
+            rx: Some(rx),
             notify,
             _callback_ctx: callback_ctx,
-            _ffi_state: ffi_state,
+            _ffi_state: Some(ffi_state),
+            forwarder_done,
         }
     }
 
     /// Convert into a tokio mpsc Receiver by spawning a forwarding task.
-    pub fn into_mpsc_receiver(self) -> drasi_lib::channels::events::BootstrapEventReceiver {
+    pub fn into_mpsc_receiver(mut self) -> drasi_lib::channels::events::BootstrapEventReceiver {
         let (tx, out_rx) = tokio::sync::mpsc::channel(256);
-        let rx = self.rx;
+        let rx = self.rx.take().expect("rx should be Some");
         let notify = self.notify.clone();
-        // Keep FFI state and callback context alive until forwarding completes
-        let _ffi_state = self._ffi_state;
-        let _callback_ctx = self._callback_ctx;
+        // Take ownership of FFI state and callback context for the spawned task
+        let ffi_state = self._ffi_state.take();
+        let callback_ctx = self._callback_ctx.clone();
+        let forwarder_done = self.forwarder_done.clone();
+        // self will be dropped after this, but Drop is a no-op when fields are taken
 
         tokio::spawn(async move {
-            let _ffi = _ffi_state;
-            let _ctx = _callback_ctx;
+            let _ffi = ffi_state;
+            let _ctx = callback_ctx;
+            let _fd = forwarder_done;
             loop {
                 // Drain all available events
                 loop {
                     match rx.try_recv() {
                         Ok(event) => {
                             if tx.send(event).await.is_err() {
+                                // Wait for plugin forwarder to finish before dropping state
+                                wait_forwarder_done_async(&_fd).await;
                                 return;
                             }
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            wait_forwarder_done_async(&_fd).await;
+                            return;
+                        }
                     }
                 }
                 notify.notified().await;
@@ -349,5 +448,31 @@ impl BootstrapReceiverProxy {
         });
 
         out_rx
+    }
+}
+
+/// Helper to wait for forwarder completion in an async context.
+async fn wait_forwarder_done_async(fd: &Arc<ForwarderDone>) {
+    let fd = fd.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        fd.wait_timeout(std::time::Duration::from_secs(5));
+    })
+    .await;
+}
+
+impl Drop for BootstrapReceiverProxy {
+    fn drop(&mut self) {
+        // If into_mpsc_receiver already consumed the fields, this is a no-op.
+        if self.rx.is_none() && self._ffi_state.is_none() {
+            return;
+        }
+        self.rx.take();
+        self._ffi_state.take();
+        if !self
+            .forwarder_done
+            .wait_timeout(std::time::Duration::from_secs(5))
+        {
+            std::mem::forget(self._callback_ctx.clone());
+        }
     }
 }
