@@ -141,6 +141,7 @@ mod schema_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         });
 
         assert_eq!(config.queries.len(), 1);
@@ -179,6 +180,7 @@ mod persistence_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         });
 
         // Serialize to YAML
@@ -251,6 +253,7 @@ mod persistence_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         });
 
         // Save config
@@ -296,6 +299,7 @@ mod runtime_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let runtime = QueryRuntime::from(config.clone());
@@ -338,6 +342,7 @@ mod runtime_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let runtime = QueryRuntime::from(config.clone());
@@ -560,6 +565,7 @@ mod runtime_tests {
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
                 storage_backend: None,
+                recovery_policy: None,
             }],
         };
 
@@ -600,6 +606,7 @@ mod runtime_tests {
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
                     storage_backend: None,
+                    recovery_policy: None,
                 },
                 QueryConfig {
                     id: "q2".to_string(),
@@ -615,6 +622,7 @@ mod runtime_tests {
                     dispatch_buffer_capacity: None,
                     dispatch_mode: None,
                     storage_backend: None,
+                    recovery_policy: None,
                 },
             ],
         };
@@ -799,6 +807,7 @@ mod dispatch_mode_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
+            recovery_policy: None,
         });
 
         config.queries.push(QueryConfig {
@@ -820,6 +829,7 @@ mod dispatch_mode_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
+            recovery_policy: None,
         });
 
         config.queries.push(QueryConfig {
@@ -841,6 +851,7 @@ mod dispatch_mode_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None, // Default
             storage_backend: None,
+            recovery_policy: None,
         });
 
         assert_eq!(config.queries.len(), 3);

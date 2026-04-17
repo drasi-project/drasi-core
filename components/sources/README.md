@@ -443,7 +443,7 @@ Bootstrap provides initial data to newly subscribing queries. The bootstrap syst
 pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request.
     /// Sends bootstrap events to the provided channel.
-    /// Returns the number of elements sent.
+    /// Returns a `BootstrapResult` with the event count plus handover metadata.
     ///
     /// # Arguments
     /// * `request` - Bootstrap request with query ID and labels
@@ -456,7 +456,19 @@ pub trait BootstrapProvider: Send + Sync {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize>;  // Returns count of events sent
+    ) -> Result<BootstrapResult>;
+}
+
+pub struct BootstrapResult {
+    /// Number of bootstrap events sent through the channel.
+    pub event_count: usize,
+    /// The snapshot's position in the source's sequence space (e.g., a
+    /// Postgres WAL LSN). `None` for providers without a positional concept.
+    pub last_sequence: Option<u64>,
+    /// Whether the bootstrap's sequence namespace matches the streaming
+    /// source's sequence namespace (typically `true` only for homogeneous
+    /// source + bootstrapper pairs, e.g., Postgres / Postgres).
+    pub sequences_aligned: bool,
 }
 
 pub struct BootstrapRequest {

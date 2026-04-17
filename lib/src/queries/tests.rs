@@ -56,6 +56,7 @@ mod manager_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -83,6 +84,7 @@ mod manager_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -901,6 +903,7 @@ mod query_core_tests {
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
                 storage_backend: None,
+                recovery_policy: None,
             };
 
             // Just verify the config can be created
@@ -924,6 +927,7 @@ mod query_core_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         };
 
         // Empty queries should be caught during validation

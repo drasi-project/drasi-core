@@ -301,13 +301,6 @@ pub struct BootstrapEvent {
     pub sequence: u64,
 }
 
-/// Bootstrap completion signal
-#[derive(Debug, Clone)]
-pub struct BootstrapComplete {
-    pub source_id: String,
-    pub total_events: u64,
-}
-
 /// Subscription request from Query to Source
 #[derive(Debug, Clone)]
 pub struct SubscriptionRequest {
@@ -459,8 +452,6 @@ pub type QueryResultBroadcastReceiver = broadcast::Receiver<ArcQueryResult>;
 // Bootstrap channel types for dedicated bootstrap data delivery
 pub type BootstrapEventSender = mpsc::Sender<BootstrapEvent>;
 pub type BootstrapEventReceiver = mpsc::Receiver<BootstrapEvent>;
-pub type BootstrapCompleteSender = mpsc::Sender<BootstrapComplete>;
-pub type BootstrapCompleteReceiver = mpsc::Receiver<BootstrapComplete>;
 
 /// Control signals for coordination
 #[derive(Debug, Clone, Serialize, Deserialize)]
