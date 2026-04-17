@@ -71,7 +71,6 @@ impl MqttSource {
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
     ///     .with_topic("my/mqtt/topic")
-    ///     .with_qos(MqttQoS::ONE)
     ///     .with_adaptive_enabled(true)
     ///     .with_bootstrap_provider(my_provider)
     ///     .build().await?;
@@ -107,7 +106,6 @@ impl MqttSource {
     ///     .with_host("0.0.0.0")
     ///     .with_port(9001)
     ///     .with_topic("my/mqtt/topic")
-    ///     .with_qos(QualityOfService::AtLeastOnce)
     ///     .build();
     ///
     /// let source = MqttSource::new("my-mqtt-source", config).await?;
@@ -333,23 +331,8 @@ impl Source for MqttSource {
             .await?;
 
         let source_id = self.base.id.clone();
-        let instance_id = self
-            .base
-            .context()
-            .await
-            .map(|c| c.instance_id)
-            .unwrap_or_default();
 
-        // Start the subscriber
-        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
-
-        let span = tracing::info_span!(
-            "mqtt_source_server",
-            instance_id = %instance_id,
-            component_id = %source_id.clone(),
-            component_type = "source"
-        );
-
+        // Start the subscriber connection and processing loops
         let config = self.config.clone();
         let source_id_for_task = self.id().to_string();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -377,58 +360,90 @@ impl Source for MqttSource {
         // Set the identity provider for unified access (use inside the connection task for authenticating with MQTT broker if needed).
         let identity_provider = self.base.identity_provider().await;
         // start mqtt connection task
-        let server_handle = tokio::spawn(
-            async move {
-                let (connection_shutdown_tx, connection_shutdown_rx) =
-                    tokio::sync::oneshot::channel();
+        let status_clone = self.base.status.clone();
+        let status_tx = self.base.status_tx();
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+        let span = tracing::info_span!(
+            "mqtt_source_connection",
+            instance_id = %instance_id,
+            component_id = %source_id.clone(),
+            component_type = "source"
+        );
 
-                match MqttConnection::new(source_id_for_task, &config, identity_provider).await {
-                    Ok((mut connection, event_loop_wrapper)) => {
+        match MqttConnection::new(source_id_for_task.clone(), &config, identity_provider).await {
+            Ok((mut connection, event_loop_wrapper)) => {
+                // connection successfully created.
+                // Run subscription loop
+                let server_handle = tokio::spawn(
+                    async move {
                         if let Err(error) = connection
                             .run_subscription_loop(
-                                connection_shutdown_rx,
+                                shutdown_rx,
                                 event_loop_wrapper,
                                 &config,
                                 processor_tx,
                             )
                             .await
                         {
-                            let _ = error_tx.send(error.to_string());
-                            return;
+                            error!(
+                                "MQTT connection loop failed for {source_id_for_task}: {error:?}"
+                            );
+                            *status_clone.write().await = ComponentStatus::Error;
+                            if let Some(ref tx) = *status_tx.read().await {
+                                let _ = tx
+                                    .send(ComponentEvent {
+                                        component_id: source_id_for_task.clone(),
+                                        component_type: ComponentType::Source,
+                                        status: ComponentStatus::Error,
+                                        timestamp: chrono::Utc::now(),
+                                        message: Some(format!(
+                                            "MQTT connection loop failed: {error:?}"
+                                        )),
+                                    })
+                                    .await;
+                            }
+                        } else {
+                            info!(
+                                "MQTT connection loop stopped gracefully for {source_id_for_task}"
+                            );
                         }
                     }
-                    Err(error) => {
-                        error!("Failed to establish MQTT connection: {error:?}");
-                        let _ = error_tx.send(error.to_string());
-                        return;
-                    }
+                    .instrument(span),
+                );
+                *self.base.task_handle.write().await = Some(server_handle);
+            }
+            Err(error) => {
+                error!("Mqtt task failed for {source_id_for_task}: {error:?}");
+                *status_clone.write().await = ComponentStatus::Error;
+                if let Some(ref tx) = *status_tx.read().await {
+                    let _ = tx
+                        .send(ComponentEvent {
+                            component_id: source_id_for_task.clone(),
+                            component_type: ComponentType::Source,
+                            status: ComponentStatus::Error,
+                            timestamp: chrono::Utc::now(),
+                            message: Some(format!("MQTT connection failed: {error:?}")),
+                        })
+                        .await;
                 }
-
-                let _ = shutdown_rx.await;
-                let _ = connection_shutdown_tx.send(());
-            }
-            .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(server_handle);
-        *self.base.shutdown_tx.write().await = Some(shutdown_tx);
-
-        match timeout(Duration::from_millis(500), error_rx).await {
-            Ok(Ok(error_msg)) => {
-                self.base.set_status(ComponentStatus::Error).await;
-                return Err(anyhow::anyhow!("{error_msg}"));
-            }
-            _ => {
-                self.base.set_status(ComponentStatus::Running).await;
+                return Err(anyhow::anyhow!("Failed to start MQTT source: {error:?}"));
             }
         }
 
+        *self.base.shutdown_tx.write().await = Some(shutdown_tx);
+
         // Set Source Status to running
+        self.base.set_status(ComponentStatus::Running).await;
         self.base
             .send_component_event(
                 ComponentStatus::Running,
                 Some(format!(
-                    "MQTT source running on {}:{}",
+                    "MQTT source is connected to broker at {}:{}",
                     self.config.host, self.config.port
                 )),
             )

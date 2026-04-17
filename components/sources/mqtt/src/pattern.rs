@@ -17,7 +17,7 @@ use matchit::{Params, Router};
 use crate::schema::MqttSourceChange;
 use crate::utils::MqttPacket;
 use crate::{
-    config::{MappingMode, MappingNode, MappingRelation, TopicMapping},
+    config::{InjectId, MappingMode, MappingNode, MappingRelation, TopicMapping},
     MqttElement,
 };
 use log::{error, info};
@@ -62,8 +62,7 @@ impl PatternMatcher {
                 }
 
                 let timestamp = packet.timestamp;
-                let mut hierarchy = Self::create_hierarchy(mapping, &params, timestamp);
-                result.append(&mut hierarchy);
+                Self::create_hierarchy(mapping, &params, timestamp, &mut result);
 
                 Ok(result)
             }
@@ -129,6 +128,13 @@ impl PatternMatcher {
         let entity_label = Self::map_template(&mapping.entity.label, params);
         let entity_id = Self::map_template(&mapping.entity.id, params);
 
+        if let Some(InjectId::True) = &mapping.properties.inject_id {
+            properties.insert(
+                "id".to_string(),
+                serde_json::Value::String(entity_id.clone()),
+            );
+        }
+
         let element = MqttElement::Node {
             id: entity_id.clone(),
             labels: vec![entity_label.clone()],
@@ -144,19 +150,20 @@ impl PatternMatcher {
         mapping: &TopicMapping,
         params: &Params,
         timestamp: u64,
-    ) -> Vec<MqttSourceChange> {
-        let mut hierarchy = Vec::new();
-        hierarchy.append(&mut Self::create_nodes(
+        result: &mut Vec<MqttSourceChange>,
+    ) {
+        result.append(&mut Self::create_nodes(
             mapping.nodes.as_ref(),
             params,
             timestamp,
         ));
-        hierarchy.append(&mut Self::create_relations(
+
+        result.append(&mut Self::create_relations(
             mapping.relations.as_ref(),
             params,
             timestamp,
+            result,
         ));
-        hierarchy
     }
 
     fn create_nodes(
@@ -170,7 +177,11 @@ impl PatternMatcher {
             let element = MqttElement::Node {
                 id: node_id.clone(),
                 labels: vec![node.label.clone()],
-                properties: serde_json::Map::new(),
+                properties: {
+                    let mut props = serde_json::Map::new();
+                    props.insert("id".to_string(), serde_json::Value::String(node_id.clone()));
+                    props
+                },
             };
             result.push(MqttSourceChange::Update {
                 element,
@@ -184,23 +195,59 @@ impl PatternMatcher {
         relations: &Vec<MappingRelation>,
         params: &Params,
         timestamp: u64,
+        nodes: &Vec<MqttSourceChange>,
     ) -> Vec<MqttSourceChange> {
         let mut result = Vec::new();
         for relation in relations {
             let relation_id = Self::map_template(&relation.id, params);
-            let element = MqttElement::Relation {
-                id: relation_id.clone(),
-                labels: vec![relation.label.clone()],
-                from: relation.from.clone(),
-                to: relation.to.clone(),
-                properties: serde_json::Map::new(),
-            };
-            result.push(MqttSourceChange::Update {
-                element,
-                timestamp: Some(timestamp),
-            });
+
+            let from_node = Self::get_node_with_label(&relation.from, nodes);
+            let to_node = Self::get_node_with_label(&relation.to, nodes);
+
+            if let Ok(from) = from_node {
+                if let Ok(to) = to_node {
+                    let element = MqttElement::Relation {
+                        id: relation_id.clone(),
+                        labels: vec![relation.label.clone()],
+                        from,
+                        to,
+                        properties: {
+                            let mut props = serde_json::Map::new();
+                            props.insert(
+                                "id".to_string(),
+                                serde_json::Value::String(relation_id.clone()),
+                            );
+                            props
+                        },
+                    };
+                    result.push(MqttSourceChange::Update {
+                        element,
+                        timestamp: Some(timestamp),
+                    });
+                }
+            }
         }
         result
+    }
+
+    fn get_node_with_label(label: &str, changes: &Vec<MqttSourceChange>) -> anyhow::Result<String> {
+        for change in changes {
+            if let MqttSourceChange::Update {
+                element:
+                    MqttElement::Node {
+                        id,
+                        labels,
+                        properties,
+                    },
+                ..
+            } = change
+            {
+                if labels.contains(&label.to_string()) {
+                    return Ok(id.clone());
+                }
+            }
+        }
+        Err(anyhow::anyhow!("Node with label '{label}' not found"))
     }
 
     fn map_template(template: &str, params: &Params) -> String {
@@ -237,6 +284,7 @@ mod tests {
                     ("floor".to_string(), "{floor}".to_string()),
                     ("room".to_string(), "{room}".to_string()),
                 ])],
+                inject_id: Some(InjectId::True),
             },
             nodes: vec![
                 MappingNode {
@@ -479,9 +527,12 @@ mod tests {
                     } => {
                         assert_eq!(id, "f6_contains_r8");
                         assert_eq!(labels, &vec!["CONTAINS".to_string()]);
-                        assert_eq!(from, "FLOOR");
-                        assert_eq!(to, "ROOM");
-                        assert!(properties.is_empty());
+                        assert_eq!(from, "f6");
+                        assert_eq!(to, "r8");
+                        assert_eq!(
+                            properties.get("id"),
+                            Some(&serde_json::json!("f6_contains_r8"))
+                        );
                     }
                     _ => panic!("fourth change should be relation"),
                 }
@@ -502,9 +553,12 @@ mod tests {
                     } => {
                         assert_eq!(id, "r8_located_in_light");
                         assert_eq!(labels, &vec!["LOCATED_IN".to_string()]);
-                        assert_eq!(from, "DEVICE");
-                        assert_eq!(to, "ROOM");
-                        assert!(properties.is_empty());
+                        assert_eq!(from, "r8:light");
+                        assert_eq!(to, "r8");
+                        assert_eq!(
+                            properties.get("id"),
+                            Some(&serde_json::json!("r8_located_in_light"))
+                        );
                     }
                     _ => panic!("fifth change should be relation"),
                 }
