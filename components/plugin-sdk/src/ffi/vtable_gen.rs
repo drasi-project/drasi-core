@@ -1342,33 +1342,49 @@ pub fn build_reaction_vtable_from_boxed(
         let ctx_raw = callback_ctx as usize;
         let ptr = SendPtr(state as *const DynReactionWrapper);
         handle.spawn(async move {
+            eprintln!("[DIAG-FWD-dyn] forwarder task started, state={:?}", ptr.0);
             loop {
                 let ctx_val = ctx_raw;
+                eprintln!("[DIAG-FWD-dyn] calling spawn_blocking for callback");
                 let result_ptr = tokio::task::spawn_blocking(move || {
                     SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
                 })
                 .await;
                 let result_ptr = match result_ptr {
                     Ok(p) => p.as_ptr(),
-                    Err(_) => break,
+                    Err(e) => {
+                        eprintln!("[DIAG-FWD-dyn] spawn_blocking JoinError: {e}");
+                        break;
+                    }
                 };
                 if result_ptr.is_null() {
+                    eprintln!("[DIAG-FWD-dyn] callback returned null, breaking");
                     break;
                 }
-                let query_result =
-                    unsafe { *Box::from_raw(result_ptr as *mut drasi_lib::channels::QueryResult) };
+                // Scope the raw pointer so it doesn't live across await
+                let query_result = {
+                    let rp = result_ptr;
+                    eprintln!("[DIAG-FWD-dyn] got result_ptr={rp:?}, calling Box::from_raw");
+                    let qr = unsafe { *Box::from_raw(rp as *mut drasi_lib::channels::QueryResult) };
+                    eprintln!("[DIAG-FWD-dyn] Box::from_raw OK, query_id={}", qr.query_id);
+                    qr
+                };
                 let inner = unsafe { ptr.as_ref() };
+                eprintln!("[DIAG-FWD-dyn] calling enqueue_query_result");
                 if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
                     log::error!("Failed to enqueue query result: {e}");
                 }
+                eprintln!("[DIAG-FWD-dyn] enqueue_query_result done");
             }
             // Signal the host that the forwarder has fully exited its loop
             // and will not access the ReactionWrapper again.
+            eprintln!("[DIAG-FWD-dyn] sending sentinel callback");
             let ctx_val = ctx_raw;
             let _ = tokio::task::spawn_blocking(move || {
                 callback(ctx_val as *mut c_void, 1usize as *mut c_void);
             })
             .await;
+            eprintln!("[DIAG-FWD-dyn] sentinel done, forwarder task exiting");
         });
     }
 

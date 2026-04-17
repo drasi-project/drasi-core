@@ -92,18 +92,25 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
     // access the ReactionWrapper again.  Signal completion so Drop can
     // safely call drop_fn.
     if !sentinel.is_null() {
+        eprintln!("[DIAG-CB] sentinel received, signaling forwarder_done");
         signal_forwarder_done(context);
         return std::ptr::null_mut();
     }
 
+    eprintln!("[DIAG-CB] callback invoked, acquiring rx lock");
     let guard = context
         .rx
         .lock()
         .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
+        eprintln!("[DIAG-CB] rx present, calling recv()");
         match rx.recv() {
-            Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
+            Ok(result) => {
+                eprintln!("[DIAG-CB] recv() returned Ok, boxing result for query_id={}", result.query_id);
+                Box::into_raw(Box::new(result)) as *mut c_void
+            }
             Err(_) => {
+                eprintln!("[DIAG-CB] recv() returned Err (channel closed)");
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will
                 // send a sentinel callback after it has fully exited.
@@ -111,6 +118,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
             }
         }
     } else {
+        eprintln!("[DIAG-CB] rx is None, returning null");
         // rx already taken — return null (forwarder will send sentinel after exiting)
         std::ptr::null_mut()
     }
@@ -257,11 +265,13 @@ impl Reaction for ReactionProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
+        eprintln!("[DIAG-STOP] stop() called");
         // Close the sender so the forwarder's callback returns null
         {
             let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
             *guard = None;
         }
+        eprintln!("[DIAG-STOP] sender dropped");
         // Also drop the receiver to unblock the callback if it's blocked in recv()
         if let Ok(guard) = self._push_ctx.lock() {
             if let Some(ref ctx) = *guard {
@@ -270,12 +280,14 @@ impl Reaction for ReactionProxy {
                 }
             }
         }
+        eprintln!("[DIAG-STOP] receiver dropped, calling stop_fn");
 
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let stop_fn = self.vtable.stop_fn;
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
+        eprintln!("[DIAG-STOP] stop_fn returned");
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 
@@ -295,10 +307,12 @@ impl Reaction for ReactionProxy {
         &self,
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
+        eprintln!("[DIAG-ENQ] enqueue_query_result called for query_id={}", result.query_id);
         let guard = self.result_tx.lock().expect("result_tx lock poisoned");
         if let Some(ref tx) = *guard {
             tx.send(result)
                 .map_err(|_| anyhow::anyhow!("Result channel closed"))?;
+            eprintln!("[DIAG-ENQ] send succeeded");
         } else {
             return Err(anyhow::anyhow!(
                 "Reaction not started — result channel not initialized"
@@ -319,6 +333,7 @@ impl Reaction for ReactionProxy {
 
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
+        eprintln!("[DIAG-DROP] ReactionProxy::drop() entered");
         // Close the result channel sender to unblock the forwarder's callback.
         // The callback's rx.recv() will return Err, causing it to return null.
         // The forwarder then breaks out of its loop and sends a sentinel
@@ -326,6 +341,7 @@ impl Drop for ReactionProxy {
         if let Ok(mut guard) = self.result_tx.lock() {
             *guard = None;
         }
+        eprintln!("[DIAG-DROP] sender closed");
         // Also drop the receiver inside the push context to unblock the callback
         // if it's blocked in recv() (belt-and-suspenders with the sender drop).
         if let Ok(guard) = self._push_ctx.lock() {
@@ -335,6 +351,7 @@ impl Drop for ReactionProxy {
                 }
             }
         }
+        eprintln!("[DIAG-DROP] receiver closed");
 
         // Wait for the forwarder task to fully exit its processing loop.
         //
@@ -345,12 +362,15 @@ impl Drop for ReactionProxy {
         // it is safe to free the ReactionWrapper.
         let forwarder_exited = if let Ok(guard) = self._push_ctx.lock() {
             if let Some(ref ctx) = *guard {
+                eprintln!("[DIAG-DROP] waiting for forwarder_done...");
                 let done = ctx.forwarder_done.lock().expect("forwarder_done lock");
                 let (guard, timeout) = ctx
                     .forwarder_done_cv
                     .wait_timeout_while(done, std::time::Duration::from_secs(5), |done| !*done)
                     .expect("forwarder_done condvar wait");
-                !timeout.timed_out() && *guard
+                let exited = !timeout.timed_out() && *guard;
+                eprintln!("[DIAG-DROP] forwarder_done={exited} (timed_out={})", timeout.timed_out());
+                exited
             } else {
                 true // No push context → forwarder was never started
             }
@@ -359,13 +379,16 @@ impl Drop for ReactionProxy {
         };
 
         if forwarder_exited {
+            eprintln!("[DIAG-DROP] calling drop_fn");
             // Safe to free the ReactionWrapper — forwarder won't access it.
             let drop_fn = self.vtable.drop_fn;
             let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
             let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+            eprintln!("[DIAG-DROP] drop_fn returned");
         } else {
             // Timeout or error — leak the ReactionWrapper to prevent UAF.
             // Memory leak is preferable to undefined behavior.
+            eprintln!("[DIAG-DROP] forwarder did NOT exit! Leaking wrapper.");
             log::warn!(
                 "ReactionProxy::drop: forwarder did not exit within timeout; \
                  leaking ReactionWrapper to prevent use-after-free"
@@ -380,6 +403,7 @@ impl Drop for ReactionProxy {
                 std::mem::forget(ctx);
             }
         }
+        eprintln!("[DIAG-DROP] ReactionProxy::drop() finished");
     }
 }
 

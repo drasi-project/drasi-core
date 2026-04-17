@@ -115,3 +115,10 @@ jobs:
         env:
           RUST_BACKTRACE: full
         run: cargo test -p drasi-host-sdk --test integration_test -- --test-threads=1 --nocapture
+
+      - name: Run isolated enqueue test (cross-test contamination check)
+        if: always()
+        shell: bash
+        env:
+          RUST_BACKTRACE: full
+        run: cargo test -p drasi-host-sdk --test integration_test test_reaction_enqueue_query_result -- --exact --test-threads=1 --nocapture
