@@ -198,12 +198,21 @@ mod integration_tests {
             .mount(&mock_server)
             .await;
 
-        // 5. Create Dataverse source pointing to mock server
+        // 5. Create identity provider that uses the mock server for token acquisition
+        let token_url = format!("{mock_uri}/oauth2/v2.0/token");
+        let identity_provider = drasi_source_dataverse::auth::TokenManager::with_token_url(
+            "mock-tenant-id",
+            "mock-client-id",
+            "mock-client-secret",
+            &mock_uri,
+            &token_url,
+        )
+        .expect("Failed to create TokenManager");
+
+        // 6. Create Dataverse source pointing to mock server
         let source = DataverseSource::builder(SOURCE_ID)
             .with_environment_url(&mock_uri)
-            .with_tenant_id("mock-tenant-id")
-            .with_client_id("mock-client-id")
-            .with_client_secret("mock-client-secret")
+            .with_identity_provider(identity_provider)
             .with_entities(vec!["account".to_string()])
             .with_min_interval_ms(100) // Fast polling for test
             .with_max_interval_seconds(1)
@@ -211,7 +220,7 @@ mod integration_tests {
             .build()
             .expect("Failed to build DataverseSource");
 
-        // 6. Create query
+        // 7. Create query
         let query = Query::cypher(QUERY_ID)
             .query(
                 r#"
@@ -224,12 +233,12 @@ mod integration_tests {
             .enable_bootstrap(false) // No bootstrap - we test CDC only
             .build();
 
-        // 7. Create application reaction to capture results
+        // 8. Create application reaction to capture results
         let (reaction, handle) = ApplicationReaction::builder("test-reaction")
             .with_query(QUERY_ID)
             .build();
 
-        // 8. Build and start DrasiLib
+        // 9. Build and start DrasiLib
         let drasi = DrasiLib::builder()
             .with_id("dataverse-integration-test")
             .with_source(source)
@@ -241,7 +250,7 @@ mod integration_tests {
 
         drasi.start().await.expect("Failed to start DrasiLib");
 
-        // 9. Create subscription
+        // 10. Create subscription
         let mut subscription = handle
             .subscribe_with_options(
                 SubscriptionOptions::default().with_timeout(Duration::from_secs(2)),
@@ -252,7 +261,7 @@ mod integration_tests {
         // Wait for source to start and do initial delta token acquisition
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // 10. Collect results - expecting INSERT, UPDATE, DELETE
+        // 11. Collect results - expecting INSERT, UPDATE, DELETE
         let mut found_insert = false;
         let mut found_update = false;
         let mut found_delete = false;

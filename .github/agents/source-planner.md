@@ -64,12 +64,12 @@ For **Protocol/Local** sources:
 
 ### 3.5. Authentication — Use Existing Identity Providers
 
-Before designing custom authentication logic, review the identity provider infrastructure in `lib/src/identity/`:
+Before designing custom authentication logic, review the shared identity abstractions in `lib/src/identity/` and the component-specific identity providers under `components/identity/`:
 
-- **`IdentityProvider` trait** (`lib/src/identity/mod.rs`) — the standard interface for credential acquisition. Returns `Credentials::Token`, `Credentials::UsernamePassword`, or `Credentials::Certificate`.
-- **`AzureIdentityProvider`** (`lib/src/identity/azure.rs`, behind `azure-identity` feature) — supports managed identity, client secrets, developer tools (CLI/azd/PS), and workload identity. Use `.with_scope()` to set the token audience.
-- **`AwsIdentityProvider`** (`lib/src/identity/aws.rs`, behind `aws-identity` feature) — for AWS-based sources.
+- **`IdentityProvider` trait** (`lib/src/identity/mod.rs`) — the standard interface for credential acquisition. Returns `Credentials::Token`, `Credentials::UsernamePassword`, or `Credentials::Certificate`. Accepts a `CredentialContext` that components can use to pass resource-specific properties (e.g., `scope` for token audience).
 - **`PasswordIdentityProvider`** (`lib/src/identity/password.rs`) — simple username/password provider.
+- **Azure identity provider** (`components/identity/azure/`) — supports managed identity, client secrets, developer tools (CLI/azd/PS), and workload identity. Respects `scope` from `CredentialContext` if provided, otherwise uses its default scope.
+- **AWS identity provider** (`components/identity/aws/`) — for AWS-based sources. Generates endpoint-specific RDS auth tokens using `CredentialContext` properties.
 
 **Plan should:**
 1. Determine which `Credentials` variant the target system needs (token, password, or certificate).

@@ -338,12 +338,12 @@ impl DataverseBootstrapProvider {
         // Build properties from all non-annotation attributes
         let mut properties = ElementPropertyMap::new();
         for (key, value) in obj {
-            // Skip OData annotations (prefixed with @ or containing @)
+            // Skip OData annotations (prefixed with @ or containing @).
+            // Other fields, including Dataverse lookup GUID fields such as
+            // `_xxx_value`, are preserved as element properties.
             if key.starts_with('@') || key.contains('@') {
                 continue;
             }
-            // Skip navigation property annotations (_xxx_value)
-            // But keep the lookups themselves as they contain the foreign key GUID
             let element_value = convert_json_value(value);
             properties.insert(key, element_value);
         }

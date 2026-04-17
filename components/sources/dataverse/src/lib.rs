@@ -727,7 +727,14 @@ impl Source for DataverseSource {
 
         // Wait for the combined task to finish
         if let Some(handle) = self.base.task_handle.write().await.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+            let mut handle = handle;
+            if tokio::time::timeout(Duration::from_secs(10), &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
+            }
         }
 
         self.base
