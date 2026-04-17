@@ -67,6 +67,7 @@ use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
+use crate::identity::IdentityProvider;
 use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
@@ -131,6 +132,7 @@ pub struct DrasiLibBuilder {
     )>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
+    identity_provider: Option<Arc<dyn IdentityProvider>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -152,6 +154,7 @@ impl DrasiLibBuilder {
             reaction_instances: Vec::new(),
             index_provider: None,
             state_store_provider: None,
+            identity_provider: None,
         }
     }
 
@@ -226,6 +229,31 @@ impl DrasiLibBuilder {
     /// ```
     pub fn with_state_store_provider(mut self, provider: Arc<dyn StateStoreProvider>) -> Self {
         self.state_store_provider = Some(provider);
+        self
+    }
+
+    /// Set the identity provider for credential injection.
+    ///
+    /// Identity providers supply authentication credentials (passwords, tokens,
+    /// certificates) to sources and reactions that need them for connecting to
+    /// external systems.
+    ///
+    /// If no identity provider is set, sources and reactions will receive `None`
+    /// for `context.identity_provider`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_identity_azure::AzureIdentityProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+    /// let core = DrasiLib::builder()
+    ///     .with_identity_provider(Arc::new(provider))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
+        self.identity_provider = Some(provider);
         self
     }
 
@@ -325,6 +353,7 @@ impl DrasiLibBuilder {
             config,
             self.index_provider,
             self.state_store_provider,
+            self.identity_provider,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
@@ -454,6 +483,32 @@ impl DrasiLibBuilder {
                     format!("Failed to provision: {e}"),
                 ));
             }
+        }
+
+        // Register the identity provider in the component graph (if configured).
+        // This creates an IdentityProvider node with Authenticates edges to all
+        // sources and reactions that receive credentials from it.
+        if core.config.identity_provider.is_some() {
+            let mut graph = core.component_graph.write().await;
+            let component_ids: Vec<String> = graph
+                .list_by_kind(&crate::component_graph::ComponentKind::Source)
+                .into_iter()
+                .chain(graph.list_by_kind(&crate::component_graph::ComponentKind::Reaction))
+                .map(|(id, _)| id)
+                .collect();
+
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), "identity_provider".to_string());
+            graph
+                .register_identity_provider("identity-provider", metadata, &component_ids)
+                .map_err(|e| {
+                    DrasiError::operation_failed(
+                        "identity_provider",
+                        "identity-provider",
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
+                })?;
         }
 
         Ok(core)

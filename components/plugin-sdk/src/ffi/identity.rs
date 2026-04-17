@@ -68,7 +68,14 @@ pub struct IdentityProviderVtable {
     pub state: *mut c_void,
     /// Fetch credentials. This is a blocking call — the host implementation
     /// spawns a tokio runtime to call the async `get_credentials()`.
-    pub get_credentials_fn: extern "C" fn(state: *const c_void) -> FfiCredentialsResult,
+    ///
+    /// `context_json` is a UTF-8 JSON string of the `CredentialContext` properties.
+    /// `context_len` is the byte length of `context_json` (excluding any null terminator).
+    pub get_credentials_fn: extern "C" fn(
+        state: *const c_void,
+        context_json: *const u8,
+        context_len: usize,
+    ) -> FfiCredentialsResult,
     /// Clone the vtable (creates a new Arc reference).
     pub clone_fn: extern "C" fn(state: *const c_void) -> *mut c_void,
     /// Drop the state (decrements Arc refcount).

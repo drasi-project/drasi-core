@@ -1320,7 +1320,10 @@ struct MockIdentityProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockIdentityProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::UsernamePassword {
             username: self.username.clone(),
             password: self.password.clone(),
@@ -1343,7 +1346,10 @@ struct MockTokenProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockTokenProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::Token {
             username: self.username.clone(),
             token: self.token.clone(),
@@ -1367,7 +1373,10 @@ struct MockCertProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockCertProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::Certificate {
             cert_pem: self.cert_pem.clone(),
             key_pem: self.key_pem.clone(),
@@ -1389,12 +1398,38 @@ struct MockErrorProvider;
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockErrorProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Err(anyhow::anyhow!("Authentication service unavailable"))
     }
 
     fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
         Box::new(MockErrorProvider)
+    }
+}
+
+/// A mock IdentityProvider that echoes context properties back as credentials.
+/// Used to verify non-empty CredentialContext survives the FFI JSON round-trip.
+struct MockContextEchoProvider;
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockContextEchoProvider {
+    async fn get_credentials(
+        &self,
+        context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        let hostname = context.get("hostname").unwrap_or_default().to_string();
+        let port = context.get("port").unwrap_or_default().to_string();
+        Ok(drasi_lib::identity::Credentials::UsernamePassword {
+            username: hostname,
+            password: port,
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockContextEchoProvider)
     }
 }
 
@@ -1413,7 +1448,7 @@ async fn test_identity_provider_username_password_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1441,7 +1476,7 @@ async fn test_identity_provider_token_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1470,7 +1505,7 @@ async fn test_identity_provider_certificate_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1504,7 +1539,7 @@ async fn test_identity_provider_certificate_no_username() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1533,7 +1568,9 @@ async fn test_identity_provider_error_propagation() {
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let result = proxy.get_credentials().await;
+    let result = proxy
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
+        .await;
 
     match result {
         Ok(_) => panic!("Expected error from identity provider"),
@@ -1570,13 +1607,43 @@ async fn test_identity_provider_clone_box() {
 
     // The clone should still work
     let creds = cloned
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("cloned provider should work");
     match creds {
         drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
             assert_eq!(username, "user1");
             assert_eq!(password, "pass1");
+        }
+        _ => panic!("Expected UsernamePassword variant"),
+    }
+}
+
+/// Test that a non-empty CredentialContext survives the FFI JSON serialization round-trip.
+#[tokio::test]
+async fn test_identity_provider_credential_context_roundtrip() {
+    let provider = std::sync::Arc::new(MockContextEchoProvider);
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+
+    use drasi_lib::identity::{CredentialContext, IdentityProvider};
+    let context = CredentialContext::new()
+        .with_property("hostname", "db.example.com")
+        .with_property("port", "5432");
+
+    let creds = proxy
+        .get_credentials(&context)
+        .await
+        .expect("get_credentials should succeed");
+
+    // The mock echoes hostname→username and port→password
+    match creds {
+        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+            assert_eq!(username, "db.example.com");
+            assert_eq!(password, "5432");
         }
         _ => panic!("Expected UsernamePassword variant"),
     }

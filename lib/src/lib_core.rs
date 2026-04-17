@@ -414,6 +414,17 @@ impl DrasiLib {
             .await;
         self.reaction_manager.inject_state_store(state_store).await;
 
+        // Inject IdentityProvider into SourceManager and ReactionManager (if configured)
+        // This allows sources and reactions to obtain authentication credentials
+        if let Some(identity_provider) = &self.config.identity_provider {
+            self.source_manager
+                .inject_identity_provider(identity_provider.clone())
+                .await;
+            self.reaction_manager
+                .inject_identity_provider(identity_provider.clone())
+                .await;
+        }
+
         // Load configuration
         self.lifecycle.load_configuration().await?;
 
