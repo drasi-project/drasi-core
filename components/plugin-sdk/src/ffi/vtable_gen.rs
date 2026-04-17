@@ -2066,9 +2066,15 @@ fn wrap_subscription_response(
         let rt_handle = receiver.runtime_handle.clone();
         rt_handle.spawn(async move {
             let mut rx = receiver.inner.lock().await;
+            // Pin the Notified future so it persists across loop iterations.
+            // Recreating it each iteration is cancel-unsafe: if select! picks
+            // rx.recv() while a notification is pending, dropping the Notified
+            // loses the permit and the shutdown signal is never observed.
+            let shutdown_notified = shutdown.notified();
+            tokio::pin!(shutdown_notified);
             loop {
                 tokio::select! {
-                    _ = shutdown.notified() => {
+                    _ = &mut shutdown_notified => {
                         callback(ctx.as_ptr(), std::ptr::null_mut());
                         break;
                     }
@@ -2130,33 +2136,34 @@ fn wrap_subscription_response(
         }
 
         /// Convert a BootstrapEvent into a heap-allocated FfiBootstrapEvent.
+        ///
+        /// The `source_id` FfiStr borrows from the boxed record (kept alive
+        /// via `opaque`). The `label` and `entity_id` fields use static
+        /// empty strings — the host currently extracts the full event from
+        /// `opaque` and does not read these metadata fields.
         fn wrap_bootstrap_event(record: BootstrapEvent) -> *mut FfiBootstrapEvent {
-            let source_id_owned = record.source_id.clone();
             let timestamp_us = record
                 .timestamp
                 .timestamp_nanos_opt()
                 .map(|n| n / 1000)
                 .unwrap_or(0);
             let sequence = record.sequence;
-            let entity_id_str = source_change_metadata(&record.change)
-                .map(|m| m.reference.element_id.to_string())
-                .unwrap_or_default();
-            let label_str = source_change_metadata(&record.change)
-                .and_then(|m| m.labels.first().map(|l| l.to_string()))
-                .unwrap_or_default();
 
+            // Box the record first so FfiStr can borrow from the
+            // heap-stable data inside it (same pattern as wrap_source_event).
             let boxed = Box::new(record);
+            let source_id = FfiStr::from_str(&boxed.source_id);
             let opaque = Box::into_raw(boxed) as *mut c_void;
             extern "C" fn drop_bootstrap(ptr: *mut c_void) {
                 unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
             }
             Box::into_raw(Box::new(FfiBootstrapEvent {
                 opaque,
-                source_id: FfiStr::from_str(&source_id_owned),
+                source_id,
                 timestamp_us,
                 sequence,
-                label: FfiStr::from_str(&label_str),
-                entity_id: FfiStr::from_str(&entity_id_str),
+                label: FfiStr::from_str(""),
+                entity_id: FfiStr::from_str(""),
                 drop_fn: drop_bootstrap,
             }))
         }
@@ -2173,9 +2180,13 @@ fn wrap_subscription_response(
             let rt_handle = receiver.runtime_handle.clone();
             rt_handle.spawn(async move {
                 let mut rx = receiver.inner.lock().await;
+                // Pin the Notified future for cancel-safe shutdown
+                // (same rationale as change receiver forwarder).
+                let shutdown_notified = shutdown.notified();
+                tokio::pin!(shutdown_notified);
                 loop {
                     tokio::select! {
-                        _ = shutdown.notified() => {
+                        _ = &mut shutdown_notified => {
                             callback(ctx.as_ptr(), std::ptr::null_mut());
                             break;
                         }
