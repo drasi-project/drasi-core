@@ -652,15 +652,11 @@ impl PostgresBootstrapHandler {
                 1114 | 1184 => {
                     // timestamp, timestamptz
                     if let Ok(Some(val)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(idx) {
-                        drasi_core::models::ElementValue::String(std::sync::Arc::from(
-                            val.to_string(),
-                        ))
+                        drasi_core::models::ElementValue::LocalDateTime(val)
                     } else if let Ok(Some(val)) =
                         row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx)
                     {
-                        drasi_core::models::ElementValue::String(std::sync::Arc::from(
-                            val.to_string(),
-                        ))
+                        drasi_core::models::ElementValue::ZonedDateTime(val.fixed_offset())
                     } else {
                         drasi_core::models::ElementValue::Null
                     }
@@ -682,6 +678,8 @@ impl PostgresBootstrapHandler {
                     drasi_core::models::ElementValue::Float(f) => f.to_string(),
                     drasi_core::models::ElementValue::String(s) => s.to_string(),
                     drasi_core::models::ElementValue::Bool(b) => b.to_string(),
+                    drasi_core::models::ElementValue::LocalDateTime(dt) => dt.to_string(),
+                    drasi_core::models::ElementValue::ZonedDateTime(dt) => dt.to_rfc3339(),
                     _ => format!("{element_value:?}"),
                 };
                 pk_values.push(value_str);

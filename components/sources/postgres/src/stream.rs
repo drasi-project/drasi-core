@@ -539,12 +539,8 @@ impl ReplicationStream {
         let mut properties = drasi_core::models::ElementPropertyMap::new();
         for (i, value) in tuple.iter().enumerate() {
             if let Some(column) = relation.columns.get(i) {
-                let json_value = value.to_json();
-                if !json_value.is_null() {
-                    properties.insert(
-                        &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
-                    );
+                if !value.is_null() {
+                    properties.insert(&column.name, value.to_element_value());
                 }
             }
         }
@@ -595,12 +591,8 @@ impl ReplicationStream {
         // Process new tuple (after state)
         for (i, column) in relation.columns.iter().enumerate() {
             if let Some(value) = new_tuple.get(i) {
-                let json_value = value.to_json();
-                if !json_value.is_null() {
-                    after_properties.insert(
-                        &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
-                    );
+                if !value.is_null() {
+                    after_properties.insert(&column.name, value.to_element_value());
                 }
             }
         }
