@@ -26,32 +26,6 @@ use rumqttc::{
 };
 use std::sync::Arc;
 
-macro_rules! run_event_loop {
-    ($event_loop:expr, $shutdown_rx:expr, $processer_tx:expr) => {
-        loop {
-            tokio::select! {
-                _ = &mut $shutdown_rx => {
-                    info!("Shutdown signal received, stopping MQTT event loop");
-                    break;
-                },
-                event = $event_loop.poll() => {
-                    match event {
-                        Ok(event) =>{
-                            let packet = event.to_mqtt_packet();
-                            if let Some(packet) = packet {
-                                if let Err(e) = $processer_tx.send(packet).await {
-                                        error!("Failed to send MQTT packet to processor: {e:?}");
-                                }
-                            }
-                        },
-                        Err(e) => error!("MQTT event loop error: {e:?}"),
-                    }
-                }
-            }
-        }
-    };
-}
-
 macro_rules! common_config_to_mqtt_options {
     ($options:expr, $config:expr, $identity_provider:expr) => {
         if let Some(request_channel_capacity) = $config.request_channel_capacity {
@@ -87,6 +61,7 @@ macro_rules! common_config_to_mqtt_options {
                 }
                 Err(e) => {
                     error!("Failed to retrieve credentials from identity provider for MQTT authentication: {e:?}");
+                    return Err(anyhow::anyhow!("Failed to retrieve credentials from identity provider for MQTT authentication: {e:?}"));
                 }
             }
         } else {
@@ -175,7 +150,7 @@ pub enum MqttEventLoopWrapper {
 }
 
 /// Mqtt connection manager that handles connection setup, authentication, and event loop management for both MQTT v5 and v3.1.1 brokers based on configuration and broker capabilities.
-pub(crate) struct MqttConnection {
+pub struct MqttConnection {
     client: MqttAsyncClientWrapper,
     event_loop_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -251,7 +226,36 @@ impl MqttConnection {
                     return Err(anyhow::anyhow!("Expected MQTT v5 event loop, exiting..."));
                 }
             };
-            run_event_loop!(event_loop_v5, shutdown_rx, processer_tx);
+
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        info!("Shutdown signal received, stopping MQTT event loop");
+                        break;
+                    },
+                    event = event_loop_v5.poll() => {
+                        match event {
+                            Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::ConnAck(_))) => {
+                                info!("Successfully connected to MQTT broker using MQTT v5 options");
+                                self.subscribe_to_topics(config).await.unwrap_or_else(|e| {
+                                    error!("Failed to subscribe to topics: {e:?}");
+                                });
+                            },
+                            Ok(event) => {
+                                let packet = event.to_mqtt_packet();
+                                if let Some(packet) = packet {
+                                    if let Err(e) = processer_tx.send(packet).await {
+                                            error!("Failed to send MQTT packet to processor: {e:?}");
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!("MQTT event loop error: {e:?}");
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             let mut event_loop_v3 = match event_loop {
                 MqttEventLoopWrapper::EventLoopV3 { event_loop } => event_loop,
@@ -260,7 +264,36 @@ impl MqttConnection {
                     return Err(anyhow::anyhow!("Expected MQTT v3 event loop, exiting..."));
                 }
             };
-            run_event_loop!(event_loop_v3, shutdown_rx, processer_tx);
+
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        info!("Shutdown signal received, stopping MQTT event loop");
+                        break;
+                    },
+                    event = event_loop_v3.poll() => {
+                        match event {
+                            Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(_))) => {
+                                info!("Successfully connected to MQTT broker using MQTT v3 options");
+                                self.subscribe_to_topics(config).await.unwrap_or_else(|e| {
+                                    error!("Failed to subscribe to topics: {e:?}");
+                                });
+                            },
+                            Ok(event) => {
+                                let packet = event.to_mqtt_packet();
+                                if let Some(packet) = packet {
+                                    if let Err(e) = processer_tx.send(packet).await {
+                                            error!("Failed to send MQTT packet to processor: {e:?}");
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!("MQTT event loop error: {e:?}");
+                            }
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -277,7 +310,7 @@ impl MqttConnection {
 
         let (client_v5, mut event_loop_v5) =
             AsyncClientV5::new(options_v5, config.event_channel_capacity);
-        for trial in 0..3 {
+        for trial in 0..5 {
             match event_loop_v5.poll().await {
                 Ok(event) => {
                     info!("Successfully connected to MQTT broker using v5 options");
@@ -286,7 +319,9 @@ impl MqttConnection {
                 Err(ConnectionError::ConnectionRefused(
                     ConnectReturnCode::UnsupportedProtocolVersion,
                 )) => {
-                    error!("Failed to connect using MQTT v5 options: Unsupported protocol version. Attempting MQTT v3 fallback...");
+                    error!(
+                        "Failed to connect using MQTT v5 options: Unsupported protocol version."
+                    );
                     break;
                 }
                 Err(e) => {
@@ -300,7 +335,9 @@ impl MqttConnection {
             // delay before retrying
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        Err(anyhow::anyhow!("Failed to connect to MQTT broker using MQTT v5 options after multiple attempts. Attempting MQTT v3 fallback..."))
+        Err(anyhow::anyhow!(
+            "Failed to connect to MQTT broker using MQTT v5 options after multiple attempts."
+        ))
     }
 
     async fn mqttv3_connect(
@@ -313,7 +350,7 @@ impl MqttConnection {
         let (client_v3, mut event_loop_v3) =
             AsyncClient::new(options_v3, config.event_channel_capacity);
 
-        for trial in 0..3 {
+        for trial in 0..5 {
             match event_loop_v3.poll().await {
                 Ok(event) => {
                     info!("Successfully connected to MQTT broker using v3 options");
@@ -330,7 +367,9 @@ impl MqttConnection {
             // delay before retrying
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        Err(anyhow::anyhow!("Failed to connect to MQTT broker using MQTT v3 options after multiple attempts. Check configuration for errors."))
+        Err(anyhow::anyhow!(
+            "Failed to connect to MQTT broker using MQTT v3 options after multiple attempts."
+        ))
     }
 
     async fn subscribe_to_topics(&mut self, config: &MqttSourceConfig) -> anyhow::Result<()> {
@@ -379,7 +418,7 @@ impl MqttConnection {
         Ok(())
     }
 
-    async fn config_to_mqtt_options_v5(
+    pub async fn config_to_mqtt_options_v5(
         id: impl Into<String>,
         config: &MqttSourceConfig,
         identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
@@ -405,17 +444,12 @@ impl MqttConnection {
             options.set_connect_properties(connection_props);
         }
 
-        if let Some(connect_properties) = config.connect_properties.as_ref() {
-            let connection_properties = connect_properties.to_connection_properties();
-            options.set_connect_properties(connection_properties);
-        }
-
         // Subscribe properties are set during subscription, not connection, so they are handled in the subscribe_to_topics method
 
         Ok(options)
     }
 
-    async fn config_to_mqtt_options_v3(
+    pub async fn config_to_mqtt_options_v3(
         id: impl Into<String>,
         config: &MqttSourceConfig,
         identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,

@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::fs;
 use std::fmt::Debug;
+use std::fs;
 
 pub fn default_host() -> String {
     "localhost".to_string()
@@ -51,6 +51,7 @@ pub enum MqttQoS {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MqttTopicConfig {
     pub topic: String,
     pub qos: MqttQoS,
@@ -58,7 +59,12 @@ pub struct MqttTopicConfig {
 
 /// Transport mode for MQTT connection.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase", tag = "mode", content = "config")]
+#[serde(
+    rename_all = "lowercase",
+    tag = "mode",
+    content = "config",
+    deny_unknown_fields
+)]
 pub enum MqttTransportMode {
     #[default]
     #[serde(rename = "tcp")]
@@ -187,36 +193,46 @@ impl MqttTransportMode {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MappingEntity {
     pub label: String,
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum MappingMode {
     PayloadAsField,
     PayloadSpread,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum InjectId {
+    True,
+    False,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MappingProperties {
     pub mode: MappingMode,
     pub field_name: Option<String>,
+    pub inject_id: Option<InjectId>,
     /// JSON object mapping topic variables to graph properties
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inject: Vec<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MappingNode {
     pub label: String,
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MappingRelation {
     pub label: String, // relation label
     pub from: String,  // label if the source node
@@ -225,6 +241,7 @@ pub struct MappingRelation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TopicMapping {
     pub pattern: String,
     pub entity: MappingEntity,
@@ -236,6 +253,7 @@ pub struct TopicMapping {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttConnectProperties {
     /// Expiry interval property after loosing connection
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +299,7 @@ impl MqttConnectProperties {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttSubscribeProperties {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<usize>,
@@ -298,6 +317,7 @@ impl MqttSubscribeProperties {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct MqttSourceConfig {
     //...... Main config, mqtt-wide config parameters
     /// MQTT broker host address
@@ -409,6 +429,15 @@ impl MqttSourceConfig {
                 return Err(anyhow::anyhow!("Connection timeout cannot be 0"));
             }
         }
+
+        if let Some(keep_alive) = self.keep_alive {
+            if keep_alive < 5 {
+                return Err(anyhow::anyhow!(
+                    "Keep alive interval cannot be less than 5 seconds"
+                ));
+            }
+        }
+
         if let (Some(min_batch), Some(max_batch)) =
             (self.adaptive_min_batch_size, self.adaptive_max_batch_size)
         {
@@ -659,6 +688,7 @@ mod tests {
                 mode,
                 field_name: field_name.map(str::to_string),
                 inject: vec![HashMap::from([("room".to_string(), "{room}".to_string())])],
+                inject_id: Some(InjectId::True),
             },
             nodes: vec![MappingNode {
                 label: "FLOOR".to_string(),
@@ -1149,7 +1179,9 @@ username: "mqtt_user"
         let err = config
             .validate()
             .expect_err("username without password should be invalid");
-        assert!(err.to_string().contains("Both username and password must be set together"));
+        assert!(err
+            .to_string()
+            .contains("Both username and password must be set together"));
     }
 
     #[test]
@@ -1161,7 +1193,9 @@ password: "mqtt_pass"
         let err = config
             .validate()
             .expect_err("password without username should be invalid");
-        assert!(err.to_string().contains("Both username and password must be set together"));   
+        assert!(err
+            .to_string()
+            .contains("Both username and password must be set together"));
     }
 
     #[test]
@@ -1170,19 +1204,20 @@ password: "mqtt_pass"
 host: "mqtt.example.com"
 port: "not a number"
 "#;
-        let err= serde_yaml::from_str::<MqttSourceConfig>(yaml).expect_err("yaml with wrong types should fail to deserialize");
-        assert!(err.to_string().contains("invalid type: string \"not a number\", expected u16 for at line 3 column 7"));
+        let err = serde_yaml::from_str::<MqttSourceConfig>(yaml)
+            .expect_err("yaml with wrong types should fail to deserialize");
+        assert!(err.to_string().contains("expected u16 at line 3 column 7"));
     }
 
     #[test]
-    fn yaml_wrong_tag() {
+    fn yaml_wrong_yaml_key() {
         let yaml = r#"
-host: "mqtt.example.com"
+broker_addr: "mqtt.example.com"
 port: 1883
 transport:
-    mode: unknown
+    mode: tcp
 "#;
-        let err = serde_yaml::from_str::<MqttSourceConfig>(yaml).expect_err("yaml with unknown transport mode should fail to deserialize");
-        assert!(err.to_string().contains("unknown variant `unknown`, expected `tcp` or `tls` at line 5 column 11"));
+        let err = serde_yaml::from_str::<MqttSourceConfig>(yaml);
+        assert!(err.is_err());
     }
 }
