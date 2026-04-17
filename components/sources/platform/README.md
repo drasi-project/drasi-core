@@ -911,10 +911,10 @@ drasi.add_query(query).await?;
 drasi.start().await?;
 ```
 
-### With DrasiServer
+### With DrasiLib
 
 ```rust
-use drasi_server::DrasiServerBuilder;
+use drasi_lib::DrasiLibBuilder;
 use drasi_source_platform::PlatformSource;
 use std::sync::Arc;
 
@@ -923,7 +923,7 @@ let source = PlatformSource::builder("platform-source")
     .with_stream_key("events:changes")
     .build()?;
 
-let server = DrasiServerBuilder::new()
+let server = DrasiLibBuilder::new()
     .with_id("my-server")
     .with_host_port("0.0.0.0", 8080)
     .with_source(source)

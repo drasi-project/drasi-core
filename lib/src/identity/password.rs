@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Credentials, IdentityProvider};
+use super::{CredentialContext, Credentials, IdentityProvider};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -35,7 +35,7 @@ impl PasswordIdentityProvider {
 
 #[async_trait]
 impl IdentityProvider for PasswordIdentityProvider {
-    async fn get_credentials(&self) -> Result<Credentials> {
+    async fn get_credentials(&self, _context: &CredentialContext) -> Result<Credentials> {
         Ok(Credentials::UsernamePassword {
             username: self.username.clone(),
             password: self.password.clone(),

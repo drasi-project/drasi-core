@@ -27,7 +27,8 @@ use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
 use super::PostgresSourceConfig;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ComponentEventSender, ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::SourceBase;
 
 pub struct ReplicationStream {
@@ -41,8 +42,7 @@ pub struct ReplicationStream {
         >,
     >,
     #[allow(dead_code)]
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    status: Arc<RwLock<ComponentStatus>>,
+    status_handle: ComponentStatusHandle,
     current_lsn: u64,
     last_feedback_time: std::time::Instant,
     pending_transaction: Option<Vec<SourceChange>>,
@@ -71,8 +71,7 @@ impl ReplicationStream {
                 >,
             >,
         >,
-        status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-        status: Arc<RwLock<ComponentStatus>>,
+        status_handle: ComponentStatusHandle,
     ) -> Self {
         Self {
             config,
@@ -80,8 +79,7 @@ impl ReplicationStream {
             connection: None,
             decoder: PgOutputDecoder::new(),
             dispatchers,
-            status_tx,
-            status,
+            status_handle,
             current_lsn: 0,
             last_feedback_time: std::time::Instant::now(),
             pending_transaction: None,
@@ -106,8 +104,8 @@ impl ReplicationStream {
         loop {
             // Check if we should stop
             {
-                let status = self.status.read().await;
-                if *status == ComponentStatus::Stopping || *status == ComponentStatus::Stopped {
+                let status = self.status_handle.get_status().await;
+                if status == ComponentStatus::Stopping || status == ComponentStatus::Stopped {
                     info!("Received stop signal, shutting down replication");
                     break;
                 }
@@ -725,8 +723,8 @@ impl ReplicationStream {
 
     #[allow(dead_code)]
     async fn check_stop_signal(&self) -> bool {
-        let status = self.status.read().await;
-        *status == ComponentStatus::Stopping || *status == ComponentStatus::Stopped
+        let status = self.status_handle.get_status().await;
+        status == ComponentStatus::Stopping || status == ComponentStatus::Stopped
     }
 
     async fn recover_connection(&mut self) -> Result<()> {

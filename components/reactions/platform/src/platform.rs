@@ -226,32 +226,32 @@ impl Reaction for PlatformReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "redis_url".to_string(),
-            serde_json::Value::String(self.config.redis_url.clone()),
-        );
-        if let Some(ref pubsub_name) = self.config.pubsub_name {
-            props.insert(
-                "pubsub_name".to_string(),
-                serde_json::Value::String(pubsub_name.clone()),
-            );
+        use crate::descriptor::PlatformReactionConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = PlatformReactionConfigDto {
+            redis_url: ConfigValue::Static(self.config.redis_url.clone()),
+            pubsub_name: self
+                .config
+                .pubsub_name
+                .as_ref()
+                .map(|n| ConfigValue::Static(n.clone())),
+            source_name: self
+                .config
+                .source_name
+                .as_ref()
+                .map(|n| ConfigValue::Static(n.clone())),
+            max_stream_length: self.config.max_stream_length.map(ConfigValue::Static),
+            emit_control_events: Some(ConfigValue::Static(self.config.emit_control_events)),
+            batch_enabled: Some(ConfigValue::Static(self.config.batch_enabled)),
+            batch_max_size: Some(ConfigValue::Static(self.config.batch_max_size)),
+            batch_max_wait_ms: Some(ConfigValue::Static(self.config.batch_max_wait_ms)),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        if let Some(ref source_name) = self.config.source_name {
-            props.insert(
-                "source_name".to_string(),
-                serde_json::Value::String(source_name.clone()),
-            );
-        }
-        props.insert(
-            "emit_control_events".to_string(),
-            serde_json::Value::Bool(self.config.emit_control_events),
-        );
-        props.insert(
-            "batch_enabled".to_string(),
-            serde_json::Value::Bool(self.config.batch_enabled),
-        );
-        props
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -271,11 +271,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting platform reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Emit Running control event
         if let Err(e) = self.emit_control_event(ControlSignal::Running).await {
@@ -284,11 +284,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Platform reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -507,11 +507,11 @@ impl Reaction for PlatformReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Platform reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

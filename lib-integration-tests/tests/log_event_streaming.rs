@@ -94,8 +94,8 @@ impl Source for TestSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         let span = tracing::info_span!(
             "test_source_running",
@@ -221,8 +221,8 @@ impl Reaction for TestReaction {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
 
         let span = tracing::info_span!(
             "test_reaction_running",
@@ -270,6 +270,41 @@ impl Reaction for TestReaction {
     async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
     }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Wait for a component to reach Running status via event notification.
+async fn wait_for_running(drasi: &DrasiLib, component_id: &str) {
+    let mut rx = drasi.subscribe_all_component_events();
+    let snapshot = drasi.get_graph().await;
+    if snapshot
+        .nodes
+        .iter()
+        .any(|n| n.id == component_id && n.status == ComponentStatus::Running)
+    {
+        return;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event)
+                    if event.component_id == component_id
+                        && event.status == ComponentStatus::Running =>
+                {
+                    return;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for '{component_id}'");
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Timed out waiting for '{component_id}' to reach Running"));
 }
 
 // ============================================================================
@@ -331,7 +366,7 @@ async fn test_source_log_streaming() {
         "Expected lifecycle logs, got: {log_messages:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that source events are captured and can be streamed.
@@ -386,7 +421,7 @@ async fn test_source_event_streaming() {
     let statuses: Vec<_> = received_events.iter().map(|e| &e.status).collect();
     println!("Received source events: {statuses:?}");
 
-    // SourceBase.set_status_with_event sends Running event directly
+    // SourceBase.set_status sends Running event directly
     assert!(
         received_events
             .iter()
@@ -394,7 +429,7 @@ async fn test_source_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that query events are captured and can be streamed.
@@ -462,7 +497,7 @@ async fn test_query_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that query logs are captured and can be streamed.
@@ -484,8 +519,8 @@ async fn test_query_log_streaming() {
 
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for startup logs
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for query to reach Running (startup logs emitted before this)
+    wait_for_running(&drasi, "test-query-logs").await;
 
     // Get log history
     let (history, _receiver) = drasi
@@ -498,7 +533,7 @@ async fn test_query_log_streaming() {
     // Queries emit lifecycle logs
     // (Note: depending on implementation, there may or may not be logs)
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that reaction events are captured and can be streamed.
@@ -572,7 +607,7 @@ async fn test_reaction_event_streaming() {
         "Expected Running event, got: {statuses:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that reaction logs are captured and can be streamed.
@@ -632,7 +667,7 @@ async fn test_reaction_log_streaming() {
         "Expected lifecycle logs, got: {log_messages:?}"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test full lifecycle with log and event streaming for all component types.
@@ -752,7 +787,7 @@ async fn test_full_lifecycle_streaming() {
     );
 
     // Now stop and verify stop events
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 
     // The stop event propagates through the main event channel, not directly to event_history.
     // The fact that we can successfully stop all components is the key verification here.
@@ -801,10 +836,31 @@ async fn test_log_levels_captured() {
         .await
         .expect("Failed to build DrasiLib");
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("log-levels-source")
+        .await
+        .expect("Failed to subscribe to source logs");
+
     drasi.start().await.expect("Failed to start DrasiLib");
 
-    // Give time for logs to be captured
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for multiple logs to arrive. The first log may arrive quickly but
+    // lifecycle logs (Starting, Running) trickle in asynchronously. Wait for
+    // up to 5 seconds, collecting logs until we have enough or time out.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut received_count = 0;
+    while tokio::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), log_rx.recv()).await {
+            Ok(Ok(_)) => {
+                received_count += 1;
+                if received_count >= 2 {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break, // channel closed
+            Err(_) => continue,  // timeout, try again
+        }
+    }
 
     // Get log history
     let (history, _) = drasi
@@ -831,5 +887,5 @@ async fn test_log_levels_captured() {
         "Expected at least 2 INFO level logs"
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }

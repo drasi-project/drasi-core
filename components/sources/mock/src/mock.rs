@@ -154,23 +154,28 @@ impl Source for MockSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        // Convert MockSourceConfig to HashMap
-        let mut props = HashMap::new();
-        props.insert(
-            "data_type".to_string(),
-            serde_json::Value::String(self.config.data_type.to_string()),
-        );
-        props.insert(
-            "interval_ms".to_string(),
-            serde_json::Value::Number(self.config.interval_ms.into()),
-        );
-        if let Some(sensor_count) = self.config.data_type.sensor_count() {
-            props.insert(
-                "sensor_count".to_string(),
-                serde_json::Value::Number(sensor_count.into()),
-            );
+        // Serialize through the DTO to get camelCase naming and structured output
+        // matching the creation schema and config file format
+        use crate::descriptor::{DataTypeDto, MockSourceConfigDto};
+        use drasi_plugin_sdk::ConfigValue;
+
+        let data_type_dto = match &self.config.data_type {
+            DataType::Counter => DataTypeDto::Counter,
+            DataType::SensorReading { sensor_count } => DataTypeDto::SensorReading {
+                sensor_count: *sensor_count,
+            },
+            DataType::Generic => DataTypeDto::Generic,
+        };
+
+        let dto = MockSourceConfigDto {
+            data_type: data_type_dto,
+            interval_ms: ConfigValue::Static(self.config.interval_ms),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
         }
-        props
     }
 
     fn auto_start(&self) -> bool {
@@ -180,13 +185,12 @@ impl Source for MockSource {
     async fn start(&self) -> Result<()> {
         log_component_start("Mock Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting mock source".to_string()),
             )
-            .await?;
+            .await;
 
         // Get broadcast_tx for publishing
         let base_dispatchers = self.base.dispatchers.clone();
@@ -211,7 +215,7 @@ impl Source for MockSource {
             .unwrap_or_default();
 
         // Start the data generation task with component span for proper log routing
-        let status = Arc::clone(&self.base.status);
+        let status_handle = self.base.status_handle();
         let source_name = self.base.id.clone();
         let source_id_for_span = source_id.clone();
         let span = tracing::info_span!(
@@ -222,6 +226,15 @@ impl Source for MockSource {
         );
         let task = tokio::spawn(
             async move {
+                // Set Running status inside the task to avoid a race condition where
+                // the loop checks status before the caller sets it after spawn.
+                status_handle
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some("Mock source started successfully".to_string()),
+                    )
+                    .await;
+
                 let mut interval =
                     tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
                 let mut seq = 0u64;
@@ -230,7 +243,7 @@ impl Source for MockSource {
                     interval.tick().await;
 
                     // Check if we should stop
-                    if !matches!(*status.read().await, ComponentStatus::Running) {
+                    if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                         break;
                     }
 
@@ -425,14 +438,6 @@ impl Source for MockSource {
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-
-        self.base
-            .send_component_event(
-                ComponentStatus::Running,
-                Some("Mock source started successfully".to_string()),
-            )
-            .await?;
 
         Ok(())
     }
@@ -440,13 +445,12 @@ impl Source for MockSource {
     async fn stop(&self) -> Result<()> {
         log_component_stop("Mock Source", &self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping mock source".to_string()),
             )
-            .await?;
+            .await;
 
         // Cancel the task
         if let Some(handle) = self.base.task_handle.write().await.take() {
@@ -454,13 +458,12 @@ impl Source for MockSource {
             let _ = handle.await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Mock source stopped successfully".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
