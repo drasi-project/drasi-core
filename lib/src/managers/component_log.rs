@@ -123,6 +123,8 @@ impl ComponentLogKey {
             ComponentType::Source => "source",
             ComponentType::Query => "query",
             ComponentType::Reaction => "reaction",
+            ComponentType::BootstrapProvider => "bootstrap_provider",
+            ComponentType::IdentityProvider => "identity_provider",
         };
         format!("{}:{}:{}", self.instance_id, type_str, self.component_id)
     }
@@ -326,6 +328,25 @@ impl ComponentLogRegistry {
         channel.log(message);
     }
 
+    /// Non-blocking log: tries to acquire the write lock without waiting.
+    ///
+    /// Returns `true` if the message was logged, `false` if the lock was held.
+    /// Use this from synchronous contexts (e.g., FFI callbacks) where blocking
+    /// on an async lock would stall the runtime scheduler.
+    pub fn try_log(&self, message: LogMessage) -> bool {
+        match self.channels.try_write() {
+            Ok(mut channels) => {
+                let key = message.key().to_string_key();
+                let channel = channels.entry(key).or_insert_with(|| {
+                    ComponentLogChannel::new(self.max_history, self.channel_capacity)
+                });
+                channel.log(message);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Get the log history for a component using composite key.
     ///
     /// Returns an empty vector if the component has no logs.
@@ -333,18 +354,6 @@ impl ComponentLogRegistry {
         let channels = self.channels.read().await;
         channels
             .get(&key.to_string_key())
-            .map(|c| c.get_history())
-            .unwrap_or_default()
-    }
-
-    /// Get the log history for a component (legacy API, uses empty instance_id).
-    ///
-    /// Returns an empty vector if the component has no logs.
-    #[deprecated(note = "Use get_history_by_key with ComponentLogKey for instance isolation")]
-    pub async fn get_history(&self, component_id: &str) -> Vec<LogMessage> {
-        let channels = self.channels.read().await;
-        channels
-            .get(component_id)
             .map(|c| c.get_history())
             .unwrap_or_default()
     }
@@ -367,38 +376,11 @@ impl ComponentLogRegistry {
         (history, receiver)
     }
 
-    /// Subscribe to live logs for a component (legacy API).
-    ///
-    /// Returns the current history and a broadcast receiver for new logs.
-    /// Creates the component's channel if it doesn't exist.
-    #[deprecated(note = "Use subscribe_by_key with ComponentLogKey for instance isolation")]
-    pub async fn subscribe(
-        &self,
-        component_id: &str,
-    ) -> (Vec<LogMessage>, broadcast::Receiver<LogMessage>) {
-        let mut channels = self.channels.write().await;
-        let channel = channels
-            .entry(component_id.to_string())
-            .or_insert_with(|| ComponentLogChannel::new(self.max_history, self.channel_capacity));
-
-        let history = channel.get_history();
-        let receiver = channel.subscribe();
-        (history, receiver)
-    }
-
     /// Remove a component's log channel using composite key.
     ///
     /// Called when a component is deleted to clean up resources.
     pub async fn remove_component_by_key(&self, key: &ComponentLogKey) {
         self.channels.write().await.remove(&key.to_string_key());
-    }
-
-    /// Remove a component's log channel (legacy API).
-    ///
-    /// Called when a component is deleted to clean up resources.
-    #[deprecated(note = "Use remove_component_by_key with ComponentLogKey for instance isolation")]
-    pub async fn remove_component(&self, component_id: &str) {
-        self.channels.write().await.remove(component_id);
     }
 
     /// Get the number of log messages stored for a component using composite key.
@@ -410,24 +392,11 @@ impl ComponentLogRegistry {
             .map(|c| c.history.len())
             .unwrap_or(0)
     }
-
-    /// Get the number of log messages stored for a component (legacy API).
-    #[deprecated(note = "Use log_count_by_key with ComponentLogKey for instance isolation")]
-    pub async fn log_count(&self, component_id: &str) -> usize {
-        self.channels
-            .read()
-            .await
-            .get(component_id)
-            .map(|c| c.history.len())
-            .unwrap_or(0)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
-
     fn make_key(instance: &str, component_type: ComponentType, component: &str) -> ComponentLogKey {
         ComponentLogKey::new(instance, component_type, component)
     }
@@ -508,7 +477,7 @@ mod tests {
         // Log a new message after subscribing
         let registry_clone = registry.clone();
         tokio::spawn(async move {
-            sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
             let msg2 = LogMessage::with_instance(
                 LogLevel::Info,
                 "Live message",

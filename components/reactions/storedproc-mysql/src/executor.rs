@@ -51,7 +51,10 @@ impl MySqlExecutor {
 
         let (username, password) = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
-            let credentials = provider.get_credentials().await?;
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &config.hostname)
+                .with_property("port", port.to_string());
+            let credentials = provider.get_credentials(&context).await?;
             if credentials.is_certificate() {
                 anyhow::bail!(
                     "Certificate-based authentication is not supported for MySQL. \
@@ -59,7 +62,9 @@ impl MySqlExecutor {
                      with PEM-based credentials. Use token or password authentication instead."
                 );
             }
-            credentials.into_auth_pair()
+            credentials
+                .try_into_auth_pair()
+                .map_err(|_| anyhow::anyhow!("Unexpected credential type for MySQL"))?
         } else {
             debug!("Using username/password for authentication");
             (config.user.clone(), config.password.clone())

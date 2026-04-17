@@ -48,21 +48,23 @@ pub use metadata::{
     PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,
 };
 pub use types::{
-    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiDispatchMode,
-    FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,
+    catch_panic_ffi, now_us, AsyncExecutorFn, FfiChangeOp, FfiComponentStatus, FfiCreateResult,
+    FfiDispatchMode, FfiGetResult, FfiOwnedStr, FfiResult, FfiStr, FfiStringArray, SendMutPtr,
+    SendPtr,
 };
 pub use vtable_gen::{
-    build_bootstrap_plugin_vtable, build_bootstrap_provider_vtable, build_reaction_plugin_vtable,
-    build_reaction_vtable, build_reaction_vtable_from_boxed, build_source_plugin_vtable,
-    build_source_vtable, build_source_vtable_from_boxed, current_instance_log_ctx,
-    InstanceLogContext,
+    build_bootstrap_plugin_vtable, build_bootstrap_provider_vtable,
+    build_identity_provider_plugin_vtable, build_identity_provider_vtable_from_boxed,
+    build_reaction_plugin_vtable, build_reaction_vtable, build_reaction_vtable_from_boxed,
+    build_source_plugin_vtable, build_source_vtable, build_source_vtable_from_boxed,
+    current_instance_log_ctx, InstanceLogContext,
 };
 pub use vtables::{
     BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapPushCallbackFn,
     FfiBootstrapReceiver, FfiBootstrapSender, FfiChangePushCallbackFn, FfiChangeReceiver,
     FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSourceEvent,
-    FfiSubscriptionResponse, ReactionPluginVtable, ReactionVtable, SourcePluginVtable,
-    SourceVtable, StateStoreVtable,
+    FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable, ReactionVtable,
+    SourcePluginVtable, SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

@@ -41,13 +41,28 @@ struct PushCallbackContext {
 /// The push callback invoked by the plugin forwarder for each event.
 /// Uses `std::sync::mpsc` which is safe to call from any runtime.
 extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
+    // Catch panics to prevent unwinding across the extern "C" boundary (which is UB).
+    // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here
+    // because we cannot know which code path panicked. It will be reclaimed when the
+    // forwarder task exits (via the null-event callback or send failure).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        change_push_callback_inner(ctx, event)
+    }))
+    .unwrap_or(false)
+}
+
+fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
         // Channel closed — drop the sender to signal the host receiver
-        let mut guard = context.tx.lock().expect("push callback mutex poisoned");
-        *guard = None;
-        context.notify.notify_one();
+        {
+            let mut guard = context.tx.lock().expect("push callback mutex poisoned");
+            *guard = None;
+            context.notify.notify_one();
+            // guard must be dropped BEFORE reclaiming the Arc, otherwise
+            // MutexGuard::drop runs after the PushCallbackContext is freed.
+        }
         // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         return false;
@@ -88,7 +103,12 @@ unsafe impl Sync for FfiReceiverState {}
 
 impl Drop for FfiReceiverState {
     fn drop(&mut self) {
-        (self.drop_fn)(self.state);
+        // Run plugin drop on a dedicated thread to avoid initializing
+        // plugin TLS on the caller's thread.
+        let drop_fn = self.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.state);
+        // Safety: state is a valid pointer owned by the plugin
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 
@@ -178,16 +198,30 @@ extern "C" fn bootstrap_push_callback(
     ctx: *mut std::ffi::c_void,
     event: *mut drasi_plugin_sdk::ffi::FfiBootstrapEvent,
 ) -> bool {
+    // Catch panics to prevent unwinding across the extern "C" boundary.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bootstrap_push_callback_inner(ctx, event)
+    }))
+    .unwrap_or(false)
+}
+
+fn bootstrap_push_callback_inner(
+    ctx: *mut std::ffi::c_void,
+    event: *mut drasi_plugin_sdk::ffi::FfiBootstrapEvent,
+) -> bool {
     let context = unsafe { &*(ctx as *const BootstrapPushCallbackContext) };
 
     if event.is_null() {
         // Stream exhausted — drop the sender to signal completion
-        let mut guard = context
-            .tx
-            .lock()
-            .expect("bootstrap push callback mutex poisoned");
-        *guard = None;
-        context.notify.notify_one();
+        {
+            let mut guard = context
+                .tx
+                .lock()
+                .expect("bootstrap push callback mutex poisoned");
+            *guard = None;
+            context.notify.notify_one();
+            // guard must be dropped BEFORE reclaiming the Arc
+        }
         // Reclaim the leaked Arc reference
         unsafe { Arc::from_raw(ctx as *const BootstrapPushCallbackContext) };
         return false;
@@ -231,7 +265,11 @@ unsafe impl Sync for FfiBootstrapReceiverState {}
 
 impl Drop for FfiBootstrapReceiverState {
     fn drop(&mut self) {
-        (self.drop_fn)(self.state);
+        // Run plugin drop on a dedicated thread to avoid initializing
+        // plugin TLS on the caller's thread (matches FfiReceiverState::drop).
+        let drop_fn = self.drop_fn;
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.state);
+        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
     }
 }
 

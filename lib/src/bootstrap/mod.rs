@@ -18,6 +18,14 @@
 //! concerns from source streaming logic. Bootstrap providers can be reused
 //! across different source types while maintaining access to their parent
 //! source configuration.
+//!
+//! # Included Providers
+//!
+//! - [`ComponentGraphBootstrapProvider`]: Bootstraps from the [`ComponentGraph`] snapshot
+//!   for the built-in component graph source.
+
+pub mod component_graph;
+pub use component_graph::ComponentGraphBootstrapProvider;
 
 use anyhow::Result;
 use async_trait::async_trait;

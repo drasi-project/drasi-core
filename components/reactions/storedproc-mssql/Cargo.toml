@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-storedproc-mssql"
-version = "0.2.6"
+version = "0.2.9"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MS SQL Server Stored Procedure reaction plugin for Drasi"
@@ -50,8 +50,8 @@ utoipa = { workspace = true }
 tokio-test = "0.4"
 env_logger = "0.10.0"
 serial_test = "3.0"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["mssql_server"] }
+testcontainers = "0.26"
+testcontainers-modules = { version = "0.14", features = ["mssql_server"] }
 
 [lints]
 workspace = true

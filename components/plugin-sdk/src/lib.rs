@@ -214,7 +214,10 @@ pub mod resolver;
 
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;
-pub use descriptor::{BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor};
+pub use descriptor::{
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
+};
 pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
@@ -255,6 +258,7 @@ pub use tokio as __tokio;
 ///     plugin_id = "postgres",
 ///     // ...
 ///     bootstrap_descriptors = [PostgresBootstrapDescriptor],
+///     identity_provider_descriptors = [],
 ///     worker_threads = 4,
 /// );
 /// ```
@@ -269,12 +273,14 @@ macro_rules! export_plugin {
         source_descriptors = [ $($source_desc:expr),* $(,)? ],
         reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
         bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ],
         worker_threads = $workers:expr $(,)?
     ) => {
         fn __auto_create_plugin_vtables() -> (
             Vec<$crate::ffi::SourcePluginVtable>,
             Vec<$crate::ffi::ReactionPluginVtable>,
             Vec<$crate::ffi::BootstrapPluginVtable>,
+            Vec<$crate::ffi::IdentityProviderPluginVtable>,
         ) {
             let source_descs = vec![
                 $( $crate::ffi::build_source_plugin_vtable(
@@ -300,7 +306,15 @@ macro_rules! export_plugin {
                     __plugin_runtime,
                 ), )*
             ];
-            (source_descs, reaction_descs, bootstrap_descs)
+            let identity_provider_descs = vec![
+                $( $crate::ffi::build_identity_provider_plugin_vtable(
+                    $ip_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs)
         }
 
         $crate::export_plugin!(
@@ -321,12 +335,14 @@ macro_rules! export_plugin {
         plugin_version = $plugin_ver:expr,
         source_descriptors = [ $($source_desc:expr),* $(,)? ],
         reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
-        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ] $(,)?
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ] $(,)?
     ) => {
         fn __auto_create_plugin_vtables() -> (
             Vec<$crate::ffi::SourcePluginVtable>,
             Vec<$crate::ffi::ReactionPluginVtable>,
             Vec<$crate::ffi::BootstrapPluginVtable>,
+            Vec<$crate::ffi::IdentityProviderPluginVtable>,
         ) {
             let source_descs = vec![
                 $( $crate::ffi::build_source_plugin_vtable(
@@ -352,7 +368,15 @@ macro_rules! export_plugin {
                     __plugin_runtime,
                 ), )*
             ];
-            (source_descs, reaction_descs, bootstrap_descs)
+            let identity_provider_descs = vec![
+                $( $crate::ffi::build_identity_provider_plugin_vtable(
+                    $ip_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs)
         }
 
         $crate::export_plugin!(
@@ -363,6 +387,50 @@ macro_rules! export_plugin {
             plugin_version = $plugin_ver,
             init_fn = __auto_create_plugin_vtables,
             default_workers = 2usize,
+        );
+    };
+    // ── Backward-compatible form: no identity_provider_descriptors (with worker_threads) ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        worker_threads = $workers:expr $(,)?
+    ) => {
+        $crate::export_plugin!(
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            source_descriptors = [ $($source_desc),* ],
+            reaction_descriptors = [ $($reaction_desc),* ],
+            bootstrap_descriptors = [ $($bootstrap_desc),* ],
+            identity_provider_descriptors = [],
+            worker_threads = $workers,
+        );
+    };
+    // ── Backward-compatible form: no identity_provider_descriptors (default workers) ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ] $(,)?
+    ) => {
+        $crate::export_plugin!(
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            source_descriptors = [ $($source_desc),* ],
+            reaction_descriptors = [ $($reaction_desc),* ],
+            bootstrap_descriptors = [ $($bootstrap_desc),* ],
+            identity_provider_descriptors = [],
         );
     };
 
@@ -377,31 +445,62 @@ macro_rules! export_plugin {
         default_workers = $default_workers:expr $(,)?
     ) => {
         // ── Tokio runtime (accessible to plugin code) ──
-        pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
-            use ::std::sync::OnceLock;
-            static RT: OnceLock<$crate::__tokio::runtime::Runtime> = OnceLock::new();
-            RT.get_or_init(|| {
-                let default_threads: usize = $default_workers;
-                let kind_var = format!(
-                    "DRASI_PLUGIN_WORKERS_{}",
-                    $plugin_id.to_uppercase().replace('-', "_")
-                );
-                let threads = ::std::env::var(&kind_var)
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .or_else(|| {
-                        ::std::env::var("DRASI_PLUGIN_WORKERS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                    })
-                    .unwrap_or(default_threads);
+        //
+        // The runtime is stored behind an `AtomicPtr` so that
+        // `drasi_plugin_shutdown()` can take ownership and call
+        // `shutdown_timeout()` to cleanly stop all worker threads.
+        // A `OnceLock<()>` ensures one-time initialization.
+        static __RT_INIT: ::std::sync::OnceLock<()> = ::std::sync::OnceLock::new();
+        static __RT_PTR: ::std::sync::atomic::AtomicPtr<$crate::__tokio::runtime::Runtime> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+
+        fn __init_plugin_runtime() {
+            let default_threads: usize = $default_workers;
+            let kind_var = format!(
+                "DRASI_PLUGIN_WORKERS_{}",
+                $plugin_id.to_uppercase().replace('-', "_")
+            );
+            let threads = ::std::env::var(&kind_var)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or_else(|| {
+                    ::std::env::var("DRASI_PLUGIN_WORKERS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                })
+                .unwrap_or(default_threads);
+            let rt = Box::new(
                 $crate::__tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(threads)
                     .enable_all()
                     .thread_name(concat!($plugin_id, "-worker"))
                     .build()
-                    .expect("Failed to create plugin tokio runtime")
-            })
+                    .expect("Failed to create plugin tokio runtime"),
+            );
+            __RT_PTR.store(Box::into_raw(rt), ::std::sync::atomic::Ordering::Release);
+        }
+
+        pub fn __plugin_runtime() -> &'static $crate::__tokio::runtime::Runtime {
+            __RT_INIT.get_or_init(|| __init_plugin_runtime());
+            // Safety: after init, __RT_PTR is non-null and valid for 'static
+            // until drasi_plugin_shutdown() is called.
+            unsafe { &*__RT_PTR.load(::std::sync::atomic::Ordering::Acquire) }
+        }
+
+        /// Shut down the plugin's tokio runtime, stopping all worker threads.
+        ///
+        /// Must be called before dlclose / library unload. After this call,
+        /// any `&'static Runtime` references obtained from `__plugin_runtime()`
+        /// are dangling — no further FFI calls into this plugin are safe.
+        #[no_mangle]
+        pub extern "C" fn drasi_plugin_shutdown() {
+            // Just null the pointer so no further FFI calls use the runtime.
+            // The runtime itself is intentionally leaked — its worker threads
+            // will be killed when the process exits.
+            __RT_PTR.swap(
+                ::std::ptr::null_mut(),
+                ::std::sync::atomic::Ordering::AcqRel,
+            );
         }
 
         struct __SendPtr(*mut ::std::ffi::c_void);
@@ -546,7 +645,7 @@ macro_rules! export_plugin {
         pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
             match ::std::panic::catch_unwind(|| {
                 let _ = __plugin_runtime();
-                let (mut source_descs, mut reaction_descs, mut bootstrap_descs) = $init_fn();
+                let (mut source_descs, mut reaction_descs, mut bootstrap_descs, mut identity_provider_descs) = $init_fn();
 
                 let registration = Box::new($crate::ffi::FfiPluginRegistration {
                     source_plugins: source_descs.as_mut_ptr(),
@@ -555,12 +654,15 @@ macro_rules! export_plugin {
                     reaction_plugin_count: reaction_descs.len(),
                     bootstrap_plugins: bootstrap_descs.as_mut_ptr(),
                     bootstrap_plugin_count: bootstrap_descs.len(),
+                    identity_provider_plugins: identity_provider_descs.as_mut_ptr(),
+                    identity_provider_plugin_count: identity_provider_descs.len(),
                     set_log_callback: __set_log_callback_impl,
                     set_lifecycle_callback: __set_lifecycle_callback_impl,
                 });
                 ::std::mem::forget(source_descs);
                 ::std::mem::forget(reaction_descs);
                 ::std::mem::forget(bootstrap_descs);
+                ::std::mem::forget(identity_provider_descs);
                 Box::into_raw(registration)
             }) {
                 Ok(ptr) => ptr,

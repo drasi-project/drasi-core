@@ -67,6 +67,7 @@ use crate::config::{
     DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
+use crate::identity::IdentityProvider;
 use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
@@ -121,10 +122,17 @@ pub struct DrasiLibBuilder {
     dispatch_buffer_capacity: Option<usize>,
     storage_backends: Vec<StorageBackendConfig>,
     query_configs: Vec<QueryConfig>,
-    source_instances: Vec<Box<dyn SourceTrait>>,
-    reaction_instances: Vec<Box<dyn ReactionTrait>>,
+    source_instances: Vec<(
+        Box<dyn SourceTrait>,
+        std::collections::HashMap<String, String>,
+    )>,
+    reaction_instances: Vec<(
+        Box<dyn ReactionTrait>,
+        std::collections::HashMap<String, String>,
+    )>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
+    identity_provider: Option<Arc<dyn IdentityProvider>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -146,6 +154,7 @@ impl DrasiLibBuilder {
             reaction_instances: Vec::new(),
             index_provider: None,
             state_store_provider: None,
+            identity_provider: None,
         }
     }
 
@@ -223,6 +232,31 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Set the identity provider for credential injection.
+    ///
+    /// Identity providers supply authentication credentials (passwords, tokens,
+    /// certificates) to sources and reactions that need them for connecting to
+    /// external systems.
+    ///
+    /// If no identity provider is set, sources and reactions will receive `None`
+    /// for `context.identity_provider`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_identity_azure::AzureIdentityProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let provider = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+    /// let core = DrasiLib::builder()
+    ///     .with_identity_provider(Arc::new(provider))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
+        self.identity_provider = Some(provider);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -237,7 +271,22 @@ impl DrasiLibBuilder {
     ///     .await?;
     /// ```
     pub fn with_source(mut self, source: impl SourceTrait + 'static) -> Self {
-        self.source_instances.push(Box::new(source));
+        self.source_instances
+            .push((Box::new(source), std::collections::HashMap::new()));
+        self
+    }
+
+    /// Add a source instance with additional component metadata.
+    ///
+    /// Like [`with_source`](Self::with_source) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub fn with_source_metadata(
+        mut self,
+        source: impl SourceTrait + 'static,
+        extra_metadata: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.source_instances
+            .push((Box::new(source), extra_metadata));
         self
     }
 
@@ -261,7 +310,22 @@ impl DrasiLibBuilder {
     ///     .await?;
     /// ```
     pub fn with_reaction(mut self, reaction: impl ReactionTrait + 'static) -> Self {
-        self.reaction_instances.push(Box::new(reaction));
+        self.reaction_instances
+            .push((Box::new(reaction), std::collections::HashMap::new()));
+        self
+    }
+
+    /// Add a reaction instance with additional component metadata.
+    ///
+    /// Like [`with_reaction`](Self::with_reaction) but merges `extra_metadata`
+    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    pub fn with_reaction_metadata(
+        mut self,
+        reaction: impl ReactionTrait + 'static,
+        extra_metadata: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.reaction_instances
+            .push((Box::new(reaction), extra_metadata));
         self
     }
 
@@ -282,39 +346,168 @@ impl DrasiLibBuilder {
         // Validate the configuration
         config
             .validate()
-            .map_err(|e| DrasiError::startup_validation(e.to_string()))?;
+            .map_err(|e| DrasiError::validation(e.to_string()))?;
 
         // Create runtime config and server with optional index and state store providers
         let runtime_config = Arc::new(crate::config::RuntimeConfig::new(
             config,
             self.index_provider,
             self.state_store_provider,
+            self.identity_provider,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
-        // Initialize the server
-        core.initialize().await?;
+        // Inject state store before provisioning sources (they need it for initialization)
+        let state_store = core.config.state_store_provider.clone();
+        core.source_manager
+            .inject_state_store(state_store.clone())
+            .await;
+        core.reaction_manager.inject_state_store(state_store).await;
 
-        // Inject pre-built source instances
-        for source in self.source_instances {
-            let source_id = source.id().to_string();
-            core.source_manager.add_source(source).await.map_err(|e| {
-                DrasiError::provisioning(format!(
-                    "Failed to add source instance '{source_id}': {e}"
-                ))
+        // Register the component graph source BEFORE initialize (which loads query config).
+        // Queries reference sources, so sources must exist in the graph first.
+        {
+            use crate::sources::component_graph_source::ComponentGraphSource;
+            let graph_source = ComponentGraphSource::new(
+                core.component_event_broadcast_tx.clone(),
+                core.config.id.clone(),
+                core.component_graph.clone(),
+            )
+            .map_err(|e| {
+                DrasiError::operation_failed(
+                    "source",
+                    "component-graph",
+                    "add",
+                    format!("Failed to create: {e}"),
+                )
             })?;
+
+            let source_id = graph_source.id().to_string();
+            let source_type = graph_source.type_name().to_string();
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), source_type);
+                metadata.insert(
+                    "autoStart".to_string(),
+                    graph_source.auto_start().to_string(),
+                );
+                graph.register_source(&source_id, metadata).map_err(|e| {
+                    DrasiError::operation_failed(
+                        "source",
+                        &source_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
+                })?;
+            }
+            if let Err(e) = core.source_manager.provision_source(graph_source).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&source_id);
+                return Err(DrasiError::operation_failed(
+                    "source",
+                    &source_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
         }
 
+        // Inject pre-built source instances BEFORE initialize.
+        // Queries reference sources by ID, so sources must be in the graph first.
+        for (source, extra_metadata) in self.source_instances {
+            let source_id = source.id().to_string();
+            let source_type = source.type_name().to_string();
+            let auto_start = source.auto_start();
+
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), source_type);
+                metadata.insert("autoStart".to_string(), auto_start.to_string());
+                metadata.extend(extra_metadata);
+                graph.register_source(&source_id, metadata).map_err(|e| {
+                    DrasiError::operation_failed(
+                        "source",
+                        &source_id,
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
+                })?;
+            }
+            if let Err(e) = core.source_manager.provision_source(source).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&source_id);
+                return Err(DrasiError::operation_failed(
+                    "source",
+                    &source_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
+        }
+
+        // Initialize the server (loads query configurations — sources must already be registered)
+        core.initialize().await?;
+
         // Inject pre-built reaction instances
-        for reaction in self.reaction_instances {
+        for (reaction, extra_metadata) in self.reaction_instances {
             let reaction_id = reaction.id().to_string();
-            core.reaction_manager
-                .add_reaction(reaction)
-                .await
+            let reaction_type = reaction.type_name().to_string();
+            let query_ids = reaction.query_ids();
+
+            // Register in graph first, then provision
+            {
+                let mut graph = core.component_graph.write().await;
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("kind".to_string(), reaction_type);
+                metadata.extend(extra_metadata);
+                graph
+                    .register_reaction(&reaction_id, metadata, &query_ids)
+                    .map_err(|e| {
+                        DrasiError::operation_failed(
+                            "reaction",
+                            &reaction_id,
+                            "add",
+                            format!("Failed to register: {e}"),
+                        )
+                    })?;
+            }
+            if let Err(e) = core.reaction_manager.provision_reaction(reaction).await {
+                let mut graph = core.component_graph.write().await;
+                let _ = graph.deregister(&reaction_id);
+                return Err(DrasiError::operation_failed(
+                    "reaction",
+                    &reaction_id,
+                    "add",
+                    format!("Failed to provision: {e}"),
+                ));
+            }
+        }
+
+        // Register the identity provider in the component graph (if configured).
+        // This creates an IdentityProvider node with Authenticates edges to all
+        // sources and reactions that receive credentials from it.
+        if core.config.identity_provider.is_some() {
+            let mut graph = core.component_graph.write().await;
+            let component_ids: Vec<String> = graph
+                .list_by_kind(&crate::component_graph::ComponentKind::Source)
+                .into_iter()
+                .chain(graph.list_by_kind(&crate::component_graph::ComponentKind::Reaction))
+                .map(|(id, _)| id)
+                .collect();
+
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), "identity_provider".to_string());
+            graph
+                .register_identity_provider("identity-provider", metadata, &component_ids)
                 .map_err(|e| {
-                    DrasiError::provisioning(format!(
-                        "Failed to add reaction instance '{reaction_id}': {e}"
-                    ))
+                    DrasiError::operation_failed(
+                        "identity_provider",
+                        "identity-provider",
+                        "add",
+                        format!("Failed to register: {e}"),
+                    )
                 })?;
         }
 
@@ -377,7 +570,7 @@ impl Query {
         }
     }
 
-    /// Create a new GQL query builder.
+    /// Create a new GQL (ISO 9074:2024) query builder.
     pub fn gql(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -605,7 +798,7 @@ mod tests {
         assert!(core.is_ok(), "Builder should create initialized server");
         let core = core.unwrap();
         assert!(
-            core.state_guard.is_initialized().await,
+            core.state_guard.is_initialized(),
             "Server should be initialized"
         );
     }
@@ -614,8 +807,11 @@ mod tests {
     async fn test_builder_with_query() {
         // In the instance-based approach, sources and reactions are added as instances
         // after the builder creates the core. Here we just test query config addition.
+        // Source must be registered before a query can reference it
+        let source = crate::sources::tests::TestMockSource::new("source1".to_string()).unwrap();
         let core = DrasiLib::builder()
             .with_id("complex-server")
+            .with_source(source)
             .with_query(
                 Query::cypher("query1")
                     .query("MATCH (n) RETURN n")
@@ -627,7 +823,337 @@ mod tests {
 
         assert!(core.is_ok(), "Builder with query should succeed");
         let core = core.unwrap();
-        assert!(core.state_guard.is_initialized().await);
+        assert!(core.state_guard.is_initialized());
         assert_eq!(core.config.queries.len(), 1);
+    }
+
+    // ==========================================================================
+    // DrasiLibBuilder Unit Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_builder_with_id_sets_id() {
+        let builder = DrasiLibBuilder::new().with_id("my-server");
+        assert_eq!(builder.server_id, Some("my-server".to_string()));
+    }
+
+    #[test]
+    fn test_builder_with_id_accepts_string() {
+        let builder = DrasiLibBuilder::new().with_id(String::from("owned-id"));
+        assert_eq!(builder.server_id, Some("owned-id".to_string()));
+    }
+
+    #[test]
+    fn test_builder_with_priority_queue_capacity() {
+        let builder = DrasiLibBuilder::new().with_priority_queue_capacity(50000);
+        assert_eq!(builder.priority_queue_capacity, Some(50000));
+    }
+
+    #[test]
+    fn test_builder_with_dispatch_buffer_capacity() {
+        let builder = DrasiLibBuilder::new().with_dispatch_buffer_capacity(2000);
+        assert_eq!(builder.dispatch_buffer_capacity, Some(2000));
+    }
+
+    #[test]
+    fn test_builder_with_query_adds_to_list() {
+        let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
+        let builder = DrasiLibBuilder::new().with_query(q);
+        assert_eq!(builder.query_configs.len(), 1);
+        assert_eq!(builder.query_configs[0].id, "q1");
+    }
+
+    #[test]
+    fn test_builder_with_multiple_queries() {
+        let q1 = Query::cypher("q1").query("MATCH (a) RETURN a").build();
+        let q2 = Query::gql("q2").query("MATCH (b) RETURN b").build();
+        let builder = DrasiLibBuilder::new().with_query(q1).with_query(q2);
+        assert_eq!(builder.query_configs.len(), 2);
+        assert_eq!(builder.query_configs[0].id, "q1");
+        assert_eq!(builder.query_configs[1].id, "q2");
+    }
+
+    #[test]
+    fn test_builder_add_storage_backend() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
+
+        let backend = StorageBackendConfig {
+            id: "mem1".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let builder = DrasiLibBuilder::new().add_storage_backend(backend);
+        assert_eq!(builder.storage_backends.len(), 1);
+        assert_eq!(builder.storage_backends[0].id, "mem1");
+    }
+
+    #[test]
+    fn test_builder_add_multiple_storage_backends() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
+
+        let b1 = StorageBackendConfig {
+            id: "mem1".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let b2 = StorageBackendConfig {
+            id: "mem2".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: true,
+            },
+        };
+        let builder = DrasiLibBuilder::new()
+            .add_storage_backend(b1)
+            .add_storage_backend(b2);
+        assert_eq!(builder.storage_backends.len(), 2);
+        assert_eq!(builder.storage_backends[0].id, "mem1");
+        assert_eq!(builder.storage_backends[1].id, "mem2");
+    }
+
+    #[test]
+    fn test_builder_default_values() {
+        let builder = DrasiLibBuilder::new();
+        assert_eq!(builder.server_id, None);
+        assert_eq!(builder.priority_queue_capacity, None);
+        assert_eq!(builder.dispatch_buffer_capacity, None);
+        assert!(builder.storage_backends.is_empty());
+        assert!(builder.query_configs.is_empty());
+        assert!(builder.source_instances.is_empty());
+        assert!(builder.reaction_instances.is_empty());
+        assert!(builder.index_provider.is_none());
+        assert!(builder.state_store_provider.is_none());
+    }
+
+    #[test]
+    fn test_builder_fluent_chaining() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
+
+        let backend = StorageBackendConfig {
+            id: "mem".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let q = Query::cypher("q1").query("MATCH (n) RETURN n").build();
+
+        let builder = DrasiLibBuilder::new()
+            .with_id("chained")
+            .with_priority_queue_capacity(20000)
+            .with_dispatch_buffer_capacity(3000)
+            .add_storage_backend(backend)
+            .with_query(q);
+
+        assert_eq!(builder.server_id, Some("chained".to_string()));
+        assert_eq!(builder.priority_queue_capacity, Some(20000));
+        assert_eq!(builder.dispatch_buffer_capacity, Some(3000));
+        assert_eq!(builder.storage_backends.len(), 1);
+        assert_eq!(builder.query_configs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_builder_default_id_when_none_set() {
+        let core = DrasiLibBuilder::new().build().await.unwrap();
+        assert_eq!(core.get_config().id, "drasi-lib");
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_storage_backend_builds_ok() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
+
+        let backend = StorageBackendConfig {
+            id: "test-mem".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let core = DrasiLibBuilder::new()
+            .add_storage_backend(backend)
+            .build()
+            .await;
+        assert!(core.is_ok(), "Builder with storage backend should succeed");
+    }
+
+    // ==========================================================================
+    // Query Builder Unit Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_query_cypher_sets_id_and_language() {
+        let q = Query::cypher("cypher-q");
+        assert_eq!(q.id, "cypher-q");
+        assert_eq!(q.query_language, QueryLanguage::Cypher);
+    }
+
+    #[test]
+    fn test_query_gql_sets_id_and_language() {
+        let q = Query::gql("gql-q");
+        assert_eq!(q.id, "gql-q");
+        assert_eq!(q.query_language, QueryLanguage::GQL);
+    }
+
+    #[test]
+    fn test_query_from_source_adds_source() {
+        let q = Query::cypher("q").from_source("src1");
+        assert_eq!(q.sources.len(), 1);
+        assert_eq!(q.sources[0].source_id, "src1");
+    }
+
+    #[test]
+    fn test_query_from_source_chaining() {
+        let q = Query::cypher("q")
+            .from_source("src1")
+            .from_source("src2")
+            .from_source("src3");
+        assert_eq!(q.sources.len(), 3);
+        assert_eq!(q.sources[0].source_id, "src1");
+        assert_eq!(q.sources[1].source_id, "src2");
+        assert_eq!(q.sources[2].source_id, "src3");
+    }
+
+    #[test]
+    fn test_query_auto_start_default_true() {
+        let q = Query::cypher("q");
+        assert!(q.auto_start);
+    }
+
+    #[test]
+    fn test_query_auto_start_false() {
+        let q = Query::cypher("q").auto_start(false);
+        assert!(!q.auto_start);
+    }
+
+    #[test]
+    fn test_query_enable_bootstrap_default_true() {
+        let q = Query::cypher("q");
+        assert!(q.enable_bootstrap);
+    }
+
+    #[test]
+    fn test_query_enable_bootstrap_false() {
+        let q = Query::cypher("q").enable_bootstrap(false);
+        assert!(!q.enable_bootstrap);
+    }
+
+    #[test]
+    fn test_query_bootstrap_buffer_size_default() {
+        let q = Query::cypher("q");
+        assert_eq!(q.bootstrap_buffer_size, 10000);
+    }
+
+    #[test]
+    fn test_query_with_bootstrap_buffer_size() {
+        let q = Query::cypher("q").with_bootstrap_buffer_size(5000);
+        assert_eq!(q.bootstrap_buffer_size, 5000);
+    }
+
+    #[test]
+    fn test_query_with_dispatch_mode_broadcast() {
+        let q = Query::cypher("q").with_dispatch_mode(DispatchMode::Broadcast);
+        assert_eq!(q.dispatch_mode, Some(DispatchMode::Broadcast));
+    }
+
+    #[test]
+    fn test_query_with_dispatch_mode_channel() {
+        let q = Query::cypher("q").with_dispatch_mode(DispatchMode::Channel);
+        assert_eq!(q.dispatch_mode, Some(DispatchMode::Channel));
+    }
+
+    #[test]
+    fn test_query_dispatch_mode_default_none() {
+        let q = Query::cypher("q");
+        assert_eq!(q.dispatch_mode, None);
+    }
+
+    #[test]
+    fn test_query_with_priority_queue_capacity() {
+        let q = Query::cypher("q").with_priority_queue_capacity(50000);
+        assert_eq!(q.priority_queue_capacity, Some(50000));
+    }
+
+    #[test]
+    fn test_query_priority_queue_capacity_default_none() {
+        let q = Query::cypher("q");
+        assert_eq!(q.priority_queue_capacity, None);
+    }
+
+    #[test]
+    fn test_query_with_dispatch_buffer_capacity() {
+        let q = Query::cypher("q").with_dispatch_buffer_capacity(5000);
+        assert_eq!(q.dispatch_buffer_capacity, Some(5000));
+    }
+
+    #[test]
+    fn test_query_dispatch_buffer_capacity_default_none() {
+        let q = Query::cypher("q");
+        assert_eq!(q.dispatch_buffer_capacity, None);
+    }
+
+    #[test]
+    fn test_query_build_propagates_all_fields() {
+        let config = Query::cypher("full-query")
+            .query("MATCH (n:Person) RETURN n.name")
+            .from_source("source-a")
+            .from_source("source-b")
+            .auto_start(false)
+            .enable_bootstrap(false)
+            .with_bootstrap_buffer_size(5000)
+            .with_priority_queue_capacity(50000)
+            .with_dispatch_buffer_capacity(2500)
+            .with_dispatch_mode(DispatchMode::Broadcast)
+            .build();
+
+        assert_eq!(config.id, "full-query");
+        assert_eq!(config.query, "MATCH (n:Person) RETURN n.name");
+        assert_eq!(config.query_language, QueryLanguage::Cypher);
+        assert_eq!(config.sources.len(), 2);
+        assert_eq!(config.sources[0].source_id, "source-a");
+        assert_eq!(config.sources[1].source_id, "source-b");
+        assert!(!config.auto_start);
+        assert!(!config.enable_bootstrap);
+        assert_eq!(config.bootstrap_buffer_size, 5000);
+        assert_eq!(config.priority_queue_capacity, Some(50000));
+        assert_eq!(config.dispatch_buffer_capacity, Some(2500));
+        assert_eq!(config.dispatch_mode, Some(DispatchMode::Broadcast));
+        assert!(config.joins.is_none());
+        assert!(config.middleware.is_empty());
+        assert!(config.storage_backend.is_none());
+    }
+
+    #[test]
+    fn test_query_build_gql_propagates_language() {
+        let config = Query::gql("gql-full")
+            .query("MATCH (n) RETURN n")
+            .from_source("src")
+            .build();
+
+        assert_eq!(config.id, "gql-full");
+        assert_eq!(config.query_language, QueryLanguage::GQL);
+        assert_eq!(config.query, "MATCH (n) RETURN n");
+        assert_eq!(config.sources.len(), 1);
+        // Verify defaults are preserved through build
+        assert!(config.auto_start);
+        assert!(config.enable_bootstrap);
+        assert_eq!(config.bootstrap_buffer_size, 10000);
+    }
+
+    #[test]
+    fn test_query_build_defaults() {
+        let config = Query::cypher("defaults-only").build();
+
+        assert_eq!(config.id, "defaults-only");
+        assert_eq!(config.query, "");
+        assert_eq!(config.query_language, QueryLanguage::Cypher);
+        assert!(config.sources.is_empty());
+        assert!(config.middleware.is_empty());
+        assert!(config.auto_start);
+        assert!(config.joins.is_none());
+        assert!(config.enable_bootstrap);
+        assert_eq!(config.bootstrap_buffer_size, 10000);
+        assert_eq!(config.priority_queue_capacity, None);
+        assert_eq!(config.dispatch_buffer_capacity, None);
+        assert_eq!(config.dispatch_mode, None);
+        assert!(config.storage_backend.is_none());
     }
 }

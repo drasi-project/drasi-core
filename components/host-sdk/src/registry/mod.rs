@@ -21,6 +21,7 @@
 //! - Version resolver for finding compatible plugin versions
 
 pub mod cosign;
+pub mod local_dir;
 pub mod oci;
 pub mod platform;
 pub mod resolver;
@@ -30,6 +31,7 @@ pub use cosign::{
     matches_trusted_identity, CosignVerifier, SignatureStatus, TrustedIdentity, VerificationConfig,
     VerificationResult,
 };
+pub use local_dir::{LocalDirRegistry, LocalPluginInfo};
 pub use oci::{DownloadResult, OciRegistryClient, PluginSearchResult, PluginVersionInfo};
 pub use platform::{
     fallback_arch_suffixes, oci_platform_to_target_triple, strip_arch_suffix,
@@ -37,5 +39,6 @@ pub use platform::{
 };
 pub use resolver::PluginResolver;
 pub use types::{
-    HostVersionInfo, PluginMetadataJson, RegistryAuth, RegistryConfig, ResolvedPlugin,
+    HostVersionInfo, PluginMetadataJson, PluginSourceKind, RegistryAuth, RegistryConfig,
+    ResolvedPlugin,
 };

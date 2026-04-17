@@ -151,12 +151,22 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 
 ## Plugin Load Sequence
 
-1. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`
-2. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks SDK version (major.minor match) and target triple
-3. **Initialization** — calls `drasi_plugin_init()` which returns an `FfiPluginRegistration` containing vtable arrays and callback setters
-4. **Callback wiring** — calls `set_log_callback` and `set_lifecycle_callback` with host context pointers
-5. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types
-6. **Library retention** — the `Arc<Library>` is stored in each proxy to keep the shared library loaded for as long as any proxy is alive
+1. **Discovery** — scans the plugin directory for files matching configured glob patterns (e.g., `libdrasi_source_*`), groups them by base name (stripping all known extensions: `.dylib`, `.so`, `.dll`, `.rlib`, `.rmeta`, `.d`)
+2. **Extension filtering** — for each plugin group, selects only cdylib files (`.dylib`, `.so`, `.dll`). Non-cdylib Cargo artifacts (`.rlib`, `.d`, `.rmeta`) are silently ignored. If multiple cdylib extensions exist for the same plugin, an error is logged and the plugin is skipped (ambiguous)
+3. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`
+4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks SDK version (major.minor match) and target triple
+5. **Initialization** — calls `drasi_plugin_init()` which returns an `FfiPluginRegistration` containing vtable arrays and callback setters
+6. **Callback wiring** — calls `set_log_callback` and `set_lifecycle_callback` with host context pointers
+7. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types
+8. **Library retention** — the `Arc<Library>` is stored in each proxy to keep the shared library loaded for as long as any proxy is alive
+
+### Plugin File Naming
+
+Plugin shared libraries must follow the naming convention `lib<plugin_name>.<ext>` (on Unix) or `<plugin_name>.dll` (on Windows). The loader uses glob patterns to match plugin files:
+
+- **Only cdylib extensions are loaded**: `.dylib` (macOS), `.so` (Linux), `.dll` (Windows)
+- **Non-cdylib artifacts are ignored**: `.rlib`, `.rmeta`, `.d` files produced by Cargo alongside the cdylib are silently skipped
+- **One cdylib per plugin**: If both `.dylib` and `.so` exist for the same plugin base name, the loader reports an ambiguity error and skips the plugin
 
 ## Integration Tests
 

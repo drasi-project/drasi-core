@@ -67,7 +67,7 @@ struct PluginArtifactMetadata {
 ///       "drasi-bootstrap-mssql" → ("bootstrap", "mssql")
 fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     let stripped = crate_name.strip_prefix("drasi-")?;
-    for prefix in &["source-", "reaction-", "bootstrap-"] {
+    for prefix in &["source-", "reaction-", "bootstrap-", "identity-"] {
         if let Some(kind) = stripped.strip_prefix(prefix) {
             let plugin_type = prefix.trim_end_matches('-');
             return Some((plugin_type.to_string(), kind.to_string()));
@@ -231,7 +231,7 @@ fn parse_jobs(args: &[String]) -> usize {
         if arg == "--jobs" || arg == "-j" {
             if let Some(n) = args.get(i + 1) {
                 return n.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid --jobs value: {}", n);
+                    eprintln!("Invalid --jobs value: {n}");
                     std::process::exit(1);
                 });
             }
@@ -323,8 +323,7 @@ fn build_plugins(args: &[String]) {
             // Cross-OS compilation requires `cross` + Docker, only works on Linux hosts
             if !host.contains("linux") {
                 eprintln!(
-                    "Cannot build {} on {} — cross-OS compilation requires a Linux host with `cross` + Docker.",
-                    t, host
+                    "Cannot build {t} on {host} — cross-OS compilation requires a Linux host with `cross` + Docker."
                 );
                 eprintln!("Skipping this target.");
                 std::process::exit(1);
@@ -383,9 +382,9 @@ fn build_plugins(args: &[String]) {
             if failed.load(Ordering::Relaxed) {
                 break;
             }
-            println!("  Building {}...", name);
+            println!("  Building {name}...");
 
-            let feature_flag = format!("{}/dynamic-plugin", name);
+            let feature_flag = format!("{name}/dynamic-plugin");
             let mut cmd = Command::new(&build_tool_str);
             cmd.args(["build", "--lib", "-p", name, "--features", &feature_flag]);
 
@@ -398,10 +397,10 @@ fn build_plugins(args: &[String]) {
 
             let status = cmd.status().expect("failed to run cross build");
             if !status.success() {
-                eprintln!("Failed to build {}", name);
+                eprintln!("Failed to build {name}");
                 failed.store(true, Ordering::Relaxed);
             } else {
-                println!("  Built {}", name);
+                println!("  Built {name}");
             }
         }
     } else {
@@ -424,7 +423,7 @@ fn build_plugins(args: &[String]) {
                     let build_tool = Arc::clone(&build_tool);
 
                     thread::spawn(move || {
-                        println!("  Building {}...", name);
+                        println!("  Building {name}...");
 
                         let mut cmd = Command::new(build_tool.as_str());
                         cmd.args([
@@ -448,10 +447,10 @@ fn build_plugins(args: &[String]) {
 
                         let status = cmd.status().expect("failed to run build command");
                         if !status.success() {
-                            eprintln!("Failed to build {}", name);
+                            eprintln!("Failed to build {name}");
                             failed.store(true, Ordering::Relaxed);
                         } else {
-                            println!("  Built {}", name);
+                            println!("  Built {name}");
                         }
                     })
                 })
@@ -472,6 +471,7 @@ fn build_plugins(args: &[String]) {
     fs::create_dir_all(&plugins_dir).expect("failed to create plugins directory");
 
     let lib_ext = plugin_lib_ext(target.as_deref());
+    let mut missing_binaries = Vec::new();
 
     for info in &result.plugins {
         let name = &info.package.name;
@@ -481,10 +481,16 @@ fn build_plugins(args: &[String]) {
 
         if src.exists() {
             fs::copy(&src, &dst).unwrap_or_else(|e| {
-                eprintln!("Failed to copy {} to plugins/: {}", lib_name, e);
+                eprintln!("Failed to copy {lib_name} to plugins/: {e}");
                 0
             });
             let _ = fs::remove_file(&src);
+        } else {
+            eprintln!(
+                "ERROR: expected cdylib not found after build: {}",
+                src.display()
+            );
+            missing_binaries.push(name.clone());
         }
 
         // Generate metadata.json alongside the plugin binary
@@ -504,10 +510,44 @@ fn build_plugins(args: &[String]) {
         let metadata_json =
             serde_json::to_string_pretty(&metadata).expect("failed to serialize metadata");
         fs::write(&metadata_path, metadata_json).unwrap_or_else(|e| {
-            eprintln!("Failed to write metadata for {}: {}", name, e);
+            eprintln!("Failed to write metadata for {name}: {e}");
         });
 
         clean_build_artifacts(&build_dir, &lib_name);
+    }
+
+    if !missing_binaries.is_empty() {
+        eprintln!(
+            "\n=== {} of {} plugin binaries missing after build ===",
+            missing_binaries.len(),
+            result.plugins.len()
+        );
+        for name in &missing_binaries {
+            eprintln!("  - {name}");
+        }
+        eprintln!("\nContents of build directory ({}):", build_dir.display());
+        match fs::read_dir(&build_dir) {
+            Ok(entries) => {
+                let mut found_any = false;
+                for entry in entries.flatten() {
+                    let fname = entry.file_name();
+                    let fname = fname.to_string_lossy();
+                    if fname.ends_with(".so")
+                        || fname.ends_with(".dll")
+                        || fname.ends_with(".dylib")
+                        || fname.ends_with(".rlib")
+                    {
+                        eprintln!("  {fname}");
+                        found_any = true;
+                    }
+                }
+                if !found_any {
+                    eprintln!("  (no library files found)");
+                }
+            }
+            Err(e) => eprintln!("  Failed to list directory: {e}"),
+        }
+        std::process::exit(1);
     }
 
     println!("=== cdylib plugins output to {} ===", plugins_dir.display());
@@ -688,7 +728,7 @@ fn publish_plugins(args: &[String]) {
         registry
     );
     if let Some(ref label) = pre_release {
-        println!("  Pre-release label: {}", label);
+        println!("  Pre-release label: {label}");
     }
 
     for p in &plugins {
@@ -759,7 +799,7 @@ fn publish_plugins(args: &[String]) {
 
             match publish_single_plugin(&client, &auth, &reference_str, p).await {
                 Ok(url) => {
-                    println!("  ✓ {} → {}", reference_str, url);
+                    println!("  ✓ {reference_str} → {url}");
                     success_count += 1;
 
                     // Sign the published artifact with cosign if --sign is enabled
@@ -768,7 +808,7 @@ fn publish_plugins(args: &[String]) {
                         let digest_ref = if let Some(digest) = url.rsplit("/manifests/").next() {
                             // Build registry/repo@sha256:... reference
                             let repo = reference_str.split(':').next().unwrap_or(&reference_str);
-                            format!("{}@{}", repo, digest)
+                            format!("{repo}@{digest}")
                         } else {
                             reference_str.clone()
                         };
@@ -776,16 +816,13 @@ fn publish_plugins(args: &[String]) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("  ✗ {} — {}", reference_str, e);
+                    eprintln!("  ✗ {reference_str} — {e}");
                     fail_count += 1;
                 }
             }
         }
 
-        println!(
-            "\n=== Published: {} succeeded, {} failed ===",
-            success_count, fail_count
-        );
+        println!("\n=== Published: {success_count} succeeded, {fail_count} failed ===");
 
         // Update plugin directory with entries for each successfully published plugin
         if success_count > 0 {
@@ -798,11 +835,11 @@ fn publish_plugins(args: &[String]) {
             dir_entries.dedup();
 
             for (ptype, kind) in &dir_entries {
-                let dir_tag = format!("{}.{}", ptype, kind);
-                let dir_ref = format!("{}/drasi-plugin-directory:{}", registry, dir_tag);
+                let dir_tag = format!("{ptype}.{kind}");
+                let dir_ref = format!("{registry}/drasi-plugin-directory:{dir_tag}");
                 match publish_directory_entry(&client, &auth, &dir_ref).await {
-                    Ok(_) => println!("  ✓ directory entry: {}", dir_tag),
-                    Err(e) => eprintln!("  ✗ directory entry: {} — {}", dir_tag, e),
+                    Ok(_) => println!("  ✓ directory entry: {dir_tag}"),
+                    Err(e) => eprintln!("  ✗ directory entry: {dir_tag} — {e}"),
                 }
             }
         }
@@ -823,12 +860,12 @@ fn make_tag(
     let base = if let Some(tag) = tag_override {
         tag.to_string()
     } else if let Some(label) = pre_release {
-        format!("{}-{}", version, label)
+        format!("{version}-{label}")
     } else {
         version.to_string()
     };
     match arch_suffix {
-        Some(suffix) => format!("{}-{}", base, suffix),
+        Some(suffix) => format!("{base}-{suffix}"),
         None => base,
     }
 }
@@ -841,7 +878,7 @@ fn make_tag(
 ///
 /// Warns on failure but does not abort the publish batch.
 fn cosign_sign(reference: &str) {
-    print!("  🔏 signing {}...", reference);
+    print!("  🔏 signing {reference}...");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut cmd = Command::new("cosign");
@@ -870,7 +907,7 @@ fn cosign_sign(reference: &str) {
             {
                 eprintln!(" ✗ cosign not found in PATH (install: https://docs.sigstore.dev/cosign/system_config/installation/)");
             } else {
-                eprintln!(" ✗ failed to run cosign: {}", e);
+                eprintln!(" ✗ failed to run cosign: {e}");
             }
         }
     }
@@ -1028,9 +1065,9 @@ fn triple_to_platform(triple: &str) -> Option<(String, String)> {
 fn triple_to_arch_suffix(triple: &str) -> Option<String> {
     triple_to_platform(triple).map(|(os, arch)| {
         if triple.contains("musl") {
-            format!("{}-musl-{}", os, arch)
+            format!("{os}-musl-{arch}")
         } else {
-            format!("{}-{}", os, arch)
+            format!("{os}-{arch}")
         }
     })
 }

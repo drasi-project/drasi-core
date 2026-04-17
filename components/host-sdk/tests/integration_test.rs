@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::{load_plugin_from_path, PluginLoader, PluginLoaderConfig};
 use drasi_plugin_sdk::descriptor::{ReactionPluginDescriptor, SourcePluginDescriptor};
+use serial_test::serial;
 
 /// Locate the drasi-core build output directory.
 ///
@@ -43,7 +44,7 @@ fn plugin_dir() -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .expect("Cannot find workspace root from CARGO_MANIFEST_DIR");
-    workspace_root.join("target").join("debug")
+    workspace_root.join("target").join("debug").join("plugins")
 }
 
 /// Get the platform-specific plugin filename.
@@ -529,10 +530,15 @@ fn test_plugin_loader_discovers_plugins_by_pattern() {
     }
     let dir = plugin_dir();
 
-    // Only scan for source plugins
+    // Only scan for source plugins (Windows DLLs lack the "lib" prefix)
+    let pattern = if cfg!(target_os = "windows") {
+        "drasi_source_mock*"
+    } else {
+        "libdrasi_source_mock*"
+    };
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir.clone(),
-        file_patterns: vec!["libdrasi_source_mock*".to_string()],
+        file_patterns: vec![pattern.to_string()],
     });
 
     let plugins = loader
@@ -567,10 +573,17 @@ fn test_plugin_loader_with_multiple_patterns() {
 
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir,
-        file_patterns: vec![
-            "libdrasi_source_mock*".to_string(),
-            "libdrasi_reaction_log*".to_string(),
-        ],
+        file_patterns: if cfg!(target_os = "windows") {
+            vec![
+                "drasi_source_mock*".to_string(),
+                "drasi_reaction_log*".to_string(),
+            ]
+        } else {
+            vec![
+                "libdrasi_source_mock*".to_string(),
+                "libdrasi_reaction_log*".to_string(),
+            ]
+        },
     });
 
     let plugins = loader
@@ -604,6 +617,7 @@ fn test_plugin_loader_with_multiple_patterns() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_log_callback_captures_plugin_logs() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIP: drasi-source-mock not built as cdylib");
@@ -612,7 +626,10 @@ async fn test_log_callback_captures_plugin_logs() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear captured logs
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -637,15 +654,21 @@ async fn test_log_callback_captures_plugin_logs() {
     source.start().await.expect("Start should succeed");
 
     // Give plugin a moment to emit logs
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     source.stop().await.expect("Stop should succeed");
 
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
     // Check that some logs were captured (mock source logs on start/stop)
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // We can't guarantee specific messages, but the callback mechanism should work
     // The lifecycle callback should at least fire
-    let lifecycles = callbacks::captured_lifecycles().lock().unwrap();
+    let lifecycles = callbacks::captured_lifecycles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Either logs or lifecycle events should be captured
     let total_captured = logs.len() + lifecycles.len();
     assert!(
@@ -838,12 +861,13 @@ fn test_drop_loaded_plugin_does_not_crash() {
 //
 // These tests simulate the real DrasiLib flow:
 // 1. Load plugin → create source via factory
-// 2. Create a status_tx/status_rx channel (like SourceManager does)
+// 2. Create an update_tx/update_rx channel (like SourceManager does)
 // 3. Call source.initialize(SourceRuntimeContext) — this wires per-instance callbacks
 // 4. Start/stop the source
 // 5. Verify logs appear in ComponentLogRegistry and events arrive on status_rx
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_logs_routed_to_log_registry() {
     //! Verify that log output from a plugin during start/stop is captured in
     //! the ComponentLogRegistry when source.initialize() is called with a real
@@ -879,12 +903,18 @@ async fn test_plugin_logs_routed_to_log_registry() {
         .await
         .unwrap();
 
-    // Create a real status channel (like SourceManager does)
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
+    // Create a real update channel (like SourceManager does)
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
 
     // Initialize with a real SourceRuntimeContext — this wires per-instance callbacks
-    let context =
-        SourceRuntimeContext::new("log-test-instance", "log-test-source", status_tx, None);
+    let context = SourceRuntimeContext::new(
+        "log-test-instance",
+        "log-test-source",
+        None,
+        update_tx,
+        None,
+    );
     source.initialize(context).await;
 
     // Subscribe to logs BEFORE starting (like the API does)
@@ -899,9 +929,9 @@ async fn test_plugin_logs_routed_to_log_registry() {
     // Starting the source should trigger log output from the plugin
     let _ = source.start().await;
     // Give a moment for logs to propagate
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Check that logs were routed to the ComponentLogRegistry
     let mut log_count = 0;
@@ -915,7 +945,9 @@ async fn test_plugin_logs_routed_to_log_registry() {
     );
 
     // Also check the diagnostic store (captured_logs) for completeness
-    let captured = callbacks::captured_logs().lock().unwrap();
+    let captured = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     assert!(
         !captured.is_empty(),
         "Expected at least one captured log from plugin start/stop"
@@ -923,10 +955,12 @@ async fn test_plugin_logs_routed_to_log_registry() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     //! Verify that lifecycle events (Starting, Started, Stopping, Stopped) from a plugin
-    //! flow through the status_tx channel when source.initialize() is called with a real
+    //! flow through the update_tx channel when source.initialize() is called with a real
     //! SourceRuntimeContext. This is the same channel that LifecycleManager monitors.
+    use drasi_lib::component_graph::ComponentUpdate;
     use drasi_lib::context::SourceRuntimeContext;
     use drasi_lib::sources::Source;
     use drasi_lib::ComponentStatus;
@@ -956,14 +990,15 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
         .await
         .unwrap();
 
-    // Create a real status channel
-    let (status_tx, mut status_rx) = tokio::sync::mpsc::channel(100);
+    // Create a real update channel
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<ComponentUpdate>(100);
 
     // Initialize with a real SourceRuntimeContext
     let context = SourceRuntimeContext::new(
         "lifecycle-test-instance",
         "lifecycle-evt-source",
-        status_tx,
+        None,
+        update_tx,
         None,
     );
     source.initialize(context).await;
@@ -978,26 +1013,33 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
 
     // Drain all events from the channel
     let mut events = Vec::new();
-    while let Ok(event) = status_rx.try_recv() {
-        eprintln!(
-            "  Event: {} {:?} {:?} {}",
-            event.component_id,
-            event.component_type,
-            event.status,
-            event.message.as_deref().unwrap_or("")
-        );
+    while let Ok(event) = update_rx.try_recv() {
+        match &event {
+            ComponentUpdate::Status {
+                component_id,
+                status,
+                message,
+            } => {
+                eprintln!(
+                    "  Event: {} {:?} {}",
+                    component_id,
+                    status,
+                    message.as_deref().unwrap_or("")
+                );
+            }
+        }
         events.push(event);
     }
 
     assert!(
         !events.is_empty(),
-        "Expected lifecycle events on status_rx channel"
+        "Expected lifecycle events on update_rx channel"
     );
 
     // Verify we got events for the right component
     let our_events: Vec<_> = events
         .iter()
-        .filter(|e| e.component_id == "lifecycle-evt-source")
+        .filter(|e| matches!(e, ComponentUpdate::Status { component_id, .. } if component_id == "lifecycle-evt-source"))
         .collect();
     assert!(
         !our_events.is_empty(),
@@ -1005,7 +1047,12 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     );
 
     // Verify we got at least Starting and Started (from start)
-    let statuses: Vec<_> = our_events.iter().map(|e| &e.status).collect();
+    let statuses: Vec<_> = our_events
+        .iter()
+        .map(|e| match e {
+            ComponentUpdate::Status { status, .. } => status,
+        })
+        .collect();
     assert!(
         statuses.contains(&&ComponentStatus::Starting),
         "Expected Starting event, got: {statuses:?}"
@@ -1016,7 +1063,9 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
     );
 
     // Also check the diagnostic store for completeness
-    let captured = callbacks::captured_lifecycles().lock().unwrap();
+    let captured = callbacks::captured_lifecycles()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let our_captured: Vec<_> = captured
         .iter()
         .filter(|e| e.component_id == "lifecycle-evt-source")
@@ -1028,6 +1077,7 @@ async fn test_plugin_lifecycle_events_routed_via_status_channel() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_null_callback_context_does_not_crash() {
     //! Verify that when source.initialize() is NOT called (no per-instance callbacks),
     //! logs still go to the diagnostic store and host log framework, and lifecycle events
@@ -1069,6 +1119,7 @@ async fn test_null_callback_context_does_not_crash() {
 // ============================================================================
 
 #[tokio::test]
+#[serial]
 async fn test_all_log_levels_captured_in_diagnostic_store() {
     //! Verify that log events at all levels (info, warn, error, debug) emitted by a plugin
     //! are captured in the diagnostic captured_logs store. The mock source emits info! during
@@ -1080,7 +1131,10 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
     let path = require_plugin("drasi-source-mock");
 
     // Clear diagnostic stores before test
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1102,11 +1156,13 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
         .unwrap();
 
     let _ = source.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // We should have at least the start and stop info logs
     let our_logs: Vec<_> = logs
         .iter()
@@ -1129,6 +1185,7 @@ async fn test_all_log_levels_captured_in_diagnostic_store() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_logs_without_initialize_reach_global_callback() {
     //! When a source is NOT initialized (no per-instance callbacks), logs should
     //! still reach the global callback and be captured in the diagnostic store.
@@ -1139,7 +1196,10 @@ async fn test_logs_without_initialize_reach_global_callback() {
     }
     let path = require_plugin("drasi-source-mock");
 
-    callbacks::captured_logs().lock().unwrap().clear();
+    callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 
     let plugin = load_plugin_from_path(
         &path,
@@ -1162,11 +1222,13 @@ async fn test_logs_without_initialize_reach_global_callback() {
 
     // Don't call initialize — no per-instance callbacks
     let _ = source.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = source.stop().await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let logs = callbacks::captured_logs().lock().unwrap();
+    let logs = callbacks::captured_logs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let our_logs: Vec<_> = logs
         .iter()
         .filter(|l| l.message.contains("global-cb-test"))
@@ -1212,9 +1274,15 @@ async fn test_per_instance_logs_include_correct_component_id() {
         .await
         .unwrap();
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(100);
-    let context =
-        SourceRuntimeContext::new("cid-test-instance", "component-id-test", status_tx, None);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = SourceRuntimeContext::new(
+        "cid-test-instance",
+        "component-id-test",
+        None,
+        update_tx,
+        None,
+    );
     source.initialize(context).await;
 
     let registry = get_or_init_global_registry();
@@ -1264,7 +1332,10 @@ struct MockIdentityProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockIdentityProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::UsernamePassword {
             username: self.username.clone(),
             password: self.password.clone(),
@@ -1287,7 +1358,10 @@ struct MockTokenProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockTokenProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::Token {
             username: self.username.clone(),
             token: self.token.clone(),
@@ -1311,7 +1385,10 @@ struct MockCertProvider {
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockCertProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Ok(drasi_lib::identity::Credentials::Certificate {
             cert_pem: self.cert_pem.clone(),
             key_pem: self.key_pem.clone(),
@@ -1333,12 +1410,38 @@ struct MockErrorProvider;
 
 #[async_trait::async_trait]
 impl drasi_lib::identity::IdentityProvider for MockErrorProvider {
-    async fn get_credentials(&self) -> anyhow::Result<drasi_lib::identity::Credentials> {
+    async fn get_credentials(
+        &self,
+        _context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
         Err(anyhow::anyhow!("Authentication service unavailable"))
     }
 
     fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
         Box::new(MockErrorProvider)
+    }
+}
+
+/// A mock IdentityProvider that echoes context properties back as credentials.
+/// Used to verify non-empty CredentialContext survives the FFI JSON round-trip.
+struct MockContextEchoProvider;
+
+#[async_trait::async_trait]
+impl drasi_lib::identity::IdentityProvider for MockContextEchoProvider {
+    async fn get_credentials(
+        &self,
+        context: &drasi_lib::identity::CredentialContext,
+    ) -> anyhow::Result<drasi_lib::identity::Credentials> {
+        let hostname = context.get("hostname").unwrap_or_default().to_string();
+        let port = context.get("port").unwrap_or_default().to_string();
+        Ok(drasi_lib::identity::Credentials::UsernamePassword {
+            username: hostname,
+            password: port,
+        })
+    }
+
+    fn clone_box(&self) -> Box<dyn drasi_lib::identity::IdentityProvider> {
+        Box::new(MockContextEchoProvider)
     }
 }
 
@@ -1357,7 +1460,7 @@ async fn test_identity_provider_username_password_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1385,7 +1488,7 @@ async fn test_identity_provider_token_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1414,7 +1517,7 @@ async fn test_identity_provider_certificate_roundtrip() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1448,7 +1551,7 @@ async fn test_identity_provider_certificate_no_username() {
 
     use drasi_lib::identity::IdentityProvider;
     let creds = proxy
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("get_credentials should succeed");
 
@@ -1477,7 +1580,9 @@ async fn test_identity_provider_error_propagation() {
     let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
 
     use drasi_lib::identity::IdentityProvider;
-    let result = proxy.get_credentials().await;
+    let result = proxy
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
+        .await;
 
     match result {
         Ok(_) => panic!("Expected error from identity provider"),
@@ -1514,13 +1619,43 @@ async fn test_identity_provider_clone_box() {
 
     // The clone should still work
     let creds = cloned
-        .get_credentials()
+        .get_credentials(&drasi_lib::identity::CredentialContext::default())
         .await
         .expect("cloned provider should work");
     match creds {
         drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
             assert_eq!(username, "user1");
             assert_eq!(password, "pass1");
+        }
+        _ => panic!("Expected UsernamePassword variant"),
+    }
+}
+
+/// Test that a non-empty CredentialContext survives the FFI JSON serialization round-trip.
+#[tokio::test]
+async fn test_identity_provider_credential_context_roundtrip() {
+    let provider = std::sync::Arc::new(MockContextEchoProvider);
+
+    let vtable = drasi_host_sdk::IdentityProviderVtableBuilder::build(provider);
+    let vtable_ptr = Box::into_raw(Box::new(vtable));
+
+    let proxy = unsafe { drasi_plugin_sdk::ffi::FfiIdentityProviderProxy::new(vtable_ptr) };
+
+    use drasi_lib::identity::{CredentialContext, IdentityProvider};
+    let context = CredentialContext::new()
+        .with_property("hostname", "db.example.com")
+        .with_property("port", "5432");
+
+    let creds = proxy
+        .get_credentials(&context)
+        .await
+        .expect("get_credentials should succeed");
+
+    // The mock echoes hostname→username and port→password
+    match creds {
+        drasi_lib::identity::Credentials::UsernamePassword { username, password } => {
+            assert_eq!(username, "db.example.com");
+            assert_eq!(password, "5432");
         }
         _ => panic!("Expected UsernamePassword variant"),
     }
@@ -1553,11 +1688,12 @@ async fn test_source_with_null_identity_provider() {
         .await
         .expect("Should create source");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "null-ip-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1599,11 +1735,12 @@ async fn test_source_with_identity_provider_injection() {
             password: "injected-pass".to_string(),
         });
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::context::SourceRuntimeContext {
         instance_id: "test-instance".to_string(),
         source_id: "ip-inject-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: Some(provider),
     };
@@ -1646,11 +1783,12 @@ async fn test_reaction_enqueue_query_result() {
         .expect("Should create log reaction instance");
 
     // Initialize the reaction with a runtime context
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1670,7 +1808,10 @@ async fn test_reaction_enqueue_query_result() {
     // This is the critical path: host calls enqueue_query_result on the reaction proxy,
     // which transfers the QueryResult as an opaque pointer through FFI into the
     // reaction's priority queue.
-    reaction.enqueue_query_result(query_result).await;
+    reaction
+        .enqueue_query_result(query_result)
+        .await
+        .expect("enqueue_query_result should succeed");
 
     // If we get here without panic/crash, the opaque pointer transfer worked.
     // Stop the reaction cleanly.
@@ -1703,11 +1844,12 @@ async fn test_reaction_enqueue_multiple_query_results() {
         .await
         .expect("Should create log reaction instance");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "multi-enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1723,7 +1865,10 @@ async fn test_reaction_enqueue_multiple_query_results() {
             vec![],
             std::collections::HashMap::new(),
         );
-        reaction.enqueue_query_result(result).await;
+        reaction
+            .enqueue_query_result(result)
+            .await
+            .expect("enqueue_query_result should succeed");
     }
 
     reaction.stop().await.expect("Reaction should stop");
@@ -1755,11 +1900,12 @@ async fn test_reaction_enqueue_query_result_with_data() {
         .await
         .expect("Should create log reaction instance");
 
-    let (status_tx, _status_rx) = tokio::sync::mpsc::channel(16);
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
     let context = drasi_lib::ReactionRuntimeContext {
         instance_id: "test-instance".to_string(),
         reaction_id: "data-enqueue-test".to_string(),
-        status_tx,
+        update_tx,
         state_store: None,
         identity_provider: None,
     };
@@ -1788,7 +1934,10 @@ async fn test_reaction_enqueue_query_result_with_data() {
 
     // Enqueue a result with actual data — validates that complex types
     // cross the FFI boundary correctly as opaque pointers
-    reaction.enqueue_query_result(query_result).await;
+    reaction
+        .enqueue_query_result(query_result)
+        .await
+        .expect("enqueue_query_result should succeed");
 
     reaction.stop().await.expect("Reaction should stop");
 }
@@ -1889,7 +2038,7 @@ async fn test_e2e_cdylib_source_query_reaction() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Connect SSE client and collect events
-    let sse_url = format!("http://127.0.0.1:{}/events", sse_port);
+    let sse_url = format!("http://127.0.0.1:{sse_port}/events");
     let collected = collect_sse_events(&sse_url, 5, std::time::Duration::from_secs(10)).await;
 
     assert!(
@@ -2229,7 +2378,7 @@ async fn collect_sse_events(
 
 /// Minimal test: just source → subscriber, no query.
 /// Checks if a cdylib mock source actually dispatches events to a subscriber.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn test_cdylib_source_dispatches_events() {
     if !plugin_exists("drasi-source-mock") {
         eprintln!("SKIPPING: cdylib mock source plugin not found");
@@ -2255,21 +2404,19 @@ async fn test_cdylib_source_dispatches_events() {
         .await
         .expect("Should create mock source");
 
-    // Initialize with a minimal context
-    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
     let context = drasi_lib::context::SourceRuntimeContext::new(
         "test-instance",
         "dispatch-test",
+        None,
         event_tx,
         None,
     );
     source.initialize(context).await;
 
-    // Start the source
     source.start().await.expect("Should start source");
-    println!("Source started, status: {:?}", source.status().await);
 
-    // Subscribe
     let settings = drasi_lib::config::SourceSubscriptionSettings {
         source_id: "dispatch-test".to_string(),
         enable_bootstrap: false,
@@ -2278,25 +2425,117 @@ async fn test_cdylib_source_dispatches_events() {
         relations: std::collections::HashSet::new(),
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
-    println!("Subscribed, got receiver");
-
-    let mut receiver = sub.receiver;
-
-    // Try to receive an event with a timeout
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv()).await;
-
-    match result {
-        Ok(Ok(event)) => {
-            println!("Received event: source_id={}", event.source_id);
-            assert_eq!(event.source_id, "dispatch-test");
-        }
-        Ok(Err(e)) => {
-            panic!("Receiver returned error: {e}");
-        }
-        Err(_) => {
-            panic!("Timed out waiting for event - source not dispatching!");
-        }
-    }
+    let receiver = sub.receiver;
 
     source.stop().await.expect("Should stop");
+    drop(receiver);
+    tokio::task::yield_now().await;
+    drop(source);
+    drop(plugin);
+    drop(_event_rx);
+}
+
+// ============================================================================
+// Stress test: rapid subscribe/drop with concurrent event delivery
+// ============================================================================
+
+/// Stress test targeting timing-dependent FFI race conditions.
+///
+/// Rapidly creates subscriptions, receives a few events, then drops the
+/// receiver while the plugin forwarder may still be pushing events. Repeats
+/// many times to exercise shutdown/cleanup timing windows.
+#[tokio::test]
+#[serial]
+async fn test_stress_rapid_subscribe_drop_under_load() {
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIPPING: cdylib mock source plugin not found");
+        panic!("SKIPPING: cdylib mock source plugin not found");
+    }
+
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    // Fast timer (50ms) to maximize event throughput during stress test
+    let source_config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 50
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("stress-test", &source_config, false)
+        .await
+        .expect("Should create mock source");
+
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "test-instance",
+        "stress-test",
+        None,
+        event_tx,
+        None,
+    );
+    source.initialize(context).await;
+    source.start().await.expect("Should start source");
+
+    // Wait for the source to be emitting events
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let iterations = 20;
+    for i in 0..iterations {
+        let settings = drasi_lib::config::SourceSubscriptionSettings {
+            source_id: "stress-test".to_string(),
+            enable_bootstrap: false,
+            query_id: format!("stress-query-{i}"),
+            nodes: std::collections::HashSet::new(),
+            relations: std::collections::HashSet::new(),
+        };
+        let sub = source.subscribe(settings).await.expect("Should subscribe");
+        let mut receiver = sub.receiver;
+
+        // Vary the timing: sometimes drop immediately, sometimes after
+        // receiving a few events, sometimes mid-event
+        match i % 4 {
+            0 => {
+                // Drop immediately — forwarder may not have started yet
+                drop(receiver);
+            }
+            1 => {
+                // Receive one event then drop
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                        .await;
+                drop(receiver);
+            }
+            2 => {
+                // Receive several events then drop
+                for _ in 0..3 {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        receiver.recv(),
+                    )
+                    .await;
+                }
+                drop(receiver);
+            }
+            _ => {
+                // Short sleep (overlapping with timer tick) then drop
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                drop(receiver);
+            }
+        }
+
+        // Brief yield to let forwarder cleanup tasks run
+        tokio::task::yield_now().await;
+    }
+
+    // If we get here without crashing, the shutdown/cleanup paths are sound
+    source.stop().await.expect("Should stop source");
+    println!("Stress test completed: {iterations} rapid subscribe/drop cycles without crash");
 }

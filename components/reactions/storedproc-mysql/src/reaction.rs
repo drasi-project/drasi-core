@@ -26,6 +26,7 @@ use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
+use serde_json::json;
 
 use crate::config::{MySqlStoredProcReactionConfig, QueryConfig};
 use crate::executor::MySqlExecutor;
@@ -191,16 +192,19 @@ impl MySqlStoredProcReaction {
 
                 // Process each result item in the batch
                 for result_item in &query_result.results {
+                    let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
                         ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
                         ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            debug!(
-                                "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
-                            );
-                            continue;
+                        ResultDiff::Aggregation { before, after } => {
+                            aggregation_data = json!({
+                                "before": before,
+                                "after": after,
+                            });
+                            (OperationType::Update, &aggregation_data, "AGGREGATION")
                         }
+                        ResultDiff::Noop => continue,
                     };
 
                     // Get the command template for this query and operation type
@@ -264,18 +268,51 @@ impl Reaction for MySqlStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert("database".to_string(), serde_json::json!("MySQL"));
-        props.insert(
-            "hostname".to_string(),
-            serde_json::json!(self.config.hostname),
-        );
-        props.insert(
-            "database_name".to_string(),
-            serde_json::json!(self.config.database),
-        );
-        props.insert("ssl".to_string(), serde_json::json!(self.config.ssl));
-        props
+        use crate::descriptor::{
+            MySqlStoredProcReactionConfigDto, StoredProcQueryConfigDto, StoredProcTemplateSpecDto,
+        };
+        use drasi_plugin_sdk::ConfigValue;
+
+        fn map_spec_to_dto(spec: &crate::TemplateSpec) -> StoredProcTemplateSpecDto {
+            StoredProcTemplateSpecDto {
+                template: spec.template.clone(),
+            }
+        }
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> StoredProcQueryConfigDto {
+            StoredProcQueryConfigDto {
+                added: qc.added.as_ref().map(map_spec_to_dto),
+                updated: qc.updated.as_ref().map(map_spec_to_dto),
+                deleted: qc.deleted.as_ref().map(map_spec_to_dto),
+            }
+        }
+
+        let dto = MySqlStoredProcReactionConfigDto {
+            hostname: Some(ConfigValue::Static(self.config.hostname.clone())),
+            port: self.config.port.map(ConfigValue::Static),
+            user: ConfigValue::Static(self.config.user.clone()),
+            password: ConfigValue::Static(self.config.password.clone()),
+            database: ConfigValue::Static(self.config.database.clone()),
+            ssl: Some(ConfigValue::Static(self.config.ssl)),
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+            default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
+            command_timeout_ms: Some(ConfigValue::Static(self.config.command_timeout_ms)),
+            retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                // Don't expose password
+                map.remove("password");
+                map.into_iter().collect()
+            }
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {

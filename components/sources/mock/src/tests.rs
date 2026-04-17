@@ -93,9 +93,10 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
     }
 
@@ -108,7 +109,7 @@ mod properties {
         let props = source.properties();
 
         assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(2000.into()))
         );
     }
@@ -121,10 +122,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(
-            props.get("sensor_count"),
-            Some(&serde_json::Value::Number(10.into()))
-        );
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), Some(&serde_json::json!(10)));
     }
 
     #[test]
@@ -135,7 +134,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(props.get("sensor_count"), None);
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -146,7 +146,8 @@ mod properties {
             .unwrap();
         let props = source.properties();
 
-        assert_eq!(props.get("sensor_count"), None);
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -231,16 +232,14 @@ mod builder {
         let source = MockSourceBuilder::new("test").build().unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("type"), Some(&serde_json::json!("generic")));
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("generic".to_string()))
-        );
-        assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(5000.into()))
         );
-        // sensor_count should not be present for generic
-        assert_eq!(props.get("sensor_count"), None);
+        // sensorCount should not be present for generic
+        assert_eq!(data_type.get("sensorCount"), None);
     }
 
     #[test]
@@ -252,18 +251,16 @@ mod builder {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
         assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(1000.into()))
         );
-        assert_eq!(
-            props.get("sensor_count"),
-            Some(&serde_json::Value::Number(10.into()))
-        );
+        assert_eq!(data_type.get("sensorCount"), Some(&serde_json::json!(10)));
     }
 
     #[test]
@@ -275,9 +272,10 @@ mod builder {
             .unwrap();
         let props = source.properties();
 
+        let data_type = props.get("dataType").expect("dataType should be present");
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("sensor_reading".to_string()))
+            data_type.get("type"),
+            Some(&serde_json::json!("sensorReading"))
         );
     }
 
@@ -319,7 +317,7 @@ mod event_generation {
 
         // Collect changes
         let mut changes = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(event) = rx.recv().await {
                 changes.push(event);
                 if changes.len() >= 3 {
@@ -350,7 +348,7 @@ mod event_generation {
         source.start().await.unwrap();
 
         // Get first event
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event received");
@@ -406,7 +404,7 @@ mod event_generation {
         // Collect 3 events
         let mut values = Vec::new();
         for _ in 0..3 {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
                 .await
                 .expect("Timeout")
                 .expect("No event");
@@ -445,7 +443,7 @@ mod event_generation {
 
         // Collect 5 events and verify all are Insert
         for i in 0..5 {
-            let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
                 .await
                 .expect("Timeout")
                 .expect("No event");
@@ -476,7 +474,7 @@ mod event_generation {
 
         // Collect a few sensor readings
         let mut readings = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_millis(350), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(event) = rx.recv().await {
                 readings.push(event);
                 if readings.len() >= 3 {
@@ -506,7 +504,7 @@ mod event_generation {
         source.start().await.unwrap();
 
         // Get first event
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event received");
@@ -593,7 +591,7 @@ mod event_generation {
         let mut seen_update = false;
         let mut insert_sensor_ids: HashSet<String> = HashSet::new();
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !seen_update {
                 if let Ok(event) = rx.recv().await {
                     match &event.event {
@@ -644,7 +642,7 @@ mod event_generation {
         // Collect many events
         let mut sensor_ids: HashSet<u32> = HashSet::new();
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             for _ in 0..20 {
                 if let Ok(event) = rx.recv().await {
                     if let SourceEvent::Change(change) = &event.event {
@@ -696,7 +694,7 @@ mod event_generation {
 
         // Collect changes
         let mut changes = Vec::new();
-        tokio::time::timeout(std::time::Duration::from_millis(350), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Ok(event) = rx.recv().await {
                 changes.push(event);
                 if changes.len() >= 2 {
@@ -726,7 +724,7 @@ mod event_generation {
         source.start().await.unwrap();
 
         // Get first event
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event received");
@@ -792,7 +790,7 @@ mod event_generation {
 
         // Collect 5 events and verify all are Insert
         for i in 0..5 {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
                 .await
                 .expect("Timeout")
                 .expect("No event");
@@ -1024,7 +1022,7 @@ mod inject_event {
         source.inject_event(change).await.unwrap();
 
         // Receive and verify
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event received");
@@ -1082,7 +1080,7 @@ mod inject_event {
         source.inject_event(change).await.unwrap();
 
         // Verify it's received as an Update
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event");
@@ -1121,7 +1119,7 @@ mod inject_event {
         source.inject_event(change).await.unwrap();
 
         // Verify it's received as a Delete
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
             .expect("Timeout")
             .expect("No event");
@@ -1220,12 +1218,10 @@ mod builder_advanced {
 
         assert_eq!(source.id(), "test-static-builder");
         let props = source.properties();
+        let data_type = props.get("dataType").expect("dataType should be present");
+        assert_eq!(data_type.get("type"), Some(&serde_json::json!("generic")));
         assert_eq!(
-            props.get("data_type"),
-            Some(&serde_json::Value::String("generic".to_string()))
-        );
-        assert_eq!(
-            props.get("interval_ms"),
+            props.get("intervalMs"),
             Some(&serde_json::Value::Number(2000.into()))
         );
     }

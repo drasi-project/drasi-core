@@ -21,9 +21,8 @@
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use drasi_lib::channels::events::{
-    ComponentEvent, ComponentEventSender, ComponentStatus, ComponentType,
-};
+use drasi_lib::channels::events::{ComponentEvent, ComponentStatus, ComponentType};
+use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateSender};
 use drasi_lib::managers::{ComponentEventHistory, ComponentLogRegistry, LogLevel, LogMessage};
 use drasi_plugin_sdk::ffi::{
     FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, LifecycleCallbackFn,
@@ -31,19 +30,10 @@ use drasi_plugin_sdk::ffi::{
 };
 use tokio::sync::RwLock;
 
-/// Spawn an async future on the host tokio runtime and block until it completes.
+/// Spawn an async future on the host tokio runtime.
 ///
 /// Callbacks are `extern "C"` functions invoked from within a plugin's own tokio
 /// runtime, so we cannot call `block_on` on the host runtime. Instead we
-/// fire-and-forget a task on the host runtime. This avoids deadlocks when the
-/// host runtime is single-threaded.
-fn run_on_host_runtime<F>(handle: &tokio::runtime::Handle, f: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    handle.spawn(f);
-}
-
 /// Host-side callback context that routes plugin logs and events into DrasiLib.
 ///
 /// One context is created per DrasiLib instance. The host passes a raw pointer
@@ -84,9 +74,8 @@ impl CallbackContext {
 /// Per-source/reaction-instance callback context.
 ///
 /// Created during `SourceProxy.initialize()` / `ReactionProxy.initialize()`.
-/// Uses the `ComponentEventSender` channel from the SourceRuntimeContext so
-/// lifecycle events flow through the same path as static sources (channel →
-/// LifecycleManager → SourceManager.event_history).
+/// Uses the `ComponentUpdateSender` channel from the runtime context so
+/// lifecycle events flow through the ComponentGraph update loop.
 pub struct InstanceCallbackContext {
     /// The DrasiLib instance ID.
     pub instance_id: String,
@@ -94,8 +83,8 @@ pub struct InstanceCallbackContext {
     pub runtime_handle: tokio::runtime::Handle,
     /// The global log registry.
     pub log_registry: Arc<ComponentLogRegistry>,
-    /// Channel for lifecycle events (same one the SourceManager monitors).
-    pub event_tx: ComponentEventSender,
+    /// Channel for status updates to the ComponentGraph.
+    pub update_tx: ComponentUpdateSender,
 }
 
 // Safety: contains only Arc and tokio mpsc::Sender (which is Send+Sync).
@@ -235,10 +224,7 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
             ComponentType::Source, // TODO: parse from entry if available
         );
         let registry = context.log_registry.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            registry.log(log_message).await;
-        });
+        registry.try_log(log_message);
     }
 }
 
@@ -283,15 +269,15 @@ pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const Ffi
             },
         };
 
-        // Route to the correct event history based on component type
+        // Use try_write to avoid spawning async tasks that block the scheduler
         let event_history = match component_type {
             ComponentType::Reaction => context.reaction_event_history.clone(),
             _ => context.source_event_history.clone(),
         };
-
-        run_on_host_runtime(&context.runtime_handle, async move {
-            event_history.write().await.record_event(component_event);
-        });
+        let write_result = event_history.try_write();
+        if let Ok(mut history) = write_result {
+            history.record_event(component_event);
+        }
     }
 }
 
@@ -370,10 +356,9 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
             ComponentType::Source,
         );
         let registry = context.log_registry.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            registry.log(log_message).await;
-        });
+        // Use try_log (non-blocking) to avoid spawning async tasks that can
+        // block the current_thread scheduler during drop sequences.
+        registry.try_log(log_message);
     }
 }
 
@@ -403,17 +388,14 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
         });
     }
 
-    // Send through the event channel (same path as static sources)
+    // Send through the component graph update channel
     if !ctx.is_null() {
         let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-        let component_type = parse_component_type(&component_type_str);
         let status = ffi_lifecycle_to_component_status(event_type);
 
-        let component_event = ComponentEvent {
+        let update = ComponentUpdate::Status {
             component_id,
-            component_type,
             status,
-            timestamp: chrono::Utc::now(),
             message: if message.is_empty() {
                 None
             } else {
@@ -421,13 +403,12 @@ pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const Ff
             },
         };
 
-        let tx = context.event_tx.clone();
-        let handle = context.runtime_handle.clone();
-        run_on_host_runtime(&handle, async move {
-            if let Err(e) = tx.send(component_event).await {
-                log::error!("Failed to send lifecycle event: {e}");
-            }
-        });
+        let tx = context.update_tx.clone();
+        // Use try_send to avoid spawning an async task that may block
+        // the host runtime's current_thread scheduler during drop sequences.
+        if let Err(e) = tx.try_send(update) {
+            log::error!("Failed to send lifecycle event: {e}");
+        }
     }
 }
 

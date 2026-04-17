@@ -19,9 +19,10 @@
 
 use anyhow::Result as AnyhowResult;
 use futures::stream::Stream;
+use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
-use crate::component_ops::map_state_error;
+use crate::component_ops::map_component_error;
 use crate::config::{QueryConfig, QueryRuntime};
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
@@ -44,11 +45,12 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn add_query(&self, query: QueryConfig) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
+        let query_id = query.id.clone();
         self.add_query_with_options(query, true)
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to add query: {e}")))?;
+            .map_err(|e| DrasiError::operation_failed("query", &query_id, "add", format!("{e}")))?;
 
         Ok(())
     }
@@ -66,27 +68,47 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn remove_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
-        // Stop if running
-        let status = self
-            .query_manager
-            .get_query_status(id.to_string())
-            .await
-            .map_err(|_| DrasiError::component_not_found("query", id))?;
-
-        if matches!(status, ComponentStatus::Running) {
-            self.query_manager
-                .stop_query(id.to_string())
-                .await
-                .map_err(|e| DrasiError::provisioning(format!("Failed to stop query: {e}")))?;
+        // Step 1: Validate no dependents
+        {
+            let graph = self.component_graph.read().await;
+            if let Err(dependent_ids) = graph.can_remove(id) {
+                return Err(DrasiError::operation_failed(
+                    "query",
+                    id,
+                    "remove",
+                    format!("Depended on by: {}", dependent_ids.join(", ")),
+                ));
+            }
         }
 
-        // Delete the query
+        // Step 2: Teardown runtime (stop, remove from runtime map)
         self.query_manager
-            .delete_query(id.to_string())
+            .teardown_query(id.to_string())
             .await
-            .map_err(|e| DrasiError::provisioning(format!("Failed to delete query: {e}")))?;
+            .map_err(|e| {
+                DrasiError::operation_failed("query", id, "remove", format!("Teardown failed: {e}"))
+            })?;
+
+        // Step 3: Deregister from graph (remove node + edges, emit events)
+        // If this fails after teardown, the runtime is already gone. Rather than
+        // returning an error (which would leave an orphaned graph node with no
+        // runtime backing), set the component to Error state and log the failure.
+        {
+            let mut graph = self.component_graph.write().await;
+            if let Err(e) = graph.deregister(id) {
+                log::error!(
+                    "Query '{id}' runtime was torn down but graph deregister failed: {e}. \
+                     Setting component to Error state."
+                );
+                let _ = graph.validate_and_transition(
+                    id,
+                    ComponentStatus::Error,
+                    Some(format!("Orphaned: deregister failed after teardown: {e}")),
+                );
+            }
+        }
 
         Ok(())
     }
@@ -104,7 +126,7 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn start_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Verify query exists
         let _config = self
@@ -114,10 +136,11 @@ impl DrasiLib {
             .ok_or_else(|| DrasiError::component_not_found("query", id))?;
 
         // Query will subscribe directly to sources when started
-        map_state_error(
+        map_component_error(
             self.query_manager.start_query(id.to_string()).await,
             "query",
             id,
+            "start",
         )
     }
 
@@ -132,16 +155,38 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn stop_query(&self, id: &str) -> Result<()> {
-        self.state_guard.require_initialized().await?;
+        self.state_guard.require_initialized()?;
 
         // Stop the query (it unsubscribes from sources automatically)
-        map_state_error(
+        map_component_error(
             self.query_manager.stop_query(id.to_string()).await,
             "query",
             id,
+            "stop",
         )?;
 
         Ok(())
+    }
+
+    /// Update a query by replacing it with a new configuration.
+    ///
+    /// Uses the `Reconfiguring` state transition to preserve the graph node, edges,
+    /// and event history. The old query is stopped, the runtime is swapped, and the
+    /// query is restarted if it was running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query doesn't exist, if the new configuration
+    /// references non-existent sources, or if provisioning fails.
+    pub async fn update_query(&self, id: &str, config: QueryConfig) -> Result<()> {
+        self.state_guard.require_initialized()?;
+
+        // Delegate to QueryManager which uses the Reconfiguring transition,
+        // preserving the graph node, edges, and event history.
+        self.query_manager
+            .update_query(id.to_string(), config)
+            .await
+            .map_err(|e| DrasiError::operation_failed("query", id, "update", e.to_string()))
     }
 
     /// List all queries with their current status
@@ -324,14 +369,255 @@ impl DrasiLib {
         let query_id = config.id.clone();
         let should_auto_start = config.auto_start;
 
-        // Add the query (without saving during initialization)
-        self.query_manager.add_query_without_save(config).await?;
+        // Step 1: Register in the component graph (validates sources exist, creates node + edges)
+        {
+            let mut graph = self.component_graph.write().await;
+            let mut metadata = HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            graph.register_query(&config.id, metadata, &source_ids)?;
+        }
 
-        // Start if auto-start is enabled and allowed
+        // Step 2: Provision runtime (create DrasiQuery, initialize, store)
+        if let Err(e) = self.query_manager.provision_query(config).await {
+            // Compensating rollback: remove from graph on runtime failure
+            let mut graph = self.component_graph.write().await;
+            let _ = graph.deregister(&query_id);
+            return Err(e);
+        }
+
+        // Step 3: Start if auto-start is enabled and allowed
         if should_auto_start && allow_auto_start {
             self.query_manager.start_query(query_id).await?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::channels::ComponentStatus;
+    use crate::error::DrasiError;
+    use crate::sources::tests::TestMockSource;
+    use crate::{DrasiLib, Query};
+
+    /// Build a DrasiLib with a single mock source, started and ready for queries.
+    async fn build_core_with_source() -> DrasiLib {
+        let source = TestMockSource::new("test-source".to_string()).unwrap();
+        let core = DrasiLib::builder()
+            .with_id("test")
+            .with_source(source)
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core
+    }
+
+    // ========================================================================
+    // add_query
+    // ========================================================================
+
+    #[tokio::test]
+    async fn add_query_happy_path() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q1")
+            .query("MATCH (n:Test) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+
+        core.add_query(config).await.unwrap();
+
+        // Query should appear in list
+        let queries = core.list_queries().await.unwrap();
+        assert!(queries.iter().any(|(id, _)| id == "q1"));
+    }
+
+    #[tokio::test]
+    async fn add_query_missing_source_returns_error() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q-bad")
+            .query("MATCH (n) RETURN n")
+            .from_source("nonexistent-source")
+            .auto_start(false)
+            .build();
+
+        let result = core.add_query(config).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::OperationFailed { .. }),
+            "expected OperationFailed, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // remove_query
+    // ========================================================================
+
+    #[tokio::test]
+    async fn remove_query_happy_path() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q-remove")
+            .query("MATCH (n:Test) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        core.add_query(config).await.unwrap();
+
+        // Remove should succeed
+        core.remove_query("q-remove").await.unwrap();
+
+        // Query should no longer appear in list
+        let queries = core.list_queries().await.unwrap();
+        assert!(!queries.iter().any(|(id, _)| id == "q-remove"));
+    }
+
+    #[tokio::test]
+    async fn remove_query_nonexistent_returns_error() {
+        let core = build_core_with_source().await;
+
+        let result = core.remove_query("does-not-exist").await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // list_queries
+    // ========================================================================
+
+    #[tokio::test]
+    async fn list_queries_empty_then_populated() {
+        let core = build_core_with_source().await;
+
+        // Initially no queries
+        let queries = core.list_queries().await.unwrap();
+        assert!(queries.is_empty(), "expected no queries initially");
+
+        // Add two queries
+        let config1 = Query::cypher("q-list-1")
+            .query("MATCH (n) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        let config2 = Query::cypher("q-list-2")
+            .query("MATCH (n) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        core.add_query(config1).await.unwrap();
+        core.add_query(config2).await.unwrap();
+
+        let queries = core.list_queries().await.unwrap();
+        let ids: Vec<&str> = queries.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"q-list-1"));
+        assert!(ids.contains(&"q-list-2"));
+        assert_eq!(queries.len(), 2);
+    }
+
+    // ========================================================================
+    // get_query_status
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_query_status_returns_correct_status() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q-status")
+            .query("MATCH (n:Test) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        core.add_query(config).await.unwrap();
+
+        // Query added without auto-start should be Stopped
+        let status = core.get_query_status("q-status").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn get_query_status_nonexistent_returns_error() {
+        let core = build_core_with_source().await;
+
+        let result = core.get_query_status("ghost-query").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DrasiError::ComponentNotFound { .. }),
+            "expected ComponentNotFound, got: {err:?}"
+        );
+    }
+
+    // ========================================================================
+    // start_query / stop_query lifecycle
+    // ========================================================================
+
+    #[tokio::test]
+    async fn start_and_stop_query_lifecycle() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q-lifecycle")
+            .query("MATCH (n:Test) RETURN n")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        core.add_query(config).await.unwrap();
+
+        // Subscribe to events before triggering actions
+        let mut event_rx = core.subscribe_all_component_events();
+
+        // Start the query
+        core.start_query("q-lifecycle").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q-lifecycle",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let status = core.get_query_status("q-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Running);
+
+        // Stop the query
+        core.stop_query("q-lifecycle").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q-lifecycle",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let status = core.get_query_status("q-lifecycle").await.unwrap();
+        assert_eq!(status, ComponentStatus::Stopped);
+    }
+
+    // ========================================================================
+    // get_query_config
+    // ========================================================================
+
+    #[tokio::test]
+    async fn get_query_config_returns_correct_fields() {
+        let core = build_core_with_source().await;
+
+        let config = Query::cypher("q-config")
+            .query("MATCH (n:Person) RETURN n.name")
+            .from_source("test-source")
+            .auto_start(false)
+            .build();
+        core.add_query(config).await.unwrap();
+
+        let retrieved = core.get_query_config("q-config").await.unwrap();
+        assert_eq!(retrieved.id, "q-config");
+        assert_eq!(retrieved.query, "MATCH (n:Person) RETURN n.name");
+        assert!(!retrieved.auto_start);
+        assert_eq!(retrieved.sources.len(), 1);
+        assert_eq!(retrieved.sources[0].source_id, "test-source");
     }
 }
