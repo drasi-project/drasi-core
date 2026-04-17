@@ -47,11 +47,10 @@ pub struct ReactionProxy {
 /// Context for the push-based result callback.
 struct ResultPushContext {
     rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
-    /// Signaled when the callback returns null (forwarder acknowledged shutdown).
-    /// The plugin-side forwarder processes callbacks serially — each `spawn_blocking`
-    /// is awaited before the next — so when the null-returning callback completes,
-    /// all prior `enqueue_query_result()` calls have already finished.  This makes
-    /// it safe to free the `ReactionWrapper` after this signal fires.
+    /// Signaled when the plugin-side forwarder task has fully exited its loop
+    /// and will no longer access the `ReactionWrapper`. The forwarder signals
+    /// this by calling the callback one final time with the sentinel parameter,
+    /// AFTER breaking out of its processing loop.
     forwarder_done: std::sync::Mutex<bool>,
     forwarder_done_cv: std::sync::Condvar,
 }
@@ -66,11 +65,17 @@ fn signal_forwarder_done(context: &ResultPushContext) {
 /// Callback invoked by the plugin's forwarder task to receive the next QueryResult.
 /// Blocks until a result is available. Returns null on channel close (shutdown).
 ///
+/// The `sentinel` parameter serves dual purpose:
+/// - `null`: Normal mode — block on recv() and return the next QueryResult.
+/// - Non-null: **Forwarder-exit sentinel** — the forwarder has fully exited its
+///   processing loop and will not access the ReactionWrapper again. Signal
+///   `forwarder_done` so the host can safely free the wrapper.
+///
 /// Wrapped in `catch_unwind` because this is `extern "C"` — panics unwinding
 /// across the FFI boundary are undefined behavior.
-extern "C" fn result_push_callback(ctx: *mut c_void, _unused: *mut c_void) -> *mut c_void {
+extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        result_push_callback_inner(ctx)
+        result_push_callback_inner(ctx, sentinel)
     }))
     .unwrap_or_else(|_| {
         // On panic, signal done so drop() doesn't deadlock
@@ -80,8 +85,17 @@ extern "C" fn result_push_callback(ctx: *mut c_void, _unused: *mut c_void) -> *m
     })
 }
 
-fn result_push_callback_inner(ctx: *mut c_void) -> *mut c_void {
+fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
+
+    // Sentinel call: the forwarder task has exited its loop and will not
+    // access the ReactionWrapper again.  Signal completion so Drop can
+    // safely call drop_fn.
+    if !sentinel.is_null() {
+        signal_forwarder_done(context);
+        return std::ptr::null_mut();
+    }
+
     let guard = context
         .rx
         .lock()
@@ -90,16 +104,14 @@ fn result_push_callback_inner(ctx: *mut c_void) -> *mut c_void {
         match rx.recv() {
             Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
             Err(_) => {
-                // Channel closed — signal that the forwarder will exit
-                drop(guard);
-                signal_forwarder_done(context);
+                // Channel closed — return null so the forwarder breaks.
+                // Do NOT signal forwarder_done here; the forwarder will
+                // send a sentinel callback after it has fully exited.
                 std::ptr::null_mut()
             }
         }
     } else {
-        // rx already taken — signal done
-        drop(guard);
-        signal_forwarder_done(context);
+        // rx already taken — return null (forwarder will send sentinel after exiting)
         std::ptr::null_mut()
     }
 }
@@ -308,8 +320,9 @@ impl Reaction for ReactionProxy {
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
         // Close the result channel sender to unblock the forwarder's callback.
-        // The callback's rx.recv() will return Err, causing it to return null
-        // and signal forwarder_done.
+        // The callback's rx.recv() will return Err, causing it to return null.
+        // The forwarder then breaks out of its loop and sends a sentinel
+        // callback to signal forwarder_done.
         if let Ok(mut guard) = self.result_tx.lock() {
             *guard = None;
         }
@@ -323,14 +336,13 @@ impl Drop for ReactionProxy {
             }
         }
 
-        // Wait for the forwarder to acknowledge shutdown (callback returned null).
+        // Wait for the forwarder task to fully exit its processing loop.
         //
-        // Safety argument: the plugin-side forwarder processes callbacks serially
-        // (each spawn_blocking is awaited before the next iteration). When the
-        // null-returning callback completes, all prior enqueue_query_result()
-        // calls have already finished and the forwarder will only check is_null()
-        // and break — it will NOT access the ReactionWrapper again. Therefore,
-        // after this signal fires, it is safe to free the ReactionWrapper.
+        // Safety argument: the forwarder sends a sentinel callback AFTER
+        // breaking out of its loop. At that point, all enqueue_query_result()
+        // calls have finished and the forwarder will NOT access the
+        // ReactionWrapper again. Therefore, after this signal fires,
+        // it is safe to free the ReactionWrapper.
         let forwarder_exited = if let Ok(guard) = self._push_ctx.lock() {
             if let Some(ref ctx) = *guard {
                 let done = ctx.forwarder_done.lock().expect("forwarder_done lock");

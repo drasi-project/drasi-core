@@ -1072,6 +1072,14 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
                     log::error!("Failed to enqueue query result: {e}");
                 }
             }
+            // Signal the host that the forwarder has fully exited its loop
+            // and will not access the ReactionWrapper again.  The non-null
+            // second parameter acts as a sentinel recognized by the callback.
+            let ctx_val = ctx_raw;
+            let _ = tokio::task::spawn_blocking(move || {
+                callback(ctx_val as *mut c_void, 1usize as *mut c_void);
+            })
+            .await;
         });
     }
 
@@ -1354,6 +1362,13 @@ pub fn build_reaction_vtable_from_boxed(
                     log::error!("Failed to enqueue query result: {e}");
                 }
             }
+            // Signal the host that the forwarder has fully exited its loop
+            // and will not access the ReactionWrapper again.
+            let ctx_val = ctx_raw;
+            let _ = tokio::task::spawn_blocking(move || {
+                callback(ctx_val as *mut c_void, 1usize as *mut c_void);
+            })
+            .await;
         });
     }
 
