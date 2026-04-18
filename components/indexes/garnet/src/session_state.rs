@@ -416,49 +416,113 @@ impl WriteBuffer {
     }
 }
 
+/// Groups the active write buffer and nesting depth under a single mutex.
+///
+/// Invariants (enforced internally by begin/commit/rollback):
+/// - `depth == 0` ↔ `buffer.is_none()` (no active session)
+/// - `depth > 0`  ↔ `buffer.is_some()` (session active)
+///
+/// External callers access the buffer through narrow inherent methods
+/// (`as_ref`, `as_mut`, `is_some`, `is_none`). `buffer` and `depth` are
+/// private so crate-level code cannot desynchronize them (e.g., by taking
+/// or replacing the buffer without adjusting depth).
+pub(crate) struct SessionInner {
+    buffer: Option<WriteBuffer>,
+    depth: u32,
+}
+
+impl SessionInner {
+    /// Get a reference to the active buffer, if any.
+    pub(crate) fn as_ref(&self) -> Option<&WriteBuffer> {
+        self.buffer.as_ref()
+    }
+
+    /// Get a mutable reference to the active buffer, if any.
+    ///
+    /// Callers mutate the buffer's contents (via its methods), but cannot
+    /// replace or take the buffer itself — preserving the `depth`/`buffer`
+    /// invariant.
+    pub(crate) fn as_mut(&mut self) -> Option<&mut WriteBuffer> {
+        self.buffer.as_mut()
+    }
+
+    /// Whether a session is active (buffer present).
+    pub(crate) fn is_some(&self) -> bool {
+        self.buffer.is_some()
+    }
+
+    /// Whether no session is active (buffer absent).
+    #[allow(dead_code)]
+    pub(crate) fn is_none(&self) -> bool {
+        self.buffer.is_none()
+    }
+}
+
 /// Shared session state for Garnet session-scoped transactions.
 ///
-/// Holds an optional `WriteBuffer` behind a `Mutex`. All Garnet index types
-/// (element, result, future_queue) share a single `Arc<GarnetSessionState>`
-/// so that a session transaction spans all indexes atomically.
+/// Holds a `SessionInner` (write buffer + nesting depth) behind a `Mutex`.
+/// All Garnet index types (element, result, future_queue) share a single
+/// `Arc<GarnetSessionState>` so that a session transaction spans all indexes atomically.
+///
+/// # Nested Transactions
+///
+/// Supports nesting via a depth counter. Only the outermost `begin()`/`commit()` pair
+/// creates and commits the real write buffer. Inner calls are no-ops that
+/// increment/decrement the depth counter. `rollback()` at any depth drops the buffer
+/// and resets depth to 0.
 ///
 /// The `connection` field is used solely for commit (MULTI/EXEC pipeline execution).
 /// Each index keeps its own connection for non-session Redis reads.
 pub struct GarnetSessionState {
     connection: MultiplexedConnection,
-    active_buffer: Mutex<Option<WriteBuffer>>,
+    inner: Mutex<SessionInner>,
 }
 
 impl GarnetSessionState {
     pub fn new(connection: MultiplexedConnection) -> Self {
         Self {
             connection,
-            active_buffer: Mutex::new(None),
+            inner: Mutex::new(SessionInner {
+                buffer: None,
+                depth: 0,
+            }),
         }
     }
 
-    /// Begin a new session-scoped transaction.
+    /// Begin a new session-scoped transaction, or nest into an existing one.
     ///
-    /// Creates a new `WriteBuffer` and stores it. Returns an error if
-    /// a session is already active.
+    /// - If no session is active (depth == 0), creates a new `WriteBuffer`
+    ///   and sets depth to 1.
+    /// - If a session is already active (depth > 0), increments depth
+    ///   without creating a new buffer (nested no-op).
     pub(crate) fn begin(&self) -> Result<(), IndexError> {
         let mut guard = self
-            .active_buffer
+            .inner
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
-        if guard.is_some() {
-            return Err(IndexError::other(SessionStateError(
-                "begin() called while a session is already active".to_string(),
-            )));
+
+        if guard.depth > 0 {
+            guard.depth += 1;
+            log::trace!("session begin: depth {} (nested no-op)", guard.depth);
+            return Ok(());
         }
-        *guard = Some(WriteBuffer::new());
+
+        debug_assert!(
+            guard.buffer.is_none(),
+            "depth==0 but buffer is Some — invariant violated"
+        );
+        guard.buffer = Some(WriteBuffer::new());
+        guard.depth = 1;
+        log::trace!("session begin: depth 1 (real buffer)");
         Ok(())
     }
 
-    /// Commit the active session-scoped transaction.
+    /// Commit the session-scoped transaction, or decrement nesting depth.
     ///
-    /// Takes the buffer, drains it into an atomic Redis pipeline (MULTI/EXEC),
-    /// and executes it.
+    /// - If depth > 1, decrements depth (nested no-op).
+    /// - If depth == 1, takes the buffer, drains it into an atomic Redis
+    ///   pipeline (MULTI/EXEC), and executes it.
+    /// - If depth == 0, returns an error (no active session).
     ///
     /// Note: the buffer is consumed before the pipeline executes. If the
     /// pipeline fails, the buffer cannot be retried — the caller must
@@ -466,18 +530,36 @@ impl GarnetSessionState {
     pub(crate) async fn commit(&self) -> Result<(), IndexError> {
         let mut buffer = {
             let mut guard = self
-                .active_buffer
+                .inner
                 .lock()
                 .map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
-            match guard.take() {
-                Some(buf) => buf,
-                None => {
+
+            match guard.depth {
+                0 => {
                     return Err(IndexError::other(SessionStateError(
                         "commit() called with no active session".to_string(),
                     )));
                 }
+                1 => {
+                    // Real commit — depth 1 → 0
+                    let buf = guard.buffer.take().ok_or_else(|| {
+                        IndexError::other(SessionStateError(
+                            "commit() at depth 1 but no buffer present — invariant violated"
+                                .to_string(),
+                        ))
+                    })?;
+                    guard.depth = 0;
+                    log::trace!("session commit: depth 1→0 (real commit)");
+                    buf
+                }
+                n => {
+                    // Nested commit — just decrement depth
+                    guard.depth = n - 1;
+                    log::trace!("session commit: depth {n}→{} (nested no-op)", n - 1);
+                    return Ok(());
+                }
             }
-        };
+        }; // guard dropped here
 
         let mut pipeline = redis::pipe();
         pipeline.atomic();
@@ -490,24 +572,37 @@ impl GarnetSessionState {
             .map_err(IndexError::other)
     }
 
-    /// Roll back the active session-scoped transaction.
+    /// Roll back the session-scoped transaction.
     ///
-    /// Takes and drops the buffer. This is synchronous and safe for use
-    /// in `Drop` implementations.
+    /// At any depth > 0, resets depth to 0 and drops the write buffer.
+    /// At depth 0, this is a no-op returning Ok.
+    /// The no-op behavior at depth 0 is important for `SessionGuard::Drop` —
+    /// after an inner rollback already cleared the buffer, the outer
+    /// guard's drop must not error.
     pub(crate) fn rollback(&self) -> Result<(), IndexError> {
         let mut guard = self
-            .active_buffer
+            .inner
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))?;
-        let _ = guard.take(); // Drop the buffer
+
+        if guard.depth == 0 {
+            return Ok(());
+        }
+
+        let prev_depth = guard.depth;
+        guard.depth = 0;
+        let _ = guard.buffer.take(); // Drop the buffer
+        log::trace!("session rollback: depth {prev_depth}→0");
         Ok(())
     }
 
-    /// Lock and return a guard providing access to the active write buffer.
+    /// Lock and return a guard providing access to the session inner state.
     ///
-    /// Callers check if the `Option` is `Some` (session active) or `None` (no session).
-    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Option<WriteBuffer>>, IndexError> {
-        self.active_buffer
+    /// The returned `SessionInner` implements `Deref<Target = Option<WriteBuffer>>`
+    /// and `DerefMut`, so callers can use `guard.as_ref()`, `guard.as_mut()`,
+    /// `guard.is_some()`, etc. directly.
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, SessionInner>, IndexError> {
+        self.inner
             .lock()
             .map_err(|e| IndexError::other(PoisonError(e.to_string())))
     }
@@ -515,12 +610,20 @@ impl GarnetSessionState {
 
 impl Drop for GarnetSessionState {
     fn drop(&mut self) {
-        // Use get_mut() since &mut self guarantees exclusive access.
-        if let Ok(inner) = self.active_buffer.get_mut() {
-            if inner.is_some() {
+        // Drop must never panic (panic-in-Drop can double-panic and abort the
+        // process). Use get_mut() since &mut self guarantees exclusive access.
+        if let Ok(inner) = self.inner.get_mut() {
+            if inner.depth > 0 {
+                log::warn!(
+                    "GarnetSessionState dropped with depth {} — rolling back",
+                    inner.depth
+                );
+                inner.depth = 0;
+            }
+            if inner.buffer.is_some() {
                 log::warn!("GarnetSessionState dropped with active session — rolling back");
             }
-            let _ = inner.take();
+            let _ = inner.buffer.take();
         }
     }
 }
@@ -953,13 +1056,15 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn begin_twice_errors() {
+    async fn begin_twice_nests() {
         let redis = setup_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
         let state = GarnetSessionState::new(connection);
         state.begin().expect("first begin");
-        assert!(state.begin().is_err());
+        state.begin().expect("second begin should succeed (nested)");
+        // Buffer should still be present
+        assert!(state.lock().expect("lock").is_some());
         redis.cleanup().await;
     }
 
@@ -1070,5 +1175,179 @@ mod tests {
             BufferReadResult::Found(v) => assert_eq!(v, b"v2"),
             other => panic!("expected Found, got {other:?}"),
         }
+    }
+
+    // --- Nesting tests ---
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn nested_begin_commit() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection.clone());
+
+        state.begin().expect("outer begin"); // depth 0→1
+        state.begin().expect("inner begin"); // depth 1→2
+
+        {
+            let mut guard = state.lock().expect("lock");
+            guard
+                .as_mut()
+                .unwrap()
+                .string_set("test:nest:k1".into(), b"v1".to_vec());
+        }
+
+        state.commit().await.expect("inner commit"); // depth 2→1 (no-op)
+
+        // Write checkpoint between inner commit and outer commit
+        {
+            let mut guard = state.lock().expect("lock");
+            guard
+                .as_mut()
+                .unwrap()
+                .string_set("test:nest:k2".into(), b"v2".to_vec());
+        }
+
+        state.commit().await.expect("outer commit"); // depth 1→0 (real commit)
+
+        // Verify both keys persisted in Redis
+        let mut con = connection.clone();
+        let v1: Option<Vec<u8>> = redis::cmd("GET")
+            .arg("test:nest:k1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        let v2: Option<Vec<u8>> = redis::cmd("GET")
+            .arg("test:nest:k2")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(v1.as_deref(), Some(b"v1".as_slice()));
+        assert_eq!(v2.as_deref(), Some(b"v2".as_slice()));
+
+        redis_guard.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn outer_rollback_after_inner_commit() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection.clone());
+
+        state.begin().expect("outer begin");
+        state.begin().expect("inner begin");
+
+        {
+            let mut guard = state.lock().expect("lock");
+            guard
+                .as_mut()
+                .unwrap()
+                .string_set("test:rollback:k1".into(), b"v1".to_vec());
+        }
+
+        state.commit().await.expect("inner commit"); // depth 2→1 (no-op)
+        state.rollback().expect("outer rollback"); // depth 1→0, buffer dropped
+
+        // Nothing should be in Redis
+        let mut con = connection.clone();
+        let v: Option<Vec<u8>> = redis::cmd("GET")
+            .arg("test:rollback:k1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert!(v.is_none());
+
+        redis_guard.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn inner_rollback_aborts_all() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection);
+
+        state.begin().expect("outer begin");
+        state.begin().expect("inner begin");
+
+        {
+            let mut guard = state.lock().expect("lock");
+            guard
+                .as_mut()
+                .unwrap()
+                .string_set("test:innerrb:k1".into(), b"v1".to_vec());
+        }
+
+        state.rollback().expect("inner rollback"); // depth→0, buffer dropped
+
+        // Buffer should be None
+        assert!(state.lock().expect("lock").is_none());
+        // Commit at depth 0 should error
+        assert!(state.commit().await.is_err());
+        // Rollback at depth 0 should be a no-op
+        assert!(state.rollback().is_ok());
+
+        redis_guard.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn triple_nesting() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection.clone());
+
+        state.begin().expect("begin 1"); // depth 1
+        state.begin().expect("begin 2"); // depth 2
+        state.begin().expect("begin 3"); // depth 3
+
+        {
+            let mut guard = state.lock().expect("lock");
+            guard
+                .as_mut()
+                .unwrap()
+                .string_set("test:triple:k1".into(), b"v1".to_vec());
+        }
+
+        state.commit().await.expect("commit 3"); // depth 3→2
+        state.commit().await.expect("commit 2"); // depth 2→1
+        state.commit().await.expect("commit 1"); // depth 1→0 (real commit)
+
+        let mut con = connection.clone();
+        let v: Option<Vec<u8>> = redis::cmd("GET")
+            .arg("test:triple:k1")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert_eq!(v.as_deref(), Some(b"v1".as_slice()));
+
+        redis_guard.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn commit_at_depth_zero_errors() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection);
+        assert!(state.commit().await.is_err());
+        redis_guard.cleanup().await;
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn rollback_at_depth_zero_is_noop() {
+        let redis_guard = setup_redis().await;
+        let client = redis::Client::open(redis_guard.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let state = GarnetSessionState::new(connection);
+        assert!(state.rollback().is_ok());
+        redis_guard.cleanup().await;
     }
 }

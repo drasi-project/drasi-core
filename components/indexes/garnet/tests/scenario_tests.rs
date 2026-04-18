@@ -1315,7 +1315,7 @@ mod session {
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]
-    async fn session_double_begin_errors() {
+    async fn session_double_begin_nests() {
         let redis = super::shared_redis().await;
         let client = redis::Client::open(redis.url()).unwrap();
         let connection = client.get_multiplexed_async_connection().await.unwrap();
@@ -1325,10 +1325,13 @@ mod session {
 
         session_control.begin().await.unwrap();
 
-        // Second begin should error
-        let result = session_control.begin().await;
-        assert!(result.is_err(), "double begin should return error");
+        // Second begin nests — returns Ok, depth is now 2
+        session_control
+            .begin()
+            .await
+            .expect("nested begin should succeed");
 
+        // Rollback at any depth aborts the entire session
         session_control.rollback().unwrap();
     }
 
