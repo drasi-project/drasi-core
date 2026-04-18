@@ -1942,9 +1942,74 @@ async fn test_reaction_enqueue_query_result_with_data() {
     reaction.stop().await.expect("Reaction should stop");
 }
 
-// =============================================================================
-// Full end-to-end tests: cdylib source → query → cdylib reaction via DrasiLib
-// =============================================================================
+/// Stress-test the reaction start/enqueue/stop lifecycle to flush out the
+/// shutdown races that previously caused intermittent SIGSEGV on macOS/Windows
+/// (Bugs B/C/F: forwarder receiver-drop race, callback-context UAF, missing
+/// catch_unwind on plugin extern fns / sentinel callback not always sent).
+///
+/// Each iteration creates a fresh reaction proxy, runs a short
+/// start → enqueue N → stop cycle, and drops it. Any regression of the
+/// fixed bugs typically manifests within a handful of iterations on stricter
+/// allocators (macOS guard pages, Windows LFH).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_reaction_start_stop_stress() {
+    if !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIP: drasi-reaction-log not built as cdylib");
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
+    }
+    let path = require_plugin("drasi-reaction-log");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+    let descriptor = &plugin.reaction_plugins[0];
+
+    const ITERATIONS: usize = 25;
+    const ENQUEUE_PER_ITER: usize = 8;
+    let config = serde_json::json!({});
+    let query_ids = vec!["stress-query".to_string()];
+
+    for i in 0..ITERATIONS {
+        let reaction = descriptor
+            .create_reaction(&format!("stress-{i}"), query_ids.clone(), &config, true)
+            .await
+            .expect("Should create reaction instance");
+
+        let (update_tx, _update_rx) =
+            tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+        let context = drasi_lib::ReactionRuntimeContext {
+            instance_id: format!("stress-instance-{i}"),
+            reaction_id: format!("stress-{i}"),
+            update_tx,
+            state_store: None,
+            identity_provider: None,
+        };
+        reaction.initialize(context).await;
+        reaction.start().await.expect("reaction start");
+
+        for _ in 0..ENQUEUE_PER_ITER {
+            let qr = drasi_lib::channels::QueryResult::new(
+                "stress-query".to_string(),
+                chrono::Utc::now(),
+                vec![],
+                std::collections::HashMap::new(),
+            );
+            reaction
+                .enqueue_query_result(qr)
+                .await
+                .expect("enqueue_query_result");
+        }
+
+        reaction.stop().await.expect("reaction stop");
+        // Explicit drop so any UAF/forwarder race surfaces inside the loop
+        // rather than being deferred to test shutdown.
+        drop(reaction);
+    }
+}
 
 /// Full pipeline test: cdylib mock source → query → cdylib log reaction.
 ///
