@@ -1045,7 +1045,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         // Push-based result delivery. The host provides a blocking callback
         // that returns the next QueryResult pointer (or null on shutdown).
         // The plugin spawns a forwarder that calls the callback via
-        // spawn_blocking (to avoid starving async workers), then enqueues
+        // block_in_place (to avoid starving async workers), then enqueues
         // each result into the reaction's priority queue.
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         let handle = (w.runtime_handle)().handle().clone();
@@ -1054,14 +1054,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         handle.spawn(async move {
             loop {
                 let ctx_val = ctx_raw;
-                let result_ptr = tokio::task::spawn_blocking(move || {
+                let result_ptr = tokio::task::block_in_place(|| {
                     SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
                 })
-                .await;
-                let result_ptr = match result_ptr {
-                    Ok(p) => p.as_ptr(),
-                    Err(_) => break,
-                };
+                .as_ptr();
                 if result_ptr.is_null() {
                     break;
                 }
@@ -1076,10 +1072,9 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             // and will not access the ReactionWrapper again.  The non-null
             // second parameter acts as a sentinel recognized by the callback.
             let ctx_val = ctx_raw;
-            let _ = tokio::task::spawn_blocking(move || {
+            tokio::task::block_in_place(|| {
                 callback(ctx_val as *mut c_void, 1usize as *mut c_void);
-            })
-            .await;
+            });
         });
     }
 
@@ -1345,17 +1340,15 @@ pub fn build_reaction_vtable_from_boxed(
             eprintln!("[DIAG] plugin forwarder ENTER ctx={:#x}", ctx_raw);
             loop {
                 let ctx_val = ctx_raw;
-                let result_ptr = tokio::task::spawn_blocking(move || {
+                // Use block_in_place rather than spawn_blocking: block_in_place
+                // runs the closure on the current worker thread (tokio temporarily
+                // reassigns other tasks elsewhere) and avoids the blocking thread
+                // pool entirely. spawn_blocking has been observed to cause SIGBUS
+                // on macOS during high-churn create/destroy of pool threads.
+                let result_ptr = tokio::task::block_in_place(|| {
                     SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
                 })
-                .await;
-                let result_ptr = match result_ptr {
-                    Ok(p) => p.as_ptr(),
-                    Err(_e) => {
-                        eprintln!("[DIAG] plugin forwarder spawn_blocking JOIN ERR ctx={:#x}", ctx_raw);
-                        break;
-                    }
-                };
+                .as_ptr();
                 if result_ptr.is_null() {
                     eprintln!("[DIAG] plugin forwarder NULL result, breaking ctx={:#x}", ctx_raw);
                     break;
@@ -1374,10 +1367,9 @@ pub fn build_reaction_vtable_from_boxed(
             // Signal the host that the forwarder has fully exited its loop
             // and will not access the ReactionWrapper again.
             let ctx_val = ctx_raw;
-            let _ = tokio::task::spawn_blocking(move || {
+            tokio::task::block_in_place(|| {
                 callback(ctx_val as *mut c_void, 1usize as *mut c_void);
-            })
-            .await;
+            });
             eprintln!("[DIAG] plugin forwarder SENTINEL DELIVERED ctx={:#x}", ctx_raw);
         });
     }
