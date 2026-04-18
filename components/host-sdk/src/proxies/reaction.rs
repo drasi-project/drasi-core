@@ -92,6 +92,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
     // access the ReactionWrapper again.  Signal completion so Drop can
     // safely call drop_fn.
     if !sentinel.is_null() {
+        eprintln!("[DIAG] result_push_callback SENTINEL ctx={:p}", ctx);
         signal_forwarder_done(context);
         return std::ptr::null_mut();
     }
@@ -106,6 +107,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
                 Box::into_raw(Box::new(result)) as *mut c_void
             }
             Err(_) => {
+                eprintln!("[DIAG] result_push_callback rx CLOSED ctx={:p}", ctx);
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will
                 // send a sentinel callback after it has fully exited.
@@ -113,6 +115,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
             }
         }
     } else {
+        eprintln!("[DIAG] result_push_callback rx NONE ctx={:p}", ctx);
         // rx already taken — return null (forwarder will send sentinel after exiting)
         std::ptr::null_mut()
     }
@@ -259,6 +262,7 @@ impl Reaction for ReactionProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
+        eprintln!("[DIAG] ReactionProxy::stop ENTER id={}", self.cached_id);
         // Close the sender so the forwarder's callback returns null
         {
             let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
@@ -272,13 +276,17 @@ impl Reaction for ReactionProxy {
                 }
             }
         }
+        eprintln!("[DIAG] ReactionProxy::stop calling stop_fn id={}", self.cached_id);
 
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let stop_fn = self.vtable.stop_fn;
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        eprintln!("[DIAG] ReactionProxy::stop stop_fn returned id={}", self.cached_id);
+        let r = unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) };
+        eprintln!("[DIAG] ReactionProxy::stop EXIT id={} ok={}", self.cached_id, r.is_ok());
+        r
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -321,6 +329,7 @@ impl Reaction for ReactionProxy {
 
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
+        eprintln!("[DIAG] ReactionProxy::drop ENTER id={}", self.cached_id);
         // Close the result channel sender to unblock the forwarder's callback.
         // The callback's rx.recv() will return Err, causing it to return null.
         // The forwarder then breaks out of its loop and sends a sentinel
@@ -337,6 +346,7 @@ impl Drop for ReactionProxy {
                 }
             }
         }
+        eprintln!("[DIAG] ReactionProxy::drop waiting for forwarder_done id={}", self.cached_id);
 
         // Wait for the forwarder task to fully exit its processing loop.
         //
@@ -359,12 +369,15 @@ impl Drop for ReactionProxy {
         } else {
             false // Lock poisoned
         };
+        eprintln!("[DIAG] ReactionProxy::drop forwarder_exited={} id={}", forwarder_exited, self.cached_id);
 
         if forwarder_exited {
             // Safe to free the ReactionWrapper — forwarder won't access it.
             let drop_fn = self.vtable.drop_fn;
             let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+            eprintln!("[DIAG] ReactionProxy::drop calling drop_fn id={}", self.cached_id);
             let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+            eprintln!("[DIAG] ReactionProxy::drop drop_fn returned id={}", self.cached_id);
         } else {
             // Timeout or error — leak the ReactionWrapper to prevent UAF.
             // Memory leak is preferable to undefined behavior.
@@ -382,6 +395,7 @@ impl Drop for ReactionProxy {
                 std::mem::forget(ctx);
             }
         }
+        eprintln!("[DIAG] ReactionProxy::drop EXIT id={}", self.cached_id);
     }
 }
 

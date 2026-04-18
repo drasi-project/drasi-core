@@ -1342,6 +1342,7 @@ pub fn build_reaction_vtable_from_boxed(
         let ctx_raw = callback_ctx as usize;
         let ptr = SendPtr(state as *const DynReactionWrapper);
         handle.spawn(async move {
+            eprintln!("[DIAG] plugin forwarder ENTER ctx={:#x}", ctx_raw);
             loop {
                 let ctx_val = ctx_raw;
                 let result_ptr = tokio::task::spawn_blocking(move || {
@@ -1351,10 +1352,12 @@ pub fn build_reaction_vtable_from_boxed(
                 let result_ptr = match result_ptr {
                     Ok(p) => p.as_ptr(),
                     Err(_e) => {
+                        eprintln!("[DIAG] plugin forwarder spawn_blocking JOIN ERR ctx={:#x}", ctx_raw);
                         break;
                     }
                 };
                 if result_ptr.is_null() {
+                    eprintln!("[DIAG] plugin forwarder NULL result, breaking ctx={:#x}", ctx_raw);
                     break;
                 }
                 // Scope the raw pointer so it doesn't live across await
@@ -1367,6 +1370,7 @@ pub fn build_reaction_vtable_from_boxed(
                     log::error!("Failed to enqueue query result: {e}");
                 }
             }
+            eprintln!("[DIAG] plugin forwarder LOOP EXIT, sending sentinel ctx={:#x}", ctx_raw);
             // Signal the host that the forwarder has fully exited its loop
             // and will not access the ReactionWrapper again.
             let ctx_val = ctx_raw;
@@ -1374,6 +1378,7 @@ pub fn build_reaction_vtable_from_boxed(
                 callback(ctx_val as *mut c_void, 1usize as *mut c_void);
             })
             .await;
+            eprintln!("[DIAG] plugin forwarder SENTINEL DELIVERED ctx={:#x}", ctx_raw);
         });
     }
 
