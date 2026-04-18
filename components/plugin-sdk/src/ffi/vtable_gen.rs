@@ -1077,7 +1077,9 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
             // second parameter acts as a sentinel recognized by the callback.
             let ctx_val = ctx_raw;
             let _ = tokio::task::spawn_blocking(move || {
-                callback(ctx_val as *mut c_void, 1usize as *mut c_void);
+                #[allow(clippy::manual_dangling_ptr)]
+                let sentinel = 1usize as *mut c_void;
+                callback(ctx_val as *mut c_void, sentinel);
             })
             .await;
         });
@@ -1152,8 +1154,7 @@ pub fn build_reaction_vtable_from_boxed(
     // on the (process-global) plugin runtime.
     #[inline]
     fn wrapper_ref(state: *const c_void) -> &'static DynReactionWrapper {
-        let arc: &Arc<DynReactionWrapper> =
-            unsafe { &*(state as *const Arc<DynReactionWrapper>) };
+        let arc: &Arc<DynReactionWrapper> = unsafe { &*(state as *const Arc<DynReactionWrapper>) };
         // SAFETY: the Arc is alive for as long as drop_fn has not been
         // called; references derived from it are valid for the duration
         // of the FFI call.
@@ -1162,8 +1163,7 @@ pub fn build_reaction_vtable_from_boxed(
 
     #[inline]
     fn wrapper_arc(state: *const c_void) -> Arc<DynReactionWrapper> {
-        let arc: &Arc<DynReactionWrapper> =
-            unsafe { &*(state as *const Arc<DynReactionWrapper>) };
+        let arc: &Arc<DynReactionWrapper> = unsafe { &*(state as *const Arc<DynReactionWrapper>) };
         Arc::clone(arc)
     }
 
@@ -1306,8 +1306,7 @@ pub fn build_reaction_vtable_from_boxed(
             let w = wrapper_ref(state);
             let handle = (w.runtime_handle)().handle().clone();
             let arc = wrapper_arc(state);
-            let result =
-                dispatch_to_runtime(&handle, async move { arc.inner.deprovision().await });
+            let result = dispatch_to_runtime(&handle, async move { arc.inner.deprovision().await });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1343,9 +1342,10 @@ pub fn build_reaction_vtable_from_boxed(
         }
         let handle = (w.runtime_handle)().handle().clone();
         let arc = wrapper_arc(state);
-        dispatch_to_runtime(&handle, async move {
-            arc.inner.initialize(runtime_ctx).await
-        });
+        dispatch_to_runtime(
+            &handle,
+            async move { arc.inner.initialize(runtime_ctx).await },
+        );
     }
 
     extern "C" fn start_result_push_fn(
@@ -1388,7 +1388,9 @@ pub fn build_reaction_vtable_from_boxed(
             // and will not access the ReactionWrapper again.
             let ctx_val = ctx_raw;
             let _ = tokio::task::spawn_blocking(move || {
-                callback(ctx_val as *mut c_void, 1usize as *mut c_void);
+                #[allow(clippy::manual_dangling_ptr)]
+                let sentinel = 1usize as *mut c_void;
+                callback(ctx_val as *mut c_void, sentinel);
             })
             .await;
             // Drop the Arc here explicitly to make the ownership intent clear.

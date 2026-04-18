@@ -102,9 +102,7 @@ fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c
         .expect("result_push_callback lock poisoned");
     if let Some(ref rx) = *guard {
         match rx.recv() {
-            Ok(result) => {
-                Box::into_raw(Box::new(result)) as *mut c_void
-            }
+            Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
             Err(_) => {
                 // Channel closed — return null so the forwarder breaks.
                 // Do NOT signal forwarder_done here; the forwarder will
