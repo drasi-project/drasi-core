@@ -2089,9 +2089,7 @@ fn wrap_subscription_response(
         let ctx = SendMutPtr(callback_ctx);
         let shutdown = receiver.shutdown.clone();
         let rt_handle = receiver.runtime_handle.clone();
-        let ctx_raw_log = callback_ctx as usize;
         rt_handle.spawn(async move {
-            eprintln!("[DIAG-SRC] change forwarder ENTER ctx={:#x}", ctx_raw_log);
             let mut rx = receiver.inner.lock().await;
             // Pin the Notified future so it persists across loop iterations.
             // Recreating it each iteration is cancel-unsafe: if select! picks
@@ -2102,7 +2100,6 @@ fn wrap_subscription_response(
             loop {
                 tokio::select! {
                     _ = &mut shutdown_notified => {
-                        eprintln!("[DIAG-SRC] change forwarder SHUTDOWN ctx={:#x}", ctx_raw_log);
                         callback(ctx.as_ptr(), std::ptr::null_mut());
                         break;
                     }
@@ -2112,12 +2109,10 @@ fn wrap_subscription_response(
                                 let ffi_event = wrap_source_event(wrapper);
                                 let accepted = callback(ctx.as_ptr(), ffi_event);
                                 if !accepted {
-                                    eprintln!("[DIAG-SRC] change forwarder REJECTED ctx={:#x}", ctx_raw_log);
                                     break;
                                 }
                             }
                             Err(_) => {
-                                eprintln!("[DIAG-SRC] change forwarder RX_ERR ctx={:#x}", ctx_raw_log);
                                 callback(ctx.as_ptr(), std::ptr::null_mut());
                                 break;
                             }
@@ -2125,19 +2120,16 @@ fn wrap_subscription_response(
                     }
                 }
             }
-            eprintln!("[DIAG-SRC] change forwarder EXIT ctx={:#x}", ctx_raw_log);
         });
     }
 
     extern "C" fn change_receiver_drop(state: *mut c_void) {
-        eprintln!("[DIAG-SRC] change_receiver_drop ENTER state={:p}", state);
         let handle = unsafe { Box::from_raw(state as *mut DrasiLibChangeReceiverHandle) };
         // Signal the forwarder to stop, then drop our Arc reference.
         // The forwarder holds its own Arc clone, so the inner data stays
         // alive until the forwarder task completes.
         handle.receiver.shutdown.notify_one();
         drop(handle);
-        eprintln!("[DIAG-SRC] change_receiver_drop EXIT state={:p}", state);
     }
 
     let ffi_receiver = Box::new(DrasiLibChangeReceiverHandle {

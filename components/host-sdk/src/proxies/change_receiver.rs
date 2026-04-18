@@ -45,23 +45,16 @@ extern "C" fn change_push_callback(ctx: *mut std::ffi::c_void, event: *mut FfiSo
     // On panic, return false to signal shutdown. The leaked Arc is NOT reclaimed here
     // because we cannot know which code path panicked. It will be reclaimed when the
     // forwarder task exits (via the null-event callback or send failure).
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         change_push_callback_inner(ctx, event)
-    }));
-    match res {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("[DIAG-SRC] change_push_callback PANIC ctx={:p} event={:p}", ctx, event);
-            false
-        }
-    }
+    }))
+    .unwrap_or(false)
 }
 
 fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceEvent) -> bool {
     let context = unsafe { &*(ctx as *const PushCallbackContext) };
 
     if event.is_null() {
-        eprintln!("[DIAG-SRC] change_push_callback NULL ctx={:p}", ctx);
         // Channel closed — drop the sender to signal the host receiver
         {
             let mut guard = context.tx.lock().expect("push callback mutex poisoned");
@@ -72,7 +65,6 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
         }
         // Reclaim the leaked Arc reference (see ChangeReceiverProxy::new)
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
-        eprintln!("[DIAG-SRC] change_push_callback NULL DONE ctx={:p}", ctx);
         return false;
     }
 
@@ -89,14 +81,12 @@ fn change_push_callback_inner(ctx: *mut std::ffi::c_void, event: *mut FfiSourceE
             true
         } else {
             // Receiver was dropped — reclaim the leaked Arc
-            eprintln!("[DIAG-SRC] change_push_callback SEND_ERR ctx={:p}", ctx);
             unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
             false
         }
     } else {
         // Sender was already dropped — reclaim the leaked Arc
         drop(guard);
-        eprintln!("[DIAG-SRC] change_push_callback NO_TX ctx={:p}", ctx);
         unsafe { Arc::from_raw(ctx as *const PushCallbackContext) };
         false
     }
@@ -113,14 +103,12 @@ unsafe impl Sync for FfiReceiverState {}
 
 impl Drop for FfiReceiverState {
     fn drop(&mut self) {
-        eprintln!("[DIAG-SRC] FfiReceiverState::drop ENTER state={:p}", self.state);
         // Run plugin drop on a dedicated thread to avoid initializing
         // plugin TLS on the caller's thread.
         let drop_fn = self.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.state);
         // Safety: state is a valid pointer owned by the plugin
         let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
-        eprintln!("[DIAG-SRC] FfiReceiverState::drop EXIT");
     }
 }
 
@@ -142,13 +130,6 @@ pub struct ChangeReceiverProxy {
 // Safety: All fields are Send+Sync safe
 unsafe impl Send for ChangeReceiverProxy {}
 unsafe impl Sync for ChangeReceiverProxy {}
-
-impl Drop for ChangeReceiverProxy {
-    fn drop(&mut self) {
-        let ctx_ptr = Arc::as_ptr(&self._callback_ctx) as *const std::ffi::c_void;
-        eprintln!("[DIAG-SRC] ChangeReceiverProxy::drop ENTER ctx={:p}", ctx_ptr);
-    }
-}
 
 impl ChangeReceiverProxy {
     pub fn new(inner: FfiChangeReceiver) -> Self {
