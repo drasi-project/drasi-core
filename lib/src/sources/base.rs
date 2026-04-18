@@ -399,6 +399,7 @@ impl SourceBase {
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver,
+            position_handle: None,
         })
     }
 

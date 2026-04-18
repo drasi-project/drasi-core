@@ -1401,6 +1401,8 @@ mod source_trait {
             query_id: "test-query".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let result = source.subscribe(settings).await;

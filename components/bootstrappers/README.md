@@ -226,6 +226,10 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     /// Set of relation labels the query needs from this source
     pub relations: HashSet<String>,
+    /// If set, the subscribing query requests events replayed from this sequence position.
+    pub resume_from: Option<u64>,
+    /// If true, the query requests a shared position handle for feedback.
+    pub request_position_handle: bool,
 }
 ```
 
