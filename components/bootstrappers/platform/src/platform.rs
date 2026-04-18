@@ -30,7 +30,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 
 /// Request format for Query API subscription
@@ -297,7 +299,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting platform bootstrap for query {} from source {}",
             request.query_id, context.source_id
@@ -380,7 +382,11 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             request.query_id, sent_count
         );
 
-        Ok(sent_count)
+        Ok(BootstrapResult {
+            event_count: sent_count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

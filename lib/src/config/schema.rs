@@ -18,6 +18,7 @@ use std::collections::HashSet;
 
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
+use crate::recovery::RecoveryPolicy;
 use drasi_core::models::SourceMiddlewareConfig;
 
 /// Query language for continuous queries
@@ -416,6 +417,15 @@ pub struct QueryConfig {
     /// Can reference a named backend or provide inline configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_backend: Option<StorageBackendRef>,
+    /// Recovery policy when a source cannot honor a requested resume position.
+    /// `None` inherits the global default (itself defaulting to `Strict`).
+    /// See [`RecoveryPolicy`](crate::RecoveryPolicy).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "recoveryPolicy"
+    )]
+    pub recovery_policy: Option<RecoveryPolicy>,
 }
 
 /// Synthetic join configuration for queries

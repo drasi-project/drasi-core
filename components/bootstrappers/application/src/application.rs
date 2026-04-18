@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::bootstrap::BootstrapRequest;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapResult};
 
 /// Bootstrap provider for application sources that replays stored insert events
 pub struct ApplicationBootstrapProvider {
@@ -174,7 +174,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
         _context: &BootstrapContext,
         _event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "ApplicationBootstrapProvider processing bootstrap request for query '{}' with {} node labels and {} relation labels",
             request.query_id,
@@ -190,7 +190,7 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
                 "ApplicationBootstrapProvider: No stored events to replay for query '{}'",
                 request.query_id
             );
-            return Ok(0);
+            return Ok(BootstrapResult::default());
         }
 
         info!(
@@ -213,7 +213,11 @@ impl BootstrapProvider for ApplicationBootstrapProvider {
             "ApplicationBootstrapProvider sent {} bootstrap events for query '{}'",
             count, request.query_id
         );
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 
