@@ -2115,9 +2115,6 @@ fn wrap_subscription_response(
                     }
                 }
             }
-            // Sentinel: signal the host that the forwarder has fully exited.
-            // The host waits for this before freeing the callback context.
-            callback(ctx.as_ptr(), 1usize as *mut FfiSourceEvent);
         });
     }
 
@@ -2231,8 +2228,6 @@ fn wrap_subscription_response(
                         }
                     }
                 }
-                // Sentinel: signal the host that the forwarder has fully exited.
-                callback(ctx.as_ptr(), 1usize as *mut FfiBootstrapEvent);
             });
         }
 
