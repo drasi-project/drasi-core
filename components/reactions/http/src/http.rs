@@ -480,8 +480,14 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Update { .. } => {
+                        ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => {
                             if let Some(spec) = query_config.updated.as_ref() {
+                                let operation = if matches!(result, ResultDiff::Aggregation { .. })
+                                {
+                                    "AGGREGATION"
+                                } else {
+                                    "UPDATE"
+                                };
                                 let data_to_process = serde_json::to_value(result)
                                     .expect("ResultDiff serialization should succeed");
                                 if let Err(e) = Self::process_result(
@@ -490,7 +496,7 @@ impl Reaction for HttpReaction {
                                     &base_url,
                                     &token,
                                     spec,
-                                    "UPDATE",
+                                    operation,
                                     &data_to_process,
                                     query_name,
                                     &reaction_name,
@@ -501,7 +507,7 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                        ResultDiff::Noop => {}
                     }
                 }
             }

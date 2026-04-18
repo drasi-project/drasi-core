@@ -27,6 +27,7 @@ use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
@@ -75,6 +76,7 @@ pub fn convert_json_to_element_properties(
 pub struct SourceManager {
     instance_id: String,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     log_registry: Arc<ComponentLogRegistry>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
@@ -101,6 +103,7 @@ impl SourceManager {
         Self {
             instance_id: instance_id.into(),
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             log_registry,
             graph,
             update_tx,
@@ -114,9 +117,13 @@ impl SourceManager {
         *self.state_store.write().await = Some(state_store);
     }
 
-    /// Get the runtime instance for a source by ID.
+    /// Inject the identity provider (called after DrasiLib is fully constructed)
     ///
-    /// Returns `None` if no runtime is registered for the given ID.
+    /// This allows sources to obtain authentication credentials when they are added.
+    pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(identity_provider);
+    }
+
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
         let graph = self.graph.read().await;
         graph.get_runtime::<Arc<dyn Source>>(id).cloned()
@@ -139,14 +146,15 @@ impl SourceManager {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
-        // Construct runtime context for this source (includes update channel for status reporting)
-        let context = SourceRuntimeContext::new(
+        // Construct runtime context for this source
+        let mut context = SourceRuntimeContext::new(
             &self.instance_id,
             &source_id,
             self.state_store.read().await.clone(),
             self.update_tx.clone(),
             None,
         );
+        context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the source with its runtime context
         source.initialize(context).await;

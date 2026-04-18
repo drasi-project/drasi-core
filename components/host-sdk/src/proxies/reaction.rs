@@ -47,12 +47,55 @@ pub struct ReactionProxy {
 /// Context for the push-based result callback.
 struct ResultPushContext {
     rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<drasi_lib::channels::QueryResult>>>,
+    /// Signaled when the plugin-side forwarder task has fully exited its loop
+    /// and will no longer access the `ReactionWrapper`. The forwarder signals
+    /// this by calling the callback one final time with the sentinel parameter,
+    /// AFTER breaking out of its processing loop.
+    forwarder_done: std::sync::Mutex<bool>,
+    forwarder_done_cv: std::sync::Condvar,
+}
+
+fn signal_forwarder_done(context: &ResultPushContext) {
+    if let Ok(mut done) = context.forwarder_done.lock() {
+        *done = true;
+        context.forwarder_done_cv.notify_all();
+    }
 }
 
 /// Callback invoked by the plugin's forwarder task to receive the next QueryResult.
 /// Blocks until a result is available. Returns null on channel close (shutdown).
-extern "C" fn result_push_callback(ctx: *mut c_void, _unused: *mut c_void) -> *mut c_void {
+///
+/// The `sentinel` parameter serves dual purpose:
+/// - `null`: Normal mode — block on recv() and return the next QueryResult.
+/// - Non-null: **Forwarder-exit sentinel** — the forwarder has fully exited its
+///   processing loop and will not access the ReactionWrapper again. Signal
+///   `forwarder_done` so the host can safely free the wrapper.
+///
+/// Wrapped in `catch_unwind` because this is `extern "C"` — panics unwinding
+/// across the FFI boundary are undefined behavior.
+extern "C" fn result_push_callback(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        result_push_callback_inner(ctx, sentinel)
+    }))
+    .unwrap_or_else(|_| {
+        // On panic, signal done so drop() doesn't deadlock
+        let context = unsafe { &*(ctx as *const ResultPushContext) };
+        signal_forwarder_done(context);
+        std::ptr::null_mut()
+    })
+}
+
+fn result_push_callback_inner(ctx: *mut c_void, sentinel: *mut c_void) -> *mut c_void {
     let context = unsafe { &*(ctx as *const ResultPushContext) };
+
+    // Sentinel call: the forwarder task has exited its loop and will not
+    // access the ReactionWrapper again.  Signal completion so Drop can
+    // safely call drop_fn.
+    if !sentinel.is_null() {
+        signal_forwarder_done(context);
+        return std::ptr::null_mut();
+    }
+
     let guard = context
         .rx
         .lock()
@@ -60,9 +103,15 @@ extern "C" fn result_push_callback(ctx: *mut c_void, _unused: *mut c_void) -> *m
     if let Some(ref rx) = *guard {
         match rx.recv() {
             Ok(result) => Box::into_raw(Box::new(result)) as *mut c_void,
-            Err(_) => std::ptr::null_mut(),
+            Err(_) => {
+                // Channel closed — return null so the forwarder breaks.
+                // Do NOT signal forwarder_done here; the forwarder will
+                // send a sentinel callback after it has fully exited.
+                std::ptr::null_mut()
+            }
         }
     } else {
+        // rx already taken — return null (forwarder will send sentinel after exiting)
         std::ptr::null_mut()
     }
 }
@@ -185,6 +234,8 @@ impl Reaction for ReactionProxy {
 
         let push_ctx = Arc::new(ResultPushContext {
             rx: std::sync::Mutex::new(Some(rx)),
+            forwarder_done: std::sync::Mutex::new(false),
+            forwarder_done_cv: std::sync::Condvar::new(),
         });
         // Use Arc::as_ptr — the Arc stays alive in _push_ctx for the lifetime of the proxy
         let ctx_ptr = Arc::as_ptr(&push_ctx) as *mut c_void;
@@ -225,7 +276,8 @@ impl Reaction for ReactionProxy {
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+        let r = unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) };
+        r
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -268,11 +320,15 @@ impl Reaction for ReactionProxy {
 
 impl Drop for ReactionProxy {
     fn drop(&mut self) {
-        // Close the result channel to unblock the forwarder
+        // Close the result channel sender to unblock the forwarder's callback.
+        // The callback's rx.recv() will return Err, causing it to return null.
+        // The forwarder then breaks out of its loop and sends a sentinel
+        // callback to signal forwarder_done.
         if let Ok(mut guard) = self.result_tx.lock() {
             *guard = None;
         }
         // Also drop the receiver inside the push context to unblock the callback
+        // if it's blocked in recv() (belt-and-suspenders with the sender drop).
         if let Ok(guard) = self._push_ctx.lock() {
             if let Some(ref ctx) = *guard {
                 if let Ok(mut rx_guard) = ctx.rx.lock() {
@@ -280,9 +336,51 @@ impl Drop for ReactionProxy {
                 }
             }
         }
-        let drop_fn = self.vtable.drop_fn;
-        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+
+        // Wait for the forwarder task to fully exit its processing loop.
+        //
+        // Safety argument: the forwarder sends a sentinel callback AFTER
+        // breaking out of its loop. At that point, all enqueue_query_result()
+        // calls have finished and the forwarder will NOT access the
+        // ReactionWrapper again. Therefore, after this signal fires,
+        // it is safe to free the ReactionWrapper.
+        let forwarder_exited = if let Ok(guard) = self._push_ctx.lock() {
+            if let Some(ref ctx) = *guard {
+                let done = ctx.forwarder_done.lock().expect("forwarder_done lock");
+                let (guard, timeout) = ctx
+                    .forwarder_done_cv
+                    .wait_timeout_while(done, std::time::Duration::from_secs(5), |done| !*done)
+                    .expect("forwarder_done condvar wait");
+                !timeout.timed_out() && *guard
+            } else {
+                true // No push context → forwarder was never started
+            }
+        } else {
+            false // Lock poisoned
+        };
+
+        if forwarder_exited {
+            // Safe to free the ReactionWrapper — forwarder won't access it.
+            let drop_fn = self.vtable.drop_fn;
+            let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+            let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        } else {
+            // Timeout or error — leak the ReactionWrapper to prevent UAF.
+            // Memory leak is preferable to undefined behavior.
+            log::warn!(
+                "ReactionProxy::drop: forwarder did not exit within timeout; \
+                 leaking ReactionWrapper to prevent use-after-free"
+            );
+        }
+
+        // Leak the push context Arc on the timeout path — the forwarder's
+        // spawn_blocking callback may still reference it. On the success path
+        // this is unnecessary but harmless, and keeps the logic simple.
+        if let Ok(mut guard) = self._push_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
     }
 }
 

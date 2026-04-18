@@ -23,6 +23,7 @@ use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::managers::{log_component_error, ComponentLogKey, ComponentLogRegistry};
 use crate::queries::Query;
 use crate::reactions::{QueryProvider, Reaction};
@@ -34,6 +35,8 @@ pub struct ReactionManager {
     query_provider: Arc<RwLock<Option<Arc<dyn QueryProvider>>>>,
     /// State store provider for reactions to persist state
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    /// Identity provider for credential injection
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
     /// Handles to subscription forwarder tasks per reaction
@@ -64,6 +67,7 @@ impl ReactionManager {
             instance_id: instance_id.into(),
             query_provider: Arc::new(RwLock::new(None)),
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             log_registry,
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
             graph,
@@ -85,7 +89,14 @@ impl ReactionManager {
         *self.state_store.write().await = Some(state_store);
     }
 
-    /// Provision a reaction instance for runtime — initialize and store it.
+    /// Inject the identity provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows reactions to obtain authentication credentials when they are added.
+    pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(identity_provider);
+    }
+
+    /// Add a reaction instance, taking ownership and wrapping it in an Arc internally.
     ///
     /// This method handles runtime-only operations: creating the runtime context,
     /// initializing the reaction, and storing it in the runtime map. Graph registration
@@ -103,13 +114,14 @@ impl ReactionManager {
         let reaction_id = reaction.id().to_string();
 
         // Construct runtime context for this reaction
-        let context = ReactionRuntimeContext::new(
+        let mut context = ReactionRuntimeContext::new(
             &self.instance_id,
             &reaction_id,
             self.state_store.read().await.clone(),
             self.update_tx.clone(),
             None,
         );
+        context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the reaction with its runtime context
         reaction.initialize(context).await;
