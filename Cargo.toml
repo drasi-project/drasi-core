@@ -86,7 +86,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
@@ -98,21 +98,21 @@ categories = ["database"]
 drasi-query-ast = { version = "0.3.3", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.3", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.3", path = "query-gql" }
-drasi-core = { version = "0.4.2", path = "core" }
+drasi-core = { version = "0.5.0", path = "core" }
 drasi-functions-cypher = { version = "0.4.2", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.4.2", path = "functions-gql" }
 drasi-middleware = { version = "0.4.2", path = "middleware" }
 drasi-identity-azure = { version = "0.1.1", path = "components/identity/azure" }
 drasi-identity-aws = { version = "0.1.1", path = "components/identity/aws" }
-drasi-lib = { version = "0.6.0", path = "lib" }
-drasi-ffi-primitives = { version = "0.6.0", path = "components/ffi-primitives" }
-drasi-plugin-sdk = { version = "0.6.0", path = "components/plugin-sdk" }
-drasi-host-sdk = { version = "0.6.0", path = "components/host-sdk" }
+drasi-lib = { version = "0.7.0", path = "lib" }
+drasi-ffi-primitives = { version = "0.7.0", path = "components/ffi-primitives" }
+drasi-plugin-sdk = { version = "0.7.0", path = "components/plugin-sdk" }
+drasi-host-sdk = { version = "0.7.0", path = "components/host-sdk" }
 
 # Common dependencies
 utoipa = { version = "4", features = ["chrono"] }
-drasi-index-rocksdb = { version = "0.3.2", path = "components/indexes/rocksdb" }
-drasi-index-garnet = { version = "0.1.9", path = "components/indexes/garnet" }
+drasi-index-rocksdb = { version = "0.4.0", path = "components/indexes/rocksdb" }
+drasi-index-garnet = { version = "0.2.0", path = "components/indexes/garnet" }
 
 # Component plugins
 drasi-source-mssql = { version = "0.1.5", path = "components/sources/mssql" }

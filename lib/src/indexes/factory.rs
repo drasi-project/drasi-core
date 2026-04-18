@@ -17,7 +17,7 @@ use crate::indexes::IndexBackendPlugin;
 use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
 use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
 use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-use drasi_core::interface::{IndexSet, NoOpSessionControl};
+use drasi_core::interface::{CreatedIndexes, IndexSet, NoOpSessionControl};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -120,7 +120,8 @@ impl IndexFactory {
         Self { backends, plugin }
     }
 
-    /// Build an IndexSet for a query using the specified storage backend
+    /// Build a [`CreatedIndexes`] (index set plus optional checkpoint writer)
+    /// for a query using the specified storage backend
     ///
     /// # Arguments
     /// * `backend_ref` - Reference to storage backend (named or inline)
@@ -135,7 +136,7 @@ impl IndexFactory {
         &self,
         backend_ref: &StorageBackendRef,
         query_id: &str,
-    ) -> Result<IndexSet, IndexError> {
+    ) -> Result<CreatedIndexes, IndexError> {
         let spec = match backend_ref {
             StorageBackendRef::Named(name) => self
                 .backends
@@ -147,12 +148,12 @@ impl IndexFactory {
         self.build_from_spec(spec, query_id).await
     }
 
-    /// Build an IndexSet from a storage backend specification
+    /// Build a CreatedIndexes from a storage backend specification
     async fn build_from_spec(
         &self,
         spec: &StorageBackendSpec,
         query_id: &str,
-    ) -> Result<IndexSet, IndexError> {
+    ) -> Result<CreatedIndexes, IndexError> {
         // Validate configuration before building
         spec.validate().map_err(IndexError::InitializationFailed)?;
 
@@ -174,8 +175,8 @@ impl IndexFactory {
         }
     }
 
-    /// Build in-memory indexes
-    fn build_memory_indexes(&self, enable_archive: bool) -> Result<IndexSet, IndexError> {
+    /// Build in-memory indexes. Volatile backend, so no checkpoint writer.
+    fn build_memory_indexes(&self, enable_archive: bool) -> Result<CreatedIndexes, IndexError> {
         let mut element_index = InMemoryElementIndex::new();
         if enable_archive {
             element_index.enable_archive();
@@ -184,12 +185,15 @@ impl IndexFactory {
         let result_index = InMemoryResultIndex::new();
         let future_queue = InMemoryFutureQueue::new();
 
-        Ok(IndexSet {
-            element_index: element_index.clone(),
-            archive_index: element_index,
-            result_index: Arc::new(result_index),
-            future_queue: Arc::new(future_queue),
-            session_control: Arc::new(NoOpSessionControl),
+        Ok(CreatedIndexes {
+            set: IndexSet {
+                element_index: element_index.clone(),
+                archive_index: element_index,
+                result_index: Arc::new(result_index),
+                future_queue: Arc::new(future_queue),
+                session_control: Arc::new(NoOpSessionControl),
+            },
+            checkpoint_writer: None,
         })
     }
 
@@ -198,11 +202,11 @@ impl IndexFactory {
         &self,
         plugin: &Arc<dyn IndexBackendPlugin>,
         query_id: &str,
-    ) -> Result<IndexSet, IndexError> {
-        plugin.create_index_set(query_id).await.map_err(|e| {
-            log::error!("Failed to create index set for query '{query_id}': {e}");
+    ) -> Result<CreatedIndexes, IndexError> {
+        plugin.create_indexes(query_id).await.map_err(|e| {
+            log::error!("Failed to create indexes for query '{query_id}': {e}");
             IndexError::InitializationFailed(format!(
-                "Failed to create index set for query '{query_id}': {e}"
+                "Failed to create indexes for query '{query_id}': {e}"
             ))
         })
     }
@@ -265,9 +269,10 @@ mod tests {
 
         let factory = IndexFactory::new(backends, None);
         let backend_ref = StorageBackendRef::Named("memory_test".to_string());
-        let result = factory.build(&backend_ref, "test_query").await;
+        let created = factory.build(&backend_ref, "test_query").await.unwrap();
 
-        assert!(result.is_ok());
+        // Volatile backend should not produce a checkpoint writer.
+        assert!(created.checkpoint_writer.is_none());
     }
 
     #[tokio::test]
@@ -291,9 +296,9 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
+        let created = factory.build(&backend_ref, "test_query").await.unwrap();
 
-        assert!(result.is_ok());
+        assert!(created.checkpoint_writer.is_none());
     }
 
     #[tokio::test]
@@ -473,11 +478,11 @@ mod tests {
 
         // Use tokio runtime for async test
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let index_set = rt
+        let created = rt
             .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
             .unwrap();
 
-        let debug_str = format!("{index_set:?}");
+        let debug_str = format!("{:?}", created.set);
         assert!(debug_str.contains("IndexSet"));
         assert!(debug_str.contains("element_index"));
         assert!(debug_str.contains("archive_index"));
@@ -510,10 +515,10 @@ mod tests {
 
         #[async_trait]
         impl IndexBackendPlugin for MockPlugin {
-            async fn create_index_set(
+            async fn create_indexes(
                 &self,
                 _query_id: &str,
-            ) -> Result<drasi_core::interface::IndexSet, drasi_core::interface::IndexError>
+            ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
             {
                 unimplemented!()
             }
@@ -536,8 +541,8 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: false,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
-        assert!(result.is_ok());
+        let created = factory.build(&backend_ref, "test_query").await.unwrap();
+        assert!(created.checkpoint_writer.is_none());
     }
 
     #[tokio::test]
@@ -546,7 +551,7 @@ mod tests {
         let backend_ref = StorageBackendRef::Inline(StorageBackendSpec::Memory {
             enable_archive: true,
         });
-        let result = factory.build(&backend_ref, "test_query").await;
-        assert!(result.is_ok());
+        let created = factory.build(&backend_ref, "test_query").await.unwrap();
+        assert!(created.checkpoint_writer.is_none());
     }
 }
