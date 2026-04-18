@@ -1143,28 +1143,52 @@ pub fn build_reaction_vtable_from_boxed(
         _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
     }
 
+    // The state pointer points to a heap-allocated `Arc<DynReactionWrapper>`.
+    // This lets the async forwarder task hold its own Arc clone, so the
+    // wrapper survives until BOTH the host has called drop_fn AND any
+    // in-flight forwarder work has completed. Without this, the forwarder
+    // task could dereference a dangling pointer if the host dropped the
+    // wrapper while `enqueue_query_result(...).await` was still pending
+    // on the (process-global) plugin runtime.
+    #[inline]
+    fn wrapper_ref(state: *const c_void) -> &'static DynReactionWrapper {
+        let arc: &Arc<DynReactionWrapper> =
+            unsafe { &*(state as *const Arc<DynReactionWrapper>) };
+        // SAFETY: the Arc is alive for as long as drop_fn has not been
+        // called; references derived from it are valid for the duration
+        // of the FFI call.
+        unsafe { &*(Arc::as_ptr(arc)) }
+    }
+
+    #[inline]
+    fn wrapper_arc(state: *const c_void) -> Arc<DynReactionWrapper> {
+        let arc: &Arc<DynReactionWrapper> =
+            unsafe { &*(state as *const Arc<DynReactionWrapper>) };
+        Arc::clone(arc)
+    }
+
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         FfiStr::from_str(&w.cached_id)
     }
 
     extern "C" fn type_name_fn(state: *const c_void) -> FfiStr {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         FfiStr::from_str(&w.cached_type_name)
     }
 
     extern "C" fn auto_start_fn(state: *const c_void) -> bool {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         w.inner.auto_start()
     }
 
     extern "C" fn query_ids_fn(state: *const c_void) -> FfiStringArray {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         FfiStringArray::from_vec(w.inner.query_ids())
     }
 
     extern "C" fn properties_fn(state: *const c_void) -> FfiOwnedStr {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         let props = w.inner.properties();
         let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
         FfiOwnedStr::from_string(json)
@@ -1217,15 +1241,14 @@ pub fn build_reaction_vtable_from_boxed(
 
     extern "C" fn start_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynReactionWrapper) };
+            let w = wrapper_ref(state);
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Starting, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let arc = wrapper_arc(state);
             let result = dispatch_to_runtime(&handle, async move {
                 set_instance_log_ctx(log_ctx);
-                let inner = unsafe { inner_ptr.as_ref() };
-                let r = inner.inner.start().await;
+                let r = arc.inner.start().await;
                 clear_instance_log_ctx();
                 r
             });
@@ -1245,15 +1268,14 @@ pub fn build_reaction_vtable_from_boxed(
 
     extern "C" fn stop_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynReactionWrapper) };
+            let w = wrapper_ref(state);
             emit_dyn_reaction_lifecycle(w, FfiLifecycleEventType::Stopping, "");
             let log_ctx = build_dyn_reaction_log_ctx(w);
             let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+            let arc = wrapper_arc(state);
             let result = dispatch_to_runtime(&handle, async move {
                 set_instance_log_ctx(log_ctx);
-                let inner = unsafe { inner_ptr.as_ref() };
-                let r = inner.inner.stop().await;
+                let r = arc.inner.stop().await;
                 clear_instance_log_ctx();
                 r
             });
@@ -1272,25 +1294,20 @@ pub fn build_reaction_vtable_from_boxed(
     }
 
     extern "C" fn status_fn(state: *const c_void) -> FfiComponentStatus {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         let handle = (w.runtime_handle)().handle().clone();
-        let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-        let status = dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { inner_ptr.as_ref() };
-            inner.inner.status().await
-        });
+        let arc = wrapper_arc(state);
+        let status = dispatch_to_runtime(&handle, async move { arc.inner.status().await });
         component_status_to_ffi(status)
     }
 
     extern "C" fn deprovision_fn(state: *mut c_void) -> FfiResult {
         catch_panic_ffi(|| {
-            let w = unsafe { &*(state as *const DynReactionWrapper) };
+            let w = wrapper_ref(state);
             let handle = (w.runtime_handle)().handle().clone();
-            let inner_ptr = SendPtr(state as *const DynReactionWrapper);
-            let result = dispatch_to_runtime(&handle, async move {
-                let inner = unsafe { inner_ptr.as_ref() };
-                inner.inner.deprovision().await
-            });
+            let arc = wrapper_arc(state);
+            let result =
+                dispatch_to_runtime(&handle, async move { arc.inner.deprovision().await });
             match result {
                 Ok(()) => FfiResult::ok(),
                 Err(e) => FfiResult::err(e.to_string()),
@@ -1299,7 +1316,7 @@ pub fn build_reaction_vtable_from_boxed(
     }
 
     extern "C" fn initialize_fn(state: *mut c_void, ctx: *const FfiRuntimeContext) {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         let ffi_ctx = unsafe { &*ctx };
 
         if let Some(log_cb) = ffi_ctx.log_callback {
@@ -1325,10 +1342,9 @@ pub fn build_reaction_vtable_from_boxed(
             *guard = Some(status_rx);
         }
         let handle = (w.runtime_handle)().handle().clone();
-        let inner_ptr = SendPtr(state as *const DynReactionWrapper);
+        let arc = wrapper_arc(state);
         dispatch_to_runtime(&handle, async move {
-            let inner = unsafe { inner_ptr.as_ref() };
-            inner.inner.initialize(runtime_ctx).await
+            arc.inner.initialize(runtime_ctx).await
         });
     }
 
@@ -1337,12 +1353,16 @@ pub fn build_reaction_vtable_from_boxed(
         callback: FfiResultPushCallbackFn,
         callback_ctx: *mut c_void,
     ) {
-        let w = unsafe { &*(state as *const DynReactionWrapper) };
+        let w = wrapper_ref(state);
         let handle = (w.runtime_handle)().handle().clone();
         let ctx_raw = callback_ctx as usize;
-        let ptr = SendPtr(state as *const DynReactionWrapper);
+        // Clone the Arc so the spawned forwarder task owns a strong reference
+        // to the wrapper. This keeps the wrapper alive even if the host calls
+        // drop_fn before the forwarder has fully exited (e.g., while an
+        // `enqueue_query_result(...).await` is still in flight on the
+        // process-global plugin runtime).
+        let arc = wrapper_arc(state);
         handle.spawn(async move {
-            eprintln!("[DIAG] plugin forwarder ENTER ctx={:#x}", ctx_raw);
             loop {
                 let ctx_val = ctx_raw;
                 let result_ptr = tokio::task::spawn_blocking(move || {
@@ -1351,26 +1371,19 @@ pub fn build_reaction_vtable_from_boxed(
                 .await;
                 let result_ptr = match result_ptr {
                     Ok(p) => p.as_ptr(),
-                    Err(_e) => {
-                        eprintln!("[DIAG] plugin forwarder spawn_blocking JOIN ERR ctx={:#x}", ctx_raw);
-                        break;
-                    }
+                    Err(_) => break,
                 };
                 if result_ptr.is_null() {
-                    eprintln!("[DIAG] plugin forwarder NULL result, breaking ctx={:#x}", ctx_raw);
                     break;
                 }
-                // Scope the raw pointer so it doesn't live across await
                 let query_result = {
                     let rp = result_ptr;
                     unsafe { *Box::from_raw(rp as *mut drasi_lib::channels::QueryResult) }
                 };
-                let inner = unsafe { ptr.as_ref() };
-                if let Err(e) = inner.inner.enqueue_query_result(query_result).await {
+                if let Err(e) = arc.inner.enqueue_query_result(query_result).await {
                     log::error!("Failed to enqueue query result: {e}");
                 }
             }
-            eprintln!("[DIAG] plugin forwarder LOOP EXIT, sending sentinel ctx={:#x}", ctx_raw);
             // Signal the host that the forwarder has fully exited its loop
             // and will not access the ReactionWrapper again.
             let ctx_val = ctx_raw;
@@ -1378,18 +1391,19 @@ pub fn build_reaction_vtable_from_boxed(
                 callback(ctx_val as *mut c_void, 1usize as *mut c_void);
             })
             .await;
-            eprintln!("[DIAG] plugin forwarder SENTINEL DELIVERED ctx={:#x}", ctx_raw);
+            // Drop the Arc here explicitly to make the ownership intent clear.
+            drop(arc);
         });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut DynReactionWrapper)) };
+        unsafe { drop(Box::from_raw(state as *mut Arc<DynReactionWrapper>)) };
     }
 
     let cached_id = reaction.id().to_string();
     let cached_type_name = reaction.type_name().to_string();
 
-    let wrapper = Box::new(DynReactionWrapper {
+    let wrapper = Arc::new(DynReactionWrapper {
         inner: reaction,
         cached_id,
         cached_type_name,
@@ -1402,9 +1416,14 @@ pub fn build_reaction_vtable_from_boxed(
         instance_id: std::sync::RwLock::new(String::new()),
         _status_rx: std::sync::Mutex::new(None),
     });
+    // Heap-allocate the Arc handle and pass its raw pointer as the FFI
+    // state. drop_fn reclaims the Box (and decrements the Arc); any
+    // outstanding clones held by spawned forwarder tasks keep the wrapper
+    // alive until they exit.
+    let state_box: Box<Arc<DynReactionWrapper>> = Box::new(wrapper);
 
     ReactionVtable {
-        state: Box::into_raw(wrapper) as *mut c_void,
+        state: Box::into_raw(state_box) as *mut c_void,
         executor,
         id_fn,
         type_name_fn,
