@@ -201,29 +201,49 @@ impl DataverseSource {
             }
         }
 
-        // If no delta token, get the initial one by requesting change tracking
-        // This matches the platform's GetCurrentDeltaToken() behavior:
-        // page through all existing data to get the latest token
+        // If no delta token, get the initial one by requesting change tracking.
+        // Retry with exponential backoff on failure instead of dying permanently.
         if delta_link.is_none() {
-            match Self::get_initial_delta_token(&client, &entity_set_name, select.as_deref()).await
-            {
-                Ok(token) => {
-                    log::info!("[{source_id}] Initial delta token obtained for {entity_name}");
-                    delta_link = Some(token);
-                    // Save the initial token
-                    if let Some(ref store) = state_store {
-                        if let Some(ref dl) = delta_link {
-                            let _ = store
-                                .set(&source_id, &state_key, dl.as_bytes().to_vec())
-                                .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!(
-                        "[{source_id}] Failed to get initial delta token for {entity_name}: {e}"
-                    );
+            let mut retry_interval_ms: u64 = 1000;
+            const MAX_RETRY_INTERVAL_MS: u64 = 60_000;
+
+            loop {
+                // Check for shutdown before each attempt
+                if *shutdown_rx.borrow() {
+                    log::info!("[{source_id}] Shutting down entity worker for {entity_name} during initial token acquisition");
                     return;
+                }
+
+                match Self::get_initial_delta_token(&client, &entity_set_name, select.as_deref()).await
+                {
+                    Ok(token) => {
+                        log::info!("[{source_id}] Initial delta token obtained for {entity_name}");
+                        delta_link = Some(token);
+                        // Save the initial token
+                        if let Some(ref store) = state_store {
+                            if let Some(ref dl) = delta_link {
+                                let _ = store
+                                    .set(&source_id, &state_key, dl.as_bytes().to_vec())
+                                    .await;
+                            }
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[{source_id}] Failed to get initial delta token for {entity_name}: {e}. Retrying in {retry_interval_ms}ms"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(retry_interval_ms)) => {}
+                            _ = shutdown_rx.changed() => {
+                                if *shutdown_rx.borrow() {
+                                    log::info!("[{source_id}] Shutting down entity worker for {entity_name}");
+                                    return;
+                                }
+                            }
+                        }
+                        retry_interval_ms = (retry_interval_ms * 2).min(MAX_RETRY_INTERVAL_MS);
+                    }
                 }
             }
         }
@@ -278,14 +298,11 @@ impl DataverseSource {
                     }
 
                     if change_count > 0 {
-                        // Skip delay to poll immediately after processing changes
-                        // (matching platform behavior)
                         continue;
                     }
                 }
                 Err(e) => {
                     log::error!("[{source_id}] Error polling entity {entity_name}: {e}");
-                    // On error, wait 5 seconds before retrying (matching platform)
                     current_interval_ms = 5000;
                 }
             }
@@ -422,11 +439,20 @@ impl DataverseSource {
                     properties.insert(key, element_value);
                 }
 
+                // Use `modifiedon` from the record for accurate ordering.
+                // Falls back to current time if the field is missing or unparseable.
+                let effective_from = attributes
+                    .get("modifiedon")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.timestamp_millis() as u64)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64);
+
                 let element_id = format!("{entity_name}:{id}");
                 let metadata = ElementMetadata {
                     reference: ElementReference::new(source_id, &element_id),
                     labels: Arc::from(vec![Arc::from(entity_name.as_str())]),
-                    effective_from: chrono::Utc::now().timestamp_millis() as u64,
+                    effective_from,
                 };
 
                 SourceChange::Update {
@@ -441,6 +467,7 @@ impl DataverseSource {
                 let metadata = ElementMetadata {
                     reference: ElementReference::new(source_id, &element_id),
                     labels: Arc::from(vec![Arc::from(entity_name.as_str())]),
+                    // Deleted records don't carry attributes, so use current time.
                     effective_from: chrono::Utc::now().timestamp_millis() as u64,
                 };
 
