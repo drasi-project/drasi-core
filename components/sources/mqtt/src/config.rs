@@ -41,6 +41,14 @@ pub fn default_event_channel_capacity() -> usize {
     20
 }
 
+pub fn default_max_retries() -> Option<u32> {
+    Some(8)
+}
+
+pub fn default_base_retry_delay_secs() -> Option<u64> {
+    Some(1)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize_repr, Deserialize_repr, Eq, Default)]
 #[repr(u8)]
 pub enum MqttQoS {
@@ -344,6 +352,20 @@ pub struct MqttSourceConfig {
     #[serde(default = "default_event_channel_capacity")] // for client creation and event loop
     pub event_channel_capacity: usize,
 
+    /// Maximum number of retries in row for MQTT operations (e.g., connection, publish, subscribe) before giving up.
+    #[serde(
+        default = "default_max_retries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_retries: Option<u32>, // Maximum number of retries in row for MQTT operations upon failure (e.g., connection, publish, subscribe)
+
+    /// Base delay in seconds for retrying MQTT operations after failure. with loop with exponential backoff (delay doubles after each failure up to max_retries)
+    #[serde(
+        default = "default_base_retry_delay_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_retry_delay_secs: Option<u64>, // Base delay in seconds for retrying MQTT operations upon failure, with exponential backoff
+
     //...... Shared config parameters (used by both v3 and v5 clients)
     /// MQTT transport protocol (e.g., "tcp", "tls")
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -638,6 +660,8 @@ impl Default for MqttSourceConfig {
             topics: vec![],
             topic_mappings: vec![],
             event_channel_capacity: default_event_channel_capacity(),
+            max_retries: default_max_retries(),
+            base_retry_delay_secs: default_base_retry_delay_secs(),
             transport: None,
             request_channel_capacity: None,
             max_inflight: None,
@@ -668,6 +692,8 @@ impl Debug for MqttSourceConfig {
             .field("topics", &self.topics)
             .field("topic_mappings", &self.topic_mappings)
             .field("event_channel_capacity", &self.event_channel_capacity)
+            .field("max_retries", &self.max_retries)
+            .field("base_retry_delay_secs", &self.base_retry_delay_secs)
             .finish()
     }
 }
@@ -714,6 +740,10 @@ mod tests {
             }],
             topic_mappings: vec![topic_mapping(MappingMode::PayloadAsField, Some("reading"))],
             event_channel_capacity: 20,
+
+            max_retries: default_max_retries(),
+            base_retry_delay_secs: default_base_retry_delay_secs(),
+
             transport: None,
             request_channel_capacity: Some(10),
             max_inflight: Some(100),

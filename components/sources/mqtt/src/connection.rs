@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use core::error;
 use std::time::Duration;
 
-use crate::config::{MqttQoS, MqttSourceConfig, MqttTransportMode};
+use crate::config::{
+    default_base_retry_delay_secs, default_max_retries, MqttQoS, MqttSourceConfig,
+    MqttTransportMode,
+};
 use crate::utils::MqttPacket;
 use log::{error, info};
 use rumqttc::v5::{
@@ -218,6 +222,15 @@ impl MqttConnection {
             MqttAsyncClientWrapper::AsyncClientV3(_) => 3,
         };
 
+        let max_retries = config
+            .max_retries
+            .unwrap_or(default_max_retries().unwrap_or(8));
+        let base_retry_delay_secs = config
+            .base_retry_delay_secs
+            .unwrap_or(default_base_retry_delay_secs().unwrap_or(1));
+        let mut error_count = 0;
+        let mut doubler = 1;
+
         if mqtt_version == 5 {
             let mut event_loop_v5 = match event_loop {
                 MqttEventLoopWrapper::EventLoopV5 { event_loop } => event_loop,
@@ -226,7 +239,6 @@ impl MqttConnection {
                     return Err(anyhow::anyhow!("Expected MQTT v5 event loop, exiting..."));
                 }
             };
-
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
@@ -240,6 +252,8 @@ impl MqttConnection {
                                 self.subscribe_to_topics(config).await.unwrap_or_else(|e| {
                                     error!("Failed to subscribe to topics: {e:?}");
                                 });
+                                error_count = 0;
+                                doubler = 1;
                             },
                             Ok(event) => {
                                 let packet = event.to_mqtt_packet();
@@ -248,9 +262,21 @@ impl MqttConnection {
                                             error!("Failed to send MQTT packet to processor: {e:?}");
                                     }
                                 }
+                                error_count = 0;
+                                doubler = 1;
                             },
                             Err(e) => {
+                                error_count += 1;
                                 error!("MQTT event loop error: {e:?}");
+                                if error_count >= max_retries {
+                                    error!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
+                                    return Err(anyhow::anyhow!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop."));
+                                } else {
+                                    let delay = base_retry_delay_secs * doubler;
+                                    info!("Waiting for {delay} seconds before retrying MQTT event loop...");
+                                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    doubler *= 2; // exponential backoff
+                                }
                             }
                         }
                     }
@@ -278,6 +304,8 @@ impl MqttConnection {
                                 self.subscribe_to_topics(config).await.unwrap_or_else(|e| {
                                     error!("Failed to subscribe to topics: {e:?}");
                                 });
+                                error_count = 0;
+                                doubler = 1;
                             },
                             Ok(event) => {
                                 let packet = event.to_mqtt_packet();
@@ -286,8 +314,20 @@ impl MqttConnection {
                                             error!("Failed to send MQTT packet to processor: {e:?}");
                                     }
                                 }
+                                error_count = 0;
+                                doubler = 1;
                             },
                             Err(e) => {
+                                error_count += 1;
+                                 if error_count >= max_retries {
+                                    error!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
+                                    return Err(anyhow::anyhow!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop."));
+                                } else {
+                                    let delay = base_retry_delay_secs * doubler;
+                                    info!("MQTT event loop error: {e:?}. Waiting for {delay} seconds before retrying...");
+                                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                                    doubler *= 2; // exponential backoff
+                                }
                                 error!("MQTT event loop error: {e:?}");
                             }
                         }
