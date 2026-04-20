@@ -286,6 +286,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: mode,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -526,6 +527,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let base = QueryBase::new(config).unwrap();
@@ -572,6 +574,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let base = QueryBase::new(config).unwrap();

@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 use super::types::{now_us, FfiStr};
 use super::vtables::{BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapSender};
-use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_lib::bootstrap::{BootstrapProvider, BootstrapResult};
 
 /// Plugin-side proxy: wraps a `BootstrapProviderVtable` into a local `BootstrapProvider`.
 pub struct FfiBootstrapProviderProxy {
@@ -41,7 +41,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         context: &drasi_lib::bootstrap::BootstrapContext,
         event_tx: drasi_lib::channels::events::BootstrapEventSender,
         settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BootstrapResult> {
         // Extract vtable fields under the lock, then release immediately
         let (vtable_state, vtable_bootstrap_fn) = {
             let vtable = self.vtable.lock().expect("vtable mutex poisoned");
@@ -139,6 +139,13 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         .await
         .expect("forwarding task panicked");
 
-        Ok(count)
+        // The FFI ABI (bootstrap_fn in vtables.rs) returns only a count.
+        // `last_sequence` / `sequences_aligned` require a future extension of
+        // the C ABI to flow across the plugin boundary.
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }

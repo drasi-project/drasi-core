@@ -38,9 +38,33 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use thiserror::Error;
 
 use crate::channels::*;
 use crate::context::SourceRuntimeContext;
+
+/// Structured error type for source operations.
+///
+/// Sources return these errors (via `anyhow::Error`) from trait methods like `subscribe()`.
+/// The orchestration layer can downcast to check for specific error variants:
+/// ```ignore
+/// if let Some(source_err) = err.downcast_ref::<SourceError>() {
+///     match source_err {
+///         SourceError::PositionUnavailable { .. } => { /* handle */ }
+///     }
+/// }
+/// ```
+#[derive(Error, Debug)]
+pub enum SourceError {
+    /// The requested resume position is no longer available.
+    /// The caller should consult its recovery_policy to decide next steps.
+    #[error("Source '{source_id}' cannot resume from position {requested}: position unavailable (earliest available: {earliest_available:?})")]
+    PositionUnavailable {
+        source_id: String,
+        requested: u64,
+        earliest_available: Option<u64>,
+    },
+}
 
 /// Trait defining the interface for all source implementations.
 ///
@@ -121,6 +145,15 @@ pub trait Source: Send + Sync {
     /// should only be started manually via `start_source()`.
     fn auto_start(&self) -> bool {
         true
+    }
+
+    /// Whether this source supports positional replay via `resume_from`.
+    ///
+    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) should
+    /// override this to return `true`. The orchestration layer uses this to
+    /// validate compatibility with persistent queries and to request position handles.
+    fn supports_replay(&self) -> bool {
+        false
     }
 
     /// Start the source
@@ -223,6 +256,10 @@ impl Source for Box<dyn Source + 'static> {
 
     fn auto_start(&self) -> bool {
         (**self).auto_start()
+    }
+
+    fn supports_replay(&self) -> bool {
+        (**self).supports_replay()
     }
 
     async fn start(&self) -> Result<()> {

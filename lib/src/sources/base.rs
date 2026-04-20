@@ -399,6 +399,7 @@ impl SourceBase {
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver,
+            position_handle: None,
         })
     }
 
@@ -462,11 +463,15 @@ impl SourceBase {
                         .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
                         .await
                     {
-                        Ok(count) => {
+                        Ok(result) => {
                             info!(
-                                "Bootstrap completed successfully for query '{}', sent {count} events",
-                                settings_clone.query_id
+                                "Bootstrap completed successfully for query '{}', sent {} events",
+                                settings_clone.query_id, result.event_count
                             );
+                            // `result.last_sequence` / `result.sequences_aligned`
+                            // are intentionally unused at this call site — a
+                            // future query-processor integration issue will
+                            // plumb them through to the handover protocol.
                         }
                         Err(e) => {
                             error!(

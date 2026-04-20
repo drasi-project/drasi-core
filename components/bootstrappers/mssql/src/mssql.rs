@@ -20,7 +20,7 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use drasi_lib::bootstrap::BootstrapProvider;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
 use drasi_mssql_common::{
     validate_sql_identifier, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
@@ -65,7 +65,7 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         context: &BootstrapContext,
         event_tx: tokio::sync::mpsc::Sender<drasi_lib::channels::BootstrapEvent>,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting MS SQL bootstrap for query '{}' with {} node labels",
             request.query_id,
@@ -83,7 +83,11 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
 
         info!("Completed MS SQL bootstrap for query {query_id}: sent {count} records");
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

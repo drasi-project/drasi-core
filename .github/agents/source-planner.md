@@ -1,7 +1,7 @@
 ---
 name: source-planner
 description: Creates detailed implementation plans for new data source and bootstrap components in Drasi.
-model: claude-sonnet-4.5
+model: claude-opus-4.6
 ---
 
 # source-planner
@@ -56,6 +56,7 @@ For **Protocol/Local** sources:
 - **POC must compile and run**
 - Document findings with evidence (file paths, struct definitions)
 - Prove library exposes needed event data
+- Do not fake anything in the POC, review it to ensure it truly verifies capabilities
 
 🚩 **Red Flags** to document:
 - Private fields that block access to needed data
