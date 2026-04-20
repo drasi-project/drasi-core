@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use log::{error, info};
 use tracing::Instrument;
 
-use drasi_lib::channels::{ComponentEvent, ComponentStatus, ComponentType, DispatchMode};
+use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::{bootstrap::BootstrapProvider, channels::SubscriptionResponse};
@@ -140,15 +140,14 @@ impl Source for MySqlReplicationSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         self.shutdown.store(false, Ordering::Relaxed);
         info!("Starting MySQL replication source: {}", self.base.id);
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let base = self.base.clone_shared();
-        let status_tx = self.base.status_tx();
-        let status_clone = self.base.status.clone();
+        let reporter = self.base.status_handle();
         let shutdown = self.shutdown.clone();
 
         let instance_id = self
@@ -171,32 +170,24 @@ impl Source for MySqlReplicationSource {
                 let mut stream = ReplicationStream::new(config, source_id.clone(), base, shutdown);
                 if let Err(e) = stream.run().await {
                     error!("Replication task failed for {source_id}: {e}");
-                    *status_clone.write().await = ComponentStatus::Error;
-                    if let Some(ref tx) = *status_tx.read().await {
-                        let _ = tx
-                            .send(ComponentEvent {
-                                component_id: source_id,
-                                component_type: ComponentType::Source,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!("Replication failed: {e}")),
-                            })
-                            .await;
-                    }
+                    reporter
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Replication failed: {e}")),
+                        )
+                        .await;
                 }
             }
             .instrument(span),
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("MySQL replication started".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -208,20 +199,19 @@ impl Source for MySqlReplicationSource {
 
         info!("Stopping MySQL replication source: {}", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
+        self.base.set_status(ComponentStatus::Stopping, None).await;
         self.shutdown.store(true, Ordering::Relaxed);
 
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("MySQL replication stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
