@@ -27,7 +27,7 @@ use ordered_float::OrderedFloat;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
 use crate::config::{is_valid_identifier, MySqlBootstrapConfig};
@@ -55,7 +55,7 @@ impl MySqlBootstrapHandler {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting MySQL bootstrap for source {} and query {}",
             context.source_id, request.query_id
@@ -67,7 +67,11 @@ impl MySqlBootstrapHandler {
         let tables = self.determine_tables(&request).await?;
         if tables.is_empty() {
             warn!("No tables selected for bootstrap; check configured allowlist and query labels");
-            return Ok(0);
+            return Ok(BootstrapResult {
+                event_count: 0,
+                last_sequence: None,
+                sequences_aligned: false,
+            });
         }
 
         let mut total = 0usize;
@@ -78,7 +82,11 @@ impl MySqlBootstrapHandler {
             total += count;
         }
 
-        Ok(total)
+        Ok(BootstrapResult {
+            event_count: total,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 
     async fn connect(&self) -> Result<Conn> {

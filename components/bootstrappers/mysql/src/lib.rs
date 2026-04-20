@@ -27,7 +27,9 @@ mod tests;
 pub use config::{MySqlBootstrapConfig, TableKeyConfig};
 
 use async_trait::async_trait;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEventSender;
 
 #[derive(Clone)]
@@ -53,7 +55,7 @@ impl BootstrapProvider for MySqlBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BootstrapResult> {
         let mut handler = mysql::MySqlBootstrapHandler::new(self.config.clone());
         handler.execute(request, context, event_tx, settings).await
     }
