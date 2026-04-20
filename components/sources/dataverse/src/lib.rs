@@ -214,7 +214,8 @@ impl DataverseSource {
                     return;
                 }
 
-                match Self::get_initial_delta_token(&client, &entity_set_name, select.as_deref()).await
+                match Self::get_initial_delta_token(&client, &entity_set_name, select.as_deref())
+                    .await
                 {
                     Ok(token) => {
                         log::info!("[{source_id}] Initial delta token obtained for {entity_name}");

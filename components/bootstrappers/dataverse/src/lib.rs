@@ -68,7 +68,9 @@ use drasi_core::models::{
 use log::{debug, info, warn};
 use url::Url;
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::identity::{Credentials, IdentityProvider};
 
@@ -372,7 +374,7 @@ impl BootstrapProvider for DataverseBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting Dataverse bootstrap for query '{}' with {} node labels",
             request.query_id,
@@ -404,7 +406,10 @@ impl BootstrapProvider for DataverseBootstrapProvider {
                 "No matching entities to bootstrap for query '{}'. Configured entities: {:?}, requested labels: {:?}",
                 request.query_id, self.config.entities, request.node_labels
             );
-            return Ok(0);
+            return Ok(BootstrapResult {
+                event_count: 0,
+                ..Default::default()
+            });
         }
 
         let mut total_count = 0;
@@ -448,7 +453,10 @@ impl BootstrapProvider for DataverseBootstrapProvider {
             request.query_id, total_count
         );
 
-        Ok(total_count)
+        Ok(BootstrapResult {
+            event_count: total_count,
+            ..Default::default()
+        })
     }
 }
 

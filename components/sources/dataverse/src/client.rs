@@ -58,7 +58,7 @@ impl DataverseClient {
             let host = url.host_str().unwrap_or_default();
             format!("{}://{}/.default", url.scheme(), host)
         } else {
-            format!("{}/.default", base_url)
+            format!("{base_url}/.default")
         };
         Self {
             base_url,
