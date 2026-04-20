@@ -19,8 +19,9 @@ pub mod schema;
 
 use adaptive_batcher::AdaptiveBatchConfig;
 use config::{
-    default_event_channel_capacity, default_host, default_port, default_qos, MqttConnectProperties,
-    MqttSourceConfig, MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
+    default_base_retry_delay_secs, default_event_channel_capacity, default_host,
+    default_max_retries, default_port, default_qos, MqttConnectProperties, MqttSourceConfig,
+    MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
 };
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -69,6 +70,8 @@ pub struct MqttSourceBuilder {
     topics: Vec<MqttTopicConfig>,
     topic_mappings: Vec<TopicMapping>,
     event_channel_capacity: usize,
+    max_retries: Option<u32>,
+    base_retry_delay_secs: Option<u64>,
     transport: Option<MqttTransportMode>,
     request_channel_capacity: Option<usize>,
     max_inflight: Option<u16>,
@@ -105,6 +108,8 @@ impl MqttSourceBuilder {
             topics: vec![],
             topic_mappings: vec![],
             event_channel_capacity: default_event_channel_capacity(),
+            max_retries: default_max_retries(),
+            base_retry_delay_secs: default_base_retry_delay_secs(),
             transport: None,
             request_channel_capacity: None,
             max_inflight: None,
@@ -173,6 +178,16 @@ impl MqttSourceBuilder {
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.event_channel_capacity = capacity;
+        self
+    }
+
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = Some(max_retries);
+        self
+    }
+
+    pub fn with_base_retry_delay_secs(mut self, delay_sec: u64) -> Self {
+        self.base_retry_delay_secs = Some(delay_sec);
         self
     }
 
@@ -307,6 +322,8 @@ impl MqttSourceBuilder {
         self.topics = config.topics;
         self.topic_mappings = config.topic_mappings;
         self.event_channel_capacity = config.event_channel_capacity;
+        self.max_retries = config.max_retries;
+        self.base_retry_delay_secs = config.base_retry_delay_secs;
         self.transport = config.transport;
         self.request_channel_capacity = config.request_channel_capacity;
         self.max_inflight = config.max_inflight;
@@ -336,6 +353,8 @@ impl MqttSourceBuilder {
             topics: self.topics,
             topic_mappings: self.topic_mappings,
             event_channel_capacity: self.event_channel_capacity,
+            max_retries: self.max_retries,
+            base_retry_delay_secs: self.base_retry_delay_secs,
             transport: self.transport,
             request_channel_capacity: self.request_channel_capacity,
             max_inflight: self.max_inflight,
@@ -435,6 +454,8 @@ mod tests {
                 }],
                 topic_mappings: Vec::new(),
                 event_channel_capacity: 100,
+                max_retries: Some(5),
+                base_retry_delay_secs: Some(2),
                 transport: None,
                 request_channel_capacity: None,
                 max_inflight: None,
