@@ -836,8 +836,8 @@ impl Source for MySource {
 ```rust
 impl MySource {
     /// Create a test subscription (for unit tests)
-    pub fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
-        self.base.test_subscribe()
+    pub async fn test_subscribe(&self) -> Box<dyn ChangeReceiver<SourceEventWrapper>> {
+        self.base.test_subscribe().await
     }
 
     /// Inject a test event (for unit tests)
@@ -976,7 +976,7 @@ mod tests {
         let source = MySource::new("test-source", config).unwrap();
 
         // Create test subscription
-        let mut receiver = source.test_subscribe();
+        let mut receiver = source.test_subscribe().await;
 
         source.start().await.unwrap();
 

@@ -471,8 +471,11 @@ mod tests {
         }];
         let factory = IndexFactory::new(backends, None);
 
-        // Use tokio runtime for async test
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Use a single-threaded runtime to verify compatibility with the `rt` feature.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let index_set = rt
             .block_on(factory.build(&StorageBackendRef::Named("memory_test".to_string()), "q1"))
             .unwrap();

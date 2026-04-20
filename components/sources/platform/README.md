@@ -583,7 +583,7 @@ async fn test_event_consumption() {
         .build()?;
 
     // Create test subscription
-    let mut receiver = source.test_subscribe_async().await;
+    let mut receiver = source.test_subscribe().await;
 
     // Start source
     source.start().await?;
