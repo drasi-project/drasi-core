@@ -506,6 +506,92 @@ async fn test_mqtt_mtls_connection_v3_1_1() -> Result<()> {
 #[tokio::test]
 #[serial]
 #[ignore]
+async fn test_mqtt_reconnection_and_loopbackoff() -> Result<()> {
+    init_logging();
+    init_rustls_crypto_provider();
+
+    // Generate certs
+    let certs =
+        generate_test_certs("localhost", true).expect("Failed to generate test certificates");
+
+    let client_cert = certs
+        .client_cert
+        .expect("Client cert should be present for mTLS test");
+    let client_key = certs
+        .client_key
+        .expect("Client key should be present for mTLS test");
+
+    // initialize config
+    let broker_config = MosquittoConfig::new()
+        .with_listener(8883)
+        .with_allow_anonymous(false)
+        .with_require_certificate(true)
+        .with_use_identity_as_username(true)
+        .with_protocols(vec!["4".to_string()])
+        .with_ca(certs.ca.clone())
+        .with_server_cert(certs.server_cert.clone())
+        .with_server_key(certs.server_key.clone());
+
+    let source_config = MqttSourceConfig {
+        host: "localhost".to_string(),
+        port: broker_config.listener,
+        max_retries: Some(8),
+        base_retry_delay_secs: Some(1),
+        transport: Some(MqttTransportMode::TLS {
+            ca: Some(certs.ca.clone()),
+            ca_path: None,
+            alpn: None,
+            client_auth: Some((client_cert.into_bytes(), client_key.into_bytes())),
+            client_cert_path: None,
+            client_key_path: None,
+        }),
+        ..Default::default()
+    };
+
+    // start container
+    let mut guard = MosquittoGuard::new(&broker_config)
+        .await
+        .expect("Failed to start Mosquitto container");
+
+    // start core with mqtt source
+    let source_slot_name = slot_name();
+    let core = build_core(source_config, source_slot_name.clone()).await?;
+    core.start().await?;
+
+    // check the status of the source.
+    let status = core.get_source_status(&source_slot_name).await?;
+    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+
+    // stop the contianer to trigger reconnection attempts
+    guard.cleanup().await;
+    tokio::time::sleep(Duration::from_secs(16)).await; // wait for a few seconds to allow the core to attempt reconnections
+
+    // restart the container
+    let new_guard = MosquittoGuard::new(&broker_config)
+        .await
+        .expect("Failed to restart Mosquitto container");
+
+    // check the status of the source again to ensure it reconnected successfully.
+    tokio::time::sleep(Duration::from_secs(16)).await; // wait a bit for the core to reconnect
+    let status_after = core.get_source_status(&source_slot_name).await?;
+    assert_eq!(status_after, drasi_lib::ComponentStatus::Running);
+
+    // stop the new container
+    new_guard.cleanup().await;
+    tokio::time::sleep(Duration::from_secs(1 + 2 + 4 + 8 + 16 + 32 + 64 + 10)).await; // wait for a few seconds to allow the core to attempt reconnections
+
+    // check the status of the source again to ensure it become in error state.
+    let status_after_cleanup = core.get_source_status(&source_slot_name).await?;
+    assert_eq!(status_after_cleanup, drasi_lib::ComponentStatus::Error);
+
+    // cleanup
+    core.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 async fn test_mqtt_query_results() -> Result<()> {
     init_logging();
     init_rustls_crypto_provider();

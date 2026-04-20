@@ -67,6 +67,8 @@ let source = MqttSource::builder("mqtt-source")
   | `with_topic_mappings(topic_mappings)` | Set topic-to-graph mappings |
   | `with_timeout_ms(timeout)` | Set MQTT v5 connection timeout |
   | `with_channel_capacity(capacity)` | Event channel capacity |
+  | `with_max_retries(max_retries)` | Max retries inside in the event loop upon failure. |
+  | `with_base_retry_delay_secs(delay_sec)` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff)|
   | `with_transport(transport)` | TCP or TLS transport configuration |
   | `with_request_channel_capacity(capacity)` | Internal request channel capacity |
   | `with_max_inflight(max_inflight)` | Max in-flight outgoing messages |
@@ -135,6 +137,8 @@ sources:
 | `topics` | Subscriptions with per-topic QoS | none |
 | `topic_mappings` | Topic-to-graph mapping rules | none |
 | `event_channel_capacity` | Event channel capacity | `20` |
+| `max_retries` | Max retries inside in the event loop upon failure. | `8` |
+| `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff)| `1` |
 | `transport` | `tcp` or `tls` transport settings | `tcp` |
 | `request_channel_capacity` | Internal request channel capacity | none |
 | `max_inflight` | Max in-flight outgoing messages | none |
