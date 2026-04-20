@@ -106,6 +106,13 @@ pub trait Source: Send + Sync {
         true
     }
 
+    /// Whether this source supports positional replay via `resume_from`.
+    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) should
+    /// override this to return `true`. Default is `false`.
+    fn supports_replay(&self) -> bool {
+        false
+    }
+
     /// Start the source - begins data ingestion and event generation
     async fn start(&self) -> Result<()>;
 
@@ -124,6 +131,11 @@ pub trait Source: Send + Sync {
     /// - `enable_bootstrap`: Whether to request initial data
     /// - `nodes`: Set of node labels the query is interested in
     /// - `relations`: Set of relation labels the query is interested in
+    /// - `resume_from`: Optional sequence position to replay from (replay-capable sources)
+    /// - `request_position_handle`: Whether the query wants a feedback handle
+    ///
+    /// Replay-capable sources return `Err(SourceError::PositionUnavailable { .. })`
+    /// if they cannot honor `resume_from`.
     async fn subscribe(
         &self,
         settings: SourceSubscriptionSettings,
@@ -176,6 +188,12 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     /// Set of relation labels the query is interested in from this source
     pub relations: HashSet<String>,
+    /// If set, the subscribing query requests events replayed from this sequence position.
+    /// Only meaningful when the source returns `supports_replay() == true`.
+    pub resume_from: Option<u64>,
+    /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
+    /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
+    pub request_position_handle: bool,
 }
 ```
 
@@ -183,6 +201,8 @@ This enables:
 - **Label filtering at source**: Sources can pre-filter data to only send relevant labels
 - **Bootstrap optimization**: Bootstrap providers can fetch only the data types needed
 - **Efficient joins**: Multi-source queries receive label allocations for each source
+- **Positional replay**: Replay-capable sources can resume from a requested sequence position
+- **Position feedback**: Queries can share their durably-processed position back to the source
 
 ## Using SourceBase
 
@@ -367,6 +387,10 @@ pub struct SubscriptionResponse {
     pub source_id: String,
     pub receiver: Box<dyn ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
+    /// Shared handle for the query to report its last durably-processed sequence position.
+    /// Created by replay-capable sources when `request_position_handle` is true.
+    /// Initialized to `u64::MAX` (meaning "no position confirmed yet").
+    pub position_handle: Option<Arc<AtomicU64>>,
 }
 ```
 
@@ -443,7 +467,7 @@ Bootstrap provides initial data to newly subscribing queries. The bootstrap syst
 pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request.
     /// Sends bootstrap events to the provided channel.
-    /// Returns the number of elements sent.
+    /// Returns a `BootstrapResult` with the event count plus handover metadata.
     ///
     /// # Arguments
     /// * `request` - Bootstrap request with query ID and labels
@@ -456,7 +480,19 @@ pub trait BootstrapProvider: Send + Sync {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize>;  // Returns count of events sent
+    ) -> Result<BootstrapResult>;
+}
+
+pub struct BootstrapResult {
+    /// Number of bootstrap events sent through the channel.
+    pub event_count: usize,
+    /// The snapshot's position in the source's sequence space (e.g., a
+    /// Postgres WAL LSN). `None` for providers without a positional concept.
+    pub last_sequence: Option<u64>,
+    /// Whether the bootstrap's sequence namespace matches the streaming
+    /// source's sequence namespace (typically `true` only for homogeneous
+    /// source + bootstrapper pairs, e.g., Postgres / Postgres).
+    pub sequences_aligned: bool,
 }
 
 pub struct BootstrapRequest {
@@ -1011,6 +1047,8 @@ mod tests {
             enable_bootstrap: false,
             nodes: ["Item"].iter().map(|s| s.to_string()).collect(),
             relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let response = source.subscribe(settings).await.unwrap();

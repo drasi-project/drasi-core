@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor;
@@ -57,7 +59,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&SourceSubscriptionSettings>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BootstrapResult> {
         // Build FfiStr arrays for node/relation labels
         let node_label_strs: Vec<String> = request.node_labels.clone();
         let rel_label_strs: Vec<String> = request.relation_labels.clone();
@@ -110,7 +112,14 @@ impl BootstrapProvider for BootstrapProviderProxy {
             return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
         }
 
-        Ok(count as usize)
+        // The FFI ABI (bootstrap_fn in vtables.rs) returns only a count.
+        // `last_sequence` / `sequences_aligned` require a future extension of
+        // the C ABI to flow across the plugin boundary.
+        Ok(BootstrapResult {
+            event_count: count as usize,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

@@ -391,6 +391,8 @@ pub fn build_source_vtable<T: Source + 'static>(
             query_id: qid,
             nodes,
             relations,
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -719,6 +721,8 @@ pub fn build_source_vtable_from_boxed(
             query_id: qid,
             nodes,
             relations,
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let handle = (w.runtime_handle)().handle().clone();

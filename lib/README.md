@@ -269,6 +269,7 @@ let config = Query::gql("active-orders")
 | `with_dispatch_buffer_capacity(usize)` | Override instance-level buffer size | Inherited |
 | `with_dispatch_mode(DispatchMode)` | `Channel` (backpressure) or `Broadcast` (fanout) | `Channel` |
 | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
+| `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
 | `build() -> QueryConfig` | Build the configuration | — |
 
@@ -920,6 +921,7 @@ let core = builder
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
 | `dispatch_mode` | `dispatch_mode` | `Option<DispatchMode>` | `Channel` |
 | `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | In-memory |
+| `recovery_policy` | `recoveryPolicy` | `Option<RecoveryPolicy>` | `Strict` (via global default) |
 
 ---
 
