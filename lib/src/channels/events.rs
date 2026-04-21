@@ -47,17 +47,19 @@ pub enum ComponentType {
 /// A typical component lifecycle follows this progression:
 ///
 /// ```text
-/// Stopped → Starting → Running → Stopping → Stopped
-///                ↓
-///              Error
+/// Added → Starting → Running → Stopping → Stopped
+///              ↓                              ↓
+///            Error                         Removed
 /// ```
 ///
 /// # Status Values
 ///
+/// - **Added**: Component has been registered in the graph but not yet started
 /// - **Starting**: Component is initializing (connecting to resources, loading data, etc.)
 /// - **Running**: Component is actively processing (ingesting, querying, or delivering)
 /// - **Stopping**: Component is shutting down gracefully
-/// - **Stopped**: Component is not running (initial or final state)
+/// - **Stopped**: Component is not running (stopped after previously running)
+/// - **Removed**: Component has been removed from the graph
 /// - **Error**: Component encountered an error and cannot continue (see error_message)
 ///
 /// # Usage
@@ -160,10 +162,14 @@ pub enum ComponentType {
 /// ```
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentStatus {
+    /// Component has been registered in the graph but not yet started.
+    Added,
     Starting,
     Running,
     Stopping,
     Stopped,
+    /// Component has been removed from the graph.
+    Removed,
     Reconfiguring,
     Error,
 }

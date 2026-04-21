@@ -1600,7 +1600,7 @@ mod tests {
             assert!(
                 matches!(
                     src.status,
-                    crate::channels::ComponentStatus::Stopped
+                    crate::channels::ComponentStatus::Added
                         | crate::channels::ComponentStatus::Running
                 ),
                 "Source status should be captured: {:?}",

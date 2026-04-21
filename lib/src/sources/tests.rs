@@ -629,7 +629,7 @@ mod manager_tests {
             .1;
 
         assert!(matches!(source1_status, ComponentStatus::Running));
-        assert!(matches!(source2_status, ComponentStatus::Stopped));
+        assert!(matches!(source2_status, ComponentStatus::Added));
     }
 
     /// Test that concurrent add_source calls with the same ID are handled atomically.
@@ -752,8 +752,8 @@ mod manager_tests {
             "Source with auto_start=true should be running"
         );
         assert!(
-            matches!(status2, ComponentStatus::Stopped),
-            "Source with auto_start=false should still be stopped"
+            matches!(status2, ComponentStatus::Added),
+            "Source with auto_start=false should still be in Added state"
         );
     }
 
@@ -818,7 +818,7 @@ mod manager_tests {
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
+            matches!(status, ComponentStatus::Added),
             "Source with auto_start=false should not be started by start_all"
         );
 

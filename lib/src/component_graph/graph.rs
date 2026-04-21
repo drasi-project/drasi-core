@@ -413,7 +413,7 @@ impl ComponentGraph {
 
     /// Remove a component node and all its edges from the graph.
     ///
-    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Stopped`] to all
+    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Removed`] to all
     /// subscribers. Returns the removed node data, or an error if the component
     /// doesn't exist. The instance root node cannot be removed.
     pub fn remove_component(&mut self, id: &str) -> anyhow::Result<ComponentNode> {
@@ -444,7 +444,7 @@ impl ComponentGraph {
         self.emit_event(
             id,
             &kind,
-            ComponentStatus::Stopped,
+            ComponentStatus::Removed,
             Some(format!("{kind} removed")),
         );
 
@@ -889,7 +889,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Source,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -927,7 +927,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Query,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -968,7 +968,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Reaction,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1043,7 +1043,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::BootstrapProvider,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1089,7 +1089,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::IdentityProvider,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1212,25 +1212,30 @@ pub(super) fn is_valid_relationship(
 /// Check if a status transition is valid according to the component lifecycle state machine.
 ///
 /// ```text
-/// Stopped ──→ Starting ──→ Running ──→ Stopping ──→ Stopped
-///    │            │            │            │
-///    │            ↓            ↓            ↓
-///    │          Error        Error        Error
-///    │            │
-///    │            ↓
-///    │         Stopped (aborted start)
-///    │
-///    ↓
+/// Added ──→ Starting ──→ Running ──→ Stopping ──→ Stopped
+///   │           │            │            │
+///   │           ↓            ↓            ↓
+///   │         Error        Error        Error
+///   │           │
+///   │           ↓
+///   │        Stopped (aborted start)
+///   │
+///   ↓
 /// Reconfiguring ──→ Stopped | Starting | Error
 ///
 /// Error ──→ Starting (retry) | Stopped (reset)
+///
+/// Note: Added and Removed are set by the graph on add/remove_component()
+/// and are NOT valid targets for validate_and_transition().
 /// ```
 pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
     use ComponentStatus::*;
     matches!(
         (from, to),
         // Normal lifecycle
-        (Stopped, Starting)
+        (Added, Starting)
+            | (Added, Stopped) // immediate deactivation without starting
+            | (Stopped, Starting)
             | (Starting, Running)
             | (Starting, Error)
             | (Starting, Stopped) // aborted start
@@ -1243,6 +1248,7 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Error, Starting) // retry
             | (Error, Stopped) // reset
             // Reconfiguration (from any stable state)
+            | (Added, Reconfiguring)
             | (Stopped, Reconfiguring)
             | (Running, Reconfiguring)
             | (Error, Reconfiguring)

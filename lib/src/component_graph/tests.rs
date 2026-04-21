@@ -13,7 +13,7 @@ fn source_node(id: &str) -> ComponentNode {
     ComponentNode {
         id: id.to_string(),
         kind: ComponentKind::Source,
-        status: ComponentStatus::Stopped,
+        status: ComponentStatus::Added,
         metadata: HashMap::new(),
     }
 }
@@ -22,7 +22,7 @@ fn query_node(id: &str) -> ComponentNode {
     ComponentNode {
         id: id.to_string(),
         kind: ComponentKind::Query,
-        status: ComponentStatus::Stopped,
+        status: ComponentStatus::Added,
         metadata: HashMap::new(),
     }
 }
@@ -31,7 +31,7 @@ fn reaction_node(id: &str) -> ComponentNode {
     ComponentNode {
         id: id.to_string(),
         kind: ComponentKind::Reaction,
-        status: ComponentStatus::Stopped,
+        status: ComponentStatus::Added,
         metadata: HashMap::new(),
     }
 }
@@ -179,10 +179,10 @@ fn test_update_status() {
 
     assert_eq!(
         graph.get_component("source-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
 
-    // Follow valid transitions: Stopped → Starting → Running
+    // Follow valid transitions: Added → Starting → Running
     graph
         .update_status("source-1", ComponentStatus::Starting)
         .unwrap();
@@ -541,23 +541,23 @@ fn test_update_status_rejects_invalid_transition() {
     let mut graph = create_test_graph();
     graph.add_component(source_node("source-1")).unwrap();
 
-    // source-1 starts as Stopped
+    // source-1 starts as Added
     assert_eq!(
         graph.get_component("source-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
 
-    // Invalid: Stopped → Running (must go through Starting)
+    // Invalid: Added → Running (must go through Starting)
     let result = graph.update_status("source-1", ComponentStatus::Running);
     assert!(result.is_ok());
-    // The update should return None (skipped) and status should remain Stopped
+    // The update should return None (skipped) and status should remain Added
     assert!(result.unwrap().is_none());
     assert_eq!(
         graph.get_component("source-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
 
-    // Valid: Stopped → Starting
+    // Valid: Added → Starting
     let result = graph.update_status("source-1", ComponentStatus::Starting);
     assert!(result.is_ok());
     assert!(result.unwrap().is_some());
@@ -583,7 +583,7 @@ fn test_register_source() {
     );
     assert_eq!(
         graph.get_component("source-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
     // 2 ownership edges
     assert_eq!(graph.edge_count(), 2);
@@ -754,7 +754,7 @@ fn test_validate_and_transition_idempotent_same_state() {
     let mut graph = create_test_graph();
     graph.add_component(source_node("s1")).unwrap();
 
-    let result = graph.validate_and_transition("s1", ComponentStatus::Stopped, None);
+    let result = graph.validate_and_transition("s1", ComponentStatus::Added, None);
     assert!(result.is_ok());
     assert!(result.unwrap().is_none()); // no event for same-state
 }
@@ -789,12 +789,13 @@ fn test_validate_and_transition_invalid_stop_while_stopped() {
     let mut graph = create_test_graph();
     graph.add_component(source_node("s1")).unwrap();
 
+    // Added → Stopping is not valid
     let result = graph.validate_and_transition("s1", ComponentStatus::Stopping, None);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("already stopped"),
-        "Expected 'already stopped' in: {err_msg}"
+        err_msg.contains("Added") && err_msg.contains("Stopping"),
+        "Expected invalid transition message mentioning Added → Stopping in: {err_msg}"
     );
 }
 
@@ -906,7 +907,7 @@ fn test_register_bootstrap_provider_standalone() {
     );
     assert_eq!(
         graph.get_component("bp-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
     // 2 ownership edges (Owns + OwnedBy)
     assert_eq!(graph.edge_count(), 2);
@@ -967,7 +968,7 @@ fn test_register_identity_provider_standalone() {
     );
     assert_eq!(
         graph.get_component("ip-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
     // 2 ownership edges (Owns + OwnedBy)
     assert_eq!(graph.edge_count(), 2);
@@ -1292,7 +1293,7 @@ fn test_subscribe_receives_add_event() {
     let event = event_rx.try_recv().unwrap();
     assert_eq!(event.component_id, "source-1");
     assert_eq!(event.component_type, ComponentType::Source);
-    assert_eq!(event.status, ComponentStatus::Stopped);
+    assert_eq!(event.status, ComponentStatus::Added);
 }
 
 #[test]
@@ -1303,7 +1304,7 @@ fn test_subscribe_receives_status_change_event() {
     graph.add_component(source_node("source-1")).unwrap();
     let _add_event = event_rx.try_recv().unwrap(); // consume add event
 
-    // Transition Stopped → Starting
+    // Transition Added → Starting
     graph
         .validate_and_transition("source-1", ComponentStatus::Starting, None)
         .unwrap();
@@ -1388,7 +1389,7 @@ fn test_apply_update_invalid_transition_returns_none() {
     let (mut graph, _rx) = ComponentGraph::new("test-instance");
     graph.add_component(source_node("source-1")).unwrap();
 
-    // Stopped → Running is not a valid transition (must go through Starting)
+    // Added → Running is not a valid transition (must go through Starting)
     let event = graph.apply_update(ComponentUpdate::Status {
         component_id: "source-1".into(),
         status: ComponentStatus::Running,
@@ -1396,10 +1397,10 @@ fn test_apply_update_invalid_transition_returns_none() {
     });
 
     assert!(event.is_none());
-    // Status should remain Stopped
+    // Status should remain Added
     assert_eq!(
         graph.get_component("source-1").unwrap().status,
-        ComponentStatus::Stopped
+        ComponentStatus::Added
     );
 }
 
@@ -1410,7 +1411,7 @@ fn test_apply_update_same_status_is_noop() {
 
     let event = graph.apply_update(ComponentUpdate::Status {
         component_id: "source-1".into(),
-        status: ComponentStatus::Stopped,
+        status: ComponentStatus::Added,
         message: None,
     });
 
@@ -1542,17 +1543,17 @@ async fn test_wait_for_status_already_reached() {
         g.add_component(source_node("source-1")).unwrap();
     }
 
-    // source-1 starts as Stopped, so waiting for Stopped should return immediately
+    // source-1 starts as Added, so waiting for Added should return immediately
     let result = wait_for_status(
         &graph,
         "source-1",
-        &[ComponentStatus::Stopped],
+        &[ComponentStatus::Added],
         std::time::Duration::from_millis(100),
     )
     .await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), ComponentStatus::Stopped);
+    assert_eq!(result.unwrap(), ComponentStatus::Added);
 }
 
 #[tokio::test]
@@ -1645,17 +1646,17 @@ async fn test_wait_for_status_multiple_targets() {
         g.add_component(source_node("source-1")).unwrap();
     }
 
-    // Stopped matches the second target
+    // Added matches the second target
     let result = wait_for_status(
         &graph,
         "source-1",
-        &[ComponentStatus::Running, ComponentStatus::Stopped],
+        &[ComponentStatus::Running, ComponentStatus::Added],
         std::time::Duration::from_millis(100),
     )
     .await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), ComponentStatus::Stopped);
+    assert_eq!(result.unwrap(), ComponentStatus::Added);
 }
 
 // ========================================================================
@@ -1694,7 +1695,7 @@ fn test_transaction_commit_events_have_correct_status() {
     }
 
     let event = event_rx.try_recv().unwrap();
-    assert_eq!(event.status, ComponentStatus::Stopped);
+    assert_eq!(event.status, ComponentStatus::Added);
     assert_eq!(event.component_type, ComponentType::Source);
 }
 
