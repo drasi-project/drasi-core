@@ -1,0 +1,22 @@
+[package]
+name = "kubernetes-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example using Kubernetes source and bootstrap provider"
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-kubernetes = { path = "../../../components/sources/kubernetes" }
+drasi-bootstrap-kubernetes = { path = "../../../components/bootstrappers/kubernetes" }
+drasi-reaction-log = { path = "../../../components/reactions/log" }
+
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+env_logger = "0.10.0"
+
+[[bin]]
+name = "kubernetes-getting-started"
+path = "main.rs"
