@@ -83,6 +83,10 @@ Write a comprehensive plan in markdown format with the following sections:
 - Configuration fields
 - Strategy for failure handling
 
+### Connection & Lifecycle (persistent-connection targets)
+- Connection recovery strategy (reconnection with backoff on connection loss)
+- Status transition: `Running` must only be set after the connection is established, not before
+
 ## 5. Testing Strategy
 
 ### Unit Tests

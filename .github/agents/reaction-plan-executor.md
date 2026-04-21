@@ -68,6 +68,12 @@ Implement components **exactly as specified** in the plan:
 - Implement mapping strategy as specified
 - Handle data type conversions
 - Organize mapping logic into a dependency for the reaction
+- Always destructure `ResultDiff` enum fields directly (`ResultDiff::Update { data, before, after, .. }`); never serialize a variant to JSON and parse it back
+
+#### Connection Lifecycle (persistent-connection targets)
+- Extract connection setup into a reusable helper method
+- Implement reconnection with exponential backoff when the connection drops
+- Set `ComponentStatus::Running` only after the connection is successfully established inside the spawned task, not before spawning it
 
 #### Output to target system
 - Follow data format and transmission method from plan
