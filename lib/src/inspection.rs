@@ -139,6 +139,71 @@ impl InspectionAPI {
             .map_err(|e| classify_component_error(e, "source", id, "get_status"))
     }
 
+    /// Get best-effort schema information for a specific source.
+    pub async fn get_source_schema(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<Option<crate::config::SourceSchema>> {
+        self.state_guard.require_initialized()?;
+        self.source_manager
+            .get_source_schema(id.to_string())
+            .await
+            .map_err(|e| classify_component_error(e, "source", id, "get_schema"))
+    }
+
+    /// Get the merged graph schema across all registered sources and queries.
+    pub async fn get_graph_schema(&self) -> crate::error::Result<crate::config::GraphSchema> {
+        self.state_guard.require_initialized()?;
+
+        let mut schema = crate::config::GraphSchema::default();
+
+        for (source_id, _) in self.source_manager.list_sources().await {
+            if source_id == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
+                continue;
+            }
+
+            match self
+                .source_manager
+                .get_source_schema(source_id.clone())
+                .await
+            {
+                Ok(Some(source_schema)) if !source_schema.is_empty() => {
+                    schema.merge_source_schema(&source_id, &source_schema);
+                }
+                Ok(_) => schema.record_source_without_schema(&source_id),
+                Err(e) => {
+                    log::warn!("Failed to inspect schema for source '{source_id}': {e}");
+                    schema.record_source_without_schema(&source_id);
+                }
+            }
+        }
+
+        for (query_id, _) in self.query_manager.list_queries().await {
+            if let Some(config) = self.query_manager.get_query_config(&query_id).await {
+                match crate::queries::label_extractor::LabelExtractor::extract_labels(
+                    &config.query,
+                    &config.query_language,
+                ) {
+                    Ok(labels) => {
+                        schema.mark_queried_nodes(
+                            labels.node_labels.iter().map(|label| label.as_str()),
+                            &query_id,
+                        );
+                        schema.mark_queried_relations(
+                            labels.relation_labels.iter().map(|label| label.as_str()),
+                            &query_id,
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to extract labels for query '{query_id}': {e}");
+                    }
+                }
+            }
+        }
+
+        Ok(schema)
+    }
+
     // ============================================================================
     // Query Inspection Methods
     // ============================================================================

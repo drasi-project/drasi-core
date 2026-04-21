@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
-use crate::config::SourceRuntime;
+use crate::config::{SourceRuntime, SourceSchema};
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
@@ -242,6 +242,22 @@ impl SourceManager {
                 properties: source.properties(),
             };
             Ok(runtime)
+        } else {
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
+        }
+    }
+
+    /// Get the best-effort graph schema for a source, if available.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found.
+    pub async fn get_source_schema(&self, id: String) -> Result<Option<SourceSchema>> {
+        let graph = self.graph.read().await;
+        let source = graph.get_runtime::<Arc<dyn Source>>(&id).cloned();
+        drop(graph);
+
+        if let Some(source) = source {
+            Ok(source.describe_schema())
         } else {
             Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }

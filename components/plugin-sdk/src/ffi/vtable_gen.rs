@@ -219,6 +219,21 @@ pub fn build_source_vtable<T: Source + 'static>(
         FfiOwnedStr::from_string(json)
     }
 
+    extern "C" fn describe_schema_fn<T: Source + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!("Source::describe_schema panicked for '{}'", w.cached_id);
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
     /// Emit a lifecycle event, preferring per-instance callback over global.
     fn emit_lifecycle_for<T: Source + 'static>(
         w: &SourceWrapper<T>,
@@ -487,6 +502,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         auto_start_fn: auto_start_fn::<T>,
         dispatch_mode_fn: dispatch_mode_fn::<T>,
         properties_fn: properties_fn::<T>,
+        describe_schema_fn: describe_schema_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -548,6 +564,21 @@ pub fn build_source_vtable_from_boxed(
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let props = w.inner.properties();
         let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
+    extern "C" fn describe_schema_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!("Dynamic source describe_schema panicked for '{}'", w.cached_id);
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
         FfiOwnedStr::from_string(json)
     }
 
@@ -809,6 +840,7 @@ pub fn build_source_vtable_from_boxed(
         auto_start_fn,
         dispatch_mode_fn,
         properties_fn,
+        describe_schema_fn,
         start_fn,
         stop_fn,
         status_fn,

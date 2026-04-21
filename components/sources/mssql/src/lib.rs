@@ -91,6 +91,7 @@ pub use lsn::Lsn;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use drasi_lib::config::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -122,6 +123,82 @@ pub struct MsSqlSource {
 
     /// Shutdown signal receiver (cloned for each task)
     shutdown_rx: watch::Receiver<bool>,
+
+    /// Best-effort cached schema populated from SQL Server catalog metadata.
+    cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+}
+
+fn normalize_table_label(table: &str) -> String {
+    table.rsplit('.').next().unwrap_or(table).to_string()
+}
+
+fn mssql_type_to_property_type(data_type: &str) -> Option<PropertyType> {
+    match data_type {
+        "tinyint" | "smallint" | "int" | "bigint" => Some(PropertyType::Integer),
+        "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => {
+            Some(PropertyType::Float)
+        }
+        "bit" => Some(PropertyType::Boolean),
+        "date" | "datetime" | "datetime2" | "datetimeoffset" | "smalldatetime" | "time" => {
+            Some(PropertyType::Timestamp)
+        }
+        "json" => Some(PropertyType::Json),
+        "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext" | "uniqueidentifier"
+        | "binary" | "varbinary" => Some(PropertyType::String),
+        _ => None,
+    }
+}
+
+async fn introspect_mssql_schema(config: &MsSqlSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let mut connection = MsSqlConnection::connect(config).await?;
+    let mut nodes = Vec::new();
+
+    for table in &config.tables {
+        let (schema_name, table_name) = table
+            .split_once('.')
+            .map(|(schema, name)| (schema.to_string(), name.to_string()))
+            .unwrap_or_else(|| ("dbo".to_string(), table.to_string()));
+
+        let rows = connection
+            .client_mut()
+            .query(
+                "SELECT COLUMN_NAME, DATA_TYPE \
+                 FROM INFORMATION_SCHEMA.COLUMNS \
+                 WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2 \
+                 ORDER BY ORDINAL_POSITION",
+                &[&schema_name, &table_name],
+            )
+            .await?
+            .into_first_result()
+            .await?;
+
+        let properties = rows
+            .into_iter()
+            .map(|row| {
+                let name: &str = row.get(0).unwrap_or_default();
+                let data_type: &str = row.get(1).unwrap_or_default();
+                PropertySchema {
+                    name: name.to_string(),
+                    data_type: mssql_type_to_property_type(data_type),
+                    description: None,
+                }
+            })
+            .collect();
+
+        nodes.push(NodeSchema {
+            label: normalize_table_label(&table_name),
+            properties,
+        });
+    }
+
+    Ok(Some(SourceSchema {
+        nodes,
+        relations: Vec::new(),
+    }))
 }
 
 impl MsSqlSource {
@@ -147,6 +224,7 @@ impl MsSqlSource {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -247,6 +325,28 @@ impl Source for MsSqlSource {
         self.base.get_auto_start()
     }
 
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.cached_schema
+            .read()
+            .ok()
+            .and_then(|schema| schema.clone())
+            .or_else(|| {
+                if self.config.tables.is_empty() {
+                    None
+                } else {
+                    Some(SourceSchema {
+                        nodes: self
+                            .config
+                            .tables
+                            .iter()
+                            .map(|table| NodeSchema::new(normalize_table_label(table)))
+                            .collect(),
+                        relations: Vec::new(),
+                    })
+                }
+            })
+    }
+
     async fn status(&self) -> drasi_lib::channels::ComponentStatus {
         self.base.get_status().await
     }
@@ -260,6 +360,21 @@ impl Source for MsSqlSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
+
+        match introspect_mssql_schema(&self.config).await {
+            Ok(Some(schema)) => {
+                if let Ok(mut cached) = self.cached_schema.write() {
+                    *cached = Some(schema);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Failed to introspect MS SQL schema for '{}': {e}",
+                    self.base.id
+                );
+            }
+        }
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
@@ -496,6 +611,7 @@ impl MsSqlSourceBuilder {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 }
@@ -552,6 +668,24 @@ mod tests {
 
         assert_eq!(source.config.table_keys.len(), 1);
         assert_eq!(source.config.table_keys[0].table, "orders");
+    }
+
+    #[test]
+    fn test_describe_schema_falls_back_to_configured_tables() {
+        let source = MsSqlSource::builder("test-source")
+            .with_database("testdb")
+            .with_user("testuser")
+            .with_tables(vec!["dbo.orders".to_string(), "customers".to_string()])
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("configured mssql tables should produce fallback schema");
+
+        assert_eq!(schema.nodes.len(), 2);
+        assert!(schema.nodes.iter().any(|node| node.label == "orders"));
+        assert!(schema.nodes.iter().any(|node| node.label == "customers"));
     }
 }
 

@@ -251,6 +251,7 @@ use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::config::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -318,6 +319,47 @@ struct WebhookState {
     route_matcher: RouteMatcher,
     /// Template engine for payload transformation
     template_engine: TemplateEngine,
+}
+
+fn extract_property_schemas(properties: Option<&serde_json::Value>) -> Vec<PropertySchema> {
+    match properties {
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .map(|key| PropertySchema::new(key.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn derive_schema_from_webhooks(webhooks: &WebhookConfig) -> Option<SourceSchema> {
+    let mut nodes = Vec::new();
+    let mut relations = Vec::new();
+
+    for route in &webhooks.routes {
+        for mapping in &route.mappings {
+            let Some(label) = mapping.template.labels.first().cloned() else {
+                continue;
+            };
+
+            let properties = extract_property_schemas(mapping.template.properties.as_ref());
+
+            match mapping.element_type {
+                crate::config::ElementType::Node => nodes.push(NodeSchema { label, properties }),
+                crate::config::ElementType::Relation => relations.push(RelationSchema {
+                    label,
+                    from: None,
+                    to: None,
+                    properties,
+                }),
+            }
+        }
+    }
+
+    if nodes.is_empty() && relations.is_empty() {
+        None
+    } else {
+        Some(SourceSchema { nodes, relations })
+    }
 }
 
 impl HttpSource {
@@ -907,6 +949,13 @@ impl Source for HttpSource {
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.config
+            .webhooks
+            .as_ref()
+            .and_then(derive_schema_from_webhooks)
     }
 
     async fn start(&self) -> Result<()> {
@@ -1688,6 +1737,58 @@ mod tests {
             let props = source.properties();
 
             assert!(!props.contains_key("endpoint"));
+        }
+
+        #[test]
+        fn test_describe_schema_uses_webhook_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Node,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["Order".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "total": "{{payload.total}}",
+                                    "status": "{{payload.status}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema");
+
+            assert_eq!(schema.nodes.len(), 1);
+            let node = &schema.nodes[0];
+            assert_eq!(node.label, "Order");
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "total"));
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "status"));
         }
     }
 

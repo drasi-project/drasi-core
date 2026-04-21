@@ -160,6 +160,34 @@ mod properties {
     }
 
     #[test]
+    fn test_describe_schema_matches_sensor_reading_shape() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::sensor_reading(5))
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("mock source should expose schema");
+
+        assert_eq!(schema.nodes.len(), 1);
+        let node = &schema.nodes[0];
+        assert_eq!(node.label, "SensorReading");
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "sensor_id"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "temperature"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "humidity"));
+    }
+
+    #[test]
     fn test_auto_start_returns_configured_value_false() {
         let source = MockSourceBuilder::new("test")
             .with_auto_start(false)
