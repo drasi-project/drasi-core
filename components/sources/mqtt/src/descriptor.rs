@@ -175,7 +175,6 @@ pub struct MappingRelationDto {
     pub label: String,
     pub from: String,
     pub to: String,
-    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -419,7 +418,6 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
                         label: r.label,
                         from: r.from,
                         to: r.to,
-                        id: r.id,
                     })
                     .collect(),
             })
