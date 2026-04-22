@@ -383,9 +383,16 @@ impl PostgresReplicationSource {
         }
     }
 
-    async fn restart_replication_from(&self, start_lsn: u64) -> Result<()> {
+    async fn abort_replication_task(&self) {
+        if let Some(task) = self.base.task_handle.write().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    async fn pause_replication_for_restart(&self, start_lsn: u64) {
         info!(
-            "Restarting PostgreSQL source '{}' from requested LSN {:x}",
+            "Pausing PostgreSQL source '{}' before replay from requested LSN {:x}",
             self.base.id, start_lsn
         );
 
@@ -398,11 +405,10 @@ impl PostgresReplicationSource {
             )
             .await;
 
-        if let Some(task) = self.base.task_handle.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        self.abort_replication_task().await;
+    }
 
+    async fn resume_replication_from(&self, start_lsn: u64) -> Result<()> {
         self.spawn_replication_task(Some(start_lsn)).await?;
 
         self.base
@@ -415,6 +421,16 @@ impl PostgresReplicationSource {
             .await;
 
         Ok(())
+    }
+
+    async fn restart_replication_from(&self, start_lsn: u64) -> Result<()> {
+        info!(
+            "Restarting PostgreSQL source '{}' from requested LSN {:x}",
+            self.base.id, start_lsn
+        );
+
+        self.pause_replication_for_restart(start_lsn).await;
+        self.resume_replication_from(start_lsn).await
     }
 
     async fn get_earliest_available_lsn(&self) -> Result<u64> {
@@ -496,11 +512,7 @@ impl Source for PostgresReplicationSource {
 
         self.base.set_status(ComponentStatus::Stopping, None).await;
 
-        // Cancel the replication task
-        if let Some(task) = self.base.task_handle.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        self.abort_replication_task().await;
 
         self.base
             .set_status(
@@ -521,6 +533,7 @@ impl Source for PostgresReplicationSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         let mut restart_from = None;
+        let mut pause_before_subscribe = false;
 
         if let Some(resume_from) = settings.resume_from {
             let earliest_available = self.get_earliest_available_lsn().await?;
@@ -538,16 +551,42 @@ impl Source for PostgresReplicationSource {
 
             if !is_running || read_lsn == 0 || resume_from < read_lsn {
                 restart_from = Some(resume_from);
+                pause_before_subscribe = is_running;
             }
         }
 
-        let response = self
+        if let Some(start_lsn) = restart_from.filter(|_| pause_before_subscribe) {
+            // Quiesce the current replication task before attaching the resumed
+            // receiver so it cannot observe newer live events ahead of replayed
+            // older WAL entries.
+            self.pause_replication_for_restart(start_lsn).await;
+        }
+
+        let response = match self
             .base
             .subscribe_with_bootstrap(&settings, "PostgreSQL")
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if pause_before_subscribe {
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to register replay subscription: {err}")),
+                        )
+                        .await;
+                }
+                return Err(err);
+            }
+        };
 
         if let Some(start_lsn) = restart_from {
-            self.restart_replication_from(start_lsn).await?;
+            if pause_before_subscribe {
+                self.resume_replication_from(start_lsn).await?;
+            } else {
+                self.restart_replication_from(start_lsn).await?;
+            }
         }
 
         Ok(response)
@@ -943,6 +982,27 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[tokio::test]
+        async fn test_pause_replication_for_restart_aborts_existing_task() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
+
+            source.base.set_status(ComponentStatus::Running, None).await;
+
+            let task = tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            });
+            *source.base.task_handle.write().await = Some(task);
+
+            source.pause_replication_for_restart(42).await;
+
+            assert!(source.base.task_handle.read().await.is_none());
+            assert_eq!(source.status().await, ComponentStatus::Starting);
         }
     }
 

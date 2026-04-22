@@ -566,6 +566,92 @@ async fn test_resume_from_retained_lsn_replays_sequence_stamped_events() -> Resu
 #[tokio::test]
 #[serial]
 #[ignore]
+async fn test_resume_subscription_replays_before_new_live_events() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let source = Arc::new(build_source(pg.config(), slot_name.clone())?);
+    source.start().await?;
+
+    let mut sub1 = source
+        .subscribe(subscription_settings(source.id(), "q1", None, true))
+        .await?;
+    let handle1 = sub1
+        .position_handle
+        .as_ref()
+        .expect("expected position handle for replay-capable subscription")
+        .clone();
+
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+    let event1 = wait_for_source_event(&mut sub1).await?;
+    let seq1 = event1
+        .sequence
+        .expect("expected WAL sequence on first event");
+    handle1.store(seq1, Ordering::Relaxed);
+
+    insert_test_row(&client, TEST_TABLE, 2, "Bob").await?;
+    let event2 = wait_for_source_event(&mut sub1).await?;
+    let seq2 = event2
+        .sequence
+        .expect("expected WAL sequence on second event");
+    handle1.store(seq2, Ordering::Relaxed);
+
+    let source_for_resume = source.clone();
+    let source_id = source.id().to_string();
+    let subscribe_task = tokio::spawn(async move {
+        source_for_resume
+            .subscribe(subscription_settings(&source_id, "q2", Some(seq1), true))
+            .await
+    });
+
+    tokio::task::yield_now().await;
+
+    let mut inserted_during_resume = false;
+    for next_id in 3..=12 {
+        if subscribe_task.is_finished() {
+            break;
+        }
+
+        insert_test_row(&client, TEST_TABLE, next_id, &format!("User {next_id}")).await?;
+        inserted_during_resume = true;
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        inserted_during_resume,
+        "expected at least one live insert while the replaying subscription was pending"
+    );
+
+    let mut resumed = subscribe_task.await??;
+
+    let first = wait_for_source_event(&mut resumed).await?;
+    let first_seq = first
+        .sequence
+        .expect("expected sequence on first resumed event");
+    assert!(
+        first_seq <= seq2,
+        "expected resumed subscriber to receive replay backlog before newer live events, got {first_seq:x} > {seq2:x}"
+    );
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -> Result<()> {
     init_logging();
 
@@ -644,6 +730,23 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
     }
 
     source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_get_slot_confirmed_flush_lsn_returns_none_when_slot_missing() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    let lsn = get_slot_confirmed_flush_lsn(&client, "missing_slot").await?;
+    assert_eq!(lsn, None);
+
     pg.cleanup().await;
 
     Ok(())

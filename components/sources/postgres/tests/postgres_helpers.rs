@@ -260,9 +260,15 @@ pub async fn create_logical_replication_slot(client: &Client, slot_name: &str) -
 
 pub async fn get_slot_confirmed_flush_lsn(client: &Client, slot_name: &str) -> Result<Option<u64>> {
     let sql = "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1";
-    let row = client.query_one(sql, &[&slot_name]).await?;
-    let lsn: Option<String> = row.get(0);
-    lsn.map(|value| parse_lsn(&value)).transpose()
+    let row = client.query_opt(sql, &[&slot_name]).await?;
+
+    match row {
+        Some(row) => {
+            let lsn: Option<String> = row.get(0);
+            lsn.map(|value| parse_lsn(&value)).transpose()
+        }
+        None => Ok(None),
+    }
 }
 
 fn parse_lsn(lsn: &str) -> Result<u64> {
