@@ -15,8 +15,10 @@
 //! Configuration types for MQTT source.
 //!
 //! This module contains configuration types for MQTT source and shared types.
+use crate::FROM_TO_STARTS_WITH;
 use bytes::Bytes;
 use drasi_lib::identity::IdentityProvider;
+use log::warn;
 use rumqttc::{v5::MqttOptions as MqttOptionsV5, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -243,9 +245,8 @@ pub struct MappingNode {
 #[serde(deny_unknown_fields)]
 pub struct MappingRelation {
     pub label: String, // relation label
-    pub from: String,  // label if the source node
-    pub to: String,    // label of the destination node
-    pub id: String,    // relation id template
+    pub from: String,  // source node id pattern
+    pub to: String,    // target node id pattern
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -443,6 +444,7 @@ pub struct MqttSourceConfig {
 impl MqttSourceConfig {
     /// Validate the configuration and return an error if invalid.
     pub fn validate(&self) -> anyhow::Result<()> {
+        // validate host and port
         if self.port == 0 {
             return Err(anyhow::anyhow!("Port number cannot be 0"));
         }
@@ -452,6 +454,7 @@ impl MqttSourceConfig {
             }
         }
 
+        // validate keep alive interval (following rumqttc strict rule for the keep alive interval)
         if let Some(keep_alive) = self.keep_alive {
             if keep_alive < 5 {
                 return Err(anyhow::anyhow!(
@@ -460,6 +463,7 @@ impl MqttSourceConfig {
             }
         }
 
+        // validate adaptive batching parameters
         if let (Some(min_batch), Some(max_batch)) =
             (self.adaptive_min_batch_size, self.adaptive_max_batch_size)
         {
@@ -479,12 +483,14 @@ impl MqttSourceConfig {
             }
         }
 
+        // validate packet size parameters
         if self.max_incoming_packet_size.is_none() ^ self.max_outgoing_packet_size.is_none() {
             return Err(anyhow::anyhow!(
                 "Both max_incoming_packet_size and max_outgoing_packet_size must be set together"
             ));
         }
 
+        // validate topic mappings
         for topic_mapping in &self.topic_mappings {
             if topic_mapping.properties.mode == MappingMode::PayloadAsField
                 && topic_mapping.properties.field_name.is_none()
@@ -507,12 +513,14 @@ impl MqttSourceConfig {
             Self::validate_mapping_placeholders(topic_mapping)?;
         }
 
+        // validate authentication config
         if self.username.is_some() ^ self.password.is_some() {
             return Err(anyhow::anyhow!(
                 "Both username and password must be set together for authentication"
             ));
         }
 
+        // validate transport config
         if let Some(transport) = &self.transport {
             transport.validate()?;
         }
@@ -531,6 +539,7 @@ impl MqttSourceConfig {
     }
 
     fn validate_mapping_placeholders(mapping: &TopicMapping) -> anyhow::Result<()> {
+        let mut node_ids = Vec::new();
         let mut router = matchit::Router::new();
         router.insert(&mapping.pattern, ()).map_err(|e| {
             anyhow::anyhow!("Invalid topic mapping pattern '{}': {}", mapping.pattern, e)
@@ -547,6 +556,8 @@ impl MqttSourceConfig {
             &mapping.pattern,
         )?;
 
+        node_ids.push(mapping.entity.id.clone());
+
         if let Some(field_name) = mapping.properties.field_name.as_ref() {
             Self::validate_template_placeholders(
                 field_name,
@@ -556,6 +567,7 @@ impl MqttSourceConfig {
             )?;
         }
 
+        // validate inject placeholders
         for inject in &mapping.properties.inject {
             for (key, value) in inject {
                 Self::validate_template_placeholders(
@@ -567,6 +579,7 @@ impl MqttSourceConfig {
             }
         }
 
+        // validate node id's
         for (idx, node) in mapping.nodes.iter().enumerate() {
             Self::validate_template_placeholders(
                 &node.id,
@@ -574,15 +587,51 @@ impl MqttSourceConfig {
                 &format!("nodes[{idx}].id"),
                 &mapping.pattern,
             )?;
+
+            node_ids.push(node.id.clone());
         }
 
+        // validate relation id's and from/to patterns
         for (idx, relation) in mapping.relations.iter().enumerate() {
-            Self::validate_template_placeholders(
-                &relation.id,
-                &allowed,
-                &format!("relations[{idx}].id"),
-                &mapping.pattern,
-            )?;
+            if (!relation.from.starts_with(FROM_TO_STARTS_WITH)) {
+                Self::validate_template_placeholders(
+                    &relation.from,
+                    &allowed,
+                    &format!("relations[{idx}].from"),
+                    &mapping.pattern,
+                )?;
+
+                if (!node_ids.contains(&relation.from)) {
+                    warn!("relations[{idx}].from references a node/entity id '{}' that is not defined in nodes for pattern '{}'. It should be defined in nodes.",
+                        relation.from, mapping.pattern
+                    );
+                }
+            } else if (mapping.properties.mode == MappingMode::PayloadAsField) {
+                return Err(anyhow::anyhow!(
+                    "relations[{idx}].from cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern '{}'",
+                    mapping.pattern
+                ));
+            }
+
+            if (!relation.to.starts_with(FROM_TO_STARTS_WITH)) {
+                Self::validate_template_placeholders(
+                    &relation.to,
+                    &allowed,
+                    &format!("relations[{idx}].to"),
+                    &mapping.pattern,
+                )?;
+
+                if (!node_ids.contains(&relation.to)) {
+                    warn!("relations[{idx}].to references a node/entity id '{}' that is not defined in nodes for pattern '{}'. It should be defined in nodes.",
+                        relation.to, mapping.pattern
+                    );
+                }
+            } else if (mapping.properties.mode == MappingMode::PayloadAsField) {
+                return Err(anyhow::anyhow!(
+                    "relations[{idx}].to cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern '{}'",
+                    mapping.pattern
+                ));
+            }
         }
 
         Ok(())
@@ -722,9 +771,8 @@ mod tests {
             }],
             relations: vec![MappingRelation {
                 label: "CONTAINS".to_string(),
-                from: "FLOOR".to_string(),
-                to: "ROOM".to_string(),
-                id: "{floor}_contains_{room}".to_string(),
+                from: "{floor}".to_string(),
+                to: "{room}:{device}".to_string(),
             }],
         }
     }
@@ -979,11 +1027,9 @@ topic_mappings:
       - label: "CONTAINS"
         from: "FLOOR"
         to: "ROOM"
-        id: "{floor}_contains_{room}"
       - label: "LOCATED_IN"
-        from: "ROOM"
-        to: "DEVICE"
-        id: "{device}_located_in_{room}"
+        from: "{room}:{device}"
+        to: "{room}"
 event_channel_capacity: 64
 adaptive_enabled: true
 adaptive_min_batch_size: 2
@@ -1183,7 +1229,7 @@ transport:
     }
 
     #[test]
-    fn yaml_deserialization_rejects_conflicting_tls_fields() {
+    fn yaml_deserialization_rejects_conflicting_tls_ca_fields() {
         let yaml = r#"
 transport:
     mode: tls
@@ -1198,6 +1244,28 @@ transport:
             .validate()
             .expect_err("conflicting TLS fields should be rejected");
         assert!(err.to_string().contains("specify either 'ca' or 'ca_path'"));
+    }
+
+    #[test]
+    fn yaml_deserialization_rejects_conflicting_tls_client_auth_fields() {
+        let yaml = r#"
+transport:
+    mode: tls
+    config:
+        ca: "ca-bytes"
+        client_auth:
+          - [99, 101, 114, 116, 45, 98, 121, 116, 101, 115]
+          - [107, 101, 121, 45, 98, 121, 116, 101, 115]
+        client_cert_path: "/tmp/client.crt"
+        client_key_path: "/tmp/client.key"
+"#;
+        let config: MqttSourceConfig = from_str(yaml).expect("yaml should deserialize");
+        let err = config
+            .validate()
+            .expect_err("conflicting TLS fields should be rejected");
+        assert!(err.to_string().contains(
+            "specify either 'client_auth' or ('client_cert_path' and 'client_key_path'), not both"
+        ));
     }
 
     #[test]
@@ -1249,5 +1317,91 @@ transport:
 "#;
         let err = serde_yaml::from_str::<MqttSourceConfig>(yaml);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn yaml_validate_accepts_valid_topic_mapping_pattern() {
+        let yaml = r#"
+topic_mappings:
+  - pattern: "building/{floor}/{room}/{device}"
+    entity:
+      label: "DEVICE"
+      id: "{room}:{device}"
+    properties:
+      mode: payload_spread
+    nodes:
+        - label: "FLOOR"
+          id: "{floor}"
+        - label: "ROOM"
+          id: "{room}"
+    relations:
+    - label: "CONTAINS"
+      from: "{floor}"
+      to: "{room}:{device}"
+    - label: "LOCATED_IN"
+      from: "{device}"
+      to: "$.reading"
+"#;
+        let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
+        let result = config.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn yaml_validate_rejects_using_from_data_relation_nodes_when_payload_as_field() {
+        let yaml = r#"
+topic_mappings:
+  - pattern: "building/{floor}/{room}/{device}"
+    entity:
+      label: "DEVICE"
+      id: "{room}:{device}"
+    properties:
+      mode: payload_as_field
+      field_name: "reading"
+    nodes:
+        - label: "FLOOR"
+          id: "{floor}"
+        - label: "ROOM"
+          id: "{room}"
+    relations:
+    - label: "CONTAINS"
+      from: "{floor}"
+      to: "{room}:{device}"
+    - label: "LOCATED_IN"
+      from: "{device}"
+      to: "$.reading"
+"#;
+        let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
+        let result = config.validate().expect_err("Validation error expected");
+        assert!(result.to_string().contains("cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern 'building/{floor}/{room}/{device}"));
+    }
+
+    #[test]
+    fn yaml_validate_rejects_using_invalid_placeholders_in_relation_templates() {
+        let yaml = r#"
+topic_mappings:
+  - pattern: "building/{floor}/{room}/{device}"
+    entity:
+      label: "DEVICE"
+      id: "{room}:{device}"
+    properties:
+      mode: payload_as_field
+      field_name: "reading"
+    nodes:
+        - label: "FLOOR"
+          id: "{floor}"
+        - label: "ROOM"
+          id: "{room}"
+    relations:
+    - label: "CONTAINS"
+      from: "{floor}"
+      to: "{room}:{device}"
+    - label: "LOCATED_IN"
+      from: "{deice}"
+      to: "$.reading"
+"#;
+        let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
+        let result = config.validate().expect_err("Validation error expected");
+        assert!(result.to_string().contains("Unknown placeholder '{deice}' in relations[1].from for pattern 'building/{floor}/{room}/{device}'. Allowed placeholders come from the pattern."));
     }
 }
