@@ -1664,11 +1664,11 @@ impl QueryManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        let mut graph = self.graph.write().await;
+        let graph = self.graph.read().await;
         if !graph.has_runtime(id) {
             return None;
         }
-        Some(graph.subscribe_events(id))
+        graph.subscribe_events(id)
     }
 }
 

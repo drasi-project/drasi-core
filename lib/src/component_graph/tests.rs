@@ -1850,7 +1850,9 @@ fn test_subscribe_events_returns_history_and_receiver() {
     };
     graph.record_event(event);
 
-    let (history, _rx) = graph.subscribe_events("source-1");
+    let (history, _rx) = graph
+        .subscribe_events("source-1")
+        .expect("channel should exist after recording an event");
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].status, ComponentStatus::Starting);
 }
@@ -1860,7 +1862,9 @@ fn test_subscribe_events_receives_new_events() {
     let (mut graph, _rx) = ComponentGraph::new("test-instance");
     graph.add_component(source_node("source-1")).unwrap();
 
-    let (_history, mut event_rx) = graph.subscribe_events("source-1");
+    let (_history, mut event_rx) = graph
+        .subscribe_events("source-1")
+        .expect("channel should exist after add_component");
 
     // Record a new event after subscribing
     let event = ComponentEvent {
@@ -1878,10 +1882,13 @@ fn test_subscribe_events_receives_new_events() {
 
 #[test]
 fn test_subscribe_events_empty_history_for_new_component() {
-    let (mut graph, _rx) = ComponentGraph::new("test-instance");
+    let (graph, _rx) = ComponentGraph::new("test-instance");
 
-    let (history, _rx) = graph.subscribe_events("brand-new");
-    assert!(history.is_empty());
+    let result = graph.subscribe_events("brand-new");
+    assert!(
+        result.is_none(),
+        "subscribe_events should return None for a component with no event channel"
+    );
 }
 
 // ========================================================================

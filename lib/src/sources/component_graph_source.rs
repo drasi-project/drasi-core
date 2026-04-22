@@ -121,6 +121,19 @@ impl Source for ComponentGraphSource {
     }
 
     async fn start(&self) -> Result<()> {
+        // Guard against double-start: if already running or starting, no-op.
+        let current = self.base.get_status().await;
+        if matches!(
+            current,
+            ComponentStatus::Running | ComponentStatus::Starting
+        ) {
+            warn!(
+                "Component graph source for instance '{}' is already {current:?}, skipping start",
+                self.instance_id
+            );
+            return Ok(());
+        }
+
         info!(
             "Starting component graph source for instance '{}'",
             self.instance_id

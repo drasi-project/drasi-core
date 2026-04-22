@@ -97,7 +97,7 @@ pub struct ComponentGraph {
     /// component in the graph. Events are recorded by [`apply_update()`] and
     /// [`remove_component()`]. Managers delegate event queries here rather than
     /// maintaining their own per-manager histories.
-    event_history: ComponentEventHistory,
+    pub(super) event_history: ComponentEventHistory,
 }
 
 /// Default broadcast channel capacity for component events.
@@ -364,7 +364,8 @@ impl ComponentGraph {
     pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
         let (node_idx, event, _, _) = self.add_component_internal(node)?;
         if let Some(event) = event {
-            let _ = self.event_tx.send(event);
+            let _ = self.event_tx.send(event.clone());
+            self.event_history.record_event(event);
         }
         Ok(node_idx)
     }
@@ -1163,13 +1164,13 @@ impl ComponentGraph {
 
     /// Subscribe to live lifecycle events for a component.
     ///
-    /// Returns the current history and a broadcast receiver for new events.
-    /// Creates the component's event channel if it doesn't exist.
+    /// Returns the current history and a broadcast receiver for new events,
+    /// or `None` if the component has no event channel yet.
     pub fn subscribe_events(
-        &mut self,
+        &self,
         component_id: &str,
-    ) -> (Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>) {
-        self.event_history.subscribe(component_id)
+    ) -> Option<(Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>)> {
+        self.event_history.try_subscribe(component_id)
     }
 }
 
