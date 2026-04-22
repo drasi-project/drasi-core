@@ -35,6 +35,7 @@ members = [
   "components/reactions/http-adaptive",
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
+  "components/reactions/aws-sqs",
   "components/reactions/sse",
   "components/reactions/platform",
   "components/reactions/profiler",
@@ -124,6 +125,7 @@ drasi-source-application = { version = "0.1.12", path = "components/sources/appl
 drasi-bootstrap-application = { version = "0.1.11", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.12", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.9", path = "components/reactions/grpc" }
+drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.1.1", path = "components/mssql-common" }
 
 [workspace.lints.rust]
