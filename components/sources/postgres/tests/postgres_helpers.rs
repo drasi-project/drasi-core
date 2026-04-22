@@ -131,6 +131,10 @@ async fn setup_postgres_raw() -> (ContainerAsync<GenericImage>, ReplicationPostg
         .with_env_var("POSTGRES_PASSWORD", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
         .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var(
+            "POSTGRES_INITDB_ARGS",
+            "--auth-host=scram-sha-256 --auth-local=scram-sha-256",
+        )
         .with_cmd([
             "-c",
             "wal_level=logical",
