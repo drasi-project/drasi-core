@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
+use drasi_lib::error;
 use matchit::{Params, Router};
+use serde_yaml::mapping;
 
 use crate::schema::MqttSourceChange;
 use crate::utils::MqttPacket;
+use crate::FROM_TO_STARTS_WITH;
 use crate::{
     config::{InjectId, MappingMode, MappingNode, MappingRelation, TopicMapping},
     MqttElement,
@@ -50,7 +55,9 @@ impl PatternMatcher {
                 let mapping = matched.value;
                 let params = matched.params;
 
-                match Self::create_entity(mapping, &params, packet) {
+                let mut properties = Self::generate_packet_properties(mapping, &params, packet)?;
+
+                match Self::create_entity(mapping, &params, packet.timestamp, &mut properties) {
                     Ok(change) => result.push(change),
                     Err(e) => {
                         error!(
@@ -62,7 +69,7 @@ impl PatternMatcher {
                 }
 
                 let timestamp = packet.timestamp;
-                Self::create_hierarchy(mapping, &params, timestamp, &mut result);
+                Self::create_hierarchy(mapping, &params, timestamp, &mut properties, &mut result)?;
 
                 Ok(result)
             }
@@ -76,15 +83,14 @@ impl PatternMatcher {
         }
     }
 
-    fn create_entity(
+    fn generate_packet_properties(
         mapping: &TopicMapping,
         params: &Params,
         packet: &MqttPacket,
-    ) -> anyhow::Result<MqttSourceChange> {
+    ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
         // mapping is validated from an initial step, so we can safely unwrap the field_name for PayloadAsField mode
-
         // payload parsing based on the mapping mode
-        let mut properties = match &mapping.properties.mode {
+        match &mapping.properties.mode {
             MappingMode::PayloadAsField => {
                 let field_name = Self::map_template(
                     mapping.properties.field_name.as_ref().ok_or_else(|| {
@@ -93,29 +99,55 @@ impl PatternMatcher {
                     params,
                 );
                 let mut props = serde_json::Map::new();
-                let val = serde_json::from_slice(&packet.payload).unwrap_or_else(|_| {
-                    serde_json::Value::String(String::from_utf8_lossy(&packet.payload).into_owned())
-                });
+                let val = match serde_json::from_slice(&packet.payload) {
+                    // throw error if payload is not a value.
+                    Ok(serde_json::Value::Object(_)) => {
+                        error!("Expected primitive value in payload for PayloadAsField mode, got JSON object.");
+                        Err(anyhow::anyhow!("Expected primitive value in payload for PayloadAsField mode, got JSON object."))
+                    }
+                    Ok(val) => Ok(val),
+                    Err(e) => {
+                        match serde_json::Value::String(
+                            String::from_utf8_lossy(&packet.payload).to_string(),
+                        ) {
+                            serde_json::Value::String(s) => Ok(serde_json::Value::String(s)),
+                            _ => {
+                                error!("Failed to parse payload for PayloadAsField mode: {e}.");
+                                Err(anyhow::anyhow!(
+                                    "Failed to parse payload for PayloadAsField mode: {e}."
+                                ))
+                            }
+                        }
+                    }
+                }?;
+
                 props.insert(field_name, val);
-                props
+                Ok(props)
             }
             MappingMode::PayloadSpread => {
                 match serde_json::from_slice::<serde_json::Value>(&packet.payload) {
-                    Ok(serde_json::Value::Object(map)) => map,
+                    Ok(serde_json::Value::Object(map)) => Ok(map),
                     Ok(_) => {
                         error!("Expected JSON object in payload for PayloadSpread mode, got different type.");
-                        return Err(anyhow::anyhow!("Expected JSON object in payload for PayloadSpread mode, got different type."));
+                        Err(anyhow::anyhow!("Expected JSON object in payload for PayloadSpread mode, got different type."))
                     }
                     Err(e) => {
                         error!("Failed to parse payload as JSON for PayloadSpread mode: {e}.");
-                        return Err(anyhow::anyhow!(
-                            "Failed to parse payload as JSON for PayloadSpread mode: {e}"
-                        ));
+                        Err(anyhow::anyhow!(
+                            "Failed to parse payload as JSON for PayloadSpread mode: {e}."
+                        ))
                     }
                 }
             }
-        };
+        }
+    }
 
+    fn create_entity(
+        mapping: &TopicMapping,
+        params: &Params,
+        timestamp: u64,
+        mut properties: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<MqttSourceChange> {
         // injection of topic variables as properties
         for inject in &mapping.properties.inject {
             for (key, template) in inject {
@@ -124,8 +156,7 @@ impl PatternMatcher {
             }
         }
 
-        // entity main label and id mapping
-        let entity_label = Self::map_template(&mapping.entity.label, params);
+        // entity main id mapping
         let entity_id = Self::map_template(&mapping.entity.id, params);
 
         if let Some(InjectId::True) = &mapping.properties.inject_id {
@@ -137,12 +168,12 @@ impl PatternMatcher {
 
         let element = MqttElement::Node {
             id: entity_id.clone(),
-            labels: vec![entity_label.clone()],
-            properties,
+            labels: vec![mapping.entity.label.clone()],
+            properties: properties.clone(),
         };
         Ok(MqttSourceChange::Update {
             element,
-            timestamp: Some(packet.timestamp),
+            timestamp: Some(timestamp),
         })
     }
 
@@ -150,20 +181,26 @@ impl PatternMatcher {
         mapping: &TopicMapping,
         params: &Params,
         timestamp: u64,
-        result: &mut Vec<MqttSourceChange>,
-    ) {
+        mut properties: &mut serde_json::Map<String, serde_json::Value>,
+        mut result: &mut Vec<MqttSourceChange>,
+    ) -> anyhow::Result<()> {
         result.append(&mut Self::create_nodes(
             mapping.nodes.as_ref(),
             params,
             timestamp,
         ));
 
-        result.append(&mut Self::create_relations(
+        let total_results = Self::create_relations(
             mapping.relations.as_ref(),
             params,
             timestamp,
+            properties,
             result,
-        ));
+        )?;
+
+        result.extend(total_results);
+
+        Ok(())
     }
 
     fn create_nodes(
@@ -195,59 +232,89 @@ impl PatternMatcher {
         relations: &Vec<MappingRelation>,
         params: &Params,
         timestamp: u64,
-        nodes: &Vec<MqttSourceChange>,
-    ) -> Vec<MqttSourceChange> {
+        mut properties: &mut serde_json::Map<String, serde_json::Value>,
+        hierarchy_changes: &Vec<MqttSourceChange>,
+    ) -> anyhow::Result<Vec<MqttSourceChange>> {
         let mut result = Vec::new();
         for relation in relations {
-            let relation_id = Self::map_template(&relation.id, params);
+            let from_node = Self::get_node_ref_id(&relation.from, params, properties);
+            let to_node = Self::get_node_ref_id(&relation.to, params, properties);
 
-            let from_node = Self::get_node_with_label(&relation.from, nodes);
-            let to_node = Self::get_node_with_label(&relation.to, nodes);
-
-            if let Ok(from) = from_node {
-                if let Ok(to) = to_node {
-                    let element = MqttElement::Relation {
-                        id: relation_id.clone(),
-                        labels: vec![relation.label.clone()],
-                        from,
-                        to,
-                        properties: {
-                            let mut props = serde_json::Map::new();
-                            props.insert(
-                                "id".to_string(),
-                                serde_json::Value::String(relation_id.clone()),
-                            );
-                            props
-                        },
-                    };
-                    result.push(MqttSourceChange::Update {
-                        element,
-                        timestamp: Some(timestamp),
-                    });
+            match from_node {
+                Ok(from) => match to_node {
+                    Ok(to) => {
+                        let relation_id =
+                            from.clone() + "_" + &relation.label.to_lowercase() + "_" + &to;
+                        let element = MqttElement::Relation {
+                            id: relation_id.clone(),
+                            labels: vec![relation.label.clone()],
+                            from: from.clone(),
+                            to: to.clone(),
+                            properties: {
+                                let mut props = serde_json::Map::new();
+                                props.insert(
+                                    "id".to_string(),
+                                    serde_json::Value::String(relation_id.clone()),
+                                );
+                                props
+                            },
+                        };
+                        result.push(MqttSourceChange::Update {
+                            element,
+                            timestamp: Some(timestamp),
+                        });
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to resolve 'to' node for relation '{}': {}",
+                            relation.label, e
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Failed to resolve 'to' node for relation '{}': {}",
+                            relation.label,
+                            e
+                        ));
+                    }
+                },
+                Err(e) => {
+                    error!(
+                        "Failed to resolve 'from' node for relation '{}': {}",
+                        relation.label, e
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Failed to resolve 'from' node for relation '{}': {}",
+                        relation.label,
+                        e
+                    ));
                 }
             }
         }
-        result
+        Ok(result)
     }
 
-    fn get_node_with_label(label: &str, changes: &Vec<MqttSourceChange>) -> anyhow::Result<String> {
-        for change in changes {
-            if let MqttSourceChange::Update {
-                element:
-                    MqttElement::Node {
-                        id,
-                        labels,
-                        properties,
-                    },
-                ..
-            } = change
-            {
-                if labels.contains(&label.to_string()) {
-                    return Ok(id.clone());
-                }
-            }
+    fn get_node_ref_id(
+        id: &str,
+        params: &Params,
+        properties: &serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        if id.starts_with(FROM_TO_STARTS_WITH) {
+            let prop_id = id.trim_start_matches(FROM_TO_STARTS_WITH);
+            let value = properties.get(prop_id).ok_or_else(|| {
+                anyhow::anyhow!("Property '{prop_id}' not found for node reference")
+            })?;
+
+            return match value {
+                serde_json::Value::String(s) => Ok(s.clone()),
+                serde_json::Value::Number(n) => Ok(n.to_string()),
+                serde_json::Value::Bool(b) => Ok(b.to_string()),
+                serde_json::Value::Null => Ok("null".to_string()),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(anyhow::anyhow!(
+                    "Property '{prop_id}' must be a primitive value for node reference"
+                )),
+            };
         }
-        Err(anyhow::anyhow!("Node with label '{label}' not found"))
+
+        Ok(Self::map_template(id, params))
     }
 
     fn map_template(template: &str, params: &Params) -> String {
@@ -299,15 +366,13 @@ mod tests {
             relations: vec![
                 MappingRelation {
                     label: "CONTAINS".to_string(),
-                    from: "FLOOR".to_string(),
-                    to: "ROOM".to_string(),
-                    id: "{floor}_contains_{room}".to_string(),
+                    from: "{floor}".to_string(),
+                    to: "{room}".to_string(),
                 },
                 MappingRelation {
                     label: "LOCATED_IN".to_string(),
-                    from: "DEVICE".to_string(),
-                    to: "ROOM".to_string(),
-                    id: "{room}_located_in_{device}".to_string(),
+                    from: "{device}".to_string(),
+                    to: "{room}".to_string(),
                 },
             ],
         }
@@ -327,7 +392,7 @@ mod tests {
             MappingMode::PayloadAsField,
             Some("reading"),
         )]);
-        let input = packet("sensors/temperature", br#"{"value":42}"#, 1);
+        let input = packet("sensors/temperature", br#"{"value":43}"#, 1);
 
         let err = matcher
             .generate_schema(&input)
@@ -551,13 +616,13 @@ mod tests {
                         to,
                         properties,
                     } => {
-                        assert_eq!(id, "r8_located_in_light");
+                        assert_eq!(id, "light_located_in_r8");
                         assert_eq!(labels, &vec!["LOCATED_IN".to_string()]);
-                        assert_eq!(from, "r8:light");
+                        assert_eq!(from, "light");
                         assert_eq!(to, "r8");
                         assert_eq!(
                             properties.get("id"),
-                            Some(&serde_json::json!("r8_located_in_light"))
+                            Some(&serde_json::json!("light_located_in_r8"))
                         );
                     }
                     _ => panic!("fifth change should be relation"),
@@ -568,26 +633,43 @@ mod tests {
     }
 
     #[test]
-    fn topic_mapping_defaults_field_name_for_payload_as_field() {
+    fn topic_mapping_rejects_json_with_payload_as_field_mode() {
         let matcher = PatternMatcher::new(&vec![topic_mapping(MappingMode::PayloadAsField, None)]);
         let input = packet("building/f6/r8/light", br#"{"lux":90}"#, 777);
 
-        let changes = matcher
-            .generate_schema(&input)
-            .expect("expected schema generation to succeed");
+        let changes = matcher.generate_schema(&input);
 
-        match &changes[0] {
-            MqttSourceChange::Update { element, .. } => match element {
-                MqttElement::Node { properties, .. } => {
-                    assert_eq!(
-                        properties.get("reading"),
-                        Some(&serde_json::json!({"lux":90}))
-                    );
-                }
-                _ => panic!("first change should be node update"),
-            },
-            _ => panic!("first change should be update"),
-        }
+        assert_eq!(changes.is_err(), true);
+    }
+
+    #[test]
+    fn topic_mapping_accepts_arr_with_payload_as_field_mode() {
+        let matcher = PatternMatcher::new(&vec![topic_mapping(MappingMode::PayloadAsField, None)]);
+        let input = packet("building/f6/r8/light", br#"[3,4]"#, 777);
+
+        let changes = matcher.generate_schema(&input);
+
+        assert_eq!(changes.is_ok(), true);
+    }
+
+    #[test]
+    fn topic_mapping_rejects_arr_with_payload_spread_mode() {
+        let matcher = PatternMatcher::new(&vec![topic_mapping(MappingMode::PayloadSpread, None)]);
+        let input = packet("building/f6/r8/light", br#"[3,4]"#, 777);
+
+        let changes = matcher.generate_schema(&input);
+
+        assert_eq!(changes.is_err(), true);
+    }
+
+    #[test]
+    fn topic_mapping_rejects_non_json_with_payload_spread_mode() {
+        let matcher = PatternMatcher::new(&vec![topic_mapping(MappingMode::PayloadSpread, None)]);
+        let input = packet("building/f6/r8/light", b"plain-text", 777);
+
+        let changes = matcher.generate_schema(&input);
+
+        assert_eq!(changes.is_err(), true);
     }
 
     #[test]
@@ -611,6 +693,47 @@ mod tests {
                 _ => panic!("first change should be node update"),
             },
             _ => panic!("first change should be update"),
+        }
+    }
+
+    #[test]
+    fn topic_mapping_for_relation_from_id_from_properties() {
+        let mut mapping = topic_mapping(MappingMode::PayloadSpread, Some("reading"));
+        mapping.relations[1].from = "$.level".to_string();
+
+        let matcher = PatternMatcher::new(&vec![mapping]);
+        let input = packet("building/f6/r8/light", br#"{"lux":99,"level": 5}"#, 777);
+
+        let changes = matcher
+            .generate_schema(&input)
+            .expect("expected schema generation to succeed");
+
+        assert_eq!(changes.len(), 5);
+
+        match &changes[4] {
+            MqttSourceChange::Update { element, timestamp } => {
+                assert_eq!(*timestamp, Some(777));
+                match element {
+                    MqttElement::Relation {
+                        id,
+                        labels,
+                        from,
+                        to,
+                        properties,
+                    } => {
+                        assert_eq!(id, "5_located_in_r8");
+                        assert_eq!(labels, &vec!["LOCATED_IN".to_string()]);
+                        assert_eq!(from, "5");
+                        assert_eq!(to, "r8");
+                        assert_eq!(
+                            properties.get("id"),
+                            Some(&serde_json::json!("5_located_in_r8"))
+                        );
+                    }
+                    _ => panic!("fifth change should be relation"),
+                }
+            }
+            _ => panic!("fifth change should be update"),
         }
     }
 }
