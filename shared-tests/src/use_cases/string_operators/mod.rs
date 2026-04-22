@@ -42,6 +42,7 @@ macro_rules! variablemap {
   }}
 }
 
+#[allow(clippy::unwrap_used)]
 async fn bootstrap_query(query: &ContinuousQuery) -> Vec<QueryPartEvaluationContext> {
     let data = get_bootstrap_data();
     let mut all_results = Vec::new();
