@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RIS Live – BGP Route Dashboard</title>
+<style>
+:root{--bg:#0f172a;--surface:#1e293b;--card:#334155;--border:#475569;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--blue:#60a5fa;--font:system-ui,-apple-system,sans-serif;--mono:'SF Mono','Fira Code','Cascadia Code',monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+
+/* Header */
+.header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
+.header h1{font-size:18px;font-weight:600;white-space:nowrap}
+.header .subtitle{color:var(--muted);font-size:13px}
+.status-dot{width:10px;height:10px;border-radius:50%;background:#666;flex-shrink:0}
+.status-dot.connected{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.connecting{background:var(--yellow);animation:pulse 1s infinite}
+.status-dot.disconnected{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:16px;font-size:13px;color:var(--muted)}
+
+/* Stats bar */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:16px 24px}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px}
+.stat-card .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.stat-card .value{font-size:28px;font-weight:700;font-family:var(--mono)}
+.stat-card .delta{font-size:12px;margin-top:4px}
+.delta.up{color:var(--green)}
+.delta.down{color:var(--red)}
+
+/* Main grid */
+.main{display:grid;grid-template-columns:1fr 360px;gap:16px;padding:0 24px 24px;min-height:0}
+@media(max-width:960px){.main{grid-template-columns:1fr}}
+
+/* Tables */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column;max-height:calc(100vh - 220px)}
+.panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.panel-header h2{font-size:14px;font-weight:600}
+.panel-header .count{background:var(--card);color:var(--muted);border-radius:12px;padding:2px 8px;font-size:11px;font-family:var(--mono)}
+.panel-body{overflow-y:auto;flex:1}
+
+table{width:100%;border-collapse:collapse}
+th{position:sticky;top:0;background:var(--card);text-align:left;padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:6px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12px;white-space:nowrap}
+tr:hover td{background:rgba(56,189,248,.04)}
+tr.flash-add td{animation:flashGreen .8s}
+tr.flash-update td{animation:flashBlue .8s}
+tr.flash-delete td{animation:flashRed .8s}
+@keyframes flashGreen{0%{background:rgba(52,211,153,.25)}100%{background:transparent}}
+@keyframes flashBlue{0%{background:rgba(96,165,250,.25)}100%{background:transparent}}
+@keyframes flashRed{0%{background:rgba(248,113,113,.25)}100%{background:transparent}}
+
+/* Event feed */
+.feed-item{padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;display:flex;gap:8px;align-items:flex-start}
+.feed-item:hover{background:rgba(56,189,248,.04)}
+.feed-time{color:var(--muted);font-family:var(--mono);flex-shrink:0;min-width:70px}
+.feed-badge{border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;text-transform:uppercase;flex-shrink:0}
+.badge-add{background:rgba(52,211,153,.15);color:var(--green)}
+.badge-update{background:rgba(96,165,250,.15);color:var(--blue)}
+.badge-delete{background:rgba(248,113,113,.15);color:var(--red)}
+.feed-text{color:var(--text);font-family:var(--mono);word-break:break-all}
+
+/* Search */
+.search-bar{padding:8px 16px;border-bottom:1px solid var(--border)}
+.search-bar input{width:100%;background:var(--card);border:1px solid var(--border);border-radius:4px;padding:6px 10px;color:var(--text);font-size:12px;font-family:var(--mono);outline:none}
+.search-bar input:focus{border-color:var(--accent)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--muted)}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="status-dot connecting" id="statusDot"></div>
+  <h1>RIS Live – BGP Route Dashboard</h1>
+  <span class="subtitle">RIPE NCC Real-Time BGP Monitoring</span>
+  <div class="header-right">
+    <span id="statusText">Connecting…</span>
+    <span id="eps">0 evt/s</span>
+    <span id="uptime"></span>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat-card"><div class="label">Active Routes</div><div class="value" id="routeCount">0</div><div class="delta" id="routeDelta"></div></div>
+  <div class="stat-card"><div class="label">Unique Peers</div><div class="value" id="peerCount">0</div></div>
+  <div class="stat-card"><div class="label">Unique Prefixes</div><div class="value" id="prefixCount">0</div></div>
+  <div class="stat-card"><div class="label">Events Received</div><div class="value" id="eventCount">0</div></div>
+</div>
+
+<div class="main">
+  <!-- Active Routes Table -->
+  <div class="panel">
+    <div class="panel-header">
+      <h2>Active Routes</h2>
+      <span class="count" id="routeTableCount">0</span>
+    </div>
+    <div class="search-bar">
+      <input type="text" id="routeSearch" placeholder="Filter by prefix, peer, ASN…">
+    </div>
+    <div class="panel-body">
+      <table>
+        <thead><tr>
+          <th>Prefix</th>
+          <th>Peer</th>
+          <th>Peer ASN</th>
+          <th>Next Hop</th>
+          <th>Origin ASN</th>
+          <th>Path Len</th>
+        </tr></thead>
+        <tbody id="routeTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Event Feed -->
+  <div class="panel">
+    <div class="panel-header">
+      <h2>Live Event Feed</h2>
+      <span class="count" id="feedCount">0</span>
+    </div>
+    <div class="panel-body" id="feedBody"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const MAX_FEED = 200;
+  const MAX_ROUTES = 5000;
+
+  // State
+  const routes = new Map();    // key → route object
+  const peers = new Set();
+  const prefixes = new Set();
+  let eventTotal = 0;
+  let eventsInWindow = 0;
+  let epsTimer = 0;
+  let startTime = Date.now();
+  let feedItems = 0;
+
+  // DOM
+  const $routeTable   = document.getElementById('routeTable');
+  const $routeCount   = document.getElementById('routeCount');
+  const $routeDelta   = document.getElementById('routeDelta');
+  const $peerCount    = document.getElementById('peerCount');
+  const $prefixCount  = document.getElementById('prefixCount');
+  const $eventCount   = document.getElementById('eventCount');
+  const $routeTableCount = document.getElementById('routeTableCount');
+  const $feedBody     = document.getElementById('feedBody');
+  const $feedCount    = document.getElementById('feedCount');
+  const $statusDot    = document.getElementById('statusDot');
+  const $statusText   = document.getElementById('statusText');
+  const $eps          = document.getElementById('eps');
+  const $uptime       = document.getElementById('uptime');
+  const $routeSearch  = document.getElementById('routeSearch');
+
+  let searchFilter = '';
+  $routeSearch.addEventListener('input', () => {
+    searchFilter = $routeSearch.value.toLowerCase();
+    rebuildRouteTable();
+  });
+
+  function routeKey(d) {
+    return (d.peer || '') + '|' + (d.prefix || '');
+  }
+
+  function addFeedItem(type, text) {
+    const el = document.createElement('div');
+    el.className = 'feed-item';
+    const badgeCls = type === 'ADD' ? 'badge-add' : type === 'UPDATE' ? 'badge-update' : 'badge-delete';
+    const now = new Date();
+    const ts = now.toLocaleTimeString([], {hour12:false});
+    el.innerHTML = `<span class="feed-time">${ts}</span><span class="feed-badge ${badgeCls}">${type}</span><span class="feed-text">${esc(text)}</span>`;
+    $feedBody.prepend(el);
+    feedItems++;
+    while ($feedBody.children.length > MAX_FEED) { $feedBody.removeChild($feedBody.lastChild); feedItems--; }
+    $feedCount.textContent = feedItems;
+  }
+
+  function esc(s) { const d=document.createElement('span'); d.textContent=s; return d.innerHTML; }
+
+  function matchesFilter(r) {
+    if (!searchFilter) return true;
+    return (r.prefix||'').toLowerCase().includes(searchFilter)
+        || (r.peer||'').toLowerCase().includes(searchFilter)
+        || String(r.peer_asn||'').includes(searchFilter)
+        || String(r.origin_asn||'').includes(searchFilter)
+        || (r.next_hop||'').toLowerCase().includes(searchFilter);
+  }
+
+  function rowHtml(r) {
+    return `<td>${esc(r.prefix||'')}</td><td>${esc(r.peer||'')}</td><td>${esc(String(r.peer_asn||''))}</td><td>${esc(r.next_hop||'')}</td><td>${esc(String(r.origin_asn||''))}</td><td>${esc(String(r.path_length||''))}</td>`;
+  }
+
+  let pendingRebuild = false;
+  function scheduleRebuild() {
+    if (pendingRebuild) return;
+    pendingRebuild = true;
+    requestAnimationFrame(() => { pendingRebuild = false; rebuildRouteTable(); });
+  }
+
+  function rebuildRouteTable() {
+    const frag = document.createDocumentFragment();
+    let shown = 0;
+    for (const [key, r] of routes) {
+      if (!matchesFilter(r)) continue;
+      if (shown >= MAX_ROUTES) break;
+      const tr = document.createElement('tr');
+      tr.id = 'r-' + key;
+      tr.innerHTML = rowHtml(r);
+      if (r._flash) { tr.classList.add(r._flash); r._flash = null; }
+      frag.appendChild(tr);
+      shown++;
+    }
+    $routeTable.innerHTML = '';
+    $routeTable.appendChild(frag);
+    $routeTableCount.textContent = shown;
+  }
+
+  function flashRow(key, cls) {
+    const existing = document.getElementById('r-' + key);
+    if (existing) {
+      existing.classList.remove('flash-add','flash-update','flash-delete');
+      void existing.offsetWidth; // reflow
+      existing.classList.add(cls);
+      existing.innerHTML = rowHtml(routes.get(key));
+    }
+  }
+
+  function updateStats() {
+    $routeCount.textContent = routes.size.toLocaleString();
+    $peerCount.textContent = peers.size.toLocaleString();
+    $prefixCount.textContent = prefixes.size.toLocaleString();
+    $eventCount.textContent = eventTotal.toLocaleString();
+  }
+
+  function handleDiff(diff) {
+    eventTotal++;
+    eventsInWindow++;
+
+    if (diff.ADD) {
+      const d = diff.ADD.data;
+      const key = routeKey(d);
+      if (d.peer) peers.add(d.peer);
+      if (d.prefix) prefixes.add(d.prefix);
+      d._flash = 'flash-add';
+      routes.set(key, d);
+      addFeedItem('ADD', `${d.prefix} via ${d.peer} (ASN ${d.peer_asn}) nh=${d.next_hop}`);
+    } else if (diff.UPDATE) {
+      const d = diff.UPDATE.after;
+      const key = routeKey(d);
+      d._flash = 'flash-update';
+      routes.set(key, d);
+      const before = diff.UPDATE.before || {};
+      let changes = [];
+      if (before.next_hop !== d.next_hop) changes.push(`nh: ${before.next_hop}→${d.next_hop}`);
+      if (before.path_length !== d.path_length) changes.push(`pathlen: ${before.path_length}→${d.path_length}`);
+      if (before.origin_asn !== d.origin_asn) changes.push(`origin: ${before.origin_asn}→${d.origin_asn}`);
+      addFeedItem('UPDATE', `${d.prefix} via ${d.peer} ${changes.join(', ')}`);
+    } else if (diff.DELETE) {
+      const d = diff.DELETE.data;
+      const key = routeKey(d);
+      routes.delete(key);
+      addFeedItem('DELETE', `${d.prefix} via ${d.peer}`);
+    }
+  }
+
+  function connectSSE() {
+    $statusDot.className = 'status-dot connecting';
+    $statusText.textContent = 'Connecting…';
+
+    const es = new EventSource('/events');
+
+    es.onopen = () => {
+      $statusDot.className = 'status-dot connected';
+      $statusText.textContent = 'Connected';
+      startTime = Date.now();
+    };
+
+    es.addEventListener('route-change', (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (Array.isArray(msg.diffs)) {
+          msg.diffs.forEach(handleDiff);
+        }
+        updateStats();
+        scheduleRebuild();
+      } catch(err) { console.error('Parse error', err, e.data); }
+    });
+
+    es.addEventListener('snapshot', (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        routes.clear(); peers.clear(); prefixes.clear();
+        if (Array.isArray(msg.routes)) {
+          msg.routes.forEach(r => {
+            const key = routeKey(r);
+            routes.set(key, r);
+            if (r.peer) peers.add(r.peer);
+            if (r.prefix) prefixes.add(r.prefix);
+          });
+        }
+        updateStats();
+        scheduleRebuild();
+      } catch(err) { console.error('Snapshot parse error', err); }
+    });
+
+    es.onerror = () => {
+      $statusDot.className = 'status-dot disconnected';
+      $statusText.textContent = 'Disconnected – reconnecting…';
+      es.close();
+      setTimeout(connectSSE, 3000);
+    };
+  }
+
+  // EPS counter
+  setInterval(() => {
+    $eps.textContent = eventsInWindow + ' evt/s';
+    eventsInWindow = 0;
+  }, 1000);
+
+  // Uptime
+  setInterval(() => {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    if (h > 0) $uptime.textContent = `${h}h ${m%60}m`;
+    else if (m > 0) $uptime.textContent = `${m}m ${s%60}s`;
+    else $uptime.textContent = `${s}s`;
+  }, 1000);
+
+  connectSSE();
+})();
+</script>
+</body>
+</html>
