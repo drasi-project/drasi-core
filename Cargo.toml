@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/here-traffic",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/here-traffic",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -117,9 +119,11 @@ drasi-index-garnet = { version = "0.1.8", path = "components/indexes/garnet" }
 # Component plugins
 drasi-source-mssql = { version = "0.1.3", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.1.3", path = "components/bootstrappers/mssql" }
+drasi-bootstrap-here-traffic = { version = "0.1.0", path = "components/bootstrappers/here-traffic" }
 drasi-bootstrap-postgres = { version = "0.1.13", path = "components/bootstrappers/postgres" }
 drasi-reaction-application = { version = "0.2.10", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.1.13", path = "components/sources/postgres" }
+drasi-source-here-traffic = { version = "0.1.0", path = "components/sources/here-traffic" }
 drasi-source-application = { version = "0.1.12", path = "components/sources/application" }
 drasi-bootstrap-application = { version = "0.1.11", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.12", path = "components/reactions/http" }

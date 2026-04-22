@@ -34,6 +34,7 @@ Sources are responsible for:
 | `drasi-source-application` | Programmatic/in-memory sources for embedded use | `application/` |
 | `drasi-source-grpc` | gRPC streaming data sources | `grpc/` |
 | `drasi-source-http` | HTTP endpoint polling with adaptive batching | `http/` |
+| `drasi-source-here-traffic` | HERE Traffic API polling source | `here-traffic/` |
 | `drasi-source-mock` | Test data generator for development | `mock/` |
 | `drasi-source-platform` | Redis Streams consumer for platform integration | `platform/` |
 | `drasi-source-postgres` | PostgreSQL WAL-based replication | `postgres/` |
@@ -244,6 +245,7 @@ pub struct SourceBaseParams {
     pub id: String,
     pub dispatch_mode: Option<DispatchMode>,                              // Default: Channel
     pub dispatch_buffer_capacity: Option<usize>,                          // Default: 1000
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,                 // Default: None
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>, // Default: None
     pub auto_start: bool,                                                 // Default: true
 }
@@ -252,6 +254,7 @@ impl SourceBaseParams {
     pub fn new(id: impl Into<String>) -> Self;
     pub fn with_dispatch_mode(self, mode: DispatchMode) -> Self;
     pub fn with_dispatch_buffer_capacity(self, capacity: usize) -> Self;
+    pub fn with_state_store(self, store: Arc<dyn StateStoreProvider>) -> Self;
     pub fn with_bootstrap_provider(self, provider: impl BootstrapProvider + 'static) -> Self;
     pub fn with_auto_start(self, auto_start: bool) -> Self;
 }

@@ -70,6 +70,8 @@ pub struct SourceBaseParams {
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Optional state store provider to set during construction
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
     /// Whether this source should auto-start - defaults to true
@@ -82,6 +84,10 @@ impl std::fmt::Debug for SourceBaseParams {
             .field("id", &self.id)
             .field("dispatch_mode", &self.dispatch_mode)
             .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
+            .field(
+                "state_store",
+                &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
+            )
             .field(
                 "bootstrap_provider",
                 &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
@@ -98,6 +104,7 @@ impl SourceBaseParams {
             id: id.into(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
+            state_store: None,
             bootstrap_provider: None,
             auto_start: true,
         }
@@ -112,6 +119,15 @@ impl SourceBaseParams {
     /// Set the dispatch buffer capacity
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the state store provider
+    ///
+    /// This is typically used when constructing sources outside of DrasiLib
+    /// and you want to provide a persistent store for checkpointing.
+    pub fn with_state_store(mut self, store: Arc<dyn StateStoreProvider>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -245,8 +261,12 @@ impl SourceBase {
         // Wire the status handle to the graph update channel
         self.status_handle.wire(context.update_tx.clone()).await;
 
+        // Store state_store from context only if not already set programmatically
         if let Some(state_store) = context.state_store.as_ref() {
-            *self.state_store.write().await = Some(state_store.clone());
+            let mut guard = self.state_store.write().await;
+            if guard.is_none() {
+                *guard = Some(state_store.clone());
+            }
         }
 
         // Store identity provider from context if not already set programmatically
