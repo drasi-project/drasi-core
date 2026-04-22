@@ -5079,11 +5079,7 @@ fn contains_expression() {
 
 #[test]
 fn contains_relationship_label_no_conflict() {
-    let query = gql::query(
-        "MATCH (a)-[:CONTAINS]->(b) RETURN a, b",
-        &TEST_CONFIG,
-    )
-    .unwrap();
+    let query = gql::query("MATCH (a)-[:CONTAINS]->(b) RETURN a, b", &TEST_CONFIG).unwrap();
 
     assert_eq!(query.parts[0].match_clauses.len(), 1);
 }

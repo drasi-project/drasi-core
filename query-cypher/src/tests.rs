@@ -821,11 +821,7 @@ fn contains_expression() {
 #[test]
 fn contains_relationship_label_no_conflict() {
     // Ensure CONTAINS as a relationship label still parses correctly
-    let query = cypher::query(
-        "MATCH (a)-[:CONTAINS]->(b) RETURN a, b",
-        &TEST_CONFIG,
-    )
-    .unwrap();
+    let query = cypher::query("MATCH (a)-[:CONTAINS]->(b) RETURN a, b", &TEST_CONFIG).unwrap();
 
     assert_eq!(query.parts[0].match_clauses.len(), 1);
 }
