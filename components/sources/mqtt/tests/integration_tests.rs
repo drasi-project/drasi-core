@@ -125,6 +125,46 @@ pub async fn build_core(
     Ok(core)
 }
 
+pub async fn build_core_for_input_as_node(
+    source_config: MqttSourceConfig,
+    slot_name: String,
+) -> Result<Arc<DrasiLib>> {
+    let source = MqttSource::builder(slot_name.clone())
+        .with_config(source_config)
+        .build()
+        .await
+        .unwrap();
+
+    let query = Query::cypher("test-query")
+        .query(
+            r#"
+        MATCH (d:Device)-[rel:LOCATED_IN_GATEWAY]->(g:Gateway)
+        WHERE d.id = 'r1:d2' AND g.id = 'gateway_1'
+        RETURN d.value as val,
+               g.id as gateway_id
+        "#,
+        )
+        .from_source(&slot_name)
+        .auto_start(true)
+        .build();
+
+    let (reaction, _handle) = ApplicationReaction::builder("test-reaction")
+        .with_query("test-query")
+        .build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("mqtt-source-http")
+            .with_query(query)
+            .with_source(source)
+            .build()
+            .await
+            .unwrap(),
+    );
+
+    Ok(core)
+}
+
 //............................Tests.....
 
 #[tokio::test]
@@ -659,16 +699,14 @@ async fn test_mqtt_query_results() -> Result<()> {
             ],
             relations: vec![
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "Device".to_string(),
-                    to: "Room".to_string(),
+                    from: "{room}:{device}".to_string(),
+                    to: "{room}".to_string(),
                     label: "LOCATED_IN_ROOM".to_string(),
-                    id: "{device}_to_{room}".to_string(),
                 },
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "Room".to_string(),
-                    to: "Floor".to_string(),
+                    from: "{room}".to_string(),
+                    to: "{floor}".to_string(),
                     label: "LOCATED_IN_FLOOR".to_string(),
-                    id: "{room}_to_{floor}".to_string(),
                 },
             ],
         }],
@@ -757,6 +795,223 @@ async fn test_mqtt_query_results() -> Result<()> {
                     .map(|v| v == "r1")
                     .unwrap_or(false);
                 val_ok && room_ok
+            })
+    };
+    wait_for_query_results(&core, "test-query", predicate).await?;
+
+    info!("Successfully received expected query results");
+    // cleanup
+    core.stop().await?;
+    guard.cleanup().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
+    init_logging();
+    init_rustls_crypto_provider();
+
+    // Generate certs
+    let certs =
+        generate_test_certs("localhost", true).expect("Failed to generate test certificates");
+
+    let client_cert = certs
+        .client_cert
+        .expect("Client cert should be present for mTLS test");
+    let client_key = certs
+        .client_key
+        .expect("Client key should be present for mTLS test");
+
+    // initialize config
+    let broker_config = MosquittoConfig::new()
+        .with_listener(8883)
+        .with_allow_anonymous(false)
+        .with_require_certificate(true)
+        .with_use_identity_as_username(true)
+        .with_ca(certs.ca.clone())
+        .with_server_cert(certs.server_cert.clone())
+        .with_server_key(certs.server_key.clone());
+
+    let source_config = MqttSourceConfig {
+        host: "localhost".to_string(),
+        port: broker_config.listener,
+        transport: Some(MqttTransportMode::TLS {
+            ca: Some(certs.ca.clone()),
+            ca_path: None,
+            alpn: None,
+            client_auth: Some((client_cert.into_bytes(), client_key.into_bytes())),
+            client_cert_path: None,
+            client_key_path: None,
+        }),
+        topics: vec![
+            MqttTopicConfig {
+                topic: "building/+/+/+".to_string(),
+                qos: drasi_source_mqtt::MqttQoS::TWO,
+            },
+            MqttTopicConfig {
+                topic: "gateway/+".to_string(),
+                qos: drasi_source_mqtt::MqttQoS::TWO,
+            },
+        ],
+        topic_mappings: vec![
+            TopicMapping {
+                pattern: "gateway/{gateway_id}".to_string(),
+                entity: MappingEntity {
+                    label: "Gateway".to_string(),
+                    id: "{gateway_id}".to_string(),
+                },
+                properties: MappingProperties {
+                    mode: drasi_source_mqtt::config::MappingMode::PayloadSpread,
+                    field_name: None,
+                    inject_id: Some(InjectId::True),
+                    inject: vec![],
+                },
+                nodes: vec![],
+                relations: vec![],
+            },
+            TopicMapping {
+                pattern: "building/{floor}/{room}/{device}".to_string(),
+                entity: MappingEntity {
+                    label: "Device".to_string(),
+                    id: "{room}:{device}".to_string(),
+                },
+                properties: MappingProperties {
+                    mode: drasi_source_mqtt::config::MappingMode::PayloadSpread,
+                    field_name: None,
+                    inject_id: Some(InjectId::True),
+                    inject: vec![
+                        HashMap::from([("floor".to_string(), "{floor}".to_string())]),
+                        HashMap::from([("room".to_string(), "{room}".to_string())]),
+                    ],
+                },
+                nodes: vec![
+                    drasi_source_mqtt::config::MappingNode {
+                        label: "Room".to_string(),
+                        id: "{room}".to_string(),
+                    },
+                    drasi_source_mqtt::config::MappingNode {
+                        label: "Floor".to_string(),
+                        id: "{floor}".to_string(),
+                    },
+                ],
+                relations: vec![
+                    drasi_source_mqtt::config::MappingRelation {
+                        from: "{room}:{device}".to_string(),
+                        to: "{room}".to_string(),
+                        label: "LOCATED_IN_ROOM".to_string(),
+                    },
+                    drasi_source_mqtt::config::MappingRelation {
+                        from: "{room}".to_string(),
+                        to: "{floor}".to_string(),
+                        label: "LOCATED_IN_FLOOR".to_string(),
+                    },
+                    drasi_source_mqtt::config::MappingRelation {
+                        from: "{room}:{device}".to_string(),
+                        to: "$.gateway_id".to_string(),
+                        label: "LOCATED_IN_GATEWAY".to_string(),
+                    },
+                ],
+            },
+        ],
+        ..Default::default()
+    };
+
+    // start container
+    let mut guard = MosquittoGuard::new(&broker_config)
+        .await
+        .expect("Failed to start Mosquitto container");
+
+    // start core with mqtt source
+    let source_slot_name = slot_name();
+    let core =
+        build_core_for_input_as_node(source_config.clone(), source_slot_name.clone()).await?;
+    core.start().await?;
+
+    // check the status of the source.
+    let status = core.get_source_status(&source_slot_name).await?;
+    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+
+    // check the status of the query.
+    loop {
+        let query_status = core.get_query_status("test-query").await?;
+        if query_status == drasi_lib::ComponentStatus::Running {
+            break;
+        }
+        info!(
+            "Waiting for query to be running. Current status: {:?}",
+            query_status
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // publish messages to the broker
+    let mqtt_options =
+        MqttConnection::config_to_mqtt_options_v5("mqtt-client-test", &source_config, None)
+            .await
+            .expect("Failed to convert config to MQTT options");
+    let client = guard
+        .get_client_v5(mqtt_options)
+        .await
+        .expect("Failed to create MQTT client");
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await; // wait a bit to ensure the core is ready to receive messages
+        match client
+            .publish(
+                "gateway/gateway_1",
+                rumqttc::v5::mqttbytes::QoS::ExactlyOnce,
+                false,
+                r#"{"name":"gateway_1"}"#.as_bytes(),
+            )
+            .await
+        {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+        }
+        match client
+            .publish(
+                "building/f2/r1/d2",
+                rumqttc::v5::mqttbytes::QoS::ExactlyOnce,
+                false,
+                r#"{"value":34.0,"gateway_id":"gateway_1"}"#.as_bytes(),
+            )
+            .await
+        {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+        }
+        match client
+            .publish(
+                "building/f2/r1/d1",
+                rumqttc::v5::mqttbytes::QoS::ExactlyOnce,
+                false,
+                r#"{"value":30.2,"gateway_id":"gateway_1"}"#.as_bytes(),
+            )
+            .await
+        {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+        }
+    })
+    .await?;
+
+    // wait for the core to process the messages
+    let predicate = |results: &[serde_json::Value]| {
+        (results.len() == 1)
+            && results.iter().any(|res| {
+                let val_ok = res
+                    .get("val")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| (v - 34.0).abs() < f64::EPSILON)
+                    .unwrap_or(false);
+                let gateway_ok = res
+                    .get("gateway_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == "gateway_1")
+                    .unwrap_or(false);
+                val_ok && gateway_ok
             })
     };
     wait_for_query_results(&core, "test-query", predicate).await?;

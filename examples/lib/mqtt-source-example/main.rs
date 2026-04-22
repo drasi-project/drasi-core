@@ -60,13 +60,11 @@ topic_mappings:
         id: "{room}"
     relations:
       - label: "LOCATED_IN_FLOOR"
-        from: "ROOM"
-        to: "FLOOR"
-        id: "{room}_located_in_{floor}"
+        from: "{room}"
+        to: "{floor}"
       - label: "LOCATED_IN_ROOM"
-        from: "DEVICE"
-        to: "ROOM"
-        id: "{device}_located_in_{room}"
+        from: "{device}"
+        to: "{room}"
 event_channel_capacity: 20
 keep_alive: 5
 conn_timeout: 5

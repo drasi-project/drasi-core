@@ -44,6 +44,8 @@ pub use config::MqttQoS;
 pub use mqtt::MqttSource;
 pub use schema::{MqttElement, MqttSourceChange};
 
+pub const FROM_TO_STARTS_WITH: &str = "$.";
+
 /// Builder for MqttSource instances.
 ///
 /// Provides a fluent API for constructing MQTT sources with sensible defaults
@@ -375,8 +377,6 @@ impl MqttSourceBuilder {
             username: self.username,
             password: self.password,
         };
-
-        config.validate()?;
 
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
