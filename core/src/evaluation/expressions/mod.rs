@@ -1583,6 +1583,36 @@ impl ExpressionEvaluator {
                     }
                 }
             }
+            ast::BinaryExpression::StartsWith(e1, e2) => match (
+                self.evaluate_expression(context, e1).await?,
+                self.evaluate_expression(context, e2).await?,
+            ) {
+                (VariableValue::String(s1), VariableValue::String(s2)) => {
+                    VariableValue::Bool(s1.starts_with(s2.as_str()))
+                }
+                (VariableValue::Null, _) | (_, VariableValue::Null) => VariableValue::Null,
+                _ => VariableValue::Bool(false),
+            },
+            ast::BinaryExpression::EndsWith(e1, e2) => match (
+                self.evaluate_expression(context, e1).await?,
+                self.evaluate_expression(context, e2).await?,
+            ) {
+                (VariableValue::String(s1), VariableValue::String(s2)) => {
+                    VariableValue::Bool(s1.ends_with(s2.as_str()))
+                }
+                (VariableValue::Null, _) | (_, VariableValue::Null) => VariableValue::Null,
+                _ => VariableValue::Bool(false),
+            },
+            ast::BinaryExpression::Contains(e1, e2) => match (
+                self.evaluate_expression(context, e1).await?,
+                self.evaluate_expression(context, e2).await?,
+            ) {
+                (VariableValue::String(s1), VariableValue::String(s2)) => {
+                    VariableValue::Bool(s1.contains(s2.as_str()))
+                }
+                (VariableValue::Null, _) | (_, VariableValue::Null) => VariableValue::Null,
+                _ => VariableValue::Bool(false),
+            },
         };
         Ok(result)
     }
