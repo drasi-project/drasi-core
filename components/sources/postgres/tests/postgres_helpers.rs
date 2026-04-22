@@ -157,8 +157,6 @@ async fn setup_postgres_raw() -> (ContainerAsync<GenericImage>, ReplicationPostg
         password: "postgres".to_string(),
     };
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
     (container, config)
 }
 
@@ -258,6 +256,24 @@ pub async fn create_logical_replication_slot(client: &Client, slot_name: &str) -
     let sql = "SELECT pg_create_logical_replication_slot($1, 'pgoutput')";
     let _ = client.query_one(sql, &[&slot_name]).await?;
     Ok(())
+}
+
+pub async fn get_slot_confirmed_flush_lsn(client: &Client, slot_name: &str) -> Result<Option<u64>> {
+    let sql = "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1";
+    let row = client.query_one(sql, &[&slot_name]).await?;
+    let lsn: Option<String> = row.get(0);
+    lsn.map(|value| parse_lsn(&value)).transpose()
+}
+
+fn parse_lsn(lsn: &str) -> Result<u64> {
+    let parts: Vec<&str> = lsn.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow!("Invalid LSN format: {lsn}"));
+    }
+
+    let high = u64::from_str_radix(parts[0], 16)?;
+    let low = u64::from_str_radix(parts[1], 16)?;
+    Ok((high << 32) | low)
 }
 
 pub async fn create_decimal_test_table(client: &Client, table_name: &str) -> Result<()> {

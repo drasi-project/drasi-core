@@ -179,18 +179,33 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use log::{error, info};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use tokio::sync::{oneshot, RwLock};
 
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
+
+#[derive(Default)]
+pub(crate) struct ReplayState {
+    pub(crate) read_lsn: AtomicU64,
+    pub(crate) confirmed_lsn: AtomicU64,
+}
+
+impl ReplayState {
+    fn read_lsn(&self) -> u64 {
+        self.read_lsn.load(Ordering::Relaxed)
+    }
+}
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///
@@ -206,6 +221,8 @@ pub struct PostgresReplicationSource {
     base: SourceBase,
     /// PostgreSQL source configuration
     config: PostgresSourceConfig,
+    /// Shared replay progress for subscribe()/rewind decisions and WAL feedback.
+    replay_state: Arc<ReplayState>,
 }
 
 impl PostgresReplicationSource {
@@ -266,6 +283,7 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            replay_state: Arc::new(ReplayState::default()),
         })
     }
 
@@ -290,7 +308,136 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            replay_state: Arc::new(ReplayState::default()),
         })
+    }
+
+    async fn spawn_replication_task(&self, start_lsn: Option<u64>) -> Result<()> {
+        let config = self.config.clone();
+        let source_id = self.base.id.clone();
+        let dispatchers = self.base.dispatchers.clone();
+        let reporter = self.base.status_handle();
+        let base = self.base.clone_shared();
+        let replay_state = self.replay_state.clone();
+        let (ready_tx, ready_rx) = oneshot::channel::<std::result::Result<(), String>>();
+
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "postgres_replication_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source",
+            start_lsn = ?start_lsn
+        );
+
+        let task = tokio::spawn(
+            async move {
+                info!("Starting replication for source {source_id}");
+
+                let mut stream = stream::ReplicationStream::new(
+                    config,
+                    source_id.clone(),
+                    dispatchers,
+                    reporter.clone(),
+                    base,
+                    replay_state,
+                    start_lsn,
+                );
+
+                if let Err(e) = stream.run(Some(ready_tx)).await {
+                    error!("Replication task failed for {source_id}: {e}");
+                    reporter
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Replication failed: {e}")),
+                        )
+                        .await;
+                }
+            }
+            .instrument(span),
+        );
+
+        *self.base.task_handle.write().await = Some(task);
+
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => {
+                let _ = self.base.task_handle.write().await.take();
+                Err(anyhow!(
+                    "Failed to establish PostgreSQL replication: {message}"
+                ))
+            }
+            Err(_) => {
+                let _ = self.base.task_handle.write().await.take();
+                Err(anyhow!(
+                    "PostgreSQL replication task exited before confirming startup"
+                ))
+            }
+        }
+    }
+
+    async fn restart_replication_from(&self, start_lsn: u64) -> Result<()> {
+        info!(
+            "Restarting PostgreSQL source '{}' from requested LSN {:x}",
+            self.base.id, start_lsn
+        );
+
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some(format!(
+                    "Rewinding PostgreSQL replication to LSN {start_lsn:x}"
+                )),
+            )
+            .await;
+
+        if let Some(task) = self.base.task_handle.write().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
+        self.spawn_replication_task(Some(start_lsn)).await?;
+
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some(format!(
+                    "PostgreSQL replication resumed from LSN {start_lsn:x}"
+                )),
+            )
+            .await;
+
+        Ok(())
+    }
+
+    async fn get_earliest_available_lsn(&self) -> Result<u64> {
+        let mut conn = connection::ReplicationConnection::connect(
+            &self.config.host,
+            self.config.port,
+            &self.config.database,
+            &self.config.user,
+            &self.config.password,
+        )
+        .await?;
+
+        let _ = conn.identify_system().await?;
+        let slot_info = conn
+            .create_replication_slot(&self.config.slot_name, false)
+            .await?;
+        let _ = conn.close().await;
+
+        if slot_info.consistent_point.is_empty() || slot_info.consistent_point == "0/0" {
+            Ok(0)
+        } else {
+            connection::parse_lsn(&slot_info.consistent_point)
+        }
     }
 }
 
@@ -318,6 +465,10 @@ impl Source for PostgresReplicationSource {
         self.base.get_auto_start()
     }
 
+    fn supports_replay(&self) -> bool {
+        true
+    }
+
     async fn start(&self) -> Result<()> {
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
@@ -325,47 +476,7 @@ impl Source for PostgresReplicationSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting PostgreSQL replication source: {}", self.base.id);
-
-        let config = self.config.clone();
-        let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
-        let reporter = self.base.status_handle();
-
-        // Get instance_id from context for log routing isolation
-        let instance_id = self
-            .base
-            .context()
-            .await
-            .map(|c| c.instance_id)
-            .unwrap_or_default();
-
-        // Create span for spawned task so log::info!, log::error! etc are routed
-        let source_id_for_span = source_id.clone();
-        let span = tracing::info_span!(
-            "postgres_replication_task",
-            instance_id = %instance_id,
-            component_id = %source_id_for_span,
-            component_type = "source"
-        );
-
-        let task = tokio::spawn(
-            async move {
-                if let Err(e) =
-                    run_replication(source_id.clone(), config, dispatchers, reporter.clone()).await
-                {
-                    error!("Replication task failed for {source_id}: {e}");
-                    reporter
-                        .set_status(
-                            ComponentStatus::Error,
-                            Some(format!("Replication failed: {e}")),
-                        )
-                        .await;
-                }
-            }
-            .instrument(span),
-        );
-
-        *self.base.task_handle.write().await = Some(task);
+        self.spawn_replication_task(None).await?;
         self.base
             .set_status(
                 ComponentStatus::Running,
@@ -388,6 +499,7 @@ impl Source for PostgresReplicationSource {
         // Cancel the replication task
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
+            let _ = task.await;
         }
 
         self.base
@@ -408,9 +520,37 @@ impl Source for PostgresReplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
+        let mut restart_from = None;
+
+        if let Some(resume_from) = settings.resume_from {
+            let earliest_available = self.get_earliest_available_lsn().await?;
+            if resume_from < earliest_available {
+                return Err(drasi_lib::SourceError::PositionUnavailable {
+                    source_id: self.base.id.clone(),
+                    requested: resume_from,
+                    earliest_available: Some(earliest_available),
+                }
+                .into());
+            }
+
+            let read_lsn = self.replay_state.read_lsn();
+            let is_running = self.base.get_status().await == ComponentStatus::Running;
+
+            if !is_running || read_lsn == 0 || resume_from < read_lsn {
+                restart_from = Some(resume_from);
+            }
+        }
+
+        let response = self
+            .base
             .subscribe_with_bootstrap(&settings, "PostgreSQL")
-            .await
+            .await?;
+
+        if let Some(start_lsn) = restart_from {
+            self.restart_replication_from(start_lsn).await?;
+        }
+
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -427,23 +567,6 @@ impl Source for PostgresReplicationSource {
     ) {
         self.base.set_bootstrap_provider(provider).await;
     }
-}
-
-async fn run_replication(
-    source_id: String,
-    config: PostgresSourceConfig,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
-    status_handle: ComponentStatusHandle,
-) -> Result<()> {
-    info!("Starting replication for source {source_id}");
-
-    let mut stream = stream::ReplicationStream::new(config, source_id, dispatchers, status_handle);
-
-    stream.run().await
 }
 
 /// Builder for PostgreSQL source configuration.
@@ -655,6 +778,7 @@ impl PostgresSourceBuilder {
         Ok(PostgresReplicationSource {
             base: SourceBase::new(params)?,
             config,
+            replay_state: Arc::new(ReplayState::default()),
         })
     }
 }
@@ -734,6 +858,16 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(source.type_name(), "postgres");
+        }
+
+        #[test]
+        fn test_supports_replay_returns_true() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
+            assert!(source.supports_replay());
         }
 
         #[test]
