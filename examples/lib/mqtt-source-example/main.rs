@@ -48,7 +48,7 @@ topic_mappings:
     properties:
       mode: payload_as_field
       field_name: "reading"
-      inject_id: true
+      inject_id: "true"
       inject:
       - room: "{room}"
       - floor: "{floor}"

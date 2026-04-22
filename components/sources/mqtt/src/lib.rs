@@ -15,6 +15,7 @@
 mod adaptive_batcher;
 pub mod config;
 pub mod connection;
+pub mod descriptor;
 pub mod schema;
 
 use adaptive_batcher::AdaptiveBatchConfig;
@@ -729,3 +730,17 @@ mod tests {
         }
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "mqtt-source",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [descriptor::MqttSourceDescriptor],
+    reaction_descriptors = [],
+    bootstrap_descriptors = [],
+);
