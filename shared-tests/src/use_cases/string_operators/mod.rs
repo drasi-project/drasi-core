@@ -42,16 +42,19 @@ macro_rules! variablemap {
   }}
 }
 
-async fn bootstrap_query(query: &ContinuousQuery) {
+async fn bootstrap_query(query: &ContinuousQuery) -> Vec<QueryPartEvaluationContext> {
     let data = get_bootstrap_data();
+    let mut all_results = Vec::new();
     for change in data {
-        let _ = query.process_source_change(change).await;
+        let mut results = query.process_source_change(change).await.unwrap();
+        all_results.append(&mut results);
     }
+    all_results
 }
 
 /// Test STARTS WITH: bootstrap data includes "DrasiDB Enterprise" which starts with "Drasi".
-/// After bootstrap the query result set should contain exactly that product.
-/// Then we insert a new product whose name also starts with "Drasi" and verify it appears.
+/// Asserts that the bootstrap produces exactly that matching row, then inserts additional
+/// products and verifies matches and non-matches.
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn starts_with(config: &(impl QueryTestConfig + Send)) {
     let query = {
@@ -63,7 +66,19 @@ pub async fn starts_with(config: &(impl QueryTestConfig + Send)) {
         builder.build().await
     };
 
-    bootstrap_query(&query).await;
+    let bootstrap_results = bootstrap_query(&query).await;
+    println!("starts_with bootstrap results: {bootstrap_results:?}");
+    // p1 "DrasiDB Enterprise" matches STARTS WITH 'Drasi'
+    assert_eq!(bootstrap_results.len(), 1);
+    assert!(contains_data(
+        &bootstrap_results,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "name" => VariableValue::from(json!("DrasiDB Enterprise"))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // Insert a new product that starts with "Drasi"
     {
@@ -116,6 +131,7 @@ pub async fn starts_with(config: &(impl QueryTestConfig + Send)) {
 }
 
 /// Test ENDS WITH: "Quick Query Tool" ends with "Tool".
+/// Bootstrap asserts that p2 is matched; subsequent inserts test positive and negative cases.
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn ends_with(config: &(impl QueryTestConfig + Send)) {
     let query = {
@@ -127,7 +143,19 @@ pub async fn ends_with(config: &(impl QueryTestConfig + Send)) {
         builder.build().await
     };
 
-    bootstrap_query(&query).await;
+    let bootstrap_results = bootstrap_query(&query).await;
+    println!("ends_with bootstrap results: {bootstrap_results:?}");
+    // p2 "Quick Query Tool" matches ENDS WITH 'Tool'
+    assert_eq!(bootstrap_results.len(), 1);
+    assert!(contains_data(
+        &bootstrap_results,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "name" => VariableValue::from(json!("Quick Query Tool"))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // Insert a product that ends with "Tool"
     {
@@ -180,6 +208,7 @@ pub async fn ends_with(config: &(impl QueryTestConfig + Send)) {
 }
 
 /// Test CONTAINS: "Quick Query Tool" contains "Query".
+/// Bootstrap asserts that p2 is matched; subsequent inserts test positive and negative cases.
 #[allow(clippy::print_stdout, clippy::unwrap_used)]
 pub async fn contains_op(config: &(impl QueryTestConfig + Send)) {
     let query = {
@@ -191,7 +220,19 @@ pub async fn contains_op(config: &(impl QueryTestConfig + Send)) {
         builder.build().await
     };
 
-    bootstrap_query(&query).await;
+    let bootstrap_results = bootstrap_query(&query).await;
+    println!("contains_op bootstrap results: {bootstrap_results:?}");
+    // p2 "Quick Query Tool" matches CONTAINS 'Query'
+    assert_eq!(bootstrap_results.len(), 1);
+    assert!(contains_data(
+        &bootstrap_results,
+        &QueryPartEvaluationContext::Adding {
+            after: variablemap!(
+                "name" => VariableValue::from(json!("Quick Query Tool"))
+            ),
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }
+    ));
 
     // Insert a product that contains "Query"
     {

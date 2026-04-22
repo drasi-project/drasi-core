@@ -251,8 +251,8 @@ peg::parser! {
                 a:(@) __* "<=" __* b:@ { BinaryExpression::le(a, b) }
                 a:(@) __* ">"  __* b:@ { BinaryExpression::gt(a, b) }
                 a:(@) __* ">=" __* b:@ { BinaryExpression::ge(a, b) }
-                a:(@) __+ kw_starts() _+ ("WITH" / "with") __+ b:@ { BinaryExpression::starts_with(a, b) }
-                a:(@) __+ kw_ends() _+ ("WITH" / "with") __+ b:@ { BinaryExpression::ends_with(a, b) }
+                a:(@) __+ kw_starts() __+ ("WITH" / "with") __+ b:@ { BinaryExpression::starts_with(a, b) }
+                a:(@) __+ kw_ends() __+ ("WITH" / "with") __+ b:@ { BinaryExpression::ends_with(a, b) }
                 a:(@) __+ kw_contains() __+ b:@ { BinaryExpression::contains(a, b) }
                 --
                 a:(@) __* "+" __* b:@ { BinaryExpression::add(a, b) }
