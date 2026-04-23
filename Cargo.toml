@@ -102,8 +102,8 @@ drasi-core = { version = "0.4.2", path = "core" }
 drasi-functions-cypher = { version = "0.4.2", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.4.2", path = "functions-gql" }
 drasi-middleware = { version = "0.4.2", path = "middleware" }
-drasi-identity-azure = { version = "0.1.0", path = "components/identity/azure" }
-drasi-identity-aws = { version = "0.1.0", path = "components/identity/aws" }
+drasi-identity-azure = { version = "0.1.1", path = "components/identity/azure" }
+drasi-identity-aws = { version = "0.1.1", path = "components/identity/aws" }
 drasi-lib = { version = "0.6.0", path = "lib" }
 drasi-ffi-primitives = { version = "0.6.0", path = "components/ffi-primitives" }
 drasi-plugin-sdk = { version = "0.6.0", path = "components/plugin-sdk" }
@@ -115,15 +115,15 @@ drasi-index-rocksdb = { version = "0.3.2", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.9", path = "components/indexes/garnet" }
 
 # Component plugins
-drasi-source-mssql = { version = "0.1.4", path = "components/sources/mssql" }
-drasi-bootstrap-mssql = { version = "0.1.4", path = "components/bootstrappers/mssql" }
-drasi-bootstrap-postgres = { version = "0.1.14", path = "components/bootstrappers/postgres" }
-drasi-reaction-application = { version = "0.2.10", path = "components/reactions/application" }
-drasi-source-postgres = { version = "0.1.14", path = "components/sources/postgres" }
-drasi-source-application = { version = "0.1.13", path = "components/sources/application" }
-drasi-bootstrap-application = { version = "0.1.12", path = "components/bootstrappers/application" }
-drasi-reaction-http = { version = "0.1.13", path = "components/reactions/http" }
-drasi-reaction-grpc = { version = "0.2.9", path = "components/reactions/grpc" }
+drasi-source-mssql = { version = "0.1.5", path = "components/sources/mssql" }
+drasi-bootstrap-mssql = { version = "0.1.5", path = "components/bootstrappers/mssql" }
+drasi-bootstrap-postgres = { version = "0.1.15", path = "components/bootstrappers/postgres" }
+drasi-reaction-application = { version = "0.2.11", path = "components/reactions/application" }
+drasi-source-postgres = { version = "0.1.15", path = "components/sources/postgres" }
+drasi-source-application = { version = "0.1.14", path = "components/sources/application" }
+drasi-bootstrap-application = { version = "0.1.13", path = "components/bootstrappers/application" }
+drasi-reaction-http = { version = "0.1.14", path = "components/reactions/http" }
+drasi-reaction-grpc = { version = "0.2.10", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.1.2", path = "components/mssql-common" }
 
 [workspace.lints.rust]
