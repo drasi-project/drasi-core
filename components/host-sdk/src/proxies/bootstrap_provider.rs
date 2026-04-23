@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor;
@@ -57,7 +59,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&SourceSubscriptionSettings>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BootstrapResult> {
         // Build FfiStr arrays for node/relation labels
         let node_label_strs: Vec<String> = request.node_labels.clone();
         let rel_label_strs: Vec<String> = request.relation_labels.clone();
@@ -110,7 +112,14 @@ impl BootstrapProvider for BootstrapProviderProxy {
             return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
         }
 
-        Ok(count as usize)
+        // The FFI ABI (bootstrap_fn in vtables.rs) returns only a count.
+        // `last_sequence` / `sequences_aligned` require a future extension of
+        // the C ABI to flow across the plugin boundary.
+        Ok(BootstrapResult {
+            event_count: count as usize,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 
@@ -146,26 +155,30 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     let state = Box::into_raw(Box::new(std_tx)) as *mut c_void;
 
     extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
-        let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
-        if event.is_null() {
-            return -1;
-        }
-        let ffi_event = unsafe { &*event };
-        let bootstrap_event = unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
-        // Free the FFI envelope but not the opaque (we took ownership)
-        unsafe { drop(Box::from_raw(event)) };
-        match tx.send(bootstrap_event) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
+            if event.is_null() {
+                return -1;
+            }
+            let ffi_event = unsafe { &*event };
+            let bootstrap_event =
+                unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
+            // Free the FFI envelope but not the opaque (we took ownership)
+            unsafe { drop(Box::from_raw(event)) };
+            match tx.send(bootstrap_event) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            }
+        }))
+        .unwrap_or(-1)
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             drop(Box::from_raw(
                 state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
             ))
-        };
+        }));
     }
 
     FfiBootstrapSender {

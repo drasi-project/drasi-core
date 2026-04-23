@@ -31,6 +31,8 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -164,6 +166,15 @@ pub struct SourceBase {
     /// Set either programmatically (via `set_identity_provider`) or automatically
     /// from the runtime context during `initialize()`.
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
+    /// Per-query position handles for replay-capable subscribers.
+    ///
+    /// Keyed by `query_id`. Values are the same `Arc<AtomicU64>` returned in
+    /// `SubscriptionResponse::position_handle`. The query writes its last
+    /// durably-processed sequence; the source reads `compute_confirmed_position()`
+    /// to advance its upstream cursor. Initial value is `u64::MAX`
+    /// ("no position confirmed yet"). Only populated when
+    /// `request_position_handle == true`.
+    position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
 }
 
 impl SourceBase {
@@ -209,6 +220,7 @@ impl SourceBase {
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
+            position_handles: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -278,6 +290,74 @@ impl SourceBase {
         *self.identity_provider.write().await = Some(provider);
     }
 
+    /// Create and register a position handle for `query_id`, initialized to `u64::MAX`.
+    ///
+    /// Returns the shared handle; the same `Arc` is placed in
+    /// `SubscriptionResponse::position_handle` so the query and the source share
+    /// one atomic. If a handle already exists for `query_id` (re-subscribe after
+    /// transient disconnect), the existing handle is returned to preserve any
+    /// position the query had previously reported.
+    pub async fn create_position_handle(&self, query_id: &str) -> Arc<AtomicU64> {
+        let mut handles = self.position_handles.write().await;
+        if let Some(existing) = handles.get(query_id) {
+            return existing.clone();
+        }
+        let handle = Arc::new(AtomicU64::new(u64::MAX));
+        handles.insert(query_id.to_string(), handle.clone());
+        handle
+    }
+
+    /// Remove the position handle for `query_id`. No-op if absent.
+    ///
+    /// Called from explicit cleanup paths (`stop_query`/`delete_query` will be
+    /// wired in a follow-up issue). Until then, `cleanup_stale_handles()`
+    /// (invoked inside `compute_confirmed_position`) catches dropped subscribers.
+    pub async fn remove_position_handle(&self, query_id: &str) {
+        let mut handles = self.position_handles.write().await;
+        handles.remove(query_id);
+    }
+
+    /// Compute the minimum confirmed position across all live subscribers.
+    ///
+    /// Returns `None` if no handles are registered, or if every registered
+    /// handle is still `u64::MAX` (no subscriber has confirmed a position yet —
+    /// typically because they are still bootstrapping). Otherwise returns the
+    /// minimum non-`u64::MAX` value, suitable for advancing the source's
+    /// upstream cursor (Postgres `flush_lsn`, Kafka commit, transient WAL prune
+    /// threshold).
+    ///
+    /// Piggy-backs `cleanup_stale_handles()` so dropped subscribers do not pin
+    /// the watermark indefinitely.
+    pub async fn compute_confirmed_position(&self) -> Option<u64> {
+        self.cleanup_stale_handles().await;
+        let handles = self.position_handles.read().await;
+        let mut min: Option<u64> = None;
+        for handle in handles.values() {
+            let v = handle.load(Ordering::Relaxed);
+            if v == u64::MAX {
+                continue;
+            }
+            min = Some(min.map_or(v, |m| m.min(v)));
+        }
+        min
+    }
+
+    /// Drop entries whose `Arc::strong_count == 1` (only `SourceBase` holds a
+    /// reference).
+    ///
+    /// This indicates the subscriber dropped its `SubscriptionResponse` without
+    /// calling `remove_position_handle` — common during query teardown until
+    /// explicit cleanup is wired by the query manager.
+    ///
+    /// Safety constraint: this relies on `SourceBase` being the only long-lived
+    /// holder of the `Arc` besides the subscribing query. If a future periodic
+    /// scan task (or any other component) clones the handle, this method must
+    /// be revisited or replaced with explicit liveness tracking.
+    pub async fn cleanup_stale_handles(&self) {
+        let mut handles = self.position_handles.write().await;
+        handles.retain(|_, handle| Arc::strong_count(handle) > 1);
+    }
+
     /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
     /// The handle can both read and write the component's status and automatically
@@ -304,6 +384,7 @@ impl SourceBase {
             shutdown_tx: self.shutdown_tx.clone(),
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
+            position_handles: self.position_handles.clone(),
         }
     }
 
@@ -377,8 +458,13 @@ impl SourceBase {
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
         info!(
-            "Query '{}' subscribing to {} source '{}' (bootstrap: {})",
-            settings.query_id, source_type, self.id, settings.enable_bootstrap
+            "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
+            settings.query_id,
+            source_type,
+            self.id,
+            settings.enable_bootstrap,
+            settings.resume_from,
+            settings.request_position_handle
         );
 
         // Create streaming receiver using helper method
@@ -386,10 +472,27 @@ impl SourceBase {
 
         let query_id_for_response = settings.query_id.clone();
 
-        // Handle bootstrap if requested and bootstrap provider is configured
-        let bootstrap_receiver = if settings.enable_bootstrap {
+        // resume_from overrides bootstrap: a resuming query already has base
+        // state in its persistent index and just needs replay from the
+        // requested sequence. Re-bootstrapping would corrupt that state.
+        let bootstrap_receiver = if settings.resume_from.is_some() {
+            info!(
+                "Query '{}' resuming from sequence {:?}; skipping bootstrap on {} source '{}'",
+                settings.query_id, settings.resume_from, source_type, self.id
+            );
+            None
+        } else if settings.enable_bootstrap {
             self.handle_bootstrap_subscription(settings, source_type)
                 .await?
+        } else {
+            None
+        };
+
+        // Only persistent (replay-capable) queries request a handle. Volatile
+        // queries are deliberately excluded from the min-watermark so they
+        // cannot pin upstream advancement.
+        let position_handle = if settings.request_position_handle {
+            Some(self.create_position_handle(&settings.query_id).await)
         } else {
             None
         };
@@ -399,6 +502,7 @@ impl SourceBase {
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver,
+            position_handle,
         })
     }
 
@@ -462,11 +566,15 @@ impl SourceBase {
                         .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
                         .await
                     {
-                        Ok(count) => {
+                        Ok(result) => {
                             info!(
-                                "Bootstrap completed successfully for query '{}', sent {count} events",
-                                settings_clone.query_id
+                                "Bootstrap completed successfully for query '{}', sent {} events",
+                                settings_clone.query_id, result.event_count
                             );
+                            // `result.last_sequence` / `result.sequences_aligned`
+                            // are intentionally unused at this call site — a
+                            // future query-processor integration issue will
+                            // plumb them through to the handover protocol.
                         }
                         Err(e) => {
                             error!(
@@ -803,5 +911,236 @@ mod tests {
         // Mutating through the handle should be visible via SourceBase
         handle.set_status(ComponentStatus::Starting, None).await;
         assert_eq!(base.get_status().await, ComponentStatus::Starting);
+    }
+
+    // =========================================================================
+    // Position handle and resume_from tests (issue #366)
+    // =========================================================================
+
+    use crate::bootstrap::{
+        BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+    };
+    use crate::channels::BootstrapEventSender;
+    use async_trait::async_trait;
+
+    fn make_settings(
+        query_id: &str,
+        enable_bootstrap: bool,
+        resume_from: Option<u64>,
+        request_position_handle: bool,
+    ) -> crate::config::SourceSubscriptionSettings {
+        use std::collections::HashSet;
+        crate::config::SourceSubscriptionSettings {
+            source_id: "test-src".to_string(),
+            enable_bootstrap,
+            query_id: query_id.to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+            resume_from,
+            request_position_handle,
+        }
+    }
+
+    /// Minimal bootstrap provider that closes its sender immediately.
+    /// Enough to verify a `bootstrap_receiver` was created without sending data.
+    struct NoopProvider;
+
+    #[async_trait]
+    impl BootstrapProvider for NoopProvider {
+        async fn bootstrap(
+            &self,
+            _request: BootstrapRequest,
+            _context: &BootstrapContext,
+            _event_tx: BootstrapEventSender,
+            _settings: Option<&crate::config::SourceSubscriptionSettings>,
+        ) -> Result<BootstrapResult> {
+            Ok(BootstrapResult::default())
+        }
+    }
+
+    fn make_base_with_bootstrap(id: &str) -> SourceBase {
+        let mut params = SourceBaseParams::new(id);
+        params.bootstrap_provider = Some(Box::new(NoopProvider));
+        SourceBase::new(params).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_create_position_handle_initializes_to_u64_max() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-init")).unwrap();
+        let handle = base.create_position_handle("q1").await;
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_create_position_handle_idempotent_for_same_query() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-idem")).unwrap();
+        let h1 = base.create_position_handle("q1").await;
+        h1.store(123, Ordering::Relaxed);
+        let h2 = base.create_position_handle("q1").await;
+        // Same Arc — preserves the previously reported position.
+        assert!(Arc::ptr_eq(&h1, &h2));
+        assert_eq!(h2.load(Ordering::Relaxed), 123);
+    }
+
+    #[tokio::test]
+    async fn test_remove_position_handle_drops_entry() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-rm")).unwrap();
+        let handle = base.create_position_handle("q1").await;
+        handle.store(42, Ordering::Relaxed);
+        assert_eq!(base.compute_confirmed_position().await, Some(42));
+        base.remove_position_handle("q1").await;
+        assert_eq!(base.compute_confirmed_position().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_remove_position_handle_noop_when_absent() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-rm-absent")).unwrap();
+        // Must not panic.
+        base.remove_position_handle("never-registered").await;
+        assert_eq!(base.compute_confirmed_position().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_position_returns_none_when_empty() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-empty")).unwrap();
+        assert_eq!(base.compute_confirmed_position().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_position_returns_none_when_all_max() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-all-max")).unwrap();
+        let _h1 = base.create_position_handle("q1").await;
+        let _h2 = base.create_position_handle("q2").await;
+        assert_eq!(base.compute_confirmed_position().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_position_filters_max_returns_min() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-min")).unwrap();
+        let h1 = base.create_position_handle("q1").await;
+        let _h2 = base.create_position_handle("q2").await; // stays u64::MAX
+        let h3 = base.create_position_handle("q3").await;
+        h1.store(100, Ordering::Relaxed);
+        h3.store(50, Ordering::Relaxed);
+        assert_eq!(base.compute_confirmed_position().await, Some(50));
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_position_single_real_value() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-single")).unwrap();
+        let h1 = base.create_position_handle("q1").await;
+        let _h2 = base.create_position_handle("q2").await;
+        h1.store(7, Ordering::Relaxed);
+        assert_eq!(base.compute_confirmed_position().await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_stale_handles_drops_orphaned_arc() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-stale")).unwrap();
+        {
+            let handle = base.create_position_handle("q1").await;
+            handle.store(99, Ordering::Relaxed);
+            // handle (the external clone) drops here.
+        }
+        base.cleanup_stale_handles().await;
+        assert_eq!(base.compute_confirmed_position().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_stale_handles_keeps_held_arc() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-held")).unwrap();
+        let handle = base.create_position_handle("q1").await;
+        handle.store(11, Ordering::Relaxed);
+        base.cleanup_stale_handles().await;
+        // External clone still alive, entry retained.
+        assert_eq!(base.compute_confirmed_position().await, Some(11));
+        // Keep `handle` alive past the assertion.
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_with_request_position_handle_returns_handle() {
+        let base = SourceBase::new(SourceBaseParams::new("sub-handle")).unwrap();
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, None, true), "test")
+            .await
+            .unwrap();
+        let handle = response.position_handle.expect("expected handle");
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+        // Internal map should also have the entry (so min-watermark sees it).
+        assert_eq!(base.compute_confirmed_position().await, None); // u64::MAX → None
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_without_request_position_handle_returns_none() {
+        let base = SourceBase::new(SourceBaseParams::new("sub-no-handle")).unwrap();
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, None, false), "test")
+            .await
+            .unwrap();
+        assert!(response.position_handle.is_none());
+        // Internal map must be empty so this volatile query is excluded from
+        // the min-watermark.
+        let handles = base.position_handles.read().await;
+        assert!(handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_returned_handle_shared_with_internal() {
+        let base = SourceBase::new(SourceBaseParams::new("sub-shared")).unwrap();
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, None, true), "test")
+            .await
+            .unwrap();
+        let handle = response.position_handle.unwrap();
+        handle.store(42, Ordering::Relaxed);
+        assert_eq!(base.compute_confirmed_position().await, Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_with_resume_from_skips_bootstrap() {
+        let base = make_base_with_bootstrap("sub-resume");
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, Some(100), false), "test")
+            .await
+            .unwrap();
+        assert!(
+            response.bootstrap_receiver.is_none(),
+            "resume_from must override enable_bootstrap"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_resume_without_bootstrap_still_none() {
+        let base = make_base_with_bootstrap("sub-resume-no-bs");
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, Some(100), false), "test")
+            .await
+            .unwrap();
+        assert!(response.bootstrap_receiver.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_no_resume_with_bootstrap_returns_receiver() {
+        let base = make_base_with_bootstrap("sub-bs");
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, None, false), "test")
+            .await
+            .unwrap();
+        assert!(
+            response.bootstrap_receiver.is_some(),
+            "regression guard: bootstrap path must still produce a receiver"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_no_resume_no_bootstrap_returns_none() {
+        let base = make_base_with_bootstrap("sub-neither");
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, None, false), "test")
+            .await
+            .unwrap();
+        assert!(response.bootstrap_receiver.is_none());
+        assert!(response.position_handle.is_none());
     }
 }

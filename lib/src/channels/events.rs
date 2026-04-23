@@ -16,6 +16,7 @@ use crate::profiling::ProfilingMetadata;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -222,6 +223,10 @@ pub struct SourceEventWrapper {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Optional profiling metadata for performance tracking
     pub profiling: Option<ProfilingMetadata>,
+    /// Monotonic, replayable sequence number stamped by the source.
+    /// `None` for volatile sources that don't support replay.
+    /// When present, must be strictly increasing per source.
+    pub sequence: Option<u64>,
 }
 
 impl SourceEventWrapper {
@@ -236,6 +241,7 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: None,
+            sequence: None,
         }
     }
 
@@ -251,6 +257,24 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: Some(profiling),
+            sequence: None,
+        }
+    }
+
+    /// Create a new SourceEventWrapper with a sequence number (and optional profiling)
+    pub fn with_sequence(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        sequence: u64,
+        profiling: Option<ProfilingMetadata>,
+    ) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling,
+            sequence: Some(sequence),
         }
     }
 
@@ -263,8 +287,15 @@ impl SourceEventWrapper {
         SourceEvent,
         chrono::DateTime<chrono::Utc>,
         Option<ProfilingMetadata>,
+        Option<u64>,
     ) {
-        (self.source_id, self.event, self.timestamp, self.profiling)
+        (
+            self.source_id,
+            self.event,
+            self.timestamp,
+            self.profiling,
+            self.sequence,
+        )
     }
 
     /// Try to extract components from an Arc<SourceEventWrapper>.
@@ -281,6 +312,7 @@ impl SourceEventWrapper {
             SourceEvent,
             chrono::DateTime<chrono::Utc>,
             Option<ProfilingMetadata>,
+            Option<u64>,
         ),
         Arc<Self>,
     > {
@@ -307,13 +339,6 @@ pub struct BootstrapEvent {
     pub sequence: u64,
 }
 
-/// Bootstrap completion signal
-#[derive(Debug, Clone)]
-pub struct BootstrapComplete {
-    pub source_id: String,
-    pub total_events: u64,
-}
-
 /// Subscription request from Query to Source
 #[derive(Debug, Clone)]
 pub struct SubscriptionRequest {
@@ -330,6 +355,12 @@ pub struct SubscriptionResponse {
     pub source_id: String,
     pub receiver: Box<dyn super::ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
+    /// Shared handle for the query to report its last durably-processed sequence position.
+    /// Created by replay-capable sources when `request_position_handle` is true.
+    /// The query writes to this atomically after each commit; the source reads the
+    /// minimum across all subscribers to advance its upstream cursor.
+    /// Sources should initialize this to `u64::MAX` (meaning "no position confirmed yet").
+    pub position_handle: Option<Arc<AtomicU64>>,
 }
 
 /// Subscription response from Query to Reaction
@@ -465,8 +496,6 @@ pub type QueryResultBroadcastReceiver = broadcast::Receiver<ArcQueryResult>;
 // Bootstrap channel types for dedicated bootstrap data delivery
 pub type BootstrapEventSender = mpsc::Sender<BootstrapEvent>;
 pub type BootstrapEventReceiver = mpsc::Receiver<BootstrapEvent>;
-pub type BootstrapCompleteSender = mpsc::Sender<BootstrapComplete>;
-pub type BootstrapCompleteReceiver = mpsc::Receiver<BootstrapComplete>;
 
 /// Control signals for coordination
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -563,7 +592,7 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let (source_id, event, _timestamp, profiling) = wrapper.into_parts();
+        let (source_id, event, _timestamp, profiling, _sequence) = wrapper.into_parts();
 
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
@@ -584,7 +613,7 @@ mod tests {
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
-        let (source_id, event, _timestamp, _profiling) = result.unwrap();
+        let (source_id, event, _timestamp, _profiling, _sequence) = result.unwrap();
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
     }
@@ -621,7 +650,7 @@ mod tests {
         let arc = Arc::new(wrapper);
 
         // This is the zero-copy path - when we have sole ownership
-        let (source_id, event, _timestamp, _profiling) =
+        let (source_id, event, _timestamp, _profiling, _sequence) =
             match SourceEventWrapper::try_unwrap_arc(arc) {
                 Ok(parts) => parts,
                 Err(arc) => {
@@ -631,6 +660,7 @@ mod tests {
                         arc.event.clone(),
                         arc.timestamp,
                         arc.profiling.clone(),
+                        arc.sequence,
                     )
                 }
             };
@@ -643,5 +673,63 @@ mod tests {
 
         assert_eq!(source_id, "test-source");
         assert!(source_change.is_some());
+    }
+
+    #[test]
+    fn test_source_event_wrapper_with_sequence() {
+        let change = create_test_source_change();
+        let wrapper = SourceEventWrapper::with_sequence(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            42,
+            None,
+        );
+        assert_eq!(wrapper.sequence, Some(42));
+        assert!(wrapper.profiling.is_none());
+
+        let (_source_id, _event, _timestamp, _profiling, sequence) = wrapper.into_parts();
+        assert_eq!(sequence, Some(42));
+    }
+
+    #[test]
+    fn test_source_event_wrapper_new_has_no_sequence() {
+        let change = create_test_source_change();
+        let wrapper = SourceEventWrapper::new(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+        assert!(wrapper.sequence.is_none());
+    }
+
+    #[test]
+    fn test_subscription_response_with_position_handle() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let handle = Arc::new(AtomicU64::new(u64::MAX));
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+
+        // Verify the handle can be cloned and read (simulates source reading query's position)
+        let handle_clone = handle.clone();
+        handle.store(500, Ordering::Relaxed);
+        assert_eq!(handle_clone.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
+    fn test_subscription_settings_with_resume_from() {
+        use std::collections::HashSet;
+        let settings = crate::config::SourceSubscriptionSettings {
+            source_id: "test-source".to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+            resume_from: Some(500),
+            request_position_handle: true,
+        };
+        assert_eq!(settings.resume_from, Some(500));
+        assert!(settings.request_position_handle);
     }
 }

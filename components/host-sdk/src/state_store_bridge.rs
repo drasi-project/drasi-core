@@ -24,6 +24,19 @@ use std::sync::Arc;
 use drasi_lib::StateStoreProvider;
 use drasi_plugin_sdk::ffi::{FfiGetResult, FfiResult, FfiStr, FfiStringArray, StateStoreVtable};
 
+/// Wraps an FFI body in `catch_unwind` and returns `default` on panic.
+///
+/// Panics unwinding across an `extern "C"` boundary are undefined behavior
+/// (and on most modern toolchains immediately abort the process). All
+/// extern "C" entry points exposed by this bridge MUST funnel through this
+/// helper. The default value is what the host returns to the plugin on panic.
+fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => default,
+    }
+}
+
 /// Builds a `StateStoreVtable` from a host-side `Arc<dyn StateStoreProvider>`.
 pub struct StateStoreVtableBuilder;
 
@@ -60,24 +73,27 @@ fn provider_ref(state: *mut c_void) -> &'static dyn StateStoreProvider {
     arc.as_ref()
 }
 
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    // Use a current-thread runtime to avoid nesting issues with the host's runtime
+fn block_on<F: std::future::Future>(f: F) -> Option<F::Output> {
+    // Use a current-thread runtime to avoid nesting issues with the host's runtime.
+    // Returns None if the runtime cannot be built — callers convert to an FFI error
+    // rather than panicking across the boundary.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("failed to build tokio runtime for state store bridge");
-    rt.block_on(f)
+        .ok()?;
+    Some(rt.block_on(f))
 }
 
 extern "C" fn ss_get(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiGetResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key = unsafe { key.to_string() };
-    match block_on(provider.get(&store_id, &key)) {
-        Ok(Some(value)) => FfiGetResult::found(value),
-        Ok(None) => FfiGetResult::not_found(),
-        Err(_) => FfiGetResult::not_found(),
-    }
+    ffi_guard(FfiGetResult::not_found(), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key = unsafe { key.to_string() };
+        match block_on(provider.get(&store_id, &key)) {
+            Some(Ok(Some(value))) => FfiGetResult::found(value),
+            _ => FfiGetResult::not_found(),
+        }
+    })
 }
 
 extern "C" fn ss_set(
@@ -87,35 +103,44 @@ extern "C" fn ss_set(
     value: *const u8,
     value_len: usize,
 ) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key = unsafe { key.to_string() };
-    let value = unsafe { std::slice::from_raw_parts(value, value_len) }.to_vec();
-    match block_on(provider.set(&store_id, &key, value)) {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_set: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key = unsafe { key.to_string() };
+        let value = unsafe { std::slice::from_raw_parts(value, value_len) }.to_vec();
+        match block_on(provider.set(&store_id, &key, value)) {
+            Some(Ok(())) => FfiResult::ok(),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_delete(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key = unsafe { key.to_string() };
-    match block_on(provider.delete(&store_id, &key)) {
-        Ok(_) => FfiResult::ok(),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_delete: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key = unsafe { key.to_string() };
+        match block_on(provider.delete(&store_id, &key)) {
+            Some(Ok(_)) => FfiResult::ok(),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_contains_key(state: *mut c_void, store_id: FfiStr, key: FfiStr) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key = unsafe { key.to_string() };
-    match block_on(provider.contains_key(&store_id, &key)) {
-        Ok(true) => FfiResult::ok(),
-        Ok(false) => FfiResult::err("not_found".to_string()),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_contains_key: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key = unsafe { key.to_string() };
+        match block_on(provider.contains_key(&store_id, &key)) {
+            Some(Ok(true)) => FfiResult::ok(),
+            Some(Ok(false)) => FfiResult::err("not_found".to_string()),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_get_many(
@@ -125,25 +150,28 @@ extern "C" fn ss_get_many(
     keys_count: usize,
     out_values: *mut FfiGetResult,
 ) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key_strs: Vec<String> = (0..keys_count)
-        .map(|i| unsafe { (*keys.add(i)).to_string() })
-        .collect();
-    let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
-    match block_on(provider.get_many(&store_id, &key_refs)) {
-        Ok(results) => {
-            for (i, key) in key_strs.iter().enumerate() {
-                let ffi_result = match results.get(key) {
-                    Some(value) => FfiGetResult::found(value.clone()),
-                    None => FfiGetResult::not_found(),
-                };
-                unsafe { *out_values.add(i) = ffi_result };
+    ffi_guard(FfiResult::err("ss_get_many: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key_strs: Vec<String> = (0..keys_count)
+            .map(|i| unsafe { (*keys.add(i)).to_string() })
+            .collect();
+        let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
+        match block_on(provider.get_many(&store_id, &key_refs)) {
+            Some(Ok(results)) => {
+                for (i, key) in key_strs.iter().enumerate() {
+                    let ffi_result = match results.get(key) {
+                        Some(value) => FfiGetResult::found(value.clone()),
+                        None => FfiGetResult::not_found(),
+                    };
+                    unsafe { *out_values.add(i) = ffi_result };
+                }
+                FfiResult::ok()
             }
-            FfiResult::ok()
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
         }
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    })
 }
 
 extern "C" fn ss_set_many(
@@ -154,24 +182,27 @@ extern "C" fn ss_set_many(
     value_lens: *const usize,
     count: usize,
 ) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let entries: Vec<(String, Vec<u8>)> = (0..count)
-        .map(|i| unsafe {
-            let key = (*keys.add(i)).to_string();
-            let len = *value_lens.add(i);
-            let val = std::slice::from_raw_parts(*values.add(i), len).to_vec();
-            (key, val)
-        })
-        .collect();
-    let refs: Vec<(&str, &[u8])> = entries
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_slice()))
-        .collect();
-    match block_on(provider.set_many(&store_id, &refs)) {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_set_many: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let entries: Vec<(String, Vec<u8>)> = (0..count)
+            .map(|i| unsafe {
+                let key = (*keys.add(i)).to_string();
+                let len = *value_lens.add(i);
+                let val = std::slice::from_raw_parts(*values.add(i), len).to_vec();
+                (key, val)
+            })
+            .collect();
+        let refs: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        match block_on(provider.set_many(&store_id, &refs)) {
+            Some(Ok(())) => FfiResult::ok(),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_delete_many(
@@ -180,64 +211,80 @@ extern "C" fn ss_delete_many(
     keys: *const FfiStr,
     keys_count: usize,
 ) -> i64 {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    let key_strs: Vec<String> = (0..keys_count)
-        .map(|i| unsafe { (*keys.add(i)).to_string() })
-        .collect();
-    let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
-    match block_on(provider.delete_many(&store_id, &key_refs)) {
-        Ok(count) => count as i64,
-        Err(_) => -1,
-    }
+    ffi_guard(-1, || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        let key_strs: Vec<String> = (0..keys_count)
+            .map(|i| unsafe { (*keys.add(i)).to_string() })
+            .collect();
+        let key_refs: Vec<&str> = key_strs.iter().map(|s| s.as_str()).collect();
+        match block_on(provider.delete_many(&store_id, &key_refs)) {
+            Some(Ok(count)) => count as i64,
+            _ => -1,
+        }
+    })
 }
 
 extern "C" fn ss_clear_store(state: *mut c_void, store_id: FfiStr) -> i64 {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    match block_on(provider.clear_store(&store_id)) {
-        Ok(count) => count as i64,
-        Err(_) => -1,
-    }
+    ffi_guard(-1, || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        match block_on(provider.clear_store(&store_id)) {
+            Some(Ok(count)) => count as i64,
+            _ => -1,
+        }
+    })
 }
 
 extern "C" fn ss_list_keys(state: *mut c_void, store_id: FfiStr) -> FfiStringArray {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    match block_on(provider.list_keys(&store_id)) {
-        Ok(keys) => FfiStringArray::from_vec(keys),
-        Err(_) => FfiStringArray::from_vec(Vec::new()),
-    }
+    ffi_guard(FfiStringArray::from_vec(Vec::new()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        match block_on(provider.list_keys(&store_id)) {
+            Some(Ok(keys)) => FfiStringArray::from_vec(keys),
+            _ => FfiStringArray::from_vec(Vec::new()),
+        }
+    })
 }
 
 extern "C" fn ss_store_exists(state: *mut c_void, store_id: FfiStr) -> FfiResult {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    match block_on(provider.store_exists(&store_id)) {
-        Ok(true) => FfiResult::ok(),
-        Ok(false) => FfiResult::err("not_found".to_string()),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_store_exists: panic".to_string()), || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        match block_on(provider.store_exists(&store_id)) {
+            Some(Ok(true)) => FfiResult::ok(),
+            Some(Ok(false)) => FfiResult::err("not_found".to_string()),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_key_count(state: *mut c_void, store_id: FfiStr) -> i64 {
-    let provider = provider_ref(state);
-    let store_id = unsafe { store_id.to_string() };
-    match block_on(provider.key_count(&store_id)) {
-        Ok(count) => count as i64,
-        Err(_) => -1,
-    }
+    ffi_guard(-1, || {
+        let provider = provider_ref(state);
+        let store_id = unsafe { store_id.to_string() };
+        match block_on(provider.key_count(&store_id)) {
+            Some(Ok(count)) => count as i64,
+            _ => -1,
+        }
+    })
 }
 
 extern "C" fn ss_sync(state: *mut c_void) -> FfiResult {
-    let provider = provider_ref(state);
-    match block_on(provider.sync()) {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::err(e.to_string()),
-    }
+    ffi_guard(FfiResult::err("ss_sync: panic".to_string()), || {
+        let provider = provider_ref(state);
+        match block_on(provider.sync()) {
+            Some(Ok(())) => FfiResult::ok(),
+            Some(Err(e)) => FfiResult::err(e.to_string()),
+            None => FfiResult::err("failed to build runtime".to_string()),
+        }
+    })
 }
 
 extern "C" fn ss_drop(state: *mut c_void) {
-    // Reconstruct the Box<Arc<...>> and drop it
-    unsafe { drop(Box::from_raw(state as *mut Arc<dyn StateStoreProvider>)) };
+    ffi_guard((), || {
+        // Reconstruct the Box<Arc<...>> and drop it
+        unsafe { drop(Box::from_raw(state as *mut Arc<dyn StateStoreProvider>)) };
+    })
 }

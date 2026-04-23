@@ -26,6 +26,7 @@ use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
+use serde_json::json;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
@@ -202,16 +203,19 @@ impl PostgresStoredProcReaction {
 
                 // Process each result item in the batch
                 for result_item in &query_result.results {
+                    let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
                         ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
                         ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            debug!(
-                                "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
-                            );
-                            continue;
+                        ResultDiff::Aggregation { before, after } => {
+                            aggregation_data = json!({
+                                "before": before,
+                                "after": after,
+                            });
+                            (OperationType::Update, &aggregation_data, "AGGREGATION")
                         }
+                        ResultDiff::Noop => continue,
                     };
 
                     // Get the command template for this query and operation type

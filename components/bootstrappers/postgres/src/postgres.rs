@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls, Row, Transaction};
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::SourceChangeEvent;
 
 pub use crate::config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
@@ -204,7 +206,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting PostgreSQL bootstrap for query '{}' with {} node labels and {} relation labels",
             request.query_id,
@@ -224,7 +226,16 @@ impl BootstrapProvider for PostgresBootstrapProvider {
 
         info!("Completed PostgreSQL bootstrap for query {query_id}: sent {count} records");
 
-        Ok(count)
+        // `last_sequence` / `sequences_aligned` are intentionally left at their
+        // defaults here. The handler already captures the snapshot LSN via
+        // `SELECT pg_current_wal_lsn()`; a follow-up issue will parse that LSN
+        // and populate these fields so Postgres→Postgres handover can dedup
+        // buffered stream events.
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

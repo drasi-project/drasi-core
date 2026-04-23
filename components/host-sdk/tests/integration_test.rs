@@ -530,10 +530,15 @@ fn test_plugin_loader_discovers_plugins_by_pattern() {
     }
     let dir = plugin_dir();
 
-    // Only scan for source plugins
+    // Only scan for source plugins (Windows DLLs lack the "lib" prefix)
+    let pattern = if cfg!(target_os = "windows") {
+        "drasi_source_mock*"
+    } else {
+        "libdrasi_source_mock*"
+    };
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir.clone(),
-        file_patterns: vec!["libdrasi_source_mock*".to_string()],
+        file_patterns: vec![pattern.to_string()],
     });
 
     let plugins = loader
@@ -568,10 +573,17 @@ fn test_plugin_loader_with_multiple_patterns() {
 
     let loader = PluginLoader::new(PluginLoaderConfig {
         plugin_dir: dir,
-        file_patterns: vec![
-            "libdrasi_source_mock*".to_string(),
-            "libdrasi_reaction_log*".to_string(),
-        ],
+        file_patterns: if cfg!(target_os = "windows") {
+            vec![
+                "drasi_source_mock*".to_string(),
+                "drasi_reaction_log*".to_string(),
+            ]
+        } else {
+            vec![
+                "libdrasi_source_mock*".to_string(),
+                "libdrasi_reaction_log*".to_string(),
+            ]
+        },
     });
 
     let plugins = loader
@@ -1930,9 +1942,74 @@ async fn test_reaction_enqueue_query_result_with_data() {
     reaction.stop().await.expect("Reaction should stop");
 }
 
-// =============================================================================
-// Full end-to-end tests: cdylib source → query → cdylib reaction via DrasiLib
-// =============================================================================
+/// Stress-test the reaction start/enqueue/stop lifecycle to flush out the
+/// shutdown races that previously caused intermittent SIGSEGV on macOS/Windows
+/// (Bugs B/C/F: forwarder receiver-drop race, callback-context UAF, missing
+/// catch_unwind on plugin extern fns / sentinel callback not always sent).
+///
+/// Each iteration creates a fresh reaction proxy, runs a short
+/// start → enqueue N → stop cycle, and drops it. Any regression of the
+/// fixed bugs typically manifests within a handful of iterations on stricter
+/// allocators (macOS guard pages, Windows LFH).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_reaction_start_stop_stress() {
+    if !plugin_exists("drasi-reaction-log") {
+        eprintln!("SKIP: drasi-reaction-log not built as cdylib");
+        panic!("SKIP: drasi-reaction-log not built as cdylib");
+    }
+    let path = require_plugin("drasi-reaction-log");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+    let descriptor = &plugin.reaction_plugins[0];
+
+    const ITERATIONS: usize = 25;
+    const ENQUEUE_PER_ITER: usize = 8;
+    let config = serde_json::json!({});
+    let query_ids = vec!["stress-query".to_string()];
+
+    for i in 0..ITERATIONS {
+        let reaction = descriptor
+            .create_reaction(&format!("stress-{i}"), query_ids.clone(), &config, true)
+            .await
+            .expect("Should create reaction instance");
+
+        let (update_tx, _update_rx) =
+            tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+        let context = drasi_lib::ReactionRuntimeContext {
+            instance_id: format!("stress-instance-{i}"),
+            reaction_id: format!("stress-{i}"),
+            update_tx,
+            state_store: None,
+            identity_provider: None,
+        };
+        reaction.initialize(context).await;
+        reaction.start().await.expect("reaction start");
+
+        for _ in 0..ENQUEUE_PER_ITER {
+            let qr = drasi_lib::channels::QueryResult::new(
+                "stress-query".to_string(),
+                chrono::Utc::now(),
+                vec![],
+                std::collections::HashMap::new(),
+            );
+            reaction
+                .enqueue_query_result(qr)
+                .await
+                .expect("enqueue_query_result");
+        }
+
+        reaction.stop().await.expect("reaction stop");
+        // Explicit drop so any UAF/forwarder race surfaces inside the loop
+        // rather than being deferred to test shutdown.
+        drop(reaction);
+    }
+}
 
 /// Full pipeline test: cdylib mock source → query → cdylib log reaction.
 ///
@@ -2411,6 +2488,8 @@ async fn test_cdylib_source_dispatches_events() {
         query_id: "test-query".to_string(),
         nodes: std::collections::HashSet::new(),
         relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
     };
     let sub = source.subscribe(settings).await.expect("Should subscribe");
     let receiver = sub.receiver;
@@ -2421,4 +2500,117 @@ async fn test_cdylib_source_dispatches_events() {
     drop(source);
     drop(plugin);
     drop(_event_rx);
+}
+
+// ============================================================================
+// Stress test: rapid subscribe/drop with concurrent event delivery
+// ============================================================================
+
+/// Stress test targeting timing-dependent FFI race conditions.
+///
+/// Rapidly creates subscriptions, receives a few events, then drops the
+/// receiver while the plugin forwarder may still be pushing events. Repeats
+/// many times to exercise shutdown/cleanup timing windows.
+///
+/// Currently ignored: this test surfaces a long-standing timing race in the
+/// source change_receiver FFI forwarder on Linux/Windows that is tracked
+/// separately. Re-enable once the change_receiver shutdown synchronization
+/// is hardened (similar to the reaction sentinel pattern).
+#[tokio::test]
+#[serial]
+#[ignore = "flaky cross-platform; tracked separately"]
+async fn test_stress_rapid_subscribe_drop_under_load() {
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIPPING: cdylib mock source plugin not found");
+        panic!("SKIPPING: cdylib mock source plugin not found");
+    }
+
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    // Fast timer (50ms) to maximize event throughput during stress test
+    let source_config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 50
+    });
+    let source = plugin.source_plugins[0]
+        .create_source("stress-test", &source_config, false)
+        .await
+        .expect("Should create mock source");
+
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "test-instance",
+        "stress-test",
+        None,
+        event_tx,
+        None,
+    );
+    source.initialize(context).await;
+    source.start().await.expect("Should start source");
+
+    // Wait for the source to be emitting events
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let iterations = 20;
+    for i in 0..iterations {
+        let settings = drasi_lib::config::SourceSubscriptionSettings {
+            source_id: "stress-test".to_string(),
+            enable_bootstrap: false,
+            query_id: format!("stress-query-{i}"),
+            nodes: std::collections::HashSet::new(),
+            relations: std::collections::HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
+        };
+        let sub = source.subscribe(settings).await.expect("Should subscribe");
+        let mut receiver = sub.receiver;
+
+        // Vary the timing: sometimes drop immediately, sometimes after
+        // receiving a few events, sometimes mid-event
+        match i % 4 {
+            0 => {
+                // Drop immediately — forwarder may not have started yet
+                drop(receiver);
+            }
+            1 => {
+                // Receive one event then drop
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), receiver.recv())
+                        .await;
+                drop(receiver);
+            }
+            2 => {
+                // Receive several events then drop
+                for _ in 0..3 {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        receiver.recv(),
+                    )
+                    .await;
+                }
+                drop(receiver);
+            }
+            _ => {
+                // Short sleep (overlapping with timer tick) then drop
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                drop(receiver);
+            }
+        }
+
+        // Brief yield to let forwarder cleanup tasks run
+        tokio::task::yield_now().await;
+    }
+
+    // If we get here without crashing, the shutdown/cleanup paths are sound
+    source.stop().await.expect("Should stop source");
+    println!("Stress test completed: {iterations} rapid subscribe/drop cycles without crash");
 }

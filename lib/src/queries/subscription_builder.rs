@@ -36,6 +36,8 @@ impl SubscriptionSettingsBuilder {
                 query_id: query_config.id.clone(),
                 nodes: source_config.nodes.iter().cloned().collect(),
                 relations: source_config.relations.iter().cloned().collect(),
+                resume_from: None,
+                request_position_handle: false,
             })
             .collect();
 
@@ -182,6 +184,7 @@ mod tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 

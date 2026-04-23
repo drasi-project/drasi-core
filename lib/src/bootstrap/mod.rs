@@ -122,13 +122,34 @@ impl BootstrapContext {
 
 use crate::channels::BootstrapEventSender;
 
+/// Result of a bootstrap operation, carrying the event count plus handover
+/// metadata that lets the query transition cleanly from bootstrap to streaming.
+///
+/// See design doc 02 §5 — Bootstrap-to-Streaming Handover.
+///
+/// # Fields
+/// * `event_count` - Number of bootstrap events sent through the channel.
+/// * `last_sequence` - The snapshot's position in the source's sequence space
+///   (e.g., a Postgres WAL LSN), when known. `None` for providers that have no
+///   positional concept (e.g., script file, no-op).
+/// * `sequences_aligned` - Whether the bootstrap's sequence namespace matches
+///   the streaming source's sequence namespace. `true` only when the query
+///   can safely dedup buffered stream events against `last_sequence`
+///   (typically homogeneous source + bootstrapper, e.g., Postgres / Postgres).
+#[derive(Debug, Clone, Default)]
+pub struct BootstrapResult {
+    pub event_count: usize,
+    pub last_sequence: Option<u64>,
+    pub sequences_aligned: bool,
+}
+
 /// Trait for bootstrap providers that handle initial data delivery
-/// for newly subscribed queries
+/// for newly subscribed queries.
 #[async_trait]
 pub trait BootstrapProvider: Send + Sync {
-    /// Perform bootstrap operation for the given request
-    /// Sends bootstrap events to the provided channel
-    /// Returns the number of elements sent
+    /// Perform bootstrap operation for the given request.
+    /// Sends bootstrap events to the provided channel.
+    /// Returns a [`BootstrapResult`] carrying the event count and handover metadata.
     ///
     /// # Arguments
     /// * `request` - Bootstrap request with query ID and labels
@@ -141,7 +162,7 @@ pub trait BootstrapProvider: Send + Sync {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&crate::config::SourceSubscriptionSettings>,
-    ) -> Result<usize>;
+    ) -> Result<BootstrapResult>;
 }
 
 /// Blanket implementation of BootstrapProvider for boxed trait objects.
@@ -154,7 +175,7 @@ impl BootstrapProvider for Box<dyn BootstrapProvider> {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&crate::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         (**self)
             .bootstrap(request, context, event_tx, settings)
             .await

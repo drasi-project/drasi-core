@@ -1051,7 +1051,7 @@ impl Query for DrasiQuery {
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
-                            let (source_id, event, _timestamp, profiling_opt) =
+                            let (source_id, event, _timestamp, profiling_opt, _sequence) =
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
@@ -1060,6 +1060,7 @@ impl Query for DrasiQuery {
                                             arc.event.clone(),
                                             arc.timestamp,
                                             arc.profiling.clone(),
+                                            arc.sequence,
                                         )
                                     }
                                 };

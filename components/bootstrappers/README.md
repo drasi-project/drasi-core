@@ -91,7 +91,9 @@ All bootstrap providers must implement the `BootstrapProvider` trait from `drasi
 ```rust
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEventSender;
 use drasi_lib::config::SourceSubscriptionSettings;
 
@@ -99,7 +101,7 @@ use drasi_lib::config::SourceSubscriptionSettings;
 pub trait BootstrapProvider: Send + Sync {
     /// Perform bootstrap operation for the given request.
     /// Sends bootstrap events to the provided channel.
-    /// Returns the number of elements sent.
+    /// Returns a `BootstrapResult` with the event count plus handover metadata.
     ///
     /// # Arguments
     /// * `request` - Bootstrap request with query ID and labels
@@ -112,7 +114,7 @@ pub trait BootstrapProvider: Send + Sync {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize>;
+    ) -> Result<BootstrapResult>;
 }
 ```
 
@@ -122,7 +124,9 @@ pub trait BootstrapProvider: Send + Sync {
 - **Channel-based delivery**: Events sent via MPSC channel, not returned directly
 - **Label filtering**: Both `request` and `settings` contain labels for filtering
 - **Sequence numbering**: Use `context.next_sequence()` for each event
-- **Return count**: Return the number of elements sent for logging/metrics
+- **Return metadata**: Return a `BootstrapResult` with the event count plus
+  handover metadata (`last_sequence`, `sequences_aligned`) for the
+  bootstrap-to-streaming handover protocol
 
 ## Core Types
 
@@ -222,6 +226,10 @@ pub struct SourceSubscriptionSettings {
     pub nodes: HashSet<String>,
     /// Set of relation labels the query needs from this source
     pub relations: HashSet<String>,
+    /// If set, the subscribing query requests events replayed from this sequence position.
+    pub resume_from: Option<u64>,
+    /// If true, the query requests a shared position handle for feedback.
+    pub request_position_handle: bool,
 }
 ```
 
@@ -373,7 +381,7 @@ impl BootstrapProvider for MyBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting bootstrap for query {} from source {}",
             request.query_id, context.source_id
@@ -430,7 +438,11 @@ impl BootstrapProvider for MyBootstrapProvider {
             request.query_id, count
         );
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 
@@ -707,7 +719,8 @@ When creating a new bootstrap provider plugin:
 - [ ] Implement label filtering for nodes and relations
 - [ ] Use `context.next_sequence()` for each event
 - [ ] Send events via `event_tx.send(event).await`
-- [ ] Return count of events sent
+- [ ] Return a `BootstrapResult` with the event count (and, when applicable,
+      `last_sequence` / `sequences_aligned` for the handover protocol)
 - [ ] Implement builder pattern for ergonomic construction
 - [ ] Implement `Default` trait if sensible defaults exist
 - [ ] Add unit tests for:
@@ -759,7 +772,7 @@ impl MyBootstrapProvider {
 Filter early to avoid unnecessary data processing:
 
 ```rust
-async fn bootstrap(&self, request: BootstrapRequest, ...) -> Result<usize> {
+async fn bootstrap(&self, request: BootstrapRequest, ...) -> Result<BootstrapResult> {
     let mut count = 0;
 
     for item in self.fetch_data().await? {
@@ -774,7 +787,11 @@ async fn bootstrap(&self, request: BootstrapRequest, ...) -> Result<usize> {
         count += 1;
     }
 
-    Ok(count)
+    Ok(BootstrapResult {
+        event_count: count,
+        last_sequence: None,
+        sequences_aligned: false,
+    })
 }
 ```
 
@@ -821,7 +838,7 @@ async fn bootstrap(
     context: &BootstrapContext,
     event_tx: BootstrapEventSender,
     settings: Option<&SourceSubscriptionSettings>,
-) -> Result<usize> {
+) -> Result<BootstrapResult> {
     // Log additional context if available
     if let Some(s) = settings {
         info!(
