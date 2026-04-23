@@ -53,7 +53,7 @@ impl DrasiLib {
     /// Add a source to a running server with additional metadata.
     ///
     /// Same as [`add_source`](Self::add_source) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub async fn add_source_with_metadata(
         &self,
         source: impl Source + 'static,

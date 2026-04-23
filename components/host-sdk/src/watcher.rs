@@ -15,9 +15,8 @@
 //! Policy-neutral plugin filesystem watcher.
 //!
 //! The [`PluginWatcher`] monitors a plugins directory and emits raw
-//! [`PluginFileEvent`]s. It does not decide whether a file change means load,
-//! upgrade, side-by-side, or retire — that policy belongs in the host
-//! application's orchestrator layer.
+//! [`PluginFileEvent`]s. It does not decide whether a file change means load
+//! or reload — that policy belongs in the host application's orchestrator layer.
 //!
 //! ## Backends
 //!
@@ -56,9 +55,8 @@ impl Default for PluginWatcherConfig {
 /// Watches a plugins directory and emits raw filesystem events.
 ///
 /// The watcher is policy-neutral: it only emits [`PluginFileEvent`]s and does
-/// not make any loading or retirement decisions. The host application's
-/// orchestrator subscribes to these events and applies its own policy
-/// (e.g., upgrade vs side-by-side based on `hotReloadMode` config).
+/// not make any loading decisions. The host application's orchestrator
+/// subscribes to these events and applies its own policy.
 pub struct PluginWatcher {
     config: PluginWatcherConfig,
     event_tx: broadcast::Sender<PluginFileEvent>,

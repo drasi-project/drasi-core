@@ -54,7 +54,7 @@ impl DrasiLib {
     /// Add a reaction to a running server with additional metadata.
     ///
     /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub async fn add_reaction_with_metadata(
         &self,
         reaction: impl Reaction + 'static,
