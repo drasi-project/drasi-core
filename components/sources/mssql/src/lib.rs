@@ -91,6 +91,7 @@ pub use lsn::Lsn;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use drasi_lib::position::SequencePosition;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -122,6 +123,10 @@ pub struct MsSqlSource {
 
     /// Shutdown signal receiver (cloned for each task)
     shutdown_rx: watch::Receiver<bool>,
+
+    /// Resume position from the last subscriber (if replay was requested).
+    /// Written by `subscribe()`, consumed once by `start()`.
+    resume_from: Arc<RwLock<Option<SequencePosition>>>,
 }
 
 impl MsSqlSource {
@@ -147,6 +152,7 @@ impl MsSqlSource {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            resume_from: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -247,6 +253,10 @@ impl Source for MsSqlSource {
         self.base.get_auto_start()
     }
 
+    fn supports_replay(&self) -> bool {
+        true
+    }
+
     async fn status(&self) -> drasi_lib::channels::ComponentStatus {
         self.base.get_status().await
     }
@@ -267,6 +277,9 @@ impl Source for MsSqlSource {
         let state_store = self.state_store.read().await.clone();
         let shutdown_rx = self.shutdown_rx.clone();
 
+        // Consume the pending resume position (if any)
+        let resume_from = self.resume_from.write().await.take();
+
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
             if let Err(e) = stream::run_cdc_stream(
@@ -275,6 +288,7 @@ impl Source for MsSqlSource {
                 dispatchers,
                 state_store,
                 shutdown_rx,
+                resume_from,
             )
             .await
             {
@@ -326,6 +340,45 @@ impl Source for MsSqlSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
+        use drasi_lib::sources::SourceError;
+
+        // If resume_from is requested, validate the position against CDC retention
+        if let Some(ref resume_pos) = settings.resume_from {
+            let seek_lsn = stream::position_to_seek_lsn(resume_pos)?;
+
+            // Connect briefly to check min_lsn for each tracked table
+            let mut conn = MsSqlConnection::connect(&self.config).await?;
+
+            for table in &self.config.tables {
+                let min_lsn = stream::get_min_lsn(conn.client_mut(), table).await?;
+
+                if seek_lsn < min_lsn {
+                    let earliest_pos = stream::cdc_position(&min_lsn, &Lsn::zero());
+                    return Err(SourceError::PositionUnavailable {
+                        source_id: self.source_id.clone(),
+                        requested: *resume_pos,
+                        earliest_available: Some(earliest_pos),
+                    }
+                    .into());
+                }
+            }
+
+            // Store for consumption by start(). If multiple subscribers request
+            // different resume positions before the next restart, keep the earliest
+            // position so replay satisfies all subscribers.
+            let mut stored = self.resume_from.write().await;
+            match *stored {
+                Some(existing) => {
+                    if *resume_pos < existing {
+                        *stored = Some(*resume_pos);
+                    }
+                }
+                None => {
+                    *stored = Some(*resume_pos);
+                }
+            }
+        }
+
         self.base
             .subscribe_with_bootstrap(&settings, "MS SQL")
             .await
@@ -496,6 +549,7 @@ impl MsSqlSourceBuilder {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            resume_from: Arc::new(RwLock::new(None)),
         })
     }
 }

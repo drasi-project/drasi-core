@@ -23,7 +23,8 @@ use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
 use anyhow::{anyhow, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ChangeDispatcher, SourceEventWrapper};
+use drasi_core::position::SequencePosition;
+use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,6 +42,33 @@ fn classify_error(error: &anyhow::Error) -> MsSqlErrorKind {
     MsSqlError::classify(error).unwrap_or(MsSqlErrorKind::Other)
 }
 
+/// Construct a 20-byte CDC position from start_lsn and seqval.
+///
+/// The position is `start_lsn (10 bytes) || seqval (10 bytes)`, which is
+/// lexicographically ordered (matching CDC's natural ordering) and uniquely
+/// identifies a single CDC row.
+pub fn cdc_position(start_lsn: &Lsn, seqval: &Lsn) -> SequencePosition {
+    let mut bytes = [0u8; 20];
+    bytes[..10].copy_from_slice(start_lsn.as_bytes());
+    bytes[10..20].copy_from_slice(seqval.as_bytes());
+    SequencePosition::from_bytes(&bytes)
+}
+
+/// Extract the start_lsn from a 20-byte CDC position.
+///
+/// Returns the first 10 bytes as an `Lsn`, suitable for seeking into the CDC
+/// stream with `fn_cdc_get_all_changes_*`.
+pub fn position_to_seek_lsn(pos: &SequencePosition) -> Result<Lsn> {
+    let bytes = pos.as_bytes();
+    if bytes.len() != 20 {
+        return Err(anyhow!(
+            "Expected 20-byte MSSQL CDC position, got {} bytes",
+            bytes.len()
+        ));
+    }
+    Lsn::from_bytes(&bytes[..10])
+}
+
 /// Run the CDC polling loop with automatic reconnection
 ///
 /// This continuously polls MS SQL CDC for changes and dispatches them to subscribers.
@@ -52,10 +80,22 @@ pub async fn run_cdc_stream(
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    resume_from: Option<SequencePosition>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
     let mut reconnect_delay = Duration::from_millis(INITIAL_RECONNECT_DELAY_MS);
+
+    // If resume_from is provided, derive the starting LSN from the position.
+    // This overrides the checkpoint and start_position config.
+    let resume_lsn = match resume_from {
+        Some(pos) => {
+            let lsn = position_to_seek_lsn(&pos)?;
+            info!("Resuming from position, seek LSN: {}", lsn.to_hex());
+            Some((lsn, pos))
+        }
+        None => None,
+    };
 
     // Outer reconnection loop
     loop {
@@ -71,6 +111,7 @@ pub async fn run_cdc_stream(
             &dispatchers,
             &state_store,
             &mut shutdown_rx,
+            &resume_lsn,
         )
         .await
         {
@@ -138,6 +179,7 @@ async fn run_cdc_polling_loop(
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    resume_lsn: &Option<(Lsn, SequencePosition)>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -149,8 +191,19 @@ async fn run_cdc_polling_loop(
     pk_cache.discover_keys(client, config).await?;
     info!("Discovered primary keys for {} tables", config.tables.len());
 
-    // Load last LSN checkpoint from StateStore
-    let mut current_lsn = load_checkpoint(source_id, state_store).await?;
+    // Determine starting LSN.
+    // Priority: resume_from > checkpoint > start_position config
+    let mut current_lsn = if let Some((lsn, _pos)) = resume_lsn {
+        info!("Using resume LSN: {}", lsn.to_hex());
+        Some(*lsn)
+    } else {
+        load_checkpoint(source_id, state_store).await?
+    };
+
+    // Track the resume position for filtering during the catch-up batch.
+    // Events with position ≤ resume_from are skipped to avoid reprocessing.
+    let mut skip_threshold: Option<SequencePosition> = resume_lsn.as_ref().map(|(_lsn, pos)| *pos);
+
     info!(
         "Starting CDC from LSN: {}",
         current_lsn
@@ -182,6 +235,7 @@ async fn run_cdc_polling_loop(
             &pk_cache,
             &mut current_lsn,
             dispatchers,
+            &mut skip_threshold,
         )
         .await
         {
@@ -258,6 +312,7 @@ async fn poll_cdc_changes(
     pk_cache: &PrimaryKeyCache,
     current_lsn: &mut Option<Lsn>,
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    skip_threshold: &mut Option<SequencePosition>,
 ) -> Result<usize> {
     // Get current max LSN from CDC
     let max_lsn = get_max_lsn(client).await?;
@@ -312,8 +367,12 @@ async fn poll_cdc_changes(
         *current_lsn = Some(from_lsn);
     }
 
-    // If from_lsn >= max_lsn, no new changes
-    if from_lsn >= max_lsn {
+    // If from_lsn > max_lsn, no new changes.
+    // Note: we use strict > (not >=) because the CDC range [from_lsn, max_lsn]
+    // is inclusive on both ends. When from_lsn == max_lsn (e.g. during resume),
+    // there may still be rows at that LSN to process; skip_threshold handles
+    // filtering already-seen rows.
+    if from_lsn > max_lsn {
         debug!(
             "No new changes: from_lsn {} >= max_lsn {}",
             from_lsn.to_hex(),
@@ -329,7 +388,7 @@ async fn poll_cdc_changes(
     );
 
     let mut change_count = 0;
-    let mut batch = Vec::new();
+    let mut batch: Vec<(SourceChange, SequencePosition)> = Vec::new();
 
     // Query each configured table's CDC changes
     for table in &config.tables {
@@ -348,6 +407,23 @@ async fn poll_cdc_changes(
             // Extract CDC metadata
             let operation = extract_operation(&row)?;
 
+            // Skip update before images - we only care about after
+            if operation == CdcOperation::UpdateBefore {
+                continue;
+            }
+
+            // Extract position components for sequence stamping
+            let start_lsn = extract_lsn(&row)?;
+            let seqval = extract_seqval(&row)?;
+            let position = cdc_position(&start_lsn, &seqval);
+
+            // During resume, skip events that were already processed
+            if let Some(threshold) = skip_threshold {
+                if position <= *threshold {
+                    continue;
+                }
+            }
+
             // Generate element ID from primary key
             let element_id = pk_cache.generate_element_id(table, &row)?;
 
@@ -363,7 +439,7 @@ async fn poll_cdc_changes(
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(source_id, &element_id),
                                 labels: Arc::from([Arc::from(label)]),
-                                effective_from: 0, // Will be set by dispatcher
+                                effective_from: 0,
                             },
                             properties,
                         },
@@ -389,24 +465,32 @@ async fn poll_cdc_changes(
                         effective_from: 0,
                     },
                 },
-                CdcOperation::UpdateBefore => {
-                    // Skip update before images - we only care about after
-                    continue;
-                }
+                CdcOperation::UpdateBefore => unreachable!("filtered above"),
             };
 
-            batch.push(change);
+            batch.push((change, position));
             change_count += 1;
         }
     }
 
-    // After processing all changes, update checkpoint to max_lsn
-    // This ensures we don't reprocess the same changes
-    if change_count > 0 {
-        *current_lsn = Some(max_lsn);
+    // Clear skip_threshold after the first poll that actually queried rows —
+    // even if every row was filtered, the threshold has served its purpose.
+    // Also advance current_lsn past max_lsn so we don't re-query the same
+    // inclusive range when all rows were filtered by skip_threshold.
+    if skip_threshold.is_some() {
+        let next_lsn = increment_lsn(client, &max_lsn).await?;
+        *current_lsn = Some(next_lsn);
+        *skip_threshold = None;
+    } else if change_count > 0 {
+        // Normal (non-resume) path: advance past max_lsn after processing.
+        let next_lsn = increment_lsn(client, &max_lsn).await?;
+        *current_lsn = Some(next_lsn);
     }
 
-    // Dispatch all changes in batch
+    // Sort batch by position to ensure strict ordering across tables
+    batch.sort_by_key(|(_, pos)| *pos);
+
+    // Dispatch all changes in batch with sequence positions
     if !batch.is_empty() {
         debug!(
             "Dispatching {} changes to {} dispatchers",
@@ -415,15 +499,16 @@ async fn poll_cdc_changes(
         );
         let dispatchers = dispatchers.read().await;
         for dispatcher in dispatchers.iter() {
-            for change in &batch {
+            for (change, position) in &batch {
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let wrapper = SourceEventWrapper::with_profiling(
+                let wrapper = SourceEventWrapper::with_sequence(
                     source_id.to_string(),
-                    drasi_lib::channels::SourceEvent::Change(change.clone()),
+                    SourceEvent::Change(change.clone()),
                     chrono::Utc::now(),
-                    profiling,
+                    *position,
+                    Some(profiling),
                 );
                 dispatcher.dispatch_change(Arc::new(wrapper)).await?;
             }
@@ -500,7 +585,7 @@ async fn get_max_lsn(
 }
 
 /// Get minimum LSN for a table's CDC capture instance
-async fn get_min_lsn(
+pub async fn get_min_lsn(
     client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
     table: &str,
 ) -> Result<Lsn> {
@@ -585,6 +670,50 @@ fn extract_lsn(row: &tiberius::Row) -> Result<Lsn> {
     Lsn::from_bytes(lsn_bytes)
 }
 
+/// Extract seqval (sequence value within transaction) from CDC row
+fn extract_seqval(row: &tiberius::Row) -> Result<Lsn> {
+    let col_idx = row
+        .columns()
+        .iter()
+        .position(|c| c.name() == cdc_columns::SEQVAL)
+        .ok_or_else(|| anyhow!("CDC row missing __$seqval column"))?;
+
+    let seqval_bytes: &[u8] = row
+        .try_get(col_idx)?
+        .ok_or_else(|| anyhow!("__$seqval is NULL"))?;
+
+    Lsn::from_bytes(seqval_bytes)
+}
+
+/// Increment an LSN using `sys.fn_cdc_increment_lsn`.
+///
+/// This is used to advance past a boundary so the next poll's inclusive range
+/// does not reprocess the last row from the previous batch.
+async fn increment_lsn(
+    client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+    lsn: &Lsn,
+) -> Result<Lsn> {
+    let lsn_bytes = lsn.to_bytes();
+    let stream = client
+        .query(
+            "SELECT sys.fn_cdc_increment_lsn(@P1) AS next_lsn",
+            &[&lsn_bytes.as_slice()],
+        )
+        .await?;
+
+    let rows = stream.into_first_result().await?;
+    if rows.is_empty() {
+        return Err(anyhow!("No result from fn_cdc_increment_lsn"));
+    }
+
+    let row = &rows[0];
+    let next_bytes: &[u8] = row
+        .try_get(0)?
+        .ok_or_else(|| anyhow!("fn_cdc_increment_lsn returned NULL"))?;
+
+    Lsn::from_bytes(next_bytes)
+}
+
 /// Load LSN checkpoint from StateStore
 async fn load_checkpoint(
     source_id: &str,
@@ -644,6 +773,49 @@ mod tests {
         let table = "orders";
         let capture_instance = format!("dbo_{table}");
         assert_eq!(capture_instance, "dbo_orders");
+    }
+
+    #[test]
+    fn test_cdc_position_roundtrip() {
+        let lsn = Lsn::from_hex("0000002700000019c002").unwrap();
+        let seqval = Lsn::from_hex("0000002700000019c003").unwrap();
+
+        let pos = cdc_position(&lsn, &seqval);
+        assert_eq!(pos.as_bytes().len(), 20);
+
+        let extracted = position_to_seek_lsn(&pos).unwrap();
+        assert_eq!(extracted, lsn);
+    }
+
+    #[test]
+    fn test_cdc_position_ordering() {
+        // Same LSN, different seqval → position ordering follows seqval
+        let lsn = Lsn::from_hex("0000002700000019c002").unwrap();
+        let seq_a = Lsn::from_hex("0000002700000019c001").unwrap();
+        let seq_b = Lsn::from_hex("0000002700000019c002").unwrap();
+
+        let pos_a = cdc_position(&lsn, &seq_a);
+        let pos_b = cdc_position(&lsn, &seq_b);
+        assert!(pos_a < pos_b);
+    }
+
+    #[test]
+    fn test_cdc_position_ordering_different_lsn() {
+        // Different LSNs → ordered by LSN regardless of seqval
+        let lsn_a = Lsn::from_hex("0000002700000019c001").unwrap();
+        let lsn_b = Lsn::from_hex("0000002700000019c002").unwrap();
+        let seqval = Lsn::zero();
+
+        let pos_a = cdc_position(&lsn_a, &seqval);
+        let pos_b = cdc_position(&lsn_b, &seqval);
+        assert!(pos_a < pos_b);
+    }
+
+    #[test]
+    fn test_position_to_seek_lsn_rejects_wrong_size() {
+        let bad_pos = SequencePosition::from_u64(42);
+        let result = position_to_seek_lsn(&bad_pos);
+        assert!(result.is_err());
     }
 
     #[test]
