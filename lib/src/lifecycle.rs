@@ -255,9 +255,9 @@ mod tests {
 
         core.start().await.unwrap();
 
-        // Non-autostart source should remain Stopped
+        // Non-autostart source should remain Added
         let status = core.get_source_status("manual-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     // ========================================================================
@@ -302,13 +302,13 @@ mod tests {
 
         core.start().await.unwrap();
 
-        // Source is not auto-started, so it's already Stopped.
+        // Source is not auto-started, so it's still in Added state.
         // Stopping should succeed without errors for user components.
         // Internal components may fail, so we just verify the server marks as stopped.
         let _ = core.stop().await;
 
         let status = core.get_source_status("idle-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     // ========================================================================
@@ -342,8 +342,8 @@ mod tests {
             "Query 'cfg-query' should exist after build; got: {queries:?}"
         );
 
-        // Query should be in Stopped state (not yet started)
+        // Query should be in Added state (not yet started)
         let (_, status) = queries.iter().find(|(id, _)| id == "cfg-query").unwrap();
-        assert_eq!(*status, ComponentStatus::Stopped);
+        assert_eq!(*status, ComponentStatus::Added);
     }
 }

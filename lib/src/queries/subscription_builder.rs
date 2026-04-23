@@ -72,7 +72,10 @@ impl SubscriptionSettingsBuilder {
 
             match matching_indices.len() {
                 0 => {
-                    // Not found in any source config - add to first source (default)
+                    // Not found in any source config — default to the first source.
+                    // This is intentional: labels that aren't explicitly mapped in
+                    // source configuration are assumed to belong to the primary
+                    // (first) source, which is the common single-source case.
                     if let Some(first_settings) = settings_vec.first_mut() {
                         first_settings.nodes.insert(node_label.clone());
                     } else {

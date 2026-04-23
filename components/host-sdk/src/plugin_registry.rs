@@ -17,7 +17,7 @@
 //! The [`PluginRegistry`] holds all known plugin descriptors (sources, reactions,
 //! bootstrappers) and provides lookup, creation, and schema introspection methods.
 //!
-//! This registry supports runtime mutation (registration and deregistration) and
+//! This registry supports runtime mutation (registration) and
 //! should be wrapped in `Arc<RwLock<PluginRegistry>>` for concurrent access.
 
 use chrono::{DateTime, Utc};
@@ -35,8 +35,6 @@ pub struct RegisteredDescriptor<T: ?Sized> {
     pub plugin_id: String,
     /// Timestamp when this descriptor was registered.
     pub registered_at: DateTime<Utc>,
-    /// Library generation counter for drain-then-replace.
-    pub generation: u64,
 }
 
 impl<T: ?Sized> std::fmt::Debug for RegisteredDescriptor<T> {
@@ -44,7 +42,6 @@ impl<T: ?Sized> std::fmt::Debug for RegisteredDescriptor<T> {
         f.debug_struct("RegisteredDescriptor")
             .field("plugin_id", &self.plugin_id)
             .field("registered_at", &self.registered_at)
-            .field("generation", &self.generation)
             .finish()
     }
 }
@@ -68,7 +65,7 @@ pub struct PluginKindInfo {
 
 /// Registry of all known plugin descriptors.
 ///
-/// Plugins are registered at startup and can be dynamically registered/deregistered
+/// Plugins are registered at startup and can be dynamically registered
 /// at runtime. The registry should be wrapped in `Arc<RwLock<PluginRegistry>>` for
 /// thread-safe access.
 pub struct PluginRegistry {
@@ -91,7 +88,7 @@ impl PluginRegistry {
         }
     }
 
-    /// Current mutation version. Incremented on every register/deregister operation.
+    /// Current mutation version. Incremented on every register operation.
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -107,7 +104,6 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: String::new(),
                 registered_at: Utc::now(),
-                generation: 0,
             },
         );
         self.version += 1;
@@ -118,7 +114,6 @@ impl PluginRegistry {
         &mut self,
         descriptor: Arc<dyn SourcePluginDescriptor>,
         plugin_id: &str,
-        generation: u64,
     ) {
         let kind = descriptor.kind().to_string();
         self.sources.insert(
@@ -127,7 +122,6 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: plugin_id.to_string(),
                 registered_at: Utc::now(),
-                generation,
             },
         );
         self.version += 1;
@@ -142,7 +136,6 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: String::new(),
                 registered_at: Utc::now(),
-                generation: 0,
             },
         );
         self.version += 1;
@@ -153,7 +146,6 @@ impl PluginRegistry {
         &mut self,
         descriptor: Arc<dyn ReactionPluginDescriptor>,
         plugin_id: &str,
-        generation: u64,
     ) {
         let kind = descriptor.kind().to_string();
         self.reactions.insert(
@@ -162,7 +154,6 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: plugin_id.to_string(),
                 registered_at: Utc::now(),
-                generation,
             },
         );
         self.version += 1;
@@ -177,7 +168,6 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: String::new(),
                 registered_at: Utc::now(),
-                generation: 0,
             },
         );
         self.version += 1;
@@ -188,7 +178,6 @@ impl PluginRegistry {
         &mut self,
         descriptor: Arc<dyn BootstrapPluginDescriptor>,
         plugin_id: &str,
-        generation: u64,
     ) {
         let kind = descriptor.kind().to_string();
         self.bootstrappers.insert(
@@ -197,56 +186,9 @@ impl PluginRegistry {
                 descriptor,
                 plugin_id: plugin_id.to_string(),
                 registered_at: Utc::now(),
-                generation,
             },
         );
         self.version += 1;
-    }
-
-    /// Deregister a source descriptor by kind. Returns true if it existed.
-    pub fn deregister_source(&mut self, kind: &str) -> bool {
-        let removed = self.sources.remove(kind).is_some();
-        if removed {
-            self.version += 1;
-        }
-        removed
-    }
-
-    /// Deregister a reaction descriptor by kind. Returns true if it existed.
-    pub fn deregister_reaction(&mut self, kind: &str) -> bool {
-        let removed = self.reactions.remove(kind).is_some();
-        if removed {
-            self.version += 1;
-        }
-        removed
-    }
-
-    /// Deregister a bootstrap descriptor by kind. Returns true if it existed.
-    pub fn deregister_bootstrapper(&mut self, kind: &str) -> bool {
-        let removed = self.bootstrappers.remove(kind).is_some();
-        if removed {
-            self.version += 1;
-        }
-        removed
-    }
-
-    /// Deregister all descriptors provided by a specific plugin.
-    /// Returns the number of descriptors removed.
-    pub fn deregister_all_for_plugin(&mut self, plugin_id: &str) -> usize {
-        let before = self.descriptor_count();
-
-        self.sources
-            .retain(|_, v| v.plugin_id != plugin_id || plugin_id.is_empty());
-        self.reactions
-            .retain(|_, v| v.plugin_id != plugin_id || plugin_id.is_empty());
-        self.bootstrappers
-            .retain(|_, v| v.plugin_id != plugin_id || plugin_id.is_empty());
-
-        let removed = before - self.descriptor_count();
-        if removed > 0 {
-            self.version += 1;
-        }
-        removed
     }
 
     /// Look up a source plugin descriptor by kind.
@@ -358,128 +300,6 @@ impl PluginRegistry {
             .collect();
         infos.sort_by(|a, b| a.kind.cmp(&b.kind));
         infos
-    }
-
-    // ── Side-by-side versioned registration and promotion ──
-
-    /// Register a source descriptor under a versioned kind key (e.g., "postgres@0.4.2").
-    /// Does not affect the unversioned key.
-    pub fn register_source_versioned(
-        &mut self,
-        versioned_key: &str,
-        descriptor: Arc<dyn SourcePluginDescriptor>,
-        plugin_id: &str,
-        generation: u64,
-    ) {
-        self.sources.insert(
-            versioned_key.to_string(),
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-                generation,
-            },
-        );
-        self.version += 1;
-    }
-
-    /// Promote a versioned source descriptor to be the incumbent (unversioned key).
-    /// Returns true if successful, false if the versioned key doesn't exist.
-    pub fn promote_source(&mut self, versioned_key: &str) -> bool {
-        if let Some(reg) = self.sources.get(versioned_key) {
-            let kind = reg.descriptor.kind().to_string();
-            let promoted = RegisteredDescriptor {
-                descriptor: reg.descriptor.clone(),
-                plugin_id: reg.plugin_id.clone(),
-                registered_at: Utc::now(),
-                generation: reg.generation,
-            };
-            self.sources.insert(kind, promoted);
-            self.version += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Register a reaction descriptor under a versioned kind key (e.g., "log@0.4.2").
-    /// Does not affect the unversioned key.
-    pub fn register_reaction_versioned(
-        &mut self,
-        versioned_key: &str,
-        descriptor: Arc<dyn ReactionPluginDescriptor>,
-        plugin_id: &str,
-        generation: u64,
-    ) {
-        self.reactions.insert(
-            versioned_key.to_string(),
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-                generation,
-            },
-        );
-        self.version += 1;
-    }
-
-    /// Promote a versioned reaction descriptor to be the incumbent (unversioned key).
-    /// Returns true if successful, false if the versioned key doesn't exist.
-    pub fn promote_reaction(&mut self, versioned_key: &str) -> bool {
-        if let Some(reg) = self.reactions.get(versioned_key) {
-            let kind = reg.descriptor.kind().to_string();
-            let promoted = RegisteredDescriptor {
-                descriptor: reg.descriptor.clone(),
-                plugin_id: reg.plugin_id.clone(),
-                registered_at: Utc::now(),
-                generation: reg.generation,
-            };
-            self.reactions.insert(kind, promoted);
-            self.version += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Register a bootstrap descriptor under a versioned kind key.
-    /// Does not affect the unversioned key.
-    pub fn register_bootstrapper_versioned(
-        &mut self,
-        versioned_key: &str,
-        descriptor: Arc<dyn BootstrapPluginDescriptor>,
-        plugin_id: &str,
-        generation: u64,
-    ) {
-        self.bootstrappers.insert(
-            versioned_key.to_string(),
-            RegisteredDescriptor {
-                descriptor,
-                plugin_id: plugin_id.to_string(),
-                registered_at: Utc::now(),
-                generation,
-            },
-        );
-        self.version += 1;
-    }
-
-    /// Promote a versioned bootstrapper descriptor to be the incumbent (unversioned key).
-    /// Returns true if successful, false if the versioned key doesn't exist.
-    pub fn promote_bootstrapper(&mut self, versioned_key: &str) -> bool {
-        if let Some(reg) = self.bootstrappers.get(versioned_key) {
-            let kind = reg.descriptor.kind().to_string();
-            let promoted = RegisteredDescriptor {
-                descriptor: reg.descriptor.clone(),
-                plugin_id: reg.plugin_id.clone(),
-                registered_at: Utc::now(),
-                generation: reg.generation,
-            };
-            self.bootstrappers.insert(kind, promoted);
-            self.version += 1;
-            true
-        } else {
-            false
-        }
     }
 
     /// Returns true if the registry contains no descriptors.
@@ -595,68 +415,11 @@ mod tests {
     }
 
     #[test]
-    fn test_register_with_metadata() {
-        let mut registry = PluginRegistry::new();
-        registry.register_source_with_metadata(
-            Arc::new(MockSourceDescriptor { kind: "mock" }),
-            "drasi-source-mock",
-            42,
-        );
-
-        let reg = registry.get_source_registration("mock").expect("exists");
-        assert_eq!(reg.plugin_id, "drasi-source-mock");
-        assert_eq!(reg.generation, 42);
-    }
-
-    #[test]
-    fn test_deregister_source() {
-        let mut registry = PluginRegistry::new();
-        registry.register_source(Arc::new(MockSourceDescriptor { kind: "mock" }));
-        assert_eq!(registry.version(), 1);
-
-        let removed = registry.deregister_source("mock");
-        assert!(removed);
-        assert!(registry.get_source("mock").is_none());
-        assert_eq!(registry.version(), 2);
-
-        let removed_again = registry.deregister_source("mock");
-        assert!(!removed_again);
-        assert_eq!(registry.version(), 2); // no change
-    }
-
-    #[test]
-    fn test_deregister_all_for_plugin() {
-        let mut registry = PluginRegistry::new();
-        registry.register_source_with_metadata(
-            Arc::new(MockSourceDescriptor { kind: "postgres" }),
-            "drasi-source-postgres",
-            1,
-        );
-        registry.register_source_with_metadata(
-            Arc::new(MockSourceDescriptor { kind: "mock" }),
-            "drasi-source-mock",
-            1,
-        );
-        registry.register_reaction_with_metadata(
-            Arc::new(MockReactionDescriptor { kind: "log" }),
-            "drasi-source-postgres", // hypothetical multi-descriptor plugin
-            1,
-        );
-
-        let removed = registry.deregister_all_for_plugin("drasi-source-postgres");
-        assert_eq!(removed, 2); // postgres source + log reaction
-        assert!(registry.get_source("postgres").is_none());
-        assert!(registry.get_reaction("log").is_none());
-        assert!(registry.get_source("mock").is_some()); // different plugin
-    }
-
-    #[test]
     fn test_source_plugin_infos_includes_plugin_id() {
         let mut registry = PluginRegistry::new();
         registry.register_source_with_metadata(
             Arc::new(MockSourceDescriptor { kind: "mock" }),
             "drasi-source-mock",
-            1,
         );
 
         let infos = registry.source_plugin_infos();
@@ -674,9 +437,6 @@ mod tests {
 
         registry.register_reaction(Arc::new(MockReactionDescriptor { kind: "b" }));
         assert_eq!(registry.version(), 2);
-
-        registry.deregister_source("a");
-        assert_eq!(registry.version(), 3);
     }
 
     #[test]
@@ -700,51 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deregister_reaction() {
-        let mut registry = PluginRegistry::new();
-        registry.register_reaction(Arc::new(MockReactionDescriptor { kind: "log" }));
-        assert_eq!(registry.reaction_kinds(), vec!["log"]);
-        assert_eq!(registry.version(), 1);
-
-        let removed = registry.deregister_reaction("log");
-        assert!(removed);
-        assert!(registry.get_reaction("log").is_none());
-        assert!(registry.reaction_kinds().is_empty());
-        assert_eq!(registry.version(), 2);
-    }
-
-    #[test]
-    fn test_deregister_nonexistent_returns_false() {
-        let mut registry = PluginRegistry::new();
-
-        assert!(!registry.deregister_source("nope"));
-        assert!(!registry.deregister_reaction("nope"));
-        assert!(!registry.deregister_bootstrapper("nope"));
-    }
-
-    #[test]
-    fn test_version_not_incremented_on_noop_deregister() {
-        let mut registry = PluginRegistry::new();
-        registry.register_source(Arc::new(MockSourceDescriptor { kind: "a" }));
-        let v = registry.version();
-
-        // Deregistering a nonexistent kind should not bump the version
-        registry.deregister_source("nonexistent");
-        assert_eq!(registry.version(), v);
-
-        registry.deregister_reaction("nonexistent");
-        assert_eq!(registry.version(), v);
-
-        registry.deregister_bootstrapper("nonexistent");
-        assert_eq!(registry.version(), v);
-
-        // deregister_all_for_plugin with an unknown plugin_id also should not bump
-        let removed = registry.deregister_all_for_plugin("unknown-plugin");
-        assert_eq!(removed, 0);
-        assert_eq!(registry.version(), v);
-    }
-
-    #[test]
     fn test_register_with_metadata_tracks_plugin_id() {
         let mut registry = PluginRegistry::new();
 
@@ -752,13 +467,11 @@ mod tests {
         registry.register_source_with_metadata(
             Arc::new(MockSourceDescriptor { kind: "pg" }),
             "drasi-source-pg",
-            10,
         );
         // Register reaction with metadata
         registry.register_reaction_with_metadata(
             Arc::new(MockReactionDescriptor { kind: "webhook" }),
             "drasi-reaction-webhook",
-            20,
         );
 
         // Verify source registration
@@ -766,14 +479,12 @@ mod tests {
             .get_source_registration("pg")
             .expect("source exists");
         assert_eq!(src_reg.plugin_id, "drasi-source-pg");
-        assert_eq!(src_reg.generation, 10);
 
         // Verify reaction registration
         let rx_reg = registry
             .get_reaction_registration("webhook")
             .expect("reaction exists");
         assert_eq!(rx_reg.plugin_id, "drasi-reaction-webhook");
-        assert_eq!(rx_reg.generation, 20);
 
         // Verify plugin_id propagates to plugin_infos
         let src_infos = registry.source_plugin_infos();
@@ -788,21 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn test_deregister_all_for_plugin_ignores_empty_plugin_id() {
-        let mut registry = PluginRegistry::new();
-        // register_source (without metadata) sets plugin_id to ""
-        registry.register_source(Arc::new(MockSourceDescriptor { kind: "core_src" }));
-        registry.register_reaction(Arc::new(MockReactionDescriptor { kind: "core_rx" }));
-
-        // Attempting to deregister_all_for_plugin("") should NOT remove
-        // descriptors with empty plugin_id (per the retain guard).
-        let removed = registry.deregister_all_for_plugin("");
-        assert_eq!(removed, 0);
-        assert!(registry.get_source("core_src").is_some());
-        assert!(registry.get_reaction("core_rx").is_some());
-    }
-
-    #[test]
     fn test_descriptor_count_across_categories() {
         let mut registry = PluginRegistry::new();
         assert_eq!(registry.descriptor_count(), 0);
@@ -812,9 +508,6 @@ mod tests {
         registry.register_reaction(Arc::new(MockReactionDescriptor { kind: "r1" }));
         assert_eq!(registry.descriptor_count(), 3);
         assert!(!registry.is_empty());
-
-        registry.deregister_source("s1");
-        assert_eq!(registry.descriptor_count(), 2);
     }
 
     #[test]
@@ -831,19 +524,16 @@ mod tests {
         registry.register_source_with_metadata(
             Arc::new(MockSourceDescriptor { kind: "pg" }),
             "plugin-v1",
-            1,
         );
 
-        // Replace same kind with a different plugin_id and generation
+        // Replace same kind with a different plugin_id
         registry.register_source_with_metadata(
             Arc::new(MockSourceDescriptor { kind: "pg" }),
             "plugin-v2",
-            5,
         );
 
         let reg = registry.get_source_registration("pg").expect("exists");
         assert_eq!(reg.plugin_id, "plugin-v2");
-        assert_eq!(reg.generation, 5);
         assert_eq!(registry.descriptor_count(), 1); // still just one
     }
 
@@ -861,110 +551,5 @@ mod tests {
         let debug_str = format!("{registry:?}");
         assert!(debug_str.contains("PluginRegistry"));
         assert!(debug_str.contains("mock"));
-    }
-
-    #[test]
-    fn test_register_source_versioned_does_not_affect_unversioned() {
-        let mut registry = PluginRegistry::new();
-        // Register the incumbent under the unversioned key
-        registry.register_source_with_metadata(
-            Arc::new(MockSourceDescriptor { kind: "postgres" }),
-            "plugin-v1",
-            1,
-        );
-        let v_before = registry.version();
-
-        // Register a new version under a versioned key
-        registry.register_source_versioned(
-            "postgres@0.4.2",
-            Arc::new(MockSourceDescriptor { kind: "postgres" }),
-            "plugin-v2",
-            2,
-        );
-
-        // The unversioned key should still point to the old plugin
-        let incumbent = registry
-            .get_source_registration("postgres")
-            .expect("exists");
-        assert_eq!(incumbent.plugin_id, "plugin-v1");
-
-        // The versioned key should exist separately
-        let versioned = registry
-            .get_source_registration("postgres@0.4.2")
-            .expect("exists");
-        assert_eq!(versioned.plugin_id, "plugin-v2");
-
-        // Both keys count as separate descriptors
-        assert!(registry.version() > v_before);
-    }
-
-    #[test]
-    fn test_promote_source_updates_unversioned_key() {
-        let mut registry = PluginRegistry::new();
-        // Register incumbent
-        registry.register_source_with_metadata(
-            Arc::new(MockSourceDescriptor { kind: "postgres" }),
-            "plugin-v1",
-            1,
-        );
-        // Register versioned
-        registry.register_source_versioned(
-            "postgres@0.4.2",
-            Arc::new(MockSourceDescriptor { kind: "postgres" }),
-            "plugin-v2",
-            2,
-        );
-
-        // Promote
-        let promoted = registry.promote_source("postgres@0.4.2");
-        assert!(promoted);
-
-        // Unversioned key should now point to plugin-v2
-        let incumbent = registry
-            .get_source_registration("postgres")
-            .expect("exists");
-        assert_eq!(incumbent.plugin_id, "plugin-v2");
-        assert_eq!(incumbent.generation, 2);
-    }
-
-    #[test]
-    fn test_promote_source_nonexistent_returns_false() {
-        let mut registry = PluginRegistry::new();
-        let promoted = registry.promote_source("nonexistent@1.0.0");
-        assert!(!promoted);
-    }
-
-    #[test]
-    fn test_promote_reaction() {
-        let mut registry = PluginRegistry::new();
-        registry.register_reaction_with_metadata(
-            Arc::new(MockReactionDescriptor { kind: "log" }),
-            "plugin-v1",
-            1,
-        );
-        registry.register_reaction_versioned(
-            "log@2.0.0",
-            Arc::new(MockReactionDescriptor { kind: "log" }),
-            "plugin-v2",
-            2,
-        );
-
-        let promoted = registry.promote_reaction("log@2.0.0");
-        assert!(promoted);
-
-        let incumbent = registry.get_reaction_registration("log").expect("exists");
-        assert_eq!(incumbent.plugin_id, "plugin-v2");
-    }
-
-    #[test]
-    fn test_promote_reaction_nonexistent_returns_false() {
-        let mut registry = PluginRegistry::new();
-        assert!(!registry.promote_reaction("nope@1.0"));
-    }
-
-    #[test]
-    fn test_promote_bootstrapper_nonexistent_returns_false() {
-        let mut registry = PluginRegistry::new();
-        assert!(!registry.promote_bootstrapper("nope@1.0"));
     }
 }
