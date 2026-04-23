@@ -363,18 +363,25 @@ mod contract_tests {
     #[test]
     fn test_source_error_position_unavailable_display() {
         use crate::sources::SourceError;
+        use crate::SequencePosition;
 
         let err = SourceError::PositionUnavailable {
             source_id: "postgres-1".to_string(),
-            requested: 1000,
-            earliest_available: Some(5000),
+            requested: SequencePosition::from_u64(1000),
+            earliest_available: Some(SequencePosition::from_u64(5000)),
         };
 
-        // Verify display formatting
+        // Verify display formatting includes source id and both positions
         let msg = format!("{err}");
         assert!(msg.contains("postgres-1"));
-        assert!(msg.contains("1000"));
-        assert!(msg.contains("5000"));
+        assert!(
+            msg.contains(&format!("{}", SequencePosition::from_u64(1000))),
+            "error message should contain requested position"
+        );
+        assert!(
+            msg.contains(&format!("{}", SequencePosition::from_u64(5000))),
+            "error message should contain earliest available position"
+        );
 
         // Verify anyhow round-trip: SourceError → anyhow::Error → downcast
         let anyhow_err: anyhow::Error = err.into();
@@ -387,8 +394,8 @@ mod contract_tests {
                 earliest_available,
             } => {
                 assert_eq!(source_id, "postgres-1");
-                assert_eq!(*requested, 1000);
-                assert_eq!(*earliest_available, Some(5000));
+                assert_eq!(*requested, SequencePosition::from_u64(1000));
+                assert_eq!(*earliest_available, Some(SequencePosition::from_u64(5000)));
             }
         }
     }
@@ -396,10 +403,11 @@ mod contract_tests {
     #[test]
     fn test_source_error_position_unavailable_no_earliest() {
         use crate::sources::SourceError;
+        use crate::SequencePosition;
 
         let err = SourceError::PositionUnavailable {
             source_id: "http-wal".to_string(),
-            requested: 42,
+            requested: SequencePosition::from_u64(42),
             earliest_available: None,
         };
 

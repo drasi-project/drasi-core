@@ -25,6 +25,7 @@ use drasi_core::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
         ResultSequence, ResultSequenceCounter,
     },
+    position::SequencePosition,
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
@@ -355,7 +356,7 @@ impl GarnetResultIndex {
 impl ResultSequenceCounter for GarnetResultIndex {
     async fn apply_sequence(
         &self,
-        sequence: u64,
+        sequence: SequencePosition,
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
@@ -367,7 +368,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
                 "write operation requires an active session",
             ))
         })?;
-        buffer.string_set(seq_key, sequence.to_string().into_bytes());
+        buffer.string_set(seq_key, hex::encode(sequence.as_bytes()).into_bytes());
         buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
         Ok(())
     }
@@ -392,9 +393,10 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let sequence = match seq_val {
             BufferReadResult::Found(bytes) => {
                 let s = String::from_utf8(bytes).map_err(IndexError::other)?;
-                s.parse::<u64>().map_err(IndexError::other)?
+                let decoded = hex::decode(s).map_err(IndexError::other)?;
+                SequencePosition::try_from_bytes(&decoded).map_err(IndexError::other)?
             }
-            BufferReadResult::KeyDeleted => 0,
+            BufferReadResult::KeyDeleted => SequencePosition::default(),
             BufferReadResult::NotInBuffer => {
                 return self.get_sequence_from_redis().await;
             }
@@ -422,10 +424,14 @@ impl GarnetResultIndex {
         let mut con = self.connection.clone();
 
         let sequence = match con
-            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.query_id))
+            .get::<String, Option<String>>(format!("metadata:{{{}}}:sequence", self.query_id))
             .await
         {
-            Ok(v) => v.unwrap_or(0),
+            Ok(Some(s)) => {
+                let decoded = hex::decode(s).map_err(IndexError::other)?;
+                SequencePosition::try_from_bytes(&decoded).map_err(IndexError::other)?
+            }
+            Ok(None) => SequencePosition::default(),
             Err(e) => return Err(IndexError::other(e)),
         };
 

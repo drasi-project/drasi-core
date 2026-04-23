@@ -163,8 +163,8 @@ pub struct SourceSubscriptionSettings {
     pub relations: HashSet<String>,
     /// If set, the subscribing query requests events replayed from this sequence position.
     /// Only meaningful when the source returns `supports_replay() == true`.
-    pub resume_from: Option<u64>,
-    /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
+    pub resume_from: Option<crate::position::SequencePosition>,
+    /// If true, the query requests a shared position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
 }

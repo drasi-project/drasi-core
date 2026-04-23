@@ -15,13 +15,14 @@
 use std::sync::Arc;
 
 use drasi_core::interface::{ResultSequence, ResultSequenceCounter};
+use drasi_core::position::SequencePosition;
 
 pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
     let result = subject.get_sequence().await.expect("get_sequence failed");
     assert_eq!(result, ResultSequence::default());
 
     subject
-        .apply_sequence(2, "foo")
+        .apply_sequence(SequencePosition::from_u64(2), "foo")
         .await
         .expect("apply_sequence failed");
 
@@ -29,7 +30,7 @@ pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
     assert_eq!(
         result,
         ResultSequence {
-            sequence: 2,
+            sequence: SequencePosition::from_u64(2),
             source_change_id: Arc::from("foo"),
         }
     );

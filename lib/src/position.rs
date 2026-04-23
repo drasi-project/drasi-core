@@ -1,4 +1,4 @@
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,12 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod evaluation;
-pub mod in_memory_index;
-pub mod index_cache;
-pub mod interface;
-pub mod middleware;
-pub mod models;
-pub mod path_solver;
-pub mod position;
-pub mod query;
+//! Opaque position type for source replay and resume.
+//!
+//! Re-exports [`drasi_core::position::SequencePosition`] for convenience.
+
+pub use drasi_core::position::{SequencePosition, SequencePositionError, MAX_POSITION_BYTES};

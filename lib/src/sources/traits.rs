@@ -61,8 +61,8 @@ pub enum SourceError {
     #[error("Source '{source_id}' cannot resume from position {requested}: position unavailable (earliest available: {earliest_available:?})")]
     PositionUnavailable {
         source_id: String,
-        requested: u64,
-        earliest_available: Option<u64>,
+        requested: crate::position::SequencePosition,
+        earliest_available: Option<crate::position::SequencePosition>,
     },
 }
 

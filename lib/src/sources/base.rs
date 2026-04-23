@@ -32,8 +32,8 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
@@ -42,6 +42,7 @@ use crate::channels::*;
 use crate::component_graph::ComponentStatusHandle;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
+use crate::position::SequencePosition;
 use crate::profiling;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceChange;
@@ -168,13 +169,13 @@ pub struct SourceBase {
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Per-query position handles for replay-capable subscribers.
     ///
-    /// Keyed by `query_id`. Values are the same `Arc<AtomicU64>` returned in
-    /// `SubscriptionResponse::position_handle`. The query writes its last
+    /// Keyed by `query_id`. Values are the same `Arc<Mutex<Option<SequencePosition>>>`
+    /// returned in `SubscriptionResponse::position_handle`. The query writes its last
     /// durably-processed sequence; the source reads `compute_confirmed_position()`
-    /// to advance its upstream cursor. Initial value is `u64::MAX`
+    /// to advance its upstream cursor. Initial value is `None`
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
-    position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    position_handles: Arc<RwLock<HashMap<String, Arc<Mutex<Option<SequencePosition>>>>>>,
 }
 
 impl SourceBase {
@@ -290,19 +291,22 @@ impl SourceBase {
         *self.identity_provider.write().await = Some(provider);
     }
 
-    /// Create and register a position handle for `query_id`, initialized to `u64::MAX`.
+    /// Create and register a position handle for `query_id`, initialized to `None`.
     ///
     /// Returns the shared handle; the same `Arc` is placed in
     /// `SubscriptionResponse::position_handle` so the query and the source share
-    /// one atomic. If a handle already exists for `query_id` (re-subscribe after
-    /// transient disconnect), the existing handle is returned to preserve any
-    /// position the query had previously reported.
-    pub async fn create_position_handle(&self, query_id: &str) -> Arc<AtomicU64> {
+    /// one mutex-guarded position. If a handle already exists for `query_id`
+    /// (re-subscribe after transient disconnect), the existing handle is returned
+    /// to preserve any position the query had previously reported.
+    pub async fn create_position_handle(
+        &self,
+        query_id: &str,
+    ) -> Arc<Mutex<Option<SequencePosition>>> {
         let mut handles = self.position_handles.write().await;
         if let Some(existing) = handles.get(query_id) {
             return existing.clone();
         }
-        let handle = Arc::new(AtomicU64::new(u64::MAX));
+        let handle = Arc::new(Mutex::new(None));
         handles.insert(query_id.to_string(), handle.clone());
         handle
     }
@@ -320,24 +324,40 @@ impl SourceBase {
     /// Compute the minimum confirmed position across all live subscribers.
     ///
     /// Returns `None` if no handles are registered, or if every registered
-    /// handle is still `u64::MAX` (no subscriber has confirmed a position yet —
+    /// handle is still `None` (no subscriber has confirmed a position yet —
     /// typically because they are still bootstrapping). Otherwise returns the
-    /// minimum non-`u64::MAX` value, suitable for advancing the source's
+    /// minimum confirmed position, suitable for advancing the source's
     /// upstream cursor (Postgres `flush_lsn`, Kafka commit, transient WAL prune
     /// threshold).
     ///
     /// Piggy-backs `cleanup_stale_handles()` so dropped subscribers do not pin
     /// the watermark indefinitely.
-    pub async fn compute_confirmed_position(&self) -> Option<u64> {
+    pub async fn compute_confirmed_position(&self) -> Option<SequencePosition> {
         self.cleanup_stale_handles().await;
         let handles = self.position_handles.read().await;
-        let mut min: Option<u64> = None;
+        let mut min: Option<SequencePosition> = None;
         for handle in handles.values() {
-            let v = handle.load(Ordering::Relaxed);
-            if v == u64::MAX {
-                continue;
+            let guard = match handle.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::warn!(
+                        "position handle mutex poisoned while computing confirmed position; recovering inner value"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            if let Some(pos) = guard.as_ref() {
+                min = Some(match min {
+                    None => *pos,
+                    Some(m) => {
+                        if *pos < m {
+                            *pos
+                        } else {
+                            m
+                        }
+                    }
+                });
             }
-            min = Some(min.map_or(v, |m| m.min(v)));
         }
         min
     }
@@ -921,12 +941,13 @@ mod tests {
         BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
     };
     use crate::channels::BootstrapEventSender;
+    use crate::SequencePosition;
     use async_trait::async_trait;
 
     fn make_settings(
         query_id: &str,
         enable_bootstrap: bool,
-        resume_from: Option<u64>,
+        resume_from: Option<SequencePosition>,
         request_position_handle: bool,
     ) -> crate::config::SourceSubscriptionSettings {
         use std::collections::HashSet;
@@ -965,29 +986,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_position_handle_initializes_to_u64_max() {
+    async fn test_create_position_handle_initializes_to_none() {
         let base = SourceBase::new(SourceBaseParams::new("ph-init")).unwrap();
         let handle = base.create_position_handle("q1").await;
-        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+        assert!(handle.lock().unwrap().is_none());
     }
 
     #[tokio::test]
     async fn test_create_position_handle_idempotent_for_same_query() {
         let base = SourceBase::new(SourceBaseParams::new("ph-idem")).unwrap();
         let h1 = base.create_position_handle("q1").await;
-        h1.store(123, Ordering::Relaxed);
+        *h1.lock().unwrap() = Some(SequencePosition::from_u64(123));
         let h2 = base.create_position_handle("q1").await;
         // Same Arc — preserves the previously reported position.
         assert!(Arc::ptr_eq(&h1, &h2));
-        assert_eq!(h2.load(Ordering::Relaxed), 123);
+        assert_eq!(*h2.lock().unwrap(), Some(SequencePosition::from_u64(123)));
     }
 
     #[tokio::test]
     async fn test_remove_position_handle_drops_entry() {
         let base = SourceBase::new(SourceBaseParams::new("ph-rm")).unwrap();
         let handle = base.create_position_handle("q1").await;
-        handle.store(42, Ordering::Relaxed);
-        assert_eq!(base.compute_confirmed_position().await, Some(42));
+        *handle.lock().unwrap() = Some(SequencePosition::from_u64(42));
+        assert_eq!(
+            base.compute_confirmed_position().await,
+            Some(SequencePosition::from_u64(42))
+        );
         base.remove_position_handle("q1").await;
         assert_eq!(base.compute_confirmed_position().await, None);
     }
@@ -1007,22 +1031,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_confirmed_position_returns_none_when_all_max() {
-        let base = SourceBase::new(SourceBaseParams::new("ph-all-max")).unwrap();
+    async fn test_compute_confirmed_position_returns_none_when_all_unset() {
+        let base = SourceBase::new(SourceBaseParams::new("ph-all-none")).unwrap();
         let _h1 = base.create_position_handle("q1").await;
         let _h2 = base.create_position_handle("q2").await;
         assert_eq!(base.compute_confirmed_position().await, None);
     }
 
     #[tokio::test]
-    async fn test_compute_confirmed_position_filters_max_returns_min() {
+    async fn test_compute_confirmed_position_filters_none_returns_min() {
         let base = SourceBase::new(SourceBaseParams::new("ph-min")).unwrap();
         let h1 = base.create_position_handle("q1").await;
-        let _h2 = base.create_position_handle("q2").await; // stays u64::MAX
+        let _h2 = base.create_position_handle("q2").await; // stays None
         let h3 = base.create_position_handle("q3").await;
-        h1.store(100, Ordering::Relaxed);
-        h3.store(50, Ordering::Relaxed);
-        assert_eq!(base.compute_confirmed_position().await, Some(50));
+        *h1.lock().unwrap() = Some(SequencePosition::from_u64(100));
+        *h3.lock().unwrap() = Some(SequencePosition::from_u64(50));
+        assert_eq!(
+            base.compute_confirmed_position().await,
+            Some(SequencePosition::from_u64(50))
+        );
     }
 
     #[tokio::test]
@@ -1030,8 +1057,11 @@ mod tests {
         let base = SourceBase::new(SourceBaseParams::new("ph-single")).unwrap();
         let h1 = base.create_position_handle("q1").await;
         let _h2 = base.create_position_handle("q2").await;
-        h1.store(7, Ordering::Relaxed);
-        assert_eq!(base.compute_confirmed_position().await, Some(7));
+        *h1.lock().unwrap() = Some(SequencePosition::from_u64(7));
+        assert_eq!(
+            base.compute_confirmed_position().await,
+            Some(SequencePosition::from_u64(7))
+        );
     }
 
     #[tokio::test]
@@ -1039,7 +1069,7 @@ mod tests {
         let base = SourceBase::new(SourceBaseParams::new("ph-stale")).unwrap();
         {
             let handle = base.create_position_handle("q1").await;
-            handle.store(99, Ordering::Relaxed);
+            *handle.lock().unwrap() = Some(SequencePosition::from_u64(99));
             // handle (the external clone) drops here.
         }
         base.cleanup_stale_handles().await;
@@ -1050,10 +1080,13 @@ mod tests {
     async fn test_cleanup_stale_handles_keeps_held_arc() {
         let base = SourceBase::new(SourceBaseParams::new("ph-held")).unwrap();
         let handle = base.create_position_handle("q1").await;
-        handle.store(11, Ordering::Relaxed);
+        *handle.lock().unwrap() = Some(SequencePosition::from_u64(11));
         base.cleanup_stale_handles().await;
         // External clone still alive, entry retained.
-        assert_eq!(base.compute_confirmed_position().await, Some(11));
+        assert_eq!(
+            base.compute_confirmed_position().await,
+            Some(SequencePosition::from_u64(11))
+        );
         // Keep `handle` alive past the assertion.
         drop(handle);
     }
@@ -1066,9 +1099,9 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.expect("expected handle");
-        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+        assert!(handle.lock().unwrap().is_none());
         // Internal map should also have the entry (so min-watermark sees it).
-        assert_eq!(base.compute_confirmed_position().await, None); // u64::MAX → None
+        assert_eq!(base.compute_confirmed_position().await, None); // None → None
     }
 
     #[tokio::test]
@@ -1093,15 +1126,21 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.unwrap();
-        handle.store(42, Ordering::Relaxed);
-        assert_eq!(base.compute_confirmed_position().await, Some(42));
+        *handle.lock().unwrap() = Some(SequencePosition::from_u64(42));
+        assert_eq!(
+            base.compute_confirmed_position().await,
+            Some(SequencePosition::from_u64(42))
+        );
     }
 
     #[tokio::test]
     async fn test_subscribe_with_resume_from_skips_bootstrap() {
         let base = make_base_with_bootstrap("sub-resume");
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, Some(100), false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings("q1", true, Some(SequencePosition::from_u64(100)), false),
+                "test",
+            )
             .await
             .unwrap();
         assert!(
@@ -1114,7 +1153,10 @@ mod tests {
     async fn test_subscribe_resume_without_bootstrap_still_none() {
         let base = make_base_with_bootstrap("sub-resume-no-bs");
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, Some(100), false), "test")
+            .subscribe_with_bootstrap(
+                &make_settings("q1", false, Some(SequencePosition::from_u64(100)), false),
+                "test",
+            )
             .await
             .unwrap();
         assert!(response.bootstrap_receiver.is_none());

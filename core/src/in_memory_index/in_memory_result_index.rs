@@ -22,6 +22,7 @@ use std::{
 use crate::interface::{
     ResultIndex, ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
 };
+use crate::position::SequencePosition;
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;
 use ordered_float::OrderedFloat;
@@ -180,7 +181,7 @@ impl LazySortedSetStore for InMemoryResultIndex {
 impl ResultSequenceCounter for InMemoryResultIndex {
     async fn apply_sequence(
         &self,
-        sequence: u64,
+        sequence: SequencePosition,
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         let mut data = self.sequence.write().await;

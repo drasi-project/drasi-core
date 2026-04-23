@@ -139,7 +139,7 @@ use crate::channels::BootstrapEventSender;
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapResult {
     pub event_count: usize,
-    pub last_sequence: Option<u64>,
+    pub last_sequence: Option<crate::SequencePosition>,
     pub sequences_aligned: bool,
 }
 

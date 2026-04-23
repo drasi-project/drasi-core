@@ -24,6 +24,7 @@ use drasi_core::{
         cached_element_index::CachedElementIndex, cached_result_index::CachedResultIndex,
     },
     interface::ElementIndex,
+    position::SequencePosition,
     query::QueryBuilder,
 };
 use shared_tests::QueryTestConfig;
@@ -445,6 +446,7 @@ mod session {
             ResultOwner, ResultSequenceCounter, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
+        position::SequencePosition,
     };
     use drasi_index_garnet::{
         element_index::GarnetElementIndex, future_queue::GarnetFutureQueue,
@@ -1095,23 +1097,33 @@ mod session {
 
         // Commit sequence 5
         session_control.begin().await.unwrap();
-        result_index.apply_sequence(5, "change-1").await.unwrap();
+        result_index
+            .apply_sequence(SequencePosition::from_u64(5), "change-1")
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
         let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 5);
+        assert_eq!(seq.sequence, SequencePosition::from_u64(5));
         assert_eq!(seq.source_change_id.as_ref(), "change-1");
 
         // Apply sequence 10 then rollback
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        result_index
+            .apply_sequence(SequencePosition::from_u64(10), "change-2")
+            .await
+            .unwrap();
         session_control.rollback().unwrap();
 
         // Verify rollback preserved the old value
         session_control.begin().await.unwrap();
         let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 5, "sequence should not change after rollback");
+        assert_eq!(
+            seq.sequence,
+            SequencePosition::from_u64(5),
+            "sequence should not change after rollback"
+        );
         assert_eq!(
             seq.source_change_id.as_ref(),
             "change-1",
@@ -1119,13 +1131,16 @@ mod session {
         );
 
         // Now commit sequence 10
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        result_index
+            .apply_sequence(SequencePosition::from_u64(10), "change-2")
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
         let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 10);
+        assert_eq!(seq.sequence, SequencePosition::from_u64(10));
         assert_eq!(seq.source_change_id.as_ref(), "change-2");
         session_control.rollback().unwrap();
     }

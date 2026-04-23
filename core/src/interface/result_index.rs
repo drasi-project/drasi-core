@@ -65,14 +65,14 @@ pub trait LazySortedSetStore: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultSequence {
-    pub sequence: u64,
+    pub sequence: crate::position::SequencePosition,
     pub source_change_id: Arc<str>,
 }
 
 impl Default for ResultSequence {
     fn default() -> Self {
         ResultSequence {
-            sequence: 0,
+            sequence: crate::position::SequencePosition::default(),
             source_change_id: Arc::from(""),
         }
     }
@@ -80,8 +80,11 @@ impl Default for ResultSequence {
 
 #[async_trait]
 pub trait ResultSequenceCounter: Send + Sync {
-    async fn apply_sequence(&self, sequence: u64, source_change_id: &str)
-        -> Result<(), IndexError>;
+    async fn apply_sequence(
+        &self,
+        sequence: crate::position::SequencePosition,
+        source_change_id: &str,
+    ) -> Result<(), IndexError>;
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
 }
 

@@ -24,6 +24,7 @@ use drasi_core::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
         ResultSequence, ResultSequenceCounter,
     },
+    position::SequencePosition,
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
 use ordered_float::OrderedFloat;
@@ -294,7 +295,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
 impl ResultSequenceCounter for RocksDbResultIndex {
     async fn apply_sequence(
         &self,
-        sequence: u64,
+        sequence: SequencePosition,
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
@@ -304,7 +305,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
 
             session_state.with_txn(|txn| {
-                txn.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes())
+                txn.put_cf(&metadata_cf, "sequence", sequence.as_bytes())
                     .map_err(IndexError::other)?;
                 txn.put_cf(
                     &metadata_cf,
@@ -331,11 +332,8 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                 let seq_data = txn.get_cf(&metadata_cf, "sequence");
                 match seq_data {
                     Ok(Some(v)) => {
-                        let seq_bytes: [u8; 8] = match v.try_into() {
-                            Ok(v) => v,
-                            Err(_) => return Err(IndexError::CorruptedData),
-                        };
-                        let sequence: u64 = u64::from_be_bytes(seq_bytes);
+                        let sequence =
+                            SequencePosition::try_from_bytes(&v).map_err(IndexError::other)?;
 
                         let source_change_id_data = txn.get_cf(&metadata_cf, "source_change_id");
 

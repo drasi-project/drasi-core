@@ -164,7 +164,7 @@ impl LazySortedSetStore for CachedResultIndex {
 impl ResultSequenceCounter for CachedResultIndex {
     async fn apply_sequence(
         &self,
-        sequence: u64,
+        sequence: crate::position::SequencePosition,
         source_change_id: &str,
     ) -> Result<(), IndexError> {
         self.inner.apply_sequence(sequence, source_change_id).await

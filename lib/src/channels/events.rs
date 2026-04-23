@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::position::SequencePosition;
 use crate::profiling::ProfilingMetadata;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -217,10 +217,10 @@ pub struct SourceEventWrapper {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Optional profiling metadata for performance tracking
     pub profiling: Option<ProfilingMetadata>,
-    /// Monotonic, replayable sequence number stamped by the source.
+    /// Monotonic, replayable sequence position stamped by the source.
     /// `None` for volatile sources that don't support replay.
     /// When present, must be strictly increasing per source.
-    pub sequence: Option<u64>,
+    pub sequence: Option<SequencePosition>,
 }
 
 impl SourceEventWrapper {
@@ -255,12 +255,12 @@ impl SourceEventWrapper {
         }
     }
 
-    /// Create a new SourceEventWrapper with a sequence number (and optional profiling)
+    /// Create a new SourceEventWrapper with a sequence position (and optional profiling)
     pub fn with_sequence(
         source_id: String,
         event: SourceEvent,
         timestamp: chrono::DateTime<chrono::Utc>,
-        sequence: u64,
+        sequence: SequencePosition,
         profiling: Option<ProfilingMetadata>,
     ) -> Self {
         Self {
@@ -281,7 +281,7 @@ impl SourceEventWrapper {
         SourceEvent,
         chrono::DateTime<chrono::Utc>,
         Option<ProfilingMetadata>,
-        Option<u64>,
+        Option<SequencePosition>,
     ) {
         (
             self.source_id,
@@ -306,7 +306,7 @@ impl SourceEventWrapper {
             SourceEvent,
             chrono::DateTime<chrono::Utc>,
             Option<ProfilingMetadata>,
-            Option<u64>,
+            Option<SequencePosition>,
         ),
         Arc<Self>,
     > {
@@ -351,10 +351,10 @@ pub struct SubscriptionResponse {
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
     /// Shared handle for the query to report its last durably-processed sequence position.
     /// Created by replay-capable sources when `request_position_handle` is true.
-    /// The query writes to this atomically after each commit; the source reads the
+    /// The query writes to this after each commit; the source reads the
     /// minimum across all subscribers to advance its upstream cursor.
-    /// Sources should initialize this to `u64::MAX` (meaning "no position confirmed yet").
-    pub position_handle: Option<Arc<AtomicU64>>,
+    /// Sources should initialize this to `None` (meaning "no position confirmed yet").
+    pub position_handle: Option<Arc<std::sync::Mutex<Option<SequencePosition>>>>,
 }
 
 /// Subscription response from Query to Reaction
@@ -676,14 +676,14 @@ mod tests {
             "test-source".to_string(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
-            42,
+            SequencePosition::from_u64(42),
             None,
         );
-        assert_eq!(wrapper.sequence, Some(42));
+        assert_eq!(wrapper.sequence, Some(SequencePosition::from_u64(42)));
         assert!(wrapper.profiling.is_none());
 
         let (_source_id, _event, _timestamp, _profiling, sequence) = wrapper.into_parts();
-        assert_eq!(sequence, Some(42));
+        assert_eq!(sequence, Some(SequencePosition::from_u64(42)));
     }
 
     #[test]
@@ -699,16 +699,18 @@ mod tests {
 
     #[test]
     fn test_subscription_response_with_position_handle() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Mutex};
 
-        let handle = Arc::new(AtomicU64::new(u64::MAX));
-        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+        let handle = Arc::new(Mutex::new(None::<SequencePosition>));
+        assert!(handle.lock().unwrap().is_none());
 
         // Verify the handle can be cloned and read (simulates source reading query's position)
         let handle_clone = handle.clone();
-        handle.store(500, Ordering::Relaxed);
-        assert_eq!(handle_clone.load(Ordering::Relaxed), 500);
+        *handle.lock().unwrap() = Some(SequencePosition::from_u64(500));
+        assert_eq!(
+            *handle_clone.lock().unwrap(),
+            Some(SequencePosition::from_u64(500))
+        );
     }
 
     #[test]
@@ -720,10 +722,10 @@ mod tests {
             query_id: "test-query".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
-            resume_from: Some(500),
+            resume_from: Some(SequencePosition::from_u64(500)),
             request_position_handle: true,
         };
-        assert_eq!(settings.resume_from, Some(500));
+        assert_eq!(settings.resume_from, Some(SequencePosition::from_u64(500)));
         assert!(settings.request_position_handle);
     }
 }

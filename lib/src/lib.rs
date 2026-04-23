@@ -34,6 +34,9 @@
 /// Component dependency graph — the single source of truth for configuration
 pub mod component_graph;
 
+/// Opaque position type for source replay and resume
+pub mod position;
+
 /// Fluent builders for DrasiLib and components
 pub mod builder;
 
@@ -174,6 +177,9 @@ pub use sources::Source;
 
 /// Structured error type for source operations (e.g., replay position unavailable)
 pub use sources::SourceError;
+
+/// Opaque position type for source replay and resume
+pub use position::SequencePosition;
 
 /// Reaction traits for implementing reaction plugins
 pub use reactions::Reaction;
