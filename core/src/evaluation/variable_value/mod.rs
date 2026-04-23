@@ -61,7 +61,13 @@ impl From<VariableValue> for Value {
         match val {
             VariableValue::Null => Value::Null,
             VariableValue::Bool(b) => Value::Bool(b),
-            VariableValue::Float(f) => Value::Number(f.into()),
+            VariableValue::Float(f) => {
+                // Handle infinity and NaN gracefully - convert to null since JSON doesn't support them
+                match f.as_f64() {
+                    Some(v) if v.is_finite() => Value::Number(f.into()),
+                    _ => Value::Null,
+                }
+            }
             VariableValue::Integer(i) => Value::Number(i.into()),
             VariableValue::String(s) => Value::String(s),
             VariableValue::List(l) => Value::Array(l.into_iter().map(|x| x.into()).collect()),
