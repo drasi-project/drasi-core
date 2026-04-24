@@ -58,6 +58,7 @@ pub mod logical_conditions;
 pub mod prev_distinct;
 pub mod rolling_average_decrease_by_ten;
 pub mod steps_happen_in_any_order;
+pub mod string_operators;
 pub mod windows;
 
 #[async_trait]
