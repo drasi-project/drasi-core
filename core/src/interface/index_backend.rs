@@ -31,7 +31,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex, SessionControl,
+    CheckpointWriter, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex,
+    SessionControl,
 };
 
 /// Set of indexes for a query.
@@ -65,6 +66,36 @@ impl fmt::Debug for IndexSet {
     }
 }
 
+/// Result of [`IndexBackendPlugin::create_indexes`].
+///
+/// Bundles the [`IndexSet`] together with an optional [`CheckpointWriter`]
+/// that shares the same underlying session state. Persistent backends return
+/// `Some(writer)`; volatile (in-memory) backends return `None`.
+///
+/// The writer's `stage_checkpoint` calls land in the same database transaction
+/// as index updates because both are derived from the same `SessionControl` /
+/// session state instance — that is why the plugin returns them together
+/// rather than via two separate calls.
+pub struct CreatedIndexes {
+    /// The set of indexes for the query.
+    pub set: IndexSet,
+    /// Atomic checkpoint writer paired with the set's session state.
+    /// `None` for volatile backends (no persistent storage to checkpoint into).
+    pub checkpoint_writer: Option<Arc<dyn CheckpointWriter>>,
+}
+
+impl fmt::Debug for CreatedIndexes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreatedIndexes")
+            .field("set", &self.set)
+            .field(
+                "checkpoint_writer",
+                &self.checkpoint_writer.as_ref().map(|_| "<trait object>"),
+            )
+            .finish()
+    }
+}
+
 /// Plugin trait for external index storage backends.
 ///
 /// Each storage backend (RocksDB, Garnet, etc.) implements this trait to provide
@@ -77,7 +108,7 @@ impl fmt::Debug for IndexSet {
 /// # Example
 ///
 /// ```ignore
-/// use drasi_core::interface::{IndexBackendPlugin, IndexSet};
+/// use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError};
 ///
 /// pub struct MyIndexProvider {
 ///     // configuration fields
@@ -85,21 +116,28 @@ impl fmt::Debug for IndexSet {
 ///
 /// #[async_trait]
 /// impl IndexBackendPlugin for MyIndexProvider {
-///     async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
-///         // Create and return all indexes from a shared backend instance
+///     async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
+///         // Create and return all indexes (and an optional checkpoint writer)
+///         // from a shared backend instance
 ///     }
 ///     fn is_volatile(&self) -> bool { false }
 /// }
 /// ```
 #[async_trait]
 pub trait IndexBackendPlugin: Send + Sync {
-    /// Create all indexes for a query from a single shared backend instance.
+    /// Create all indexes (and an optional checkpoint writer) for a query
+    /// from a single shared backend instance.
     ///
     /// This method creates the element index, archive index, result index,
     /// future queue, and session control backed by a shared storage resource
     /// (e.g., a single RocksDB database or Redis connection). This reduces
     /// resource overhead and enables cross-index atomic transactions.
-    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError>;
+    ///
+    /// Persistent backends additionally return a [`CheckpointWriter`] that
+    /// shares the same session state as the returned `SessionControl`, so
+    /// `stage_checkpoint` writes land in the same database transaction as
+    /// index updates. Volatile backends return `checkpoint_writer: None`.
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError>;
 
     /// Returns true if this backend is volatile (data lost on restart).
     ///

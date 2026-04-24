@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod checkpoint_writer;
 mod element_index;
 mod future_queue;
 mod index_backend;
@@ -23,6 +24,7 @@ mod source_middleware;
 use std::error::Error;
 use std::fmt::Display;
 
+pub use checkpoint_writer::CheckpointWriter;
 use drasi_query_ast::api::QueryParseError;
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;
@@ -32,6 +34,7 @@ pub use future_queue::FutureElementRef;
 pub use future_queue::FutureQueue;
 pub use future_queue::FutureQueueConsumer;
 pub use future_queue::PushType;
+pub use index_backend::CreatedIndexes;
 pub use index_backend::IndexBackendPlugin;
 pub use index_backend::IndexSet;
 pub use query_clock::QueryClock;

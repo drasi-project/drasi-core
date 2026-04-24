@@ -30,6 +30,7 @@
 //!     .build()?;
 //! ```
 
+mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
 mod plugin;

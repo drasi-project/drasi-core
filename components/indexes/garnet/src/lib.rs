@@ -33,6 +33,7 @@
 use drasi_core::interface::IndexError;
 use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
+mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
 mod plugin;

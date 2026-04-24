@@ -31,9 +31,10 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
 use std::sync::Arc;
 
+use crate::checkpoint::GarnetCheckpointWriter;
 use crate::element_index::GarnetElementIndex;
 use crate::future_queue::GarnetFutureQueue;
 use crate::result_index::GarnetResultIndex;
@@ -120,7 +121,7 @@ impl GarnetIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for GarnetIndexProvider {
-    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
         let client = redis::Client::open(self.connection_string.as_str())
             .map_err(IndexError::connection_failed)?;
         let connection = client
@@ -142,14 +143,27 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             connection.clone(),
             session_state.clone(),
         ));
-        let future_queue = Arc::new(GarnetFutureQueue::new(query_id, connection, session_state));
+        let future_queue = Arc::new(GarnetFutureQueue::new(
+            query_id,
+            connection.clone(),
+            session_state.clone(),
+        ));
 
-        Ok(IndexSet {
-            element_index: element_index.clone(),
-            archive_index: element_index,
-            result_index,
-            future_queue,
-            session_control,
+        let checkpoint_writer = Arc::new(GarnetCheckpointWriter::new(
+            query_id,
+            connection,
+            session_state,
+        ));
+
+        Ok(CreatedIndexes {
+            set: IndexSet {
+                element_index: element_index.clone(),
+                archive_index: element_index,
+                result_index,
+                future_queue,
+                session_control,
+            },
+            checkpoint_writer: Some(checkpoint_writer),
         })
     }
 

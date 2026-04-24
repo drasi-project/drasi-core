@@ -423,10 +423,13 @@ impl Query for DrasiQuery {
             );
             let index_factory = self.index_factory.clone();
 
-            let index_set = index_factory
+            let created = index_factory
                 .build(backend_ref, &self.base.config.id)
                 .await
-                .context("Failed to build index set")?;
+                .context("Failed to build indexes")?;
+            // The checkpoint_writer is intentionally unused in this PR; #370
+            // (query processor checkpoint integration) will consume it.
+            let index_set = created.set;
 
             builder = builder
                 .with_element_index(index_set.element_index)

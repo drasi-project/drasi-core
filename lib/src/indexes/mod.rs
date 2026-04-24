@@ -72,6 +72,9 @@ pub mod factory;
 pub use config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 pub use factory::{IndexError, IndexFactory};
 
-// Re-export IndexSet and IndexBackendPlugin from drasi_core for plugin developers
+// Re-export CheckpointWriter, CreatedIndexes, IndexBackendPlugin, and IndexSet
+// from drasi_core for plugin developers
+pub use drasi_core::interface::CheckpointWriter;
+pub use drasi_core::interface::CreatedIndexes;
 pub use drasi_core::interface::IndexBackendPlugin;
 pub use drasi_core::interface::IndexSet;
