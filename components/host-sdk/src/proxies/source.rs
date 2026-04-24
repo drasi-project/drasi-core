@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::SubscriptionResponse;
 use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
@@ -77,6 +78,11 @@ pub struct SourceProxy {
     cached_type_name: String,
     /// Keeps the per-instance callback context alive for the lifetime of this proxy.
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+    /// Per-source identity provider set programmatically via
+    /// [`Source::set_identity_provider`]. When present, it takes precedence over
+    /// any instance-wide provider supplied via
+    /// [`SourceRuntimeContext::identity_provider`] during [`Source::initialize`].
+    identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
 unsafe impl Send for SourceProxy {}
@@ -93,6 +99,7 @@ impl SourceProxy {
             cached_id,
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
+            identity_provider: std::sync::Mutex::new(None),
         }
     }
 }
@@ -289,10 +296,13 @@ impl Source for SourceProxy {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = context
+        let identity_vtable = self
             .identity_provider
-            .as_ref()
-            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip.clone()));
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| context.identity_provider.clone())
+            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip));
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
@@ -320,6 +330,18 @@ impl Source for SourceProxy {
             drasi_plugin_sdk::ffi::build_bootstrap_provider_vtable(provider, host_executor);
         let vtable_ptr = Box::into_raw(Box::new(vtable));
         (self.vtable.set_bootstrap_provider_fn)(self.vtable.state, vtable_ptr);
+    }
+
+    async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        // Stash the provider so [`Source::initialize`] can prefer it over the
+        // instance-wide provider supplied via SourceRuntimeContext. There is no
+        // FFI hook for late identity-provider injection — the plugin only sees
+        // the provider through `FfiRuntimeContext` during `initialize_fn`. This
+        // means [`set_identity_provider`] must be called before the source is
+        // added to DrasiLib (i.e. before the manager invokes `initialize`).
+        if let Ok(mut guard) = self.identity_provider.lock() {
+            *guard = Some(provider);
+        }
     }
 }
 

@@ -22,7 +22,8 @@
 
 use chrono::{DateTime, Utc};
 use drasi_plugin_sdk::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,6 +73,7 @@ pub struct PluginRegistry {
     sources: HashMap<String, RegisteredDescriptor<dyn SourcePluginDescriptor>>,
     reactions: HashMap<String, RegisteredDescriptor<dyn ReactionPluginDescriptor>>,
     bootstrappers: HashMap<String, RegisteredDescriptor<dyn BootstrapPluginDescriptor>>,
+    identity_providers: HashMap<String, RegisteredDescriptor<dyn IdentityProviderPluginDescriptor>>,
     /// Monotonically increasing counter incremented on every mutation.
     /// Used by OpenAPI cache invalidation and other version-sensitive consumers.
     version: u64,
@@ -84,6 +86,7 @@ impl PluginRegistry {
             sources: HashMap::new(),
             reactions: HashMap::new(),
             bootstrappers: HashMap::new(),
+            identity_providers: HashMap::new(),
             version: 0,
         }
     }
@@ -191,6 +194,41 @@ impl PluginRegistry {
         self.version += 1;
     }
 
+    /// Register an identity-provider plugin descriptor.
+    pub fn register_identity_provider(
+        &mut self,
+        descriptor: Arc<dyn IdentityProviderPluginDescriptor>,
+    ) {
+        let kind = descriptor.kind().to_string();
+        self.identity_providers.insert(
+            kind,
+            RegisteredDescriptor {
+                descriptor,
+                plugin_id: String::new(),
+                registered_at: Utc::now(),
+            },
+        );
+        self.version += 1;
+    }
+
+    /// Register an identity-provider plugin descriptor with plugin identity metadata.
+    pub fn register_identity_provider_with_metadata(
+        &mut self,
+        descriptor: Arc<dyn IdentityProviderPluginDescriptor>,
+        plugin_id: &str,
+    ) {
+        let kind = descriptor.kind().to_string();
+        self.identity_providers.insert(
+            kind,
+            RegisteredDescriptor {
+                descriptor,
+                plugin_id: plugin_id.to_string(),
+                registered_at: Utc::now(),
+            },
+        );
+        self.version += 1;
+    }
+
     /// Look up a source plugin descriptor by kind.
     pub fn get_source(&self, kind: &str) -> Option<&Arc<dyn SourcePluginDescriptor>> {
         self.sources.get(kind).map(|r| &r.descriptor)
@@ -204,6 +242,14 @@ impl PluginRegistry {
     /// Look up a bootstrap plugin descriptor by kind.
     pub fn get_bootstrapper(&self, kind: &str) -> Option<&Arc<dyn BootstrapPluginDescriptor>> {
         self.bootstrappers.get(kind).map(|r| &r.descriptor)
+    }
+
+    /// Look up an identity-provider plugin descriptor by kind.
+    pub fn get_identity_provider(
+        &self,
+        kind: &str,
+    ) -> Option<&Arc<dyn IdentityProviderPluginDescriptor>> {
+        self.identity_providers.get(kind).map(|r| &r.descriptor)
     }
 
     /// Look up a source registration (descriptor + metadata) by kind.
@@ -230,6 +276,14 @@ impl PluginRegistry {
         self.bootstrappers.get(kind)
     }
 
+    /// Look up an identity-provider registration (descriptor + metadata) by kind.
+    pub fn get_identity_provider_registration(
+        &self,
+        kind: &str,
+    ) -> Option<&RegisteredDescriptor<dyn IdentityProviderPluginDescriptor>> {
+        self.identity_providers.get(kind)
+    }
+
     /// List all registered source kinds.
     pub fn source_kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = self.sources.keys().map(String::as_str).collect();
@@ -247,6 +301,17 @@ impl PluginRegistry {
     /// List all registered bootstrapper kinds.
     pub fn bootstrapper_kinds(&self) -> Vec<&str> {
         let mut kinds: Vec<&str> = self.bootstrappers.keys().map(String::as_str).collect();
+        kinds.sort();
+        kinds
+    }
+
+    /// List all registered identity-provider kinds.
+    pub fn identity_provider_kinds(&self) -> Vec<&str> {
+        let mut kinds: Vec<&str> = self
+            .identity_providers
+            .keys()
+            .map(String::as_str)
+            .collect();
         kinds.sort();
         kinds
     }
@@ -302,14 +367,37 @@ impl PluginRegistry {
         infos
     }
 
+    /// Get detailed info about all registered identity-provider plugins.
+    pub fn identity_provider_plugin_infos(&self) -> Vec<PluginKindInfo> {
+        let mut infos: Vec<PluginKindInfo> = self
+            .identity_providers
+            .values()
+            .map(|r| PluginKindInfo {
+                kind: r.descriptor.kind().to_string(),
+                config_version: r.descriptor.config_version().to_string(),
+                config_schema_json: r.descriptor.config_schema_json(),
+                config_schema_name: r.descriptor.config_schema_name().to_string(),
+                plugin_id: r.plugin_id.clone(),
+            })
+            .collect();
+        infos.sort_by(|a, b| a.kind.cmp(&b.kind));
+        infos
+    }
+
     /// Returns true if the registry contains no descriptors.
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty() && self.reactions.is_empty() && self.bootstrappers.is_empty()
+        self.sources.is_empty()
+            && self.reactions.is_empty()
+            && self.bootstrappers.is_empty()
+            && self.identity_providers.is_empty()
     }
 
     /// Returns the total number of registered descriptors.
     pub fn descriptor_count(&self) -> usize {
-        self.sources.len() + self.reactions.len() + self.bootstrappers.len()
+        self.sources.len()
+            + self.reactions.len()
+            + self.bootstrappers.len()
+            + self.identity_providers.len()
     }
 }
 
@@ -325,6 +413,7 @@ impl std::fmt::Debug for PluginRegistry {
             .field("sources", &self.source_kinds())
             .field("reactions", &self.reaction_kinds())
             .field("bootstrappers", &self.bootstrapper_kinds())
+            .field("identity_providers", &self.identity_provider_kinds())
             .field("version", &self.version)
             .finish()
     }

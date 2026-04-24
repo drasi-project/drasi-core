@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
@@ -52,6 +53,12 @@ pub struct ReactionProxy {
         std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
     /// Keep the callback context alive for the lifetime of the forwarder.
     _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
+    /// Per-reaction identity provider set programmatically via
+    /// [`Reaction::set_identity_provider`]. When present, it takes precedence
+    /// over any instance-wide provider supplied via
+    /// [`ReactionRuntimeContext::identity_provider`] during
+    /// [`Reaction::initialize`].
+    identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
 /// Context for the push-based result callback.
@@ -142,6 +149,7 @@ impl ReactionProxy {
             _callback_ctx: std::sync::Mutex::new(None),
             result_tx: std::sync::Mutex::new(None),
             _push_ctx: std::sync::Mutex::new(None),
+            identity_provider: std::sync::Mutex::new(None),
         }
     }
 }
@@ -217,10 +225,13 @@ impl Reaction for ReactionProxy {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = context
+        let identity_vtable = self
             .identity_provider
-            .as_ref()
-            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip.clone()));
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .or_else(|| context.identity_provider.clone())
+            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip));
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
@@ -332,6 +343,19 @@ impl Reaction for ReactionProxy {
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+    }
+
+    async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        // Stash the provider so [`Reaction::initialize`] can prefer it over
+        // the instance-wide provider supplied via ReactionRuntimeContext.
+        // There is no FFI hook for late identity-provider injection — the
+        // plugin only sees the provider through `FfiRuntimeContext` during
+        // `initialize_fn`. This means [`set_identity_provider`] must be called
+        // before the reaction is added to DrasiLib (i.e. before the manager
+        // invokes `initialize`).
+        if let Ok(mut guard) = self.identity_provider.lock() {
+            *guard = Some(provider);
+        }
     }
 }
 
