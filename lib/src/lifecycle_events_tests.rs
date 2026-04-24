@@ -157,7 +157,7 @@ mod tests {
             &events,
             "test-src",
             ComponentType::Source,
-            &[(ComponentStatus::Stopped, "added")],
+            &[(ComponentStatus::Added, "added")],
         );
 
         // Start
@@ -217,7 +217,7 @@ mod tests {
             &events,
             "test-src",
             ComponentType::Source,
-            &[(ComponentStatus::Stopped, "removed")],
+            &[(ComponentStatus::Removed, "removed")],
         );
     }
 
@@ -258,7 +258,7 @@ mod tests {
             &events,
             "test-query",
             ComponentType::Query,
-            &[(ComponentStatus::Stopped, "added")],
+            &[(ComponentStatus::Added, "added")],
         );
 
         // Start the source first (queries need running sources for bootstrap)
@@ -325,7 +325,7 @@ mod tests {
             &events,
             "test-query",
             ComponentType::Query,
-            &[(ComponentStatus::Stopped, "removed")],
+            &[(ComponentStatus::Removed, "removed")],
         );
     }
 
@@ -372,7 +372,7 @@ mod tests {
             &events,
             "test-rxn",
             ComponentType::Reaction,
-            &[(ComponentStatus::Stopped, "added")],
+            &[(ComponentStatus::Added, "added")],
         );
 
         // Start reaction
@@ -432,7 +432,7 @@ mod tests {
             &events,
             "test-rxn",
             ComponentType::Reaction,
-            &[(ComponentStatus::Stopped, "removed")],
+            &[(ComponentStatus::Removed, "removed")],
         );
     }
 
@@ -458,7 +458,7 @@ mod tests {
         )
         .await;
         assert_eq!(src_added[0].component_type, ComponentType::Source);
-        assert_eq!(src_added[0].status, ComponentStatus::Stopped);
+        assert_eq!(src_added[0].status, ComponentStatus::Added);
 
         // Add query (depends on source)
         let query_config = Query::cypher("mc-query")
@@ -475,7 +475,7 @@ mod tests {
         )
         .await;
         assert_eq!(qry_added[0].component_type, ComponentType::Query);
-        assert_eq!(qry_added[0].status, ComponentStatus::Stopped);
+        assert_eq!(qry_added[0].status, ComponentStatus::Added);
 
         // Add reaction (depends on query)
         let reaction = TestMockReaction::with_auto_start(
@@ -492,7 +492,7 @@ mod tests {
         )
         .await;
         assert_eq!(rxn_added[0].component_type, ComponentType::Reaction);
-        assert_eq!(rxn_added[0].status, ComponentStatus::Stopped);
+        assert_eq!(rxn_added[0].status, ComponentStatus::Added);
 
         // --- Start in dependency order: source → query → reaction ---
 
