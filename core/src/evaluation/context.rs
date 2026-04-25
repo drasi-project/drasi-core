@@ -53,7 +53,6 @@ pub enum QueryPartEvaluationContext {
         after: QueryVariables,
         grouping_keys: Vec<String>,
         default_before: bool,
-        default_after: bool,
         row_signature: u64,
     },
     Noop,
@@ -94,7 +93,6 @@ impl QueryPartEvaluationContext {
                     after: aa,
                     grouping_keys: ag,
                     default_before: adb,
-                    default_after: ada,
                     ..
                 },
                 Self::Aggregation {
@@ -102,10 +100,9 @@ impl QueryPartEvaluationContext {
                     after: ba,
                     grouping_keys: bg,
                     default_before: bdb,
-                    default_after: bda,
                     ..
                 },
-            ) => ab == bb && aa == ba && ag == bg && adb == bdb && ada == bda,
+            ) => ab == bb && aa == ba && ag == bg && adb == bdb,
             (Self::Noop, Self::Noop) => true,
             _ => false,
         }

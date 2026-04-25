@@ -1736,6 +1736,80 @@ impl ExpressionEvaluator {
         Ok(result)
     }
 
+    /// Returns `true` when every aggregating function reachable from the given
+    /// projection expressions reports identity (no remaining contributors) for
+    /// the supplied grouping. Used by `QueryPartEvaluator` to decide whether a
+    /// `Removing` change to a `GroupBy` projection should emit a `Removing`
+    /// diff (group is now empty) or an `Aggregation` diff (group still alive).
+    pub async fn projection_is_at_identity(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        aggregates: &[ast::Expression],
+        grouping_values: &Arc<Vec<VariableValue>>,
+    ) -> Result<bool, EvaluationError> {
+        let result_key = ResultKey::GroupBy(grouping_values.clone());
+        for aggregate in aggregates {
+            if !self
+                .expression_is_at_identity(context, aggregate, &result_key, grouping_values)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    #[async_recursion]
+    async fn expression_is_at_identity(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        expr: &ast::Expression,
+        result_key: &ResultKey,
+        grouping_values: &Arc<Vec<VariableValue>>,
+    ) -> Result<bool, EvaluationError> {
+        if let ast::Expression::FunctionExpression(fe) = expr {
+            if let Some(function) = self.functions.get_function(&fe.name) {
+                if let Function::Aggregating(agg) = function.as_ref() {
+                    let result_owner = ResultOwner::Function(fe.position_in_query);
+                    let accumulator = if agg.accumulator_is_lazy() {
+                        agg.initialize_accumulator(
+                            context,
+                            fe,
+                            grouping_values,
+                            self.result_index.clone(),
+                        )
+                    } else {
+                        match self.result_index.get(result_key, &result_owner).await? {
+                            Some(va) => Accumulator::Value(va),
+                            None => agg.initialize_accumulator(
+                                context,
+                                fe,
+                                grouping_values,
+                                self.result_index.clone(),
+                            ),
+                        }
+                    };
+
+                    return agg
+                        .is_at_identity(&accumulator)
+                        .await
+                        .map_err(EvaluationError::FunctionError);
+                }
+            }
+        }
+
+        use ast::ParentExpression;
+        for child in expr.get_children() {
+            if !self
+                .expression_is_at_identity(context, child, result_key, grouping_values)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     async fn evaluate_case_expression(
         &self,
         context: &ExpressionEvaluationContext<'_>,

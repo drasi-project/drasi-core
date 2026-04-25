@@ -103,7 +103,6 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
                 before: None,
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -136,7 +135,6 @@ pub async fn truefor_sum(config: &(impl QueryTestConfig + Send)) {
                 before: Some(variablemap!("value"=>VariableValue::Float(Float::from(2.0))),),
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -205,7 +203,6 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
                 before: None,
                 grouping_keys: vec!["category".into()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -245,7 +242,6 @@ pub async fn truefor_grouped_sum(config: &(impl QueryTestConfig + Send)) {
                 )),
                 grouping_keys: vec!["category".into()],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
