@@ -370,13 +370,26 @@ pub struct QuerySubscriptionResponse {
 }
 
 /// Typed result diff emitted by continuous queries.
+///
+/// Each non-`Noop` variant carries a `row_signature` stamped by the core engine:
+/// the path-solver binding hash for non-aggregating rows, and the grouping-key hash
+/// for aggregations. Downstream consumers use it as the row identity in place of
+/// JSON-equality matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ResultDiff {
     #[serde(rename = "ADD")]
-    Add { data: serde_json::Value },
+    Add {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
     #[serde(rename = "DELETE")]
-    Delete { data: serde_json::Value },
+    Delete {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
     #[serde(rename = "UPDATE")]
     Update {
         data: serde_json::Value,
@@ -384,11 +397,15 @@ pub enum ResultDiff {
         after: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         grouping_keys: Option<Vec<String>>,
+        #[serde(default)]
+        row_signature: u64,
     },
     #[serde(rename = "aggregation")]
     Aggregation {
         before: Option<serde_json::Value>,
         after: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
     },
     #[serde(rename = "noop")]
     Noop,
@@ -401,6 +418,11 @@ pub enum ResultDiff {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
+    /// Monotonic per-query sequence number identifying this emission.
+    /// Reactions persist this in their checkpoint, the outbox is keyed by it,
+    /// and the bootstrap APIs return it as `as_of_sequence`.
+    #[serde(default)]
+    pub sequence: u64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
@@ -413,12 +435,14 @@ impl QueryResult {
     /// Create a new QueryResult without profiling
     pub fn new(
         query_id: String,
+        sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
     ) -> Self {
         Self {
             query_id,
+            sequence,
             timestamp,
             results,
             metadata,
@@ -429,6 +453,7 @@ impl QueryResult {
     /// Create a new QueryResult with profiling metadata
     pub fn with_profiling(
         query_id: String,
+        sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
@@ -436,6 +461,7 @@ impl QueryResult {
     ) -> Self {
         Self {
             query_id,
+            sequence,
             timestamp,
             results,
             metadata,

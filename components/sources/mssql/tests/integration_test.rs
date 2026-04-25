@@ -61,8 +61,8 @@ fn matches_fields(data: &Value, fields: &[(&str, &str)]) -> bool {
 
 fn matches_change(entry: &ResultDiff, change_type: &str, fields: &[(&str, &str)]) -> bool {
     match (change_type, entry) {
-        ("ADD", ResultDiff::Add { data })
-        | ("DELETE", ResultDiff::Delete { data })
+        ("ADD", ResultDiff::Add { data, .. })
+        | ("DELETE", ResultDiff::Delete { data, .. })
         | ("UPDATE", ResultDiff::Update { data, .. }) => matches_fields(data, fields),
         _ => false,
     }
