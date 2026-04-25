@@ -117,7 +117,7 @@ pub fn transform_query_result(
     // Parse the results array
     for result_item in query_result.results {
         match result_item {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 let data = data
                     .as_object()
                     .ok_or_else(|| anyhow!("'data' field must be an object"))?
@@ -145,14 +145,14 @@ pub fn transform_query_result(
                     grouping_keys,
                 });
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 let data = data
                     .as_object()
                     .ok_or_else(|| anyhow!("'data' field must be an object"))?
                     .clone();
                 deleted_results.push(data);
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 let before_map = before.as_ref().and_then(|b| b.as_object()).cloned();
                 let after_map = after
                     .as_object()
@@ -227,13 +227,16 @@ mod tests {
         let timestamp = chrono::DateTime::from_timestamp_millis(1609459200000).unwrap();
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp,
             results: vec![
                 ResultDiff::Add {
                     data: json!({"id": "1", "value": "test1"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Add {
                     data: json!({"id": "2", "value": "test2"}),
+                    row_signature: 0,
                 },
             ],
             metadata: HashMap::new(),
@@ -262,12 +265,14 @@ mod tests {
         let timestamp = chrono::DateTime::from_timestamp_millis(1609459200000).unwrap();
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp,
             results: vec![ResultDiff::Update {
                 data: json!({"id": "1", "value": 20}),
                 before: json!({"id": "1", "value": 10}),
                 after: json!({"id": "1", "value": 20}),
                 grouping_keys: None,
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -296,12 +301,14 @@ mod tests {
     fn test_transform_update_with_grouping_keys() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
                 data: json!({"id": "1", "value": 20}),
                 before: json!({"id": "1", "value": 10}),
                 after: json!({"id": "1", "value": 20}),
                 grouping_keys: Some(vec!["key1".to_string(), "key2".to_string()]),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -325,9 +332,11 @@ mod tests {
     fn test_transform_delete_results() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Delete {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -348,19 +357,23 @@ mod tests {
     fn test_transform_mixed_results() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
                 ResultDiff::Add {
                     data: json!({"id": "1"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Update {
                     data: json!({"id": "2", "value": 20}),
                     before: json!({"id": "2", "value": 10}),
                     after: json!({"id": "2", "value": 20}),
                     grouping_keys: None,
+                    row_signature: 0,
                 },
                 ResultDiff::Delete {
                     data: json!({"id": "3"}),
+                    row_signature: 0,
                 },
             ],
             metadata: HashMap::new(),
@@ -388,9 +401,11 @@ mod tests {
 
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata,
             profiling: None,
@@ -415,9 +430,11 @@ mod tests {
     fn test_transform_invalid_add_data_field() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
                 data: json!(["not-an-object"]),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -435,12 +452,14 @@ mod tests {
     fn test_transform_invalid_update_before_field() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
                 data: json!({"id": "1", "value": 20}),
                 before: json!(true),
                 after: json!({"id": "1", "value": 20}),
                 grouping_keys: None,
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -458,12 +477,14 @@ mod tests {
     fn test_transform_invalid_update_after_field() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Update {
                 data: json!({"id": "1", "value": 20}),
                 before: json!({"id": "1", "value": 10}),
                 after: json!(42),
                 grouping_keys: None,
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None,
@@ -481,14 +502,17 @@ mod tests {
     fn test_transform_unknown_type_skipped() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![
                 ResultDiff::Add {
                     data: json!({"id": "1"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Noop,
                 ResultDiff::Delete {
                     data: json!({"id": "3"}),
+                    row_signature: 0,
                 },
             ],
             metadata: HashMap::new(),
@@ -511,9 +535,11 @@ mod tests {
     fn test_transform_empty_metadata_filtered() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata: HashMap::new(), // Empty metadata
             profiling: None,
@@ -658,9 +684,11 @@ mod tests {
 
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: Some(profiling),
@@ -718,9 +746,11 @@ mod tests {
 
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: chrono::DateTime::from_timestamp_millis(1609459200000).unwrap(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata,
             profiling: Some(profiling),

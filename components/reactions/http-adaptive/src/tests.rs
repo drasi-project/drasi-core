@@ -118,12 +118,14 @@ mod tests {
             results: vec![
                 ResultDiff::Add {
                     data: json!({"id": 1, "name": "Alice"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Update {
                     data: json!({"id": 2, "name": "Bob Updated"}),
                     before: json!({"id": 2, "name": "Bob"}),
                     after: json!({"id": 2, "name": "Bob Updated"}),
                     grouping_keys: None,
+                    row_signature: 0,
                 },
             ],
             timestamp: "2025-10-19T12:34:56.789Z".to_string(),
@@ -150,6 +152,7 @@ mod tests {
                 query_id: "query1".to_string(),
                 results: vec![ResultDiff::Add {
                     data: json!({"id": 1}),
+                    row_signature: 0,
                 }],
                 timestamp: "2025-10-19T12:34:56Z".to_string(),
                 count: 1,
@@ -162,9 +165,11 @@ mod tests {
                         before: json!({"id": 2}),
                         after: json!({"id": 2}),
                         grouping_keys: None,
+                        row_signature: 0,
                     },
                     ResultDiff::Delete {
                         data: json!({"id": 3}),
+                        row_signature: 0,
                     },
                 ],
                 timestamp: "2025-10-19T12:34:57Z".to_string(),
@@ -192,15 +197,18 @@ mod tests {
             results: vec![
                 ResultDiff::Add {
                     data: json!({"id": "user_123", "name": "John Doe"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Update {
                     data: json!({"id": "user_456", "name": "Jane Smith"}),
                     before: json!({"id": "user_456", "name": "Jane Doe"}),
                     after: json!({"id": "user_456", "name": "Jane Smith"}),
                     grouping_keys: None,
+                    row_signature: 0,
                 },
                 ResultDiff::Delete {
                     data: json!({"id": "user_789", "name": "Bob Wilson"}),
+                    row_signature: 0,
                 },
             ],
             timestamp: "2025-10-19T12:34:56.789Z".to_string(),
@@ -215,7 +223,7 @@ mod tests {
 
         // Verify result types and structures
         match &batch_result.results[0] {
-            ResultDiff::Add { data } => assert!(data.is_object()),
+            ResultDiff::Add { data, .. } => assert!(data.is_object()),
             _ => panic!("Expected add result"),
         }
         match &batch_result.results[1] {
@@ -232,7 +240,7 @@ mod tests {
             _ => panic!("Expected update result"),
         }
         match &batch_result.results[2] {
-            ResultDiff::Delete { data } => assert!(data.is_object()),
+            ResultDiff::Delete { data, .. } => assert!(data.is_object()),
             _ => panic!("Expected delete result"),
         }
     }
@@ -266,12 +274,15 @@ mod tests {
         let results = vec![
             ResultDiff::Add {
                 data: json!({"id": 1}),
+                row_signature: 0,
             },
             ResultDiff::Add {
                 data: json!({"id": 2}),
+                row_signature: 0,
             },
             ResultDiff::Add {
                 data: json!({"id": 3}),
+                row_signature: 0,
             },
         ];
 
@@ -398,6 +409,7 @@ mod tests {
         for i in 0..1000 {
             results.push(ResultDiff::Add {
                 data: json!({"id": i, "value": format!("item_{}", i)}),
+                row_signature: 0,
             });
         }
 

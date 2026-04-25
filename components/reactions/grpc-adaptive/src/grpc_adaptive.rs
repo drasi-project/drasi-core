@@ -356,8 +356,8 @@ impl AdaptiveGrpcReaction {
                 // Convert results to proto format
                 for result in &query_result.results {
                     let (result_type, data, before, after) = match result {
-                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                        ResultDiff::Add { data, .. } => ("ADD", data.clone(), None, None),
+                        ResultDiff::Delete { data, .. } => ("DELETE", data.clone(), None, None),
                         ResultDiff::Update {
                             data,
                             before,
@@ -369,7 +369,7 @@ impl AdaptiveGrpcReaction {
                             Some(before.clone()),
                             Some(after.clone()),
                         ),
-                        ResultDiff::Aggregation { before, after } => (
+                        ResultDiff::Aggregation { before, after, .. } => (
                             "aggregation",
                             serde_json::to_value(result)
                                 .expect("ResultDiff serialization should succeed"),

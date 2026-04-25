@@ -539,6 +539,7 @@ mod tests {
         // Dispatch a result
         let result = QueryResult {
             query_id: "test_query".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![],
             metadata: HashMap::new(),
@@ -586,6 +587,7 @@ mod tests {
         // Dispatch a result
         let result = QueryResult {
             query_id: "test_query".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![],
             metadata: HashMap::new(),
