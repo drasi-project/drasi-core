@@ -75,7 +75,6 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                     "min_value" => VariableValue::Null
                 )),
@@ -111,7 +110,6 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                   "min_value" => VariableValue::from(json!(5.0))
                 )),
@@ -146,7 +144,6 @@ pub async fn min_value(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap!(
                   "min_value" => VariableValue::from(json!(3.0))
                 )),

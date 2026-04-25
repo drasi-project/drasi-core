@@ -28,7 +28,6 @@ impl QueryConfiguration for TestCypherConfig {
         set.insert("max".into());
         set.insert("avg".into());
         set.insert("drasi.linearGradient".into());
-        set.insert("drasi.last".into());
         set
     }
 }

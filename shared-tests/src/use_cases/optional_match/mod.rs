@@ -320,7 +320,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["id".to_string(), "amount".to_string()],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                     "amount" => VariableValue::from(json!(100.0)),
                     "balance" => VariableValue::from(json!(100.0)),
@@ -389,7 +388,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["id".to_string(), "amount".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap!(
                     "amount" => VariableValue::from(json!(100.0)),
                     "balance" => VariableValue::from(json!(100.0)),
@@ -458,7 +456,6 @@ pub async fn optional_match_aggregating(config: &(impl QueryTestConfig + Send)) 
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["id".to_string(), "amount".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap!(
                     "amount" => VariableValue::from(json!(100.0)),
                     "balance" => VariableValue::from(json!(30.0)),

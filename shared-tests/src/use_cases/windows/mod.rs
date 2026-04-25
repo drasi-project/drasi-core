@@ -93,7 +93,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(50.0))),
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -139,7 +138,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(30.0))),
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -177,7 +175,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(45.0))),
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -215,7 +212,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(65.0))),
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -248,7 +244,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Null),
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -286,7 +281,6 @@ pub async fn sliding_window_max(config: &(impl QueryTestConfig + Send)) {
                 after: variablemap!("slidingMax"=>VariableValue::Float(Float::from(15.0))),
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -347,7 +341,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -391,7 +384,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -431,7 +423,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: true,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -460,7 +451,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -495,7 +485,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -513,7 +502,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -553,7 +541,6 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
                 ),
                 grouping_keys: vec!["sensorGroup".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
@@ -573,20 +560,16 @@ pub async fn sliding_window_avg_grouped(config: &(impl QueryTestConfig + Send)) 
         assert_eq!(result.len(), 1);
         println!("result: {result:#?}");
 
+        // Removing the only remaining contributor leaves the group at
+        // identity (empty), so the engine emits Removing rather than an
+        // Aggregation diff that would leave a phantom row at avg=0.
         assert!(contains_data(
             &result,
-            &QueryPartEvaluationContext::Aggregation {
-                before: Some(variablemap!(
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
                     "slidingAvg"=>VariableValue::Float(Float::from(5.0)),
                     "sensorGroup"=>VariableValue::String("A".to_string())
-                )),
-                after: variablemap!(
-                    "slidingAvg"=>VariableValue::Float(Float::from(0.0)),
-                    "sensorGroup"=>VariableValue::String("A".to_string())
                 ),
-                grouping_keys: vec!["sensorGroup".to_string()],
-                default_before: false,
-                default_after: true,
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
         ));
