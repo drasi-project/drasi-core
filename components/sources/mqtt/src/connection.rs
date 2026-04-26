@@ -47,7 +47,10 @@ macro_rules! common_config_to_mqtt_options {
         let mut optional_mtls_client_auth = None;
         let provider = effective_provider.or(config_provider);
         if let Some(provider) = provider {
-            let credentials = provider.get_credentials().await;
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &$config.host)
+                .with_property("port", $config.port.to_string());
+            let credentials = provider.get_credentials(&context).await;
             match credentials {
                 Ok(creds) => {
                     info!("Successfully retrieved credentials from identity provider for MQTT authentication");

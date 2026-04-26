@@ -115,7 +115,7 @@ impl MosquittoConfig {
         config.push_str(&format!("listener {}\n", self.listener));
 
         if let Some(allow_anonymous) = self.allow_anonymous {
-            config.push_str(&format!("allow_anonymous {}\n", allow_anonymous));
+            config.push_str(&format!("allow_anonymous {allow_anonymous}\n"));
         } else {
             config.push_str("allow_anonymous true\n");
         }
@@ -128,23 +128,22 @@ impl MosquittoConfig {
         }
 
         if let Some(ca) = &self.ca {
-            config.push_str(&format!("cafile /mosquitto/config/ca.crt\n"));
+            config.push_str("cafile /mosquitto/config/ca.crt\n");
         }
         if let Some(cert) = &self.server_cert {
-            config.push_str(&format!("certfile /mosquitto/config/server.crt\n"));
+            config.push_str("certfile /mosquitto/config/server.crt\n");
         }
         if let Some(key) = &self.server_key {
-            config.push_str(&format!("keyfile /mosquitto/config/server.key\n"));
+            config.push_str("keyfile /mosquitto/config/server.key\n");
         }
 
         if let Some(require_certificate) = self.require_certificate {
-            config.push_str(&format!("require_certificate {}\n", require_certificate));
+            config.push_str(&format!("require_certificate {require_certificate}\n"));
         }
 
         if let Some(use_identity_as_username) = self.use_identity_as_username {
             config.push_str(&format!(
-                "use_identity_as_username {}\n",
-                use_identity_as_username
+                "use_identity_as_username {use_identity_as_username}\n"
             ));
         }
 
@@ -156,9 +155,9 @@ impl MosquittoConfig {
     }
 }
 
-impl Into<String> for &MosquittoConfig {
-    fn into(self) -> String {
-        self.build()
+impl Default for MosquittoConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -212,7 +211,7 @@ impl MosquittoGuard {
         );
 
         // generate the configuration file.
-        let config_data: String = config_builder.into();
+        let config_data = config_builder.build();
 
         request = request.with_copy_to(
             "/mosquitto/config/mosquitto.conf",
@@ -244,7 +243,7 @@ impl MosquittoGuard {
         let container = request
             .start()
             .await
-            .map_err(|e| anyhow!("Failed to start Mosquitto: {}", e))?;
+            .map_err(|e| anyhow!("Failed to start Mosquitto: {e}"))?;
 
         Ok(container)
     }
@@ -267,14 +266,14 @@ impl MosquittoGuard {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
-                Err(e) => return Err(anyhow!("Failed to connect to MQTT: {}", e)),
+                Err(e) => return Err(anyhow!("Failed to connect to MQTT: {e}")),
             }
         }
 
         self.client_event_loop_handle = Some(tokio::spawn(async move {
             loop {
                 if let Err(e) = event_loop.poll().await {
-                    debug!("MQTT event loop error: {}", e);
+                    debug!("MQTT event loop error: {e}");
                 }
             }
         }));
@@ -300,14 +299,14 @@ impl MosquittoGuard {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
-                Err(e) => return Err(anyhow!("Failed to connect to MQTT: {}", e)),
+                Err(e) => return Err(anyhow!("Failed to connect to MQTT: {e}")),
             }
         }
 
         self.client_event_loop_handle = Some(tokio::spawn(async move {
             loop {
                 if let Err(e) = event_loop.poll().await {
-                    debug!("MQTT v5 event loop error: {}", e);
+                    debug!("MQTT v5 event loop error: {e}");
                 }
             }
         }));
@@ -333,7 +332,7 @@ impl MosquittoGuard {
         if let Some(_container) = container_to_stop {
             match _container.stop().await {
                 Ok(_) => debug!("Mosquitto container stopped successfully"),
-                Err(e) => debug!("Error stopping Mosquitto container: {}", e),
+                Err(e) => debug!("Error stopping Mosquitto container: {e}"),
             }
             drop(_container);
         }

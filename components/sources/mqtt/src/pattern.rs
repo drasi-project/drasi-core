@@ -513,7 +513,7 @@ mod tests {
         let input = packet("building/f4/r2/smoke", br#"34.5"#, 321);
 
         let changes = matcher.generate_schema(&input);
-        assert_eq!(changes.is_err(), true);
+        assert!(changes.is_err());
         assert!(changes
             .err()
             .unwrap()
@@ -639,7 +639,7 @@ mod tests {
 
         let changes = matcher.generate_schema(&input);
 
-        assert_eq!(changes.is_err(), true);
+        assert!(changes.is_err());
     }
 
     #[test]
@@ -649,7 +649,7 @@ mod tests {
 
         let changes = matcher.generate_schema(&input);
 
-        assert_eq!(changes.is_ok(), true);
+        assert!(changes.is_ok());
     }
 
     #[test]
@@ -659,7 +659,7 @@ mod tests {
 
         let changes = matcher.generate_schema(&input);
 
-        assert_eq!(changes.is_err(), true);
+        assert!(changes.is_err());
     }
 
     #[test]
@@ -669,7 +669,7 @@ mod tests {
 
         let changes = matcher.generate_schema(&input);
 
-        assert_eq!(changes.is_err(), true);
+        assert!(changes.is_err());
     }
 
     #[test]

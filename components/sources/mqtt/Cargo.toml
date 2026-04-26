@@ -36,7 +36,7 @@ serde_repr = "0.1.20"
 
 [dev-dependencies]
 drasi-reaction-application = { path = "../../reactions/application" }
-testcontainers = "0.23"
+testcontainers = "0.26"
 env_logger = "0.11"
 tokio-test = "0.4"
 rcgen = "0.13"
