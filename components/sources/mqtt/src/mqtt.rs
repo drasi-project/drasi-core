@@ -322,13 +322,12 @@ impl Source for MqttSource {
         info!("[{}] Starting MQTT source", self.id());
 
         // Set Source Status to starting
-        self.base.set_status(ComponentStatus::Starting).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting MQTT Source".to_string()),
             )
-            .await?;
+            .await;
 
         let source_id = self.base.id.clone();
 
@@ -360,8 +359,6 @@ impl Source for MqttSource {
         // Set the identity provider for unified access (use inside the connection task for authenticating with MQTT broker if needed).
         let identity_provider = self.base.identity_provider().await;
         // start mqtt connection task
-        let status_clone = self.base.status.clone();
-        let status_tx = self.base.status_tx();
         let instance_id = self
             .base
             .context()
@@ -374,6 +371,8 @@ impl Source for MqttSource {
             component_id = %source_id.clone(),
             component_type = "source"
         );
+
+        let status_handle = self.base.status_handle();
 
         match MqttConnection::new(source_id_for_task.clone(), &config, identity_provider).await {
             Ok((mut connection, event_loop_wrapper)) => {
@@ -393,20 +392,12 @@ impl Source for MqttSource {
                             error!(
                                 "MQTT connection loop failed for {source_id_for_task}: {error:?}"
                             );
-                            *status_clone.write().await = ComponentStatus::Error;
-                            if let Some(ref tx) = *status_tx.read().await {
-                                let _ = tx
-                                    .send(ComponentEvent {
-                                        component_id: source_id_for_task.clone(),
-                                        component_type: ComponentType::Source,
-                                        status: ComponentStatus::Error,
-                                        timestamp: chrono::Utc::now(),
-                                        message: Some(format!(
-                                            "MQTT connection loop failed: {error:?}"
-                                        )),
-                                    })
-                                    .await;
-                            }
+                            status_handle
+                                .set_status(
+                                    ComponentStatus::Error,
+                                    Some(format!("MQTT connection loop failed: {error:?}")),
+                                )
+                                .await;
                         } else {
                             info!(
                                 "MQTT connection loop stopped gracefully for {source_id_for_task}"
@@ -419,18 +410,12 @@ impl Source for MqttSource {
             }
             Err(error) => {
                 error!("Mqtt task failed for {source_id_for_task}: {error:?}");
-                *status_clone.write().await = ComponentStatus::Error;
-                if let Some(ref tx) = *status_tx.read().await {
-                    let _ = tx
-                        .send(ComponentEvent {
-                            component_id: source_id_for_task.clone(),
-                            component_type: ComponentType::Source,
-                            status: ComponentStatus::Error,
-                            timestamp: chrono::Utc::now(),
-                            message: Some(format!("MQTT connection failed: {error:?}")),
-                        })
-                        .await;
-                }
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("MQTT connection failed: {error:?}")),
+                    )
+                    .await;
                 return Err(anyhow::anyhow!("Failed to start MQTT source: {error:?}"));
             }
         }
@@ -438,16 +423,15 @@ impl Source for MqttSource {
         *self.base.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Set Source Status to running
-        self.base.set_status(ComponentStatus::Running).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some(format!(
                     "MQTT source is connected to broker at {}:{}",
                     self.config.host, self.config.port
                 )),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -455,13 +439,12 @@ impl Source for MqttSource {
     async fn stop(&self) -> Result<()> {
         info!("[{}] Stopping MQTT source", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping MQTT source".to_string()),
             )
-            .await?;
+            .await;
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -471,13 +454,12 @@ impl Source for MqttSource {
             let _ = timeout(Duration::from_secs(5), handle).await;
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("MQTT source stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
