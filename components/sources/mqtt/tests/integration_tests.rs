@@ -75,12 +75,37 @@ async fn wait_for_query_results(
     loop {
         let results = core.get_query_results(query_id).await?;
         if predicate(&results) {
-            info!("Received expected query results: {:?}", results);
+            info!("Received expected query results: {results:?}");
             return Ok(());
         }
         if start.elapsed() > timeout {
             anyhow::bail!("Timed out waiting for query results for query_id `{query_id}`")
         }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_source_status(
+    core: &Arc<DrasiLib>,
+    source_id: &str,
+    expected_status: drasi_lib::ComponentStatus,
+) -> Result<()> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(20);
+
+    loop {
+        let status = core.get_source_status(source_id).await?;
+        if status == expected_status {
+            info!("Source {source_id} reached expected status: {status:?}");
+            return Ok(());
+        }
+
+        if start.elapsed() > timeout {
+            anyhow::bail!(
+                "Timed out waiting for source `{source_id}` to reach status {expected_status:?}; current status: {status:?}"
+            )
+        }
+
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -92,8 +117,7 @@ pub async fn build_core(
     let source = MqttSource::builder(slot_name.clone())
         .with_config(source_config)
         .build()
-        .await
-        .unwrap();
+        .await?;
 
     let query = Query::cypher("test-query")
         .query(
@@ -119,8 +143,7 @@ pub async fn build_core(
             .with_source(source)
             .with_reaction(reaction)
             .build()
-            .await
-            .unwrap(),
+            .await?,
     );
     Ok(core)
 }
@@ -132,8 +155,7 @@ pub async fn build_core_for_input_as_node(
     let source = MqttSource::builder(slot_name.clone())
         .with_config(source_config)
         .build()
-        .await
-        .unwrap();
+        .await?;
 
     let query = Query::cypher("test-query")
         .query(
@@ -158,8 +180,7 @@ pub async fn build_core_for_input_as_node(
             .with_query(query)
             .with_source(source)
             .build()
-            .await
-            .unwrap(),
+            .await?,
     );
 
     Ok(core)
@@ -289,9 +310,12 @@ async fn test_mqtt_version_fallback_from_v5_to_v3() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // Check the Source status.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     core.stop().await?;
     guard.cleanup().await;
@@ -326,9 +350,12 @@ async fn test_mqtt_version_v5() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // Check the Source status.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     core.stop().await?;
     guard.cleanup().await;
@@ -366,9 +393,12 @@ async fn test_mqtt_static_credentials_authentication() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // cleanup
     core.stop().await?;
@@ -408,9 +438,12 @@ async fn test_mqtt_with_identity_provider_authentication() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // cleanup
     core.stop().await?;
@@ -470,9 +503,12 @@ async fn test_mqtt_mtls_connection() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // cleanup
     core.stop().await?;
@@ -533,9 +569,12 @@ async fn test_mqtt_mtls_connection_v3_1_1() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // cleanup
     core.stop().await?;
@@ -598,9 +637,12 @@ async fn test_mqtt_reconnection_and_loopbackoff() -> Result<()> {
     let core = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // stop the contianer to trigger reconnection attempts
     guard.cleanup().await;
@@ -613,16 +655,18 @@ async fn test_mqtt_reconnection_and_loopbackoff() -> Result<()> {
 
     // check the status of the source again to ensure it reconnected successfully.
     tokio::time::sleep(Duration::from_secs(16)).await; // wait a bit for the core to reconnect
-    let status_after = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status_after, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // stop the new container
     new_guard.cleanup().await;
     tokio::time::sleep(Duration::from_secs(1 + 2 + 4 + 8 + 16 + 32 + 64 + 10)).await; // wait for a few seconds to allow the core to attempt reconnections
 
-    // check the status of the source again to ensure it become in error state.
-    let status_after_cleanup = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status_after_cleanup, drasi_lib::ComponentStatus::Error);
+    wait_for_source_status(&core, &source_slot_name, drasi_lib::ComponentStatus::Error).await?;
 
     // cleanup
     core.stop().await?;
@@ -723,9 +767,12 @@ async fn test_mqtt_query_results() -> Result<()> {
     let core = build_core(source_config.clone(), source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // check the status of the query.
     loop {
@@ -733,10 +780,7 @@ async fn test_mqtt_query_results() -> Result<()> {
         if query_status == drasi_lib::ComponentStatus::Running {
             break;
         }
-        info!(
-            "Waiting for query to be running. Current status: {:?}",
-            query_status
-        );
+        info!("Waiting for query to be running. Current status: {query_status:?}",);
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -762,7 +806,7 @@ async fn test_mqtt_query_results() -> Result<()> {
             .await
         {
             Ok(_) => (),
-            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
         }
         match client
             .publish(
@@ -774,7 +818,7 @@ async fn test_mqtt_query_results() -> Result<()> {
             .await
         {
             Ok(_) => (),
-            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
         }
     })
     .await?;
@@ -929,9 +973,12 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
         build_core_for_input_as_node(source_config.clone(), source_slot_name.clone()).await?;
     core.start().await?;
 
-    // check the status of the source.
-    let status = core.get_source_status(&source_slot_name).await?;
-    assert_eq!(status, drasi_lib::ComponentStatus::Running);
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
 
     // check the status of the query.
     loop {
@@ -939,10 +986,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
         if query_status == drasi_lib::ComponentStatus::Running {
             break;
         }
-        info!(
-            "Waiting for query to be running. Current status: {:?}",
-            query_status
-        );
+        info!("Waiting for query to be running. Current status: {query_status:?}");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
@@ -968,7 +1012,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
             .await
         {
             Ok(_) => (),
-            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
         }
         match client
             .publish(
@@ -980,7 +1024,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
             .await
         {
             Ok(_) => (),
-            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
         }
         match client
             .publish(
@@ -992,7 +1036,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
             .await
         {
             Ok(_) => (),
-            Err(e) => eprintln!("Failed to publish message: {:?}", e),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
         }
     })
     .await?;
