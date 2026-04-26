@@ -628,7 +628,7 @@ mod tests {
                 .build()
                 .await;
 
-            assert_eq!(source.is_ok(), true);
+            assert!(source.is_ok());
             let unwrapped_source = source.unwrap();
 
             assert_eq!(
