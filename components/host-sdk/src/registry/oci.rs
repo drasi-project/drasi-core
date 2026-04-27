@@ -19,7 +19,7 @@ use crate::registry::types::{
     media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
 use anyhow::{bail, Context, Result};
-use log::info;
+use log::{info, warn};
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
@@ -98,6 +98,7 @@ impl OciRegistryClient {
     /// This method follows pagination using the `last` cursor until all tags are retrieved.
     async fn list_tags_all(&self, oci_ref: &Reference) -> Result<Vec<String>> {
         const PAGE_SIZE: usize = 1000;
+        const MAX_TAGS: usize = 10_000;
 
         let mut all_tags = Vec::new();
         let mut last: Option<String> = None;
@@ -116,6 +117,14 @@ impl OciRegistryClient {
 
             last = page.last().cloned();
             all_tags.extend(page);
+
+            if all_tags.len() >= MAX_TAGS {
+                warn!(
+                    "Tag listing for {} reached safety cap of {} tags; results may be incomplete",
+                    oci_ref, MAX_TAGS
+                );
+                break;
+            }
         }
 
         Ok(all_tags)
