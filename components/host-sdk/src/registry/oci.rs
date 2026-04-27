@@ -115,7 +115,15 @@ impl OciRegistryClient {
                 break;
             }
 
-            last = page.last().cloned();
+            let new_last = page.last().cloned();
+            if new_last == last {
+                warn!(
+                    "Registry pagination cursor did not advance for {}; stopping to avoid infinite loop",
+                    oci_ref
+                );
+                break;
+            }
+            last = new_last;
             all_tags.extend(page);
 
             if all_tags.len() >= MAX_TAGS {
