@@ -19,7 +19,7 @@ use crate::registry::types::{
     media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
 use anyhow::{bail, Context, Result};
-use log::info;
+use log::{info, warn};
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
@@ -89,13 +89,53 @@ impl OciRegistryClient {
             .parse()
             .context("invalid OCI reference")?;
 
-        let response = self
-            .client
-            .list_tags(&oci_ref, &self.auth(), None, None)
-            .await
-            .context("failed to list tags")?;
+        self.list_tags_all(&oci_ref).await
+    }
 
-        Ok(response.tags)
+    /// Fetch all tags across all pages from the registry.
+    ///
+    /// OCI registries may paginate tag listings (e.g., GHCR defaults to 100 tags per page).
+    /// This method follows pagination using the `last` cursor until all tags are retrieved.
+    async fn list_tags_all(&self, oci_ref: &Reference) -> Result<Vec<String>> {
+        const PAGE_SIZE: usize = 1000;
+        const MAX_TAGS: usize = 100_000;
+
+        let mut all_tags = Vec::new();
+        let mut last: Option<String> = None;
+
+        loop {
+            let response = self
+                .client
+                .list_tags(oci_ref, &self.auth(), Some(PAGE_SIZE), last.as_deref())
+                .await
+                .context("failed to list tags")?;
+
+            let page = response.tags;
+            if page.is_empty() {
+                break;
+            }
+
+            let new_last = page.last().cloned();
+            if new_last == last {
+                warn!(
+                    "Registry pagination cursor did not advance for {}; stopping to avoid infinite loop",
+                    oci_ref
+                );
+                break;
+            }
+            last = new_last;
+            all_tags.extend(page);
+
+            if all_tags.len() >= MAX_TAGS {
+                warn!(
+                    "Tag listing for {} reached safety cap of {} tags; results may be incomplete",
+                    oci_ref, MAX_TAGS
+                );
+                break;
+            }
+        }
+
+        Ok(all_tags)
     }
 
     /// Fetch the manifest and annotations for a specific tag.
@@ -266,16 +306,15 @@ impl OciRegistryClient {
 
         // List all directory entries
         let dir_oci_ref: Reference = dir_ref.parse().context("invalid directory reference")?;
-        let dir_response = self
-            .client
-            .list_tags(&dir_oci_ref, &self.auth(), None, None)
+        let dir_tags = self
+            .list_tags_all(&dir_oci_ref)
             .await
             .context("failed to list plugin directory — directory package may not exist yet")?;
 
         // Parse directory tags into (type, kind) pairs
         // Tags are formatted as "type.kind" (e.g., "source.postgres", "reaction.storedproc-mssql")
         let mut candidates: Vec<(String, String)> = Vec::new();
-        for tag in &dir_response.tags {
+        for tag in &dir_tags {
             if let Some((ptype, kind)) = tag.split_once('.') {
                 let plugin_ref = format!("{}/{}", ptype, kind);
 

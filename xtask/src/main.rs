@@ -872,7 +872,11 @@ fn make_tag(
 
 /// Sign an OCI artifact with cosign after publishing.
 ///
-/// Shells out to the `cosign` CLI. Supports:
+/// Shells out to the `cosign` CLI using OCI 1.1 referrers mode, which stores
+/// signatures as OCI referrers instead of legacy `sha256-DIGEST.sig` tags.
+/// This prevents `.sig` tags from polluting the tag namespace.
+///
+/// Supports:
 /// - Keyless mode (default): uses ambient OIDC credentials (GitHub Actions, etc.)
 /// - Key-based mode: set `COSIGN_KEY` env var to a private key path
 ///
@@ -882,7 +886,10 @@ fn cosign_sign(reference: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut cmd = Command::new("cosign");
-    cmd.arg("sign").arg("--yes").arg(reference);
+    cmd.arg("sign")
+        .arg("--yes")
+        .arg("--registry-referrers-mode=oci-1-1")
+        .arg(reference);
 
     // If COSIGN_KEY is set, use key-based signing
     if let Ok(key) = std::env::var("COSIGN_KEY") {
