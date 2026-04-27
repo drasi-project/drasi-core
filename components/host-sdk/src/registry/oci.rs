@@ -92,10 +92,12 @@ impl OciRegistryClient {
         self.list_tags_all(&oci_ref).await
     }
 
-    /// Fetch all tags across all pages from the registry.
+    /// Fetch all tags across all pages from the registry, newest first.
     ///
     /// OCI registries may paginate tag listings (e.g., GHCR defaults to 100 tags per page).
-    /// This method follows pagination using the `last` cursor until all tags are retrieved.
+    /// This method follows pagination using the `last` cursor until all tags are retrieved,
+    /// then reverses the result so that the latest tags (which are lexicographically last)
+    /// appear first — callers that iterate linearly will encounter the newest versions first.
     async fn list_tags_all(&self, oci_ref: &Reference) -> Result<Vec<String>> {
         const PAGE_SIZE: usize = 1000;
         const MAX_TAGS: usize = 10_000;
@@ -123,6 +125,7 @@ impl OciRegistryClient {
             }
         }
 
+        all_tags.reverse();
         Ok(all_tags)
     }
 
