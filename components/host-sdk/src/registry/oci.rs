@@ -98,7 +98,7 @@ impl OciRegistryClient {
     /// This method follows pagination using the `last` cursor until all tags are retrieved.
     async fn list_tags_all(&self, oci_ref: &Reference) -> Result<Vec<String>> {
         const PAGE_SIZE: usize = 1000;
-        const MAX_TAGS: usize = 10_000;
+        const MAX_TAGS: usize = 100_000;
 
         let mut all_tags = Vec::new();
         let mut last: Option<String> = None;
