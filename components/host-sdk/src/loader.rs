@@ -217,7 +217,7 @@ pub fn load_plugin_from_path(
 
     // Step 1: Read and validate metadata
     let metadata_info = read_plugin_metadata(&lib);
-    validate_plugin_metadata(&lib, path)?;
+    let plugin_sdk_version = validate_plugin_metadata(&lib, path)?;
 
     // Step 2: Call drasi_plugin_init()
     let init_fn: Symbol<unsafe extern "C" fn() -> *mut FfiPluginRegistration> = unsafe {
@@ -282,16 +282,34 @@ pub fn load_plugin_from_path(
             None
         };
 
-    // NOTE: We intentionally do not read `identity_provider_plugins` /
-    // `identity_provider_plugin_count` from `FfiPluginRegistration` here.
-    // Those fields were added in a later SDK version, and older plugins built
-    // against the previous ABI may provide a smaller `FfiPluginRegistration`
-    // allocation. Accessing the new fields in that case would read beyond the
-    // end of the struct, causing undefined behavior. Until ABI/SDK versioning
-    // guarantees are tightened, we treat identity provider plugins as absent.
+    // NOTE: `identity_provider_plugins` / `identity_provider_plugin_count` are
+    // trailing fields appended to `FfiPluginRegistration` after the initial ABI.
+    // Plugins built against an older SDK allocate the previous (smaller) struct
+    // layout, so reading these fields for such plugins would read past the end
+    // of the allocation (undefined behavior). We therefore gate access on the
+    // plugin's reported `sdk_version` from `drasi_plugin_metadata()`. Only when
+    // that version is at least `MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS` can we
+    // safely read the trailing fields.
     let identity_provider_vtables: Option<
         Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
-    > = None;
+    > = if plugin_sdk_version
+        .as_deref()
+        .and_then(parse_semver)
+        .map(|v| v >= MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS)
+        .unwrap_or(false)
+        && !registration.identity_provider_plugins.is_null()
+        && registration.identity_provider_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.identity_provider_plugins,
+                registration.identity_provider_plugin_count,
+                registration.identity_provider_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
@@ -356,11 +374,39 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
     }
 }
 
+/// Minimum plugin SDK version that is guaranteed to include the
+/// `identity_provider_plugins` / `identity_provider_plugin_count` trailing
+/// fields in `FfiPluginRegistration`. Plugins reporting an older `sdk_version`
+/// in `drasi_plugin_metadata()` allocated the previous (smaller) struct layout
+/// — reading those trailing fields for such plugins would be undefined
+/// behavior, so the loader treats identity provider plugins as absent.
+const MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS: (u32, u32, u32) = (0, 6, 0);
+
+/// Parse a SemVer-ish version string into `(major, minor, patch)`. Trailing
+/// pre-release / build identifiers (e.g. `-rc.1`, `+abc`) on the patch are
+/// ignored. Returns `None` on malformed input.
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch_raw = parts.next().unwrap_or("0");
+    let patch_digits: String = patch_raw
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let patch: u32 = patch_digits.parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
 /// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
-fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
+///
+/// On success returns the plugin's reported `sdk_version` string (if metadata
+/// was present), so callers can gate access to ABI fields introduced in a
+/// later SDK revision.
+fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
     let meta_fn = unsafe {
         match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
             Ok(f) => f,
@@ -369,7 +415,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
                     "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
                     path.display()
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
     };
@@ -380,7 +426,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
             "Plugin '{}' returned null metadata — skipping version check",
             path.display()
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let meta = unsafe { &*meta_ptr };
@@ -434,7 +480,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
         plugin_target
     );
 
-    Ok(())
+    Ok(Some(plugin_sdk_version))
 }
 
 /// Scan the plugin directory and group files by plugin base name.
