@@ -1,0 +1,49 @@
+[package]
+name = "drasi-source-mqtt"
+version = "0.1.7"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "MQTT source plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "mqtt"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+log = "0.4"
+tokio = { version = "1.0", features = ["full"] }
+rumqttc = "0.25.1"
+ordered-float = "3.0"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+tracing = "0.1"
+bytes = "1.5"
+matchit = "0.9.2"
+serde_repr = "0.1.20"
+
+[dev-dependencies]
+drasi-reaction-application = { path = "../../reactions/application" }
+testcontainers = "0.26"
+env_logger = "0.11"
+tokio-test = "0.4"
+rcgen = "0.13"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+serial_test = "3.0"
+rustls = { version = "0.23", features = ["ring"] }
+
+
+[features]
+dynamic-plugin = []
