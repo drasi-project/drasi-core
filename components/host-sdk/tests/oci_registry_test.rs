@@ -122,11 +122,7 @@ mod tests {
         assert!(!results.is_empty(), "expected at least one plugin");
         println!("discovered {} plugins:", results.len());
         for r in &results {
-            println!(
-                "  {} — {} versions",
-                r.reference,
-                r.versions.len()
-            );
+            println!("  {} — {} versions", r.reference, r.versions.len());
         }
 
         // Should discover well-known plugin types
@@ -142,11 +138,7 @@ mod tests {
 
         // Each plugin should have at least one version
         for r in &results {
-            assert!(
-                !r.versions.is_empty(),
-                "{} has no versions",
-                r.reference
-            );
+            assert!(!r.versions.is_empty(), "{} has no versions", r.reference);
         }
     }
 
@@ -185,10 +177,7 @@ mod tests {
 
         assert_eq!(results.len(), 1, "expected exactly one exact match");
         assert_eq!(results[0].reference, "source/postgres");
-        println!(
-            "source/postgres: {} versions",
-            results[0].versions.len()
-        );
+        println!("source/postgres: {} versions", results[0].versions.len());
 
         // Verify version info includes platform details
         for v in &results[0].versions {
