@@ -179,12 +179,13 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use drasi_lib::config::{
     normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
 };
-use log::{error, info};
+use log::{debug, error, info};
+use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -243,22 +244,55 @@ async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Opt
         pg_config.password(&config.password);
     }
 
-    // Respect the source's SSL configuration for protocol negotiation.
-    // Note: the NoTls connector cannot perform actual TLS handshakes,
-    // so Require will fail (gracefully caught by the caller) and Prefer
-    // will proceed without encryption.
-    pg_config.ssl_mode(match config.ssl_mode {
-        SslMode::Disable => tokio_postgres::config::SslMode::Disable,
-        SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
-        SslMode::Require => tokio_postgres::config::SslMode::Require,
-    });
+    let client = match config.ssl_mode {
+        SslMode::Require => {
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
 
-    let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            log::warn!("PostgreSQL schema introspection connection closed: {e}");
+            debug!("Schema introspection: connecting with SSL (require)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
         }
-    });
+        SslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+            debug!("Schema introspection: connecting with SSL (prefer)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Disable => {
+            debug!("Schema introspection: connecting without SSL");
+            let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+    };
 
     let mut nodes = Vec::new();
 

@@ -332,8 +332,8 @@ fn extract_property_schemas(properties: Option<&serde_json::Value>) -> Vec<Prope
 }
 
 fn derive_schema_from_webhooks(webhooks: &WebhookConfig) -> Option<SourceSchema> {
-    let mut nodes = Vec::new();
-    let mut relations = Vec::new();
+    let mut node_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
+    let mut relation_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
 
     for route in &webhooks.routes {
         for mapping in &route.mappings {
@@ -344,16 +344,39 @@ fn derive_schema_from_webhooks(webhooks: &WebhookConfig) -> Option<SourceSchema>
             let properties = extract_property_schemas(mapping.template.properties.as_ref());
 
             match mapping.element_type {
-                crate::config::ElementType::Node => nodes.push(NodeSchema { label, properties }),
-                crate::config::ElementType::Relation => relations.push(RelationSchema {
-                    label,
-                    from: None,
-                    to: None,
-                    properties,
-                }),
+                crate::config::ElementType::Node => {
+                    let entry = node_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
+                crate::config::ElementType::Relation => {
+                    let entry = relation_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
             }
         }
     }
+
+    let nodes: Vec<_> = node_map
+        .into_iter()
+        .map(|(label, properties)| NodeSchema { label, properties })
+        .collect();
+    let relations: Vec<_> = relation_map
+        .into_iter()
+        .map(|(label, properties)| RelationSchema {
+            label,
+            from: None,
+            to: None,
+            properties,
+        })
+        .collect();
 
     if nodes.is_empty() && relations.is_empty() {
         None

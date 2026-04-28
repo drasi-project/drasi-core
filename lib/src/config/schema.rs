@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
@@ -178,7 +178,7 @@ pub struct GraphSchema {
     #[serde(default)]
     pub relations: BTreeMap<String, GraphRelationSchema>,
     #[serde(default)]
-    pub sources_without_schema: Vec<String>,
+    pub sources_without_schema: BTreeSet<String>,
 }
 
 impl GraphSchema {
@@ -186,13 +186,13 @@ impl GraphSchema {
     pub fn merge_source_schema(&mut self, source_id: &str, schema: &SourceSchema) {
         for node in &schema.nodes {
             let entry = self.nodes.entry(node.label.clone()).or_default();
-            push_unique(&mut entry.sources, source_id.to_string());
+            entry.sources.insert(source_id.to_string());
             merge_properties(&mut entry.properties, &node.properties);
         }
 
         for relation in &schema.relations {
             let entry = self.relations.entry(relation.label.clone()).or_default();
-            push_unique(&mut entry.sources, source_id.to_string());
+            entry.sources.insert(source_id.to_string());
 
             if entry.from.is_none() {
                 entry.from = relation.from.clone();
@@ -212,7 +212,7 @@ impl GraphSchema {
     {
         for label in labels {
             let entry = self.nodes.entry(label.to_string()).or_default();
-            push_unique(&mut entry.queried_by, query_id.to_string());
+            entry.queried_by.insert(query_id.to_string());
         }
     }
 
@@ -223,13 +223,13 @@ impl GraphSchema {
     {
         for label in labels {
             let entry = self.relations.entry(label.to_string()).or_default();
-            push_unique(&mut entry.queried_by, query_id.to_string());
+            entry.queried_by.insert(query_id.to_string());
         }
     }
 
     /// Record a source that exists but could not describe its schema.
     pub fn record_source_without_schema(&mut self, source_id: &str) {
-        push_unique(&mut self.sources_without_schema, source_id.to_string());
+        self.sources_without_schema.insert(source_id.to_string());
     }
 }
 
@@ -238,9 +238,9 @@ impl GraphSchema {
 #[serde(rename_all = "camelCase")]
 pub struct GraphNodeSchema {
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: BTreeSet<String>,
     #[serde(default)]
-    pub queried_by: Vec<String>,
+    pub queried_by: BTreeSet<String>,
     #[serde(default)]
     pub properties: Vec<PropertySchema>,
 }
@@ -250,22 +250,15 @@ pub struct GraphNodeSchema {
 #[serde(rename_all = "camelCase")]
 pub struct GraphRelationSchema {
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: BTreeSet<String>,
     #[serde(default)]
-    pub queried_by: Vec<String>,
+    pub queried_by: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     #[serde(default)]
     pub properties: Vec<PropertySchema>,
-}
-
-fn push_unique(values: &mut Vec<String>, value: String) {
-    match values.binary_search(&value) {
-        Ok(_) => {}
-        Err(pos) => values.insert(pos, value),
-    }
 }
 
 fn merge_properties(target: &mut Vec<PropertySchema>, incoming: &[PropertySchema]) {
@@ -840,14 +833,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn push_unique_maintains_sorted_order_and_deduplication() {
-        let mut values = Vec::new();
-        push_unique(&mut values, "charlie".to_string());
-        push_unique(&mut values, "alpha".to_string());
-        push_unique(&mut values, "bravo".to_string());
-        push_unique(&mut values, "alpha".to_string()); // duplicate
+    fn btreeset_sources_maintains_sorted_order_and_deduplication() {
+        let mut graph = GraphSchema::default();
+        let schema = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Item".to_string(),
+                properties: Vec::new(),
+            }],
+            relations: Vec::new(),
+        };
 
-        assert_eq!(values, vec!["alpha", "bravo", "charlie"]);
+        graph.merge_source_schema("charlie", &schema);
+        graph.merge_source_schema("alpha", &schema);
+        graph.merge_source_schema("bravo", &schema);
+        graph.merge_source_schema("alpha", &schema); // duplicate
+
+        let item = graph.nodes.get("Item").unwrap();
+        let sources: Vec<_> = item.sources.iter().cloned().collect();
+        assert_eq!(sources, vec!["alpha", "bravo", "charlie"]);
     }
 
     #[test]
@@ -887,7 +890,10 @@ mod tests {
         graph.merge_source_schema("src-b", &schema_b);
 
         let sensor = graph.nodes.get("Sensor").unwrap();
-        assert_eq!(sensor.sources, vec!["src-a", "src-b"]);
+        assert_eq!(
+            sensor.sources,
+            BTreeSet::from(["src-a".to_string(), "src-b".to_string()])
+        );
         assert_eq!(sensor.properties.len(), 2);
 
         // temperature should have gotten the type from src-b

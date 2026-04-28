@@ -815,8 +815,8 @@ mod tests {
             .nodes
             .get("Sensor")
             .expect("Sensor label should exist");
-        assert!(sensor.sources.contains(&"schema-src".to_string()));
-        assert!(sensor.queried_by.contains(&"schema-query".to_string()));
+        assert!(sensor.sources.contains("schema-src"));
+        assert!(sensor.queried_by.contains("schema-query"));
         assert!(sensor
             .properties
             .iter()
@@ -826,8 +826,8 @@ mod tests {
             .relations
             .get("CONNECTS_TO")
             .expect("CONNECTS_TO relation should exist");
-        assert!(relation.sources.contains(&"schema-src".to_string()));
-        assert!(relation.queried_by.contains(&"schema-query".to_string()));
+        assert!(relation.sources.contains("schema-src"));
+        assert!(relation.queried_by.contains("schema-query"));
         assert_eq!(relation.from.as_deref(), Some("Sensor"));
         assert_eq!(relation.to.as_deref(), Some("Counter"));
     }
