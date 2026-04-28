@@ -37,6 +37,8 @@ pub enum FfiComponentStatus {
     Stopping = 3,
     Reconfiguring = 4,
     Error = 5,
+    Added = 6,
+    Removed = 7,
 }
 
 /// Change operation type, FFI-safe.

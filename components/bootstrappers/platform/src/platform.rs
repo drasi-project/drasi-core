@@ -407,8 +407,7 @@ fn matches_labels(element_labels: &[String], requested_labels: &[String]) -> boo
 /// a Node or Relation based on presence of start_id/end_id fields.
 fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Result<Element> {
     // Convert properties from JSON Map to ElementPropertyMap
-    let properties = convert_json_to_element_properties(&bootstrap_elem.properties)
-        .context("Failed to convert element properties")?;
+    let properties = convert_json_to_element_properties(&bootstrap_elem.properties);
 
     // Convert labels to Arc slice
     let labels: Arc<[Arc<str>]> = bootstrap_elem

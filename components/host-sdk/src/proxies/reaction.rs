@@ -36,6 +36,16 @@ pub struct ReactionProxy {
     _library: Arc<Library>,
     cached_id: String,
     cached_type_name: String,
+    /// Per-instance callback context for plugin-emitted log/lifecycle callbacks.
+    ///
+    /// Stored as an `Arc` whose strong count was bumped by `Arc::into_raw` when
+    /// the raw pointer was handed to the plugin. The host's `Arc` is kept here
+    /// so the proxy holds at least two strong references; on Drop the host's
+    /// `Arc` is `mem::forget`-ed unconditionally so any **late** log/lifecycle
+    /// callback emitted by the plugin (after `stop()` returns) still finds a
+    /// valid pointer. The cdylib itself is intentionally leaked process-wide
+    /// (see `host-sdk/src/loader.rs`), so the small per-instance `Arc` leak is
+    /// acceptable in exchange for closing the late-callback UAF window.
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
     /// Channel for push-based result delivery. Created on start, closed on stop/drop.
     result_tx:
@@ -195,7 +205,13 @@ impl Reaction for ReactionProxy {
             update_tx: context.update_tx.clone(),
         });
 
-        let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
+        // Bug C fix: hand the plugin a strong reference (Arc::into_raw bumps
+        // the refcount) so log/lifecycle callbacks emitted late by the plugin
+        // (e.g. from inside stop_fn or from internal tasks shutting down) do
+        // not deref freed memory. The matching `mem::forget` happens in Drop
+        // and intentionally leaks one strong ref per instance.
+        let ctx_for_plugin = per_instance_ctx.clone();
+        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
 
         if let Ok(mut guard) = self._callback_ctx.lock() {
             *guard = Some(per_instance_ctx);
@@ -257,18 +273,17 @@ impl Reaction for ReactionProxy {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        // Close the sender so the forwarder's callback returns null
+        // Bug B fix: close ONLY the sender. Dropping the sender is sufficient
+        // to unblock the forwarder's `rx.recv()` (it returns Err, the callback
+        // returns null, and the forwarder breaks). Do NOT also drop the
+        // receiver here — the callback may still be holding `context.rx.lock()`
+        // for a recv() that is racing this stop, and removing the receiver
+        // mid-flight creates a race against the forwarder's in-flight
+        // `enqueue_query_result(qr).await` against the reaction's
+        // shutting-down priority queue.
         {
             let mut guard = self.result_tx.lock().expect("result_tx lock poisoned");
             *guard = None;
-        }
-        // Also drop the receiver to unblock the callback if it's blocked in recv()
-        if let Ok(guard) = self._push_ctx.lock() {
-            if let Some(ref ctx) = *guard {
-                if let Ok(mut rx_guard) = ctx.rx.lock() {
-                    *rx_guard = None;
-                }
-            }
         }
 
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
@@ -289,6 +304,8 @@ impl Reaction for ReactionProxy {
             FfiComponentStatus::Stopped => ComponentStatus::Stopped,
             FfiComponentStatus::Reconfiguring => ComponentStatus::Reconfiguring,
             FfiComponentStatus::Error => ComponentStatus::Error,
+            FfiComponentStatus::Added => ComponentStatus::Added,
+            FfiComponentStatus::Removed => ComponentStatus::Removed,
         }
     }
 
@@ -327,15 +344,10 @@ impl Drop for ReactionProxy {
         if let Ok(mut guard) = self.result_tx.lock() {
             *guard = None;
         }
-        // Also drop the receiver inside the push context to unblock the callback
-        // if it's blocked in recv() (belt-and-suspenders with the sender drop).
-        if let Ok(guard) = self._push_ctx.lock() {
-            if let Some(ref ctx) = *guard {
-                if let Ok(mut rx_guard) = ctx.rx.lock() {
-                    *rx_guard = None;
-                }
-            }
-        }
+        // Bug B fix: do NOT drop the receiver here. Sender drop alone unblocks
+        // recv(); leaving the receiver in place avoids racing a callback that
+        // is currently holding `context.rx.lock()`. The receiver lives until
+        // the leaked push-ctx Arc is collected (see the `mem::forget` below).
 
         // Wait for the forwarder task to fully exit its processing loop.
         //
@@ -377,6 +389,20 @@ impl Drop for ReactionProxy {
         // spawn_blocking callback may still reference it. On the success path
         // this is unnecessary but harmless, and keeps the logic simple.
         if let Ok(mut guard) = self._push_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
+
+        // Bug C fix: leak the per-instance callback context Arc unconditionally.
+        // The strong reference handed to the plugin via `Arc::into_raw` in
+        // initialize() is never reclaimed — late log/lifecycle callbacks
+        // emitted by the plugin (during stop_fn or from internal tasks) must
+        // still find a valid pointer. The cdylib itself is intentionally
+        // leaked process-wide (see host-sdk/src/loader.rs), so this small
+        // per-instance Arc leak is the price of closing the late-callback
+        // UAF window.
+        if let Ok(mut guard) = self._callback_ctx.lock() {
             if let Some(ctx) = guard.take() {
                 std::mem::forget(ctx);
             }

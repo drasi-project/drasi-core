@@ -896,7 +896,7 @@ mod tests {
         core.add_source(source).await.unwrap();
 
         let status = core.get_source_status("status-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
@@ -936,7 +936,7 @@ mod tests {
     async fn get_query_status_found() {
         let core = build_with_source_and_query().await;
         let status = core.get_query_status("q1").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
@@ -982,7 +982,7 @@ mod tests {
         core.add_reaction(reaction).await.unwrap();
 
         let status = core.get_reaction_status("r1").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
