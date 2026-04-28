@@ -1375,7 +1375,7 @@ fn transform_platform_event(
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'properties' field"))?;
 
-        let properties = convert_json_to_element_properties(properties_obj)?;
+        let properties = convert_json_to_element_properties(properties_obj);
 
         // Build element based on type
         let element = match element_type {

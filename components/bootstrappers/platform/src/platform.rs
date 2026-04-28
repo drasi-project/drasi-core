@@ -30,7 +30,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 
 /// Request format for Query API subscription
@@ -297,7 +299,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting platform bootstrap for query {} from source {}",
             request.query_id, context.source_id
@@ -380,7 +382,11 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             request.query_id, sent_count
         );
 
-        Ok(sent_count)
+        Ok(BootstrapResult {
+            event_count: sent_count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 
@@ -401,8 +407,7 @@ fn matches_labels(element_labels: &[String], requested_labels: &[String]) -> boo
 /// a Node or Relation based on presence of start_id/end_id fields.
 fn transform_element(source_id: &str, bootstrap_elem: BootstrapElement) -> Result<Element> {
     // Convert properties from JSON Map to ElementPropertyMap
-    let properties = convert_json_to_element_properties(&bootstrap_elem.properties)
-        .context("Failed to convert element properties")?;
+    let properties = convert_json_to_element_properties(&bootstrap_elem.properties);
 
     // Convert labels to Arc slice
     let labels: Arc<[Arc<str>]> = bootstrap_elem

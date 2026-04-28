@@ -279,7 +279,7 @@ impl DrasiLibBuilder {
     /// Add a source instance with additional component metadata.
     ///
     /// Like [`with_source`](Self::with_source) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_source_metadata(
         mut self,
         source: impl SourceTrait + 'static,
@@ -318,7 +318,7 @@ impl DrasiLibBuilder {
     /// Add a reaction instance with additional component metadata.
     ///
     /// Like [`with_reaction`](Self::with_reaction) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_reaction_metadata(
         mut self,
         reaction: impl ReactionTrait + 'static,
@@ -548,6 +548,7 @@ pub struct Query {
     dispatch_buffer_capacity: Option<usize>,
     dispatch_mode: Option<DispatchMode>,
     storage_backend: Option<crate::indexes::StorageBackendRef>,
+    recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
 impl Query {
@@ -567,6 +568,7 @@ impl Query {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -586,6 +588,7 @@ impl Query {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -678,6 +681,13 @@ impl Query {
         self
     }
 
+    /// Set the recovery policy. Applies only to queries with a persistent
+    /// storage backend. See [`RecoveryPolicy`](crate::RecoveryPolicy).
+    pub fn with_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
+
     /// Build the query configuration.
     pub fn build(self) -> QueryConfig {
         QueryConfig {
@@ -694,6 +704,7 @@ impl Query {
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
             storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
         }
     }
 }

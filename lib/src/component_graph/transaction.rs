@@ -129,6 +129,7 @@ impl<'g> GraphTransaction<'g> {
         self.committed = true;
         for event in &self.pending_events {
             let _ = self.graph.event_tx.send(event.clone());
+            self.graph.event_history.record_event(event.clone());
         }
     }
 }

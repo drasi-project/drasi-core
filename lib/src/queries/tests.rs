@@ -56,6 +56,7 @@ mod manager_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -83,6 +84,7 @@ mod manager_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -574,12 +576,12 @@ mod manager_tests {
         let query_config = create_test_query_config("test-query", vec!["source1".to_string()]);
         add_query(&manager, &graph, query_config).await.unwrap();
 
-        // Verify query is in stopped state
+        // Verify query is in Added state
         let status = manager
             .get_query_status("test-query".to_string())
             .await
             .unwrap();
-        assert!(matches!(status, ComponentStatus::Stopped));
+        assert!(matches!(status, ComponentStatus::Added));
 
         // Subscribe to graph events BEFORE starting the query
         let mut event_rx = graph.read().await.subscribe();
@@ -640,14 +642,14 @@ mod manager_tests {
         let config = create_test_query_config_with_auto_start("no-auto-start-query", vec![], false);
         add_query(&manager, &graph, config).await.unwrap();
 
-        // Query should be in stopped state
+        // Query should be in Added state
         let status = manager
             .get_query_status("no-auto-start-query".to_string())
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
-            "Query with auto_start=false should remain stopped after add"
+            matches!(status, ComponentStatus::Added),
+            "Query with auto_start=false should remain in Added state after add"
         );
     }
 
@@ -668,14 +670,14 @@ mod manager_tests {
         );
         add_query(&manager, &graph, config).await.unwrap();
 
-        // Query should be in stopped state initially
+        // Query should be in Added state initially
         let status = manager
             .get_query_status("manual-query".to_string())
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
-            "Query with auto_start=false should be stopped initially"
+            matches!(status, ComponentStatus::Added),
+            "Query with auto_start=false should be in Added state initially"
         );
 
         // Subscribe to graph events BEFORE starting the query
@@ -901,6 +903,7 @@ mod query_core_tests {
                 dispatch_buffer_capacity: None,
                 dispatch_mode: None,
                 storage_backend: None,
+                recovery_policy: None,
             };
 
             // Just verify the config can be created
@@ -924,6 +927,7 @@ mod query_core_tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
         };
 
         // Empty queries should be caught during validation

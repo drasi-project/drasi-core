@@ -26,7 +26,7 @@ use log::info;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, RelationshipKind};
 use crate::config::SourceSubscriptionSettings;
@@ -56,7 +56,7 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
         _context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Component graph bootstrap for query '{}' starting",
             request.query_id
@@ -210,7 +210,11 @@ impl BootstrapProvider for ComponentGraphBootstrapProvider {
             "Component graph bootstrap complete: {} elements for query '{}'",
             count, request.query_id
         );
-        Ok(count as usize)
+        Ok(BootstrapResult {
+            event_count: count as usize,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 
@@ -254,13 +258,13 @@ mod tests {
         let request = make_request("test-query");
         let context = make_context();
 
-        let count = provider
+        let result = provider
             .bootstrap(request, &context, tx, None)
             .await
             .unwrap();
 
         // Only the instance root node is present; it is emitted as DrasiInstance
-        assert_eq!(count, 1);
+        assert_eq!(result.event_count, 1);
 
         let event = rx.recv().await.unwrap();
         match &event.change {
@@ -295,7 +299,7 @@ mod tests {
         let request = make_request("test-query");
         let context = make_context();
 
-        let count = provider
+        let result = provider
             .bootstrap(request, &context, tx, None)
             .await
             .unwrap();
@@ -305,7 +309,7 @@ mod tests {
             events.push(event);
         }
 
-        assert_eq!(count, events.len());
+        assert_eq!(result.event_count, events.len());
 
         let mut node_count = 0;
         let mut relation_count = 0;
@@ -323,7 +327,7 @@ mod tests {
         assert_eq!(node_count, 4);
         // 5 relations: HAS_SOURCE×2 + HAS_QUERY×1 + SUBSCRIBES_TO×2
         assert_eq!(relation_count, 5);
-        assert_eq!(count, 9);
+        assert_eq!(result.event_count, 9);
     }
 
     #[tokio::test]

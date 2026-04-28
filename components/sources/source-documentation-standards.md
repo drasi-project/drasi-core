@@ -591,15 +591,10 @@ impl Source for MySource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         // Delegate to base for bootstrap handling
-        self.base.subscribe_with_bootstrap(
-            query_id, enable_bootstrap, node_labels, relation_labels, "MySource"
-        ).await
+        self.base.subscribe_with_bootstrap(&settings, "MySource").await
     }
 }
 ```

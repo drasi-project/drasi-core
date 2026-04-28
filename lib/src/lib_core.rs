@@ -1291,6 +1291,7 @@ mod tests {
                     source_id: self.id.clone(),
                     receiver,
                     bootstrap_receiver: None,
+                    position_handle: None,
                 })
             }
             fn as_any(&self) -> &dyn std::any::Any {
@@ -1600,7 +1601,7 @@ mod tests {
             assert!(
                 matches!(
                     src.status,
-                    crate::channels::ComponentStatus::Stopped
+                    crate::channels::ComponentStatus::Added
                         | crate::channels::ComponentStatus::Running
                 ),
                 "Source status should be captured: {:?}",

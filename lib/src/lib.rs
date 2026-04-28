@@ -49,6 +49,9 @@ pub mod error;
 /// Identity providers for authentication credentials
 pub mod identity;
 
+/// Recovery policy and error types for checkpoint-based recovery
+pub mod recovery;
+
 // ============================================================================
 // Internal Modules (crate-private, but visible to integration tests)
 // ============================================================================
@@ -122,6 +125,9 @@ pub use lib_core::DrasiLib;
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};
 
+/// Recovery policy and error types for checkpoint-based recovery
+pub use recovery::{RecoveryError, RecoveryPolicy};
+
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
 
@@ -165,6 +171,9 @@ pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 
 /// Source trait for implementing source plugins
 pub use sources::Source;
+
+/// Structured error type for source operations (e.g., replay position unavailable)
+pub use sources::SourceError;
 
 /// Reaction traits for implementing reaction plugins
 pub use reactions::Reaction;

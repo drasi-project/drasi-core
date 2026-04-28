@@ -93,6 +93,7 @@ mod tests {
             event: SourceEvent::Change(change),
             timestamp: chrono::Utc::now(),
             profiling: None,
+            sequence: None,
         };
 
         assert_eq!(wrapper.source_id, "test-source");
