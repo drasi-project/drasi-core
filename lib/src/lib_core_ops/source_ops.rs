@@ -53,7 +53,7 @@ impl DrasiLib {
     /// Add a source to a running server with additional metadata.
     ///
     /// Same as [`add_source`](Self::add_source) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub async fn add_source_with_metadata(
         &self,
         source: impl Source + 'static,
@@ -689,8 +689,8 @@ mod tests {
         let status = core.get_source_status("status-src").await.unwrap();
         assert_eq!(
             status,
-            ComponentStatus::Stopped,
-            "Newly added non-autostart source should be Stopped"
+            ComponentStatus::Added,
+            "Newly added non-autostart source should be Added"
         );
     }
 
@@ -719,9 +719,9 @@ mod tests {
         let source = TestMockSource::with_auto_start("lifecycle-src".to_string(), false).unwrap();
         core.add_source(source).await.unwrap();
 
-        // Initially stopped
+        // Initially in Added state
         let status = core.get_source_status("lifecycle-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
 
         // Start
         core.start_source("lifecycle-src").await.unwrap();
@@ -764,7 +764,7 @@ mod tests {
         let info = core.get_source_info("info-src").await.unwrap();
         assert_eq!(info.id, "info-src");
         assert_eq!(info.source_type, "mock");
-        assert_eq!(info.status, ComponentStatus::Stopped);
+        assert_eq!(info.status, ComponentStatus::Added);
         assert!(info.error_message.is_none());
     }
 

@@ -52,6 +52,21 @@ use crate::descriptor::{
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
 
+/// Wraps a closure in `catch_unwind`, returning `default` on panic.
+///
+/// Use this for `extern "C"` functions that don't return `FfiResult` (so
+/// `catch_panic_ffi` doesn't apply) and for the bodies of forwarder closures
+/// spawned on the plugin runtime — a panic in a forwarder must not prevent
+/// the sentinel callback from being sent, otherwise the host's drop path
+/// times out (5s) and leaks resources.
+#[inline]
+fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => default,
+    }
+}
+
 // Compile-time assertions that transmute between raw pointers and callback
 // function pointers is safe (same size and alignment).
 const _: () = assert!(
@@ -108,6 +123,8 @@ fn component_status_to_ffi(s: ComponentStatus) -> FfiComponentStatus {
         ComponentStatus::Stopping => FfiComponentStatus::Stopping,
         ComponentStatus::Reconfiguring => FfiComponentStatus::Reconfiguring,
         ComponentStatus::Error => FfiComponentStatus::Error,
+        ComponentStatus::Added => FfiComponentStatus::Added,
+        ComponentStatus::Removed => FfiComponentStatus::Removed,
     }
 }
 
@@ -473,7 +490,11 @@ pub fn build_source_vtable<T: Source + 'static>(
     }
 
     extern "C" fn drop_fn<T: Source + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut SourceWrapper<T>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SourceWrapper<T>)) };
+            }
+        });
     }
 
     let cached_id = source.id().to_string();
@@ -814,7 +835,11 @@ pub fn build_source_vtable_from_boxed(
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut DynSourceWrapper)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut DynSourceWrapper)) };
+            }
+        });
     }
 
     let cached_id = source.id().to_string();
@@ -1125,7 +1150,11 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
     }
 
     extern "C" fn drop_fn<T: Reaction + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut ReactionWrapper<T>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut ReactionWrapper<T>)) };
+            }
+        });
     }
 
     let cached_id = reaction.id().to_string();
@@ -1392,53 +1421,75 @@ pub fn build_reaction_vtable_from_boxed(
         callback: FfiResultPushCallbackFn,
         callback_ctx: *mut c_void,
     ) {
-        let w = wrapper_ref(state);
-        let handle = (w.runtime_handle)().handle().clone();
-        let ctx_raw = callback_ctx as usize;
-        // Clone the Arc so the spawned forwarder task owns a strong reference
-        // to the wrapper. This keeps the wrapper alive even if the host calls
-        // drop_fn before the forwarder has fully exited (e.g., while an
-        // `enqueue_query_result(...).await` is still in flight on the
-        // process-global plugin runtime).
-        let arc = wrapper_arc(state);
-        handle.spawn(async move {
-            loop {
-                let ctx_val = ctx_raw;
-                let result_ptr = tokio::task::spawn_blocking(move || {
-                    SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
-                })
-                .await;
-                let result_ptr = match result_ptr {
-                    Ok(p) => p.as_ptr(),
-                    Err(_) => break,
-                };
-                if result_ptr.is_null() {
-                    break;
-                }
-                let query_result = {
-                    let rp = result_ptr;
-                    unsafe { *Box::from_raw(rp as *mut drasi_lib::channels::QueryResult) }
-                };
-                if let Err(e) = arc.inner.enqueue_query_result(query_result).await {
-                    log::error!("Failed to enqueue query result: {e}");
+        ffi_guard((), || {
+            let w = wrapper_ref(state);
+            let handle = (w.runtime_handle)().handle().clone();
+            let ctx_raw = callback_ctx as usize;
+            // Clone the Arc so the spawned forwarder task owns a strong reference
+            // to the wrapper. This keeps the wrapper alive even if the host calls
+            // drop_fn before the forwarder has fully exited (e.g., while an
+            // `enqueue_query_result(...).await` is still in flight on the
+            // process-global plugin runtime).
+            let arc = wrapper_arc(state);
+
+            // Bug F: Drop guard ensures the sentinel callback is ALWAYS sent
+            // — even if the forwarder task panics on an `enqueue_query_result`
+            // .await against a shutting-down priority queue, or if tokio drops
+            // the spawned task. Without this, the host's Drop times out at
+            // 5 s and leaks resources, allowing Bugs B/C to compound into a
+            // hard SIGSEGV.
+            struct SentinelOnDrop {
+                ctx_raw: usize,
+                callback: FfiResultPushCallbackFn,
+            }
+            impl Drop for SentinelOnDrop {
+                fn drop(&mut self) {
+                    let cb = self.callback;
+                    let ctx = self.ctx_raw as *mut c_void;
+                    #[allow(clippy::manual_dangling_ptr)]
+                    let sentinel = 1usize as *mut c_void;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb(ctx, sentinel);
+                    }));
                 }
             }
-            // Signal the host that the forwarder has fully exited its loop
-            // and will not access the ReactionWrapper again.
-            let ctx_val = ctx_raw;
-            let _ = tokio::task::spawn_blocking(move || {
-                #[allow(clippy::manual_dangling_ptr)]
-                let sentinel = 1usize as *mut c_void;
-                callback(ctx_val as *mut c_void, sentinel);
-            })
-            .await;
-            // Drop the Arc here explicitly to make the ownership intent clear.
-            drop(arc);
+
+            handle.spawn(async move {
+                let _sentinel_guard = SentinelOnDrop { ctx_raw, callback };
+                loop {
+                    let ctx_val = ctx_raw;
+                    let result_ptr = tokio::task::spawn_blocking(move || {
+                        SendMutPtr(callback(ctx_val as *mut c_void, std::ptr::null_mut()))
+                    })
+                    .await;
+                    let result_ptr = match result_ptr {
+                        Ok(p) => p.as_ptr(),
+                        Err(_) => break,
+                    };
+                    if result_ptr.is_null() {
+                        break;
+                    }
+                    let query_result = {
+                        let rp = result_ptr;
+                        unsafe { *Box::from_raw(rp as *mut drasi_lib::channels::QueryResult) }
+                    };
+                    if let Err(e) = arc.inner.enqueue_query_result(query_result).await {
+                        log::error!("Failed to enqueue query result: {e}");
+                    }
+                }
+                // Sentinel sent by SentinelOnDrop on scope exit (covers panic
+                // and normal exit paths).
+                drop(arc);
+            });
         });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut Arc<DynReactionWrapper>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut Arc<DynReactionWrapper>)) };
+            }
+        });
     }
 
     let cached_id = reaction.id().to_string();
@@ -1602,13 +1653,19 @@ pub fn build_bootstrap_provider_vtable(
     }
 
     extern "C" fn bootstrap_event_drop(opaque: *mut c_void) {
-        if !opaque.is_null() {
-            unsafe { drop(Box::from_raw(opaque as *mut BootstrapEvent)) };
-        }
+        ffi_guard((), || {
+            if !opaque.is_null() {
+                unsafe { drop(Box::from_raw(opaque as *mut BootstrapEvent)) };
+            }
+        });
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut BootstrapProviderWrapper)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut BootstrapProviderWrapper)) };
+            }
+        });
     }
 
     let wrapper = Box::new(BootstrapProviderWrapper { inner: provider });
@@ -1716,7 +1773,11 @@ pub fn build_source_plugin_vtable<T: SourcePluginDescriptor + 'static>(
     }
 
     extern "C" fn drop_fn<T: SourcePluginDescriptor + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut SourcePluginWrapper<T>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SourcePluginWrapper<T>)) };
+            }
+        });
     }
 
     let cached_kind = descriptor.kind().to_string();
@@ -1852,7 +1913,11 @@ pub fn build_reaction_plugin_vtable<T: ReactionPluginDescriptor + 'static>(
     }
 
     extern "C" fn drop_fn<T: ReactionPluginDescriptor + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut ReactionPluginWrapper<T>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut ReactionPluginWrapper<T>)) };
+            }
+        });
     }
 
     let cached_kind = descriptor.kind().to_string();
@@ -1980,7 +2045,11 @@ pub fn build_bootstrap_plugin_vtable<T: BootstrapPluginDescriptor + 'static>(
     }
 
     extern "C" fn drop_fn<T: BootstrapPluginDescriptor + 'static>(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut BootstrapPluginWrapper<T>)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut BootstrapPluginWrapper<T>)) };
+            }
+        });
     }
 
     let cached_kind = descriptor.kind().to_string();
@@ -2126,7 +2195,11 @@ fn wrap_subscription_response(
         let source_id = FfiStr::from_str(&boxed.source_id);
         let opaque = Box::into_raw(boxed) as *mut c_void;
         extern "C" fn drop_wrapper(ptr: *mut c_void) {
-            unsafe { drop(Box::from_raw(ptr as *mut SourceEventWrapper)) };
+            ffi_guard((), || {
+                if !ptr.is_null() {
+                    unsafe { drop(Box::from_raw(ptr as *mut SourceEventWrapper)) };
+                }
+            });
         }
         Box::into_raw(Box::new(FfiSourceEvent {
             opaque,
@@ -2144,52 +2217,82 @@ fn wrap_subscription_response(
         callback: FfiChangePushCallbackFn,
         callback_ctx: *mut c_void,
     ) {
-        let handle = unsafe { &*(state as *const DrasiLibChangeReceiverHandle) };
-        let receiver = handle.receiver.clone();
-        let ctx = SendMutPtr(callback_ctx);
-        let shutdown = receiver.shutdown.clone();
-        let rt_handle = receiver.runtime_handle.clone();
-        rt_handle.spawn(async move {
-            let mut rx = receiver.inner.lock().await;
-            // Pin the Notified future so it persists across loop iterations.
-            // Recreating it each iteration is cancel-unsafe: if select! picks
-            // rx.recv() while a notification is pending, dropping the Notified
-            // loses the permit and the shutdown signal is never observed.
-            let shutdown_notified = shutdown.notified();
-            tokio::pin!(shutdown_notified);
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_notified => {
-                        callback(ctx.as_ptr(), std::ptr::null_mut());
-                        break;
-                    }
-                    result = rx.recv() => {
-                        match result {
-                            Ok(wrapper) => {
-                                let ffi_event = wrap_source_event(wrapper);
-                                let accepted = callback(ctx.as_ptr(), ffi_event);
-                                if !accepted {
+        ffi_guard((), || {
+            let handle = unsafe { &*(state as *const DrasiLibChangeReceiverHandle) };
+            let receiver = handle.receiver.clone();
+            let ctx_raw = callback_ctx as usize;
+            let shutdown = receiver.shutdown.clone();
+            let rt_handle = receiver.runtime_handle.clone();
+
+            // Bug F: Drop guard guarantees the host receives a final null
+            // callback (acting as forwarder-exit sentinel) even if the
+            // forwarder body panics — preventing host-side waits from
+            // timing out and preventing UAF cascades on shutdown.
+            struct SourceSentinelOnDrop {
+                ctx_raw: usize,
+                callback: FfiChangePushCallbackFn,
+            }
+            impl Drop for SourceSentinelOnDrop {
+                fn drop(&mut self) {
+                    let cb = self.callback;
+                    let ctx = self.ctx_raw as *mut c_void;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cb(ctx, std::ptr::null_mut());
+                    }));
+                }
+            }
+
+            rt_handle.spawn(async move {
+                let _sentinel_guard = SourceSentinelOnDrop { ctx_raw, callback };
+                let mut rx = receiver.inner.lock().await;
+                // Pin the Notified future so it persists across loop iterations.
+                // Recreating it each iteration is cancel-unsafe: if select! picks
+                // rx.recv() while a notification is pending, dropping the Notified
+                // loses the permit and the shutdown signal is never observed.
+                let shutdown_notified = shutdown.notified();
+                tokio::pin!(shutdown_notified);
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_notified => {
+                            break;
+                        }
+                        result = rx.recv() => {
+                            match result {
+                                Ok(wrapper) => {
+                                    let ffi_event = wrap_source_event(wrapper);
+                                    let accepted = std::panic::catch_unwind(
+                                        std::panic::AssertUnwindSafe(|| {
+                                            callback(ctx_raw as *mut c_void, ffi_event)
+                                        })
+                                    ).unwrap_or(false);
+                                    if !accepted {
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
                                     break;
                                 }
-                            }
-                            Err(_) => {
-                                callback(ctx.as_ptr(), std::ptr::null_mut());
-                                break;
                             }
                         }
                     }
                 }
-            }
+                // Sentinel sent by SourceSentinelOnDrop on scope exit.
+            });
         });
     }
 
     extern "C" fn change_receiver_drop(state: *mut c_void) {
-        let handle = unsafe { Box::from_raw(state as *mut DrasiLibChangeReceiverHandle) };
-        // Signal the forwarder to stop, then drop our Arc reference.
-        // The forwarder holds its own Arc clone, so the inner data stays
-        // alive until the forwarder task completes.
-        handle.receiver.shutdown.notify_one();
-        drop(handle);
+        ffi_guard((), || {
+            if state.is_null() {
+                return;
+            }
+            let handle = unsafe { Box::from_raw(state as *mut DrasiLibChangeReceiverHandle) };
+            // Signal the forwarder to stop, then drop our Arc reference.
+            // The forwarder holds its own Arc clone, so the inner data stays
+            // alive until the forwarder task completes.
+            handle.receiver.shutdown.notify_one();
+            drop(handle);
+        });
     }
 
     let ffi_receiver = Box::new(DrasiLibChangeReceiverHandle {
@@ -2240,7 +2343,11 @@ fn wrap_subscription_response(
             let source_id = FfiStr::from_str(&boxed.source_id);
             let opaque = Box::into_raw(boxed) as *mut c_void;
             extern "C" fn drop_bootstrap(ptr: *mut c_void) {
-                unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
+                ffi_guard((), || {
+                    if !ptr.is_null() {
+                        unsafe { drop(Box::from_raw(ptr as *mut BootstrapEvent)) };
+                    }
+                });
             }
             Box::into_raw(Box::new(FfiBootstrapEvent {
                 opaque,
@@ -2258,48 +2365,75 @@ fn wrap_subscription_response(
             callback: FfiBootstrapPushCallbackFn,
             callback_ctx: *mut c_void,
         ) {
-            let handle = unsafe { &*(state as *const DrasiLibBootstrapReceiverHandle) };
-            let receiver = handle.receiver.clone();
-            let ctx = SendMutPtr(callback_ctx);
-            let shutdown = receiver.shutdown.clone();
-            let rt_handle = receiver.runtime_handle.clone();
-            rt_handle.spawn(async move {
-                let mut rx = receiver.inner.lock().await;
-                // Pin the Notified future for cancel-safe shutdown
-                // (same rationale as change receiver forwarder).
-                let shutdown_notified = shutdown.notified();
-                tokio::pin!(shutdown_notified);
-                loop {
-                    tokio::select! {
-                        _ = &mut shutdown_notified => {
-                            callback(ctx.as_ptr(), std::ptr::null_mut());
-                            break;
-                        }
-                        result = rx.recv() => {
-                            match result {
-                                Some(record) => {
-                                    let ffi_event = wrap_bootstrap_event(record);
-                                    let accepted = callback(ctx.as_ptr(), ffi_event);
-                                    if !accepted {
+            ffi_guard((), || {
+                let handle = unsafe { &*(state as *const DrasiLibBootstrapReceiverHandle) };
+                let receiver = handle.receiver.clone();
+                let ctx_raw = callback_ctx as usize;
+                let shutdown = receiver.shutdown.clone();
+                let rt_handle = receiver.runtime_handle.clone();
+
+                struct BootstrapSentinelOnDrop {
+                    ctx_raw: usize,
+                    callback: FfiBootstrapPushCallbackFn,
+                }
+                impl Drop for BootstrapSentinelOnDrop {
+                    fn drop(&mut self) {
+                        let cb = self.callback;
+                        let ctx = self.ctx_raw as *mut c_void;
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cb(ctx, std::ptr::null_mut());
+                        }));
+                    }
+                }
+
+                rt_handle.spawn(async move {
+                    let _sentinel_guard = BootstrapSentinelOnDrop { ctx_raw, callback };
+                    let mut rx = receiver.inner.lock().await;
+                    // Pin the Notified future for cancel-safe shutdown
+                    // (same rationale as change receiver forwarder).
+                    let shutdown_notified = shutdown.notified();
+                    tokio::pin!(shutdown_notified);
+                    loop {
+                        tokio::select! {
+                            _ = &mut shutdown_notified => {
+                                break;
+                            }
+                            result = rx.recv() => {
+                                match result {
+                                    Some(record) => {
+                                        let ffi_event = wrap_bootstrap_event(record);
+                                        let accepted = std::panic::catch_unwind(
+                                            std::panic::AssertUnwindSafe(|| {
+                                                callback(ctx_raw as *mut c_void, ffi_event)
+                                            })
+                                        ).unwrap_or(false);
+                                        if !accepted {
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        // Stream exhausted
                                         break;
                                     }
-                                }
-                                None => {
-                                    // Stream exhausted
-                                    callback(ctx.as_ptr(), std::ptr::null_mut());
-                                    break;
                                 }
                             }
                         }
                     }
-                }
+                    // Sentinel sent by BootstrapSentinelOnDrop on scope exit.
+                });
             });
         }
 
         extern "C" fn bootstrap_drop(state: *mut c_void) {
-            let handle = unsafe { Box::from_raw(state as *mut DrasiLibBootstrapReceiverHandle) };
-            handle.receiver.shutdown.notify_one();
-            drop(handle);
+            ffi_guard((), || {
+                if state.is_null() {
+                    return;
+                }
+                let handle =
+                    unsafe { Box::from_raw(state as *mut DrasiLibBootstrapReceiverHandle) };
+                handle.receiver.shutdown.notify_one();
+                drop(handle);
+            });
         }
 
         let ffi_brx = Box::new(DrasiLibBootstrapReceiverHandle {
@@ -2395,7 +2529,11 @@ pub fn build_identity_provider_vtable_from_boxed(
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe { drop(Box::from_raw(state as *mut IdentityProviderWrapper)) };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut IdentityProviderWrapper)) };
+            }
+        });
     }
 
     let wrapper = Box::new(IdentityProviderWrapper {
@@ -2500,11 +2638,15 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
     }
 
     extern "C" fn drop_fn<T: IdentityProviderPluginDescriptor + 'static>(state: *mut c_void) {
-        unsafe {
-            drop(Box::from_raw(
-                state as *mut IdentityProviderPluginWrapper<T>,
-            ))
-        };
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe {
+                    drop(Box::from_raw(
+                        state as *mut IdentityProviderPluginWrapper<T>,
+                    ))
+                };
+            }
+        });
     }
 
     let cached_kind = descriptor.kind().to_string();
