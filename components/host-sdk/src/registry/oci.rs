@@ -104,11 +104,28 @@ impl OciRegistryClient {
         let mut last: Option<String> = None;
 
         loop {
-            let response = self
+            let response = match self
                 .client
                 .list_tags(oci_ref, &self.auth(), Some(PAGE_SIZE), last.as_deref())
                 .await
-                .context("failed to list tags")?;
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Some OCI registries (e.g. GHCR) return {"tags": null} instead
+                    // of {"tags": []} when a repository has no tags. The oci-client
+                    // crate deserializes `tags` as Vec<String> which rejects null.
+                    // Treat this as an empty tag list rather than a hard failure.
+                    let err_str = format!("{e:#}");
+                    if err_str.contains("invalid type: null") {
+                        warn!(
+                            "Registry returned null tags for {}; treating as empty",
+                            oci_ref
+                        );
+                        break;
+                    }
+                    return Err(e).context("failed to list tags");
+                }
+            };
 
             let page = response.tags;
             if page.is_empty() {
