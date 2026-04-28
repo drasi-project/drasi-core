@@ -891,7 +891,11 @@ mod tests {
         assert_eq!(sensor.properties.len(), 2);
 
         // temperature should have gotten the type from src-b
-        let temp = sensor.properties.iter().find(|p| p.name == "temperature").unwrap();
+        let temp = sensor
+            .properties
+            .iter()
+            .find(|p| p.name == "temperature")
+            .unwrap();
         assert_eq!(temp.data_type, Some(PropertyType::Float));
     }
 }

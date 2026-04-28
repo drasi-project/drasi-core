@@ -181,7 +181,9 @@ pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::config::{normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::config::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
 use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;

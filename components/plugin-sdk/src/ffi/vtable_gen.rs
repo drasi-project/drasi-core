@@ -574,7 +574,10 @@ pub fn build_source_vtable_from_boxed(
         })) {
             Ok(schema) => schema,
             Err(_) => {
-                log::error!("Dynamic source describe_schema panicked for '{}'", w.cached_id);
+                log::error!(
+                    "Dynamic source describe_schema panicked for '{}'",
+                    w.cached_id
+                );
                 None
             }
         };

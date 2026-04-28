@@ -91,7 +91,9 @@ pub use lsn::Lsn;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::config::{normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::config::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
