@@ -91,7 +91,7 @@ pub use lsn::Lsn;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::config::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::config::{normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
@@ -126,10 +126,6 @@ pub struct MsSqlSource {
 
     /// Best-effort cached schema populated from SQL Server catalog metadata.
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
-}
-
-fn normalize_table_label(table: &str) -> String {
-    table.rsplit('.').next().unwrap_or(table).to_string()
 }
 
 fn mssql_type_to_property_type(data_type: &str) -> Option<PropertyType> {
@@ -430,6 +426,11 @@ impl Source for MsSqlSource {
                     log::warn!("CDC polling task did not stop within timeout, it will be dropped");
                 }
             }
+        }
+
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
         }
 
         self.base.set_status(ComponentStatus::Stopped, None).await;

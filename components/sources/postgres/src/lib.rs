@@ -181,12 +181,11 @@ pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::config::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::config::{normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema};
 use log::{error, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio_postgres::NoTls;
 
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::component_graph::ComponentStatusHandle;
@@ -210,10 +209,6 @@ pub struct PostgresReplicationSource {
     config: PostgresSourceConfig,
     /// Best-effort cached schema populated from information_schema on start.
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
-}
-
-fn normalize_table_label(table: &str) -> String {
-    table.rsplit('.').next().unwrap_or(table).to_string()
 }
 
 fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
@@ -246,7 +241,17 @@ async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Opt
         pg_config.password(&config.password);
     }
 
-    let (client, connection) = pg_config.connect(NoTls).await?;
+    // Respect the source's SSL configuration for protocol negotiation.
+    // Note: the NoTls connector cannot perform actual TLS handshakes,
+    // so Require will fail (gracefully caught by the caller) and Prefer
+    // will proceed without encryption.
+    pg_config.ssl_mode(match config.ssl_mode {
+        SslMode::Disable => tokio_postgres::config::SslMode::Disable,
+        SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
+        SslMode::Require => tokio_postgres::config::SslMode::Require,
+    });
+
+    let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             log::warn!("PostgreSQL schema introspection connection closed: {e}");
@@ -511,6 +516,11 @@ impl Source for PostgresReplicationSource {
         // Cancel the replication task
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
+        }
+
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
         }
 
         self.base

@@ -262,9 +262,9 @@ pub struct GraphRelationSchema {
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
-    if !values.contains(&value) {
-        values.push(value);
-        values.sort();
+    match values.binary_search(&value) {
+        Ok(_) => {}
+        Err(pos) => values.insert(pos, value),
     }
 }
 
@@ -283,6 +283,15 @@ fn merge_properties(target: &mut Vec<PropertySchema>, incoming: &[PropertySchema
     }
 
     target.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
+/// Strip an optional schema prefix from a qualified table name to derive a node label.
+///
+/// For example, `"public.users"` becomes `"users"` and `"orders"` stays `"orders"`.
+/// This is used by database sources (Postgres, MSSQL) when converting configured
+/// table names into graph node labels.
+pub fn normalize_table_label(table: &str) -> String {
+    table.rsplit('.').next().unwrap_or(table).to_string()
 }
 
 /// Source subscription configuration for queries
@@ -823,5 +832,66 @@ impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
             id: config.id,
             keys: config.keys.into_iter().map(|k| k.into()).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_unique_maintains_sorted_order_and_deduplication() {
+        let mut values = Vec::new();
+        push_unique(&mut values, "charlie".to_string());
+        push_unique(&mut values, "alpha".to_string());
+        push_unique(&mut values, "bravo".to_string());
+        push_unique(&mut values, "alpha".to_string()); // duplicate
+
+        assert_eq!(values, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn normalize_table_label_strips_schema_prefix() {
+        assert_eq!(normalize_table_label("public.users"), "users");
+        assert_eq!(normalize_table_label("dbo.orders"), "orders");
+        assert_eq!(normalize_table_label("customers"), "customers");
+    }
+
+    #[test]
+    fn merge_source_schema_combines_properties() {
+        let mut graph = GraphSchema::default();
+
+        let schema_a = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![PropertySchema::new("temperature")],
+            }],
+            relations: Vec::new(),
+        };
+        let schema_b = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![
+                    PropertySchema {
+                        name: "temperature".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    },
+                    PropertySchema::new("humidity"),
+                ],
+            }],
+            relations: Vec::new(),
+        };
+
+        graph.merge_source_schema("src-a", &schema_a);
+        graph.merge_source_schema("src-b", &schema_b);
+
+        let sensor = graph.nodes.get("Sensor").unwrap();
+        assert_eq!(sensor.sources, vec!["src-a", "src-b"]);
+        assert_eq!(sensor.properties.len(), 2);
+
+        // temperature should have gotten the type from src-b
+        let temp = sensor.properties.iter().find(|p| p.name == "temperature").unwrap();
+        assert_eq!(temp.data_type, Some(PropertyType::Float));
     }
 }
