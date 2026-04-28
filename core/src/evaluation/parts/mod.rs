@@ -28,9 +28,10 @@ use crate::{
 use super::{
     context::{self, ChangeContext, SideEffects},
     expressions::*,
+    variable_value::VariableValue,
     EvaluationError, ExpressionEvaluationContext,
 };
-use drasi_query_ast::ast::{ProjectionClause, QueryPart};
+use drasi_query_ast::ast::{Expression, ProjectionClause, QueryPart};
 use hashers::jenkins::spooky_hash::SpookyHasher;
 
 use super::context::{QueryPartEvaluationContext, QueryVariables};
@@ -58,9 +59,7 @@ impl QueryPartEvaluator {
         part: &QueryPart,
         change_context: &ChangeContext,
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
-        // println!("Evaluating : {:#?}", context);
-
-        let is_return_aggreating = matches!(
+        let is_return_aggregating = matches!(
             &part.return_clause,
             ProjectionClause::GroupBy {
                 grouping: _,
@@ -122,7 +121,6 @@ impl QueryPartEvaluator {
                         after: data,
                         grouping_keys,
                         default_before: true,
-                        default_after: false,
                         row_signature: 0,
                     }]),
                     _ => Ok(vec![QueryPartEvaluationContext::Adding {
@@ -215,9 +213,9 @@ impl QueryPartEvaluator {
                         .await?
                     {
                         if let Some(agg_after) = agg_after {
-                            if is_return_aggreating {
+                            if is_return_aggregating {
                                 return self
-                                    .reconile_crossing_agregate(
+                                    .reconcile_crossing_aggregate(
                                         part,
                                         grouping_keys,
                                         Some(before),
@@ -252,7 +250,7 @@ impl QueryPartEvaluator {
                         grouping: _,
                         aggregates: _,
                     } => {
-                        self.reconile_crossing_agregate(
+                        self.reconcile_crossing_aggregate(
                             part,
                             grouping_keys,
                             Some(before),
@@ -322,16 +320,35 @@ impl QueryPartEvaluator {
 
                 match &part.return_clause {
                     ProjectionClause::GroupBy {
-                        grouping: _,
-                        aggregates: _,
-                    } => Ok(vec![QueryPartEvaluationContext::Aggregation {
-                        before: agg_before,
-                        after: data,
-                        grouping_keys,
-                        default_before: false,
-                        default_after: true,
-                        row_signature: 0,
-                    }]),
+                        grouping,
+                        aggregates,
+                    } => {
+                        let mut id_context = eval_context.clone();
+                        id_context.set_output_grouping_key(grouping);
+                        let grouping_values =
+                            self.evaluate_grouping_values(&id_context, grouping).await?;
+                        let at_identity = self
+                            .expression_evaluator
+                            .projection_is_at_identity(&id_context, aggregates, &grouping_values)
+                            .await?;
+
+                        if at_identity {
+                            if let Some(before) = agg_before {
+                                return Ok(vec![QueryPartEvaluationContext::Removing {
+                                    before,
+                                    row_signature: 0,
+                                }]);
+                            }
+                        }
+
+                        Ok(vec![QueryPartEvaluationContext::Aggregation {
+                            before: agg_before,
+                            after: data,
+                            grouping_keys,
+                            default_before: false,
+                            row_signature: 0,
+                        }])
+                    }
                     _ => Ok(vec![QueryPartEvaluationContext::Removing {
                         before: data,
                         row_signature: 0,
@@ -343,7 +360,6 @@ impl QueryPartEvaluator {
                 after,
                 grouping_keys,
                 default_before,
-                default_after,
                 ..
             } => {
                 if let Some(before) = &before {
@@ -354,6 +370,12 @@ impl QueryPartEvaluator {
 
                 let result_key = ResultKey::groupby_from_variables(&grouping_keys, &after);
 
+                // When the upstream tags `default_before: true`, the `before`
+                // *might* be the synthetic identity row for a fresh group;
+                // the PartCurrent ledger below disambiguates "first-time
+                // default" vs "continuation that happens to be tagged
+                // default" by comparing `before` against the part's last
+                // emitted `after`.
                 let should_revert = match &before {
                     Some(before) => {
                         if !default_before {
@@ -362,24 +384,12 @@ impl QueryPartEvaluator {
                             let mut before_hash = SpookyHasher::default();
                             before.hash(&mut before_hash);
                             let before_hash = before_hash.finish();
-                            match self
-                                .result_index
-                                .get(&result_key, &ResultOwner::PartCurrent(part_num))
-                                .await?
-                            {
-                                Some(ValueAccumulator::Signature(sig)) => sig == before_hash,
-                                None => {
-                                    self.result_index
-                                        .set(
-                                            result_key.clone(),
-                                            ResultOwner::PartDefault(part_num),
-                                            Some(ValueAccumulator::Signature(before_hash)),
-                                        )
-                                        .await?;
-                                    false
-                                }
-                                _ => false,
-                            }
+                            matches!(
+                                self.result_index
+                                    .get(&result_key, &ResultOwner::PartCurrent(part_num))
+                                    .await?,
+                                Some(ValueAccumulator::Signature(sig)) if sig == before_hash,
+                            )
                         }
                     }
                     None => false,
@@ -389,42 +399,13 @@ impl QueryPartEvaluator {
                 after.hash(&mut after_hash);
                 let after_hash = after_hash.finish();
 
-                let should_apply = {
-                    if !default_after {
-                        true
-                    } else {
-                        match self
-                            .result_index
-                            .get(&result_key, &ResultOwner::PartDefault(part_num))
-                            .await?
-                        {
-                            Some(ValueAccumulator::Signature(sig)) => {
-                                if sig == after_hash {
-                                    self.result_index
-                                        .set(
-                                            result_key.clone(),
-                                            ResultOwner::PartCurrent(part_num),
-                                            None,
-                                        )
-                                        .await?;
-                                }
-                                sig != after_hash
-                            }
-                            None => true,
-                            _ => true,
-                        }
-                    }
-                };
-
-                if should_apply {
-                    self.result_index
-                        .set(
-                            result_key,
-                            ResultOwner::PartCurrent(part_num),
-                            Some(ValueAccumulator::Signature(after_hash)),
-                        )
-                        .await?;
-                }
+                self.result_index
+                    .set(
+                        result_key,
+                        ResultOwner::PartCurrent(part_num),
+                        Some(ValueAccumulator::Signature(after_hash)),
+                    )
+                    .await?;
 
                 let agg_snapshot = match &part.return_clause {
                     ProjectionClause::GroupBy {
@@ -475,9 +456,9 @@ impl QueryPartEvaluator {
                 let mut next_after: Option<QueryVariables> = None;
                 let mut next_after_grouping_keys = Vec::new();
 
-                if let Some(before) = &before {
+                if let Some(before_inner) = &before {
                     let before_context = ExpressionEvaluationContext::from_before_change(
-                        before,
+                        before_inner,
                         SideEffects::Snapshot,
                         change_context,
                         part,
@@ -493,12 +474,12 @@ impl QueryPartEvaluator {
 
                     if !before_filtered && should_revert {
                         let mut revert_context = ExpressionEvaluationContext::from_before_change(
-                            before,
+                            before_inner,
                             SideEffects::RevertForUpdate,
                             change_context,
                             part,
                         );
-                        revert_context.replace_variables(before);
+                        revert_context.replace_variables(before_inner);
                         next_after = Some(
                             self.project(
                                 &revert_context,
@@ -510,12 +491,8 @@ impl QueryPartEvaluator {
                     }
                 }
 
-                let mut after_context =
+                let after_context =
                     ExpressionEvaluationContext::from_after_change(&after, change_context, part);
-
-                if !should_apply {
-                    after_context.set_side_effects(SideEffects::Snapshot);
-                }
 
                 for filter in &part.where_clauses {
                     if !self
@@ -524,9 +501,9 @@ impl QueryPartEvaluator {
                         .await?
                     {
                         if let Some(next_after) = next_after {
-                            if is_return_aggreating {
+                            if is_return_aggregating {
                                 return self
-                                    .reconile_crossing_agregate(
+                                    .reconcile_crossing_aggregate(
                                         part,
                                         next_after_grouping_keys,
                                         before,
@@ -564,7 +541,7 @@ impl QueryPartEvaluator {
                         grouping: _,
                         aggregates: _,
                     } => Ok(self
-                        .reconile_crossing_agregate(
+                        .reconcile_crossing_aggregate(
                             part,
                             next_after_grouping_keys,
                             before,
@@ -647,9 +624,29 @@ impl QueryPartEvaluator {
         }
     }
 
-    /// Reconciles values crossing from one group to another
+    async fn evaluate_grouping_values(
+        &self,
+        context: &ExpressionEvaluationContext<'_>,
+        grouping: &[Expression],
+    ) -> Result<Arc<Vec<VariableValue>>, EvaluationError> {
+        let mut values = Vec::with_capacity(grouping.len());
+        for expr in grouping {
+            values.push(
+                self.expression_evaluator
+                    .evaluate_expression(context, expr)
+                    .await?,
+            );
+        }
+        Ok(Arc::new(values))
+    }
+
+    /// Reconciles values crossing from one group to another. When a row moves
+    /// out of its source group and the source group's aggregates all report
+    /// identity (no remaining contributors), the source-side emission is a
+    /// `Removing` rather than an `Aggregation` so the consumer drops the row
+    /// instead of retaining it at its identity values.
     #[allow(clippy::too_many_arguments, clippy::unwrap_used)]
-    async fn reconile_crossing_agregate(
+    async fn reconcile_crossing_aggregate(
         &self,
         part: &QueryPart,
         grouping_keys: Vec<String>,
@@ -666,7 +663,6 @@ impl QueryPartEvaluator {
                 after: after_out,
                 grouping_keys,
                 default_before: false,
-                default_after: false,
                 row_signature: 0,
             }]);
         }
@@ -682,15 +678,113 @@ impl QueryPartEvaluator {
         }
 
         if grouping_match {
-            return Ok(vec![QueryPartEvaluationContext::Aggregation {
-                before: Some(before_out),
-                after: after_out,
-                grouping_keys,
-                default_before: false,
-                default_after: false,
-                row_signature: 0,
-            }]);
+            // Same-group case. The row stayed in (or was filtered out of) its
+            // original group; `after_out` already reflects the post-revert /
+            // post-apply state. If the group is now empty, emit `Removing`
+            // to drop the row, mirroring the cross-group branch below.
+            let same_group_emission = match &part.return_clause {
+                ProjectionClause::GroupBy {
+                    grouping,
+                    aggregates,
+                } => {
+                    let prev_context = ExpressionEvaluationContext::from_before_change(
+                        &before_in,
+                        SideEffects::Snapshot,
+                        change_context,
+                        part,
+                    );
+                    let grouping_values = self
+                        .evaluate_grouping_values(&prev_context, grouping)
+                        .await?;
+                    let at_identity = self
+                        .expression_evaluator
+                        .projection_is_at_identity(&prev_context, aggregates, &grouping_values)
+                        .await?;
+
+                    if at_identity {
+                        QueryPartEvaluationContext::Removing {
+                            before: before_out,
+                            row_signature: 0,
+                        }
+                    } else {
+                        QueryPartEvaluationContext::Aggregation {
+                            before: Some(before_out),
+                            after: after_out,
+                            grouping_keys,
+                            default_before: false,
+                            row_signature: 0,
+                        }
+                    }
+                }
+                _ => QueryPartEvaluationContext::Aggregation {
+                    before: Some(before_out),
+                    after: after_out,
+                    grouping_keys,
+                    default_before: false,
+                    row_signature: 0,
+                },
+            };
+            return Ok(vec![same_group_emission]);
         }
+
+        // Cross-group: the row left `before_out`'s group and entered
+        // `after_out`'s. Recompute the source group's post-revert state and
+        // determine whether it has emptied. Use `from_before_change` so the
+        // context carries the change's anchor, solution signature, and input
+        // grouping hash, matching how every other branch of `evaluate`
+        // constructs its contexts.
+        let prev_context = ExpressionEvaluationContext::from_before_change(
+            &before_in,
+            SideEffects::Snapshot,
+            change_context,
+            part,
+        );
+
+        let mut source_after_grouping_keys = Vec::new();
+        let source_after = self
+            .project(
+                &prev_context,
+                &part.return_clause,
+                &mut source_after_grouping_keys,
+            )
+            .await?;
+
+        let source_emission = match &part.return_clause {
+            ProjectionClause::GroupBy {
+                grouping,
+                aggregates,
+            } => {
+                let grouping_values = self
+                    .evaluate_grouping_values(&prev_context, grouping)
+                    .await?;
+                let at_identity = self
+                    .expression_evaluator
+                    .projection_is_at_identity(&prev_context, aggregates, &grouping_values)
+                    .await?;
+
+                if at_identity {
+                    QueryPartEvaluationContext::Removing {
+                        before: before_out,
+                        row_signature: 0,
+                    }
+                } else {
+                    QueryPartEvaluationContext::Aggregation {
+                        before: Some(before_out),
+                        after: source_after,
+                        grouping_keys: grouping_keys.clone(),
+                        default_before: false,
+                        row_signature: 0,
+                    }
+                }
+            }
+            _ => QueryPartEvaluationContext::Aggregation {
+                before: Some(before_out),
+                after: source_after,
+                grouping_keys: grouping_keys.clone(),
+                default_before: false,
+                row_signature: 0,
+            },
+        };
 
         Ok(vec![
             QueryPartEvaluationContext::Aggregation {
@@ -698,26 +792,9 @@ impl QueryPartEvaluator {
                 after: after_out,
                 grouping_keys: grouping_keys.clone(),
                 default_before: false,
-                default_after: false,
                 row_signature: 0,
             },
-            QueryPartEvaluationContext::Aggregation {
-                before: Some(before_out),
-                after: {
-                    let mut prev_context = ExpressionEvaluationContext::new(
-                        &before_in,
-                        change_context.before_clock.clone(),
-                    );
-                    prev_context.set_side_effects(context::SideEffects::Snapshot);
-                    let mut grouping_keys = Vec::new();
-                    self.project(&prev_context, &part.return_clause, &mut grouping_keys)
-                        .await?
-                },
-                grouping_keys: grouping_keys.clone(),
-                default_before: false,
-                default_after: false,
-                row_signature: 0,
-            },
+            source_emission,
         ])
     }
 }

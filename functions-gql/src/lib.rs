@@ -122,10 +122,6 @@ fn register_aggregation_functions(registry: &FunctionRegistry) {
         "drasi.linearGradient",
         Function::Aggregating(Arc::new(LinearGradient {})),
     );
-    registry.register_function(
-        "drasi.last",
-        Function::Aggregating(Arc::new(AggregatingLast {})),
-    );
 }
 
 fn register_temporal_instant_functions(registry: &FunctionRegistry) {
