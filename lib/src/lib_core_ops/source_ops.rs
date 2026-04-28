@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::SourceRuntime;
+use crate::config::{GraphSchema, SourceRuntime, SourceSchema};
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
 use crate::sources::Source;
@@ -313,6 +313,16 @@ impl DrasiLib {
         self.inspection.get_source_status(id).await
     }
 
+    /// Get best-effort schema information for a specific source.
+    pub async fn get_source_schema(&self, id: &str) -> Result<Option<SourceSchema>> {
+        self.inspection.get_source_schema(id).await
+    }
+
+    /// Get the merged graph schema across all registered sources and queries.
+    pub async fn get_graph_schema(&self) -> Result<GraphSchema> {
+        self.inspection.get_graph_schema().await
+    }
+
     /// Get lifecycle events for a specific source as an async stream.
     ///
     /// Returns events in chronological order (oldest first). Up to 100 most recent
@@ -424,13 +434,133 @@ impl DrasiLib {
 
 #[cfg(test)]
 mod tests {
+    use crate::channels::dispatcher::{ChangeDispatcher, ChannelChangeDispatcher};
     use crate::channels::ComponentStatus;
+    use crate::channels::{SourceEventWrapper, SubscriptionResponse};
+    use crate::component_graph::ComponentStatusHandle;
+    use crate::config::{NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema};
     use crate::error::DrasiError;
     use crate::lib_core::DrasiLib;
     use crate::sources::tests::{create_test_mock_source, TestMockSource};
     use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
     use crate::test_helpers::wait_for_component_status;
+    use crate::{Query, Source};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
     use std::time::Duration;
+
+    struct SchemaAwareSource {
+        id: String,
+        status_handle: ComponentStatusHandle,
+        dispatchers:
+            std::sync::Arc<tokio::sync::RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper>>>>>,
+    }
+
+    impl SchemaAwareSource {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                status_handle: ComponentStatusHandle::new(id),
+                dispatchers: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Source for SchemaAwareSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn type_name(&self) -> &str {
+            "schema-aware"
+        }
+
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+
+        fn auto_start(&self) -> bool {
+            false
+        }
+
+        fn describe_schema(&self) -> Option<SourceSchema> {
+            Some(SourceSchema {
+                nodes: vec![
+                    NodeSchema {
+                        label: "Sensor".to_string(),
+                        properties: vec![PropertySchema {
+                            name: "temperature".to_string(),
+                            data_type: Some(PropertyType::Float),
+                            description: None,
+                        }],
+                    },
+                    NodeSchema {
+                        label: "Counter".to_string(),
+                        properties: vec![PropertySchema {
+                            name: "value".to_string(),
+                            data_type: Some(PropertyType::Integer),
+                            description: None,
+                        }],
+                    },
+                ],
+                relations: vec![RelationSchema {
+                    label: "CONNECTS_TO".to_string(),
+                    from: Some("Sensor".to_string()),
+                    to: Some("Counter".to_string()),
+                    properties: vec![PropertySchema {
+                        name: "strength".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    }],
+                }],
+            })
+        }
+
+        async fn start(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Running, Some("Source started".to_string()))
+                .await;
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Stopped, Some("Source stopped".to_string()))
+                .await;
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+
+        async fn subscribe(
+            &self,
+            settings: crate::config::SourceSubscriptionSettings,
+        ) -> Result<SubscriptionResponse> {
+            let dispatcher = ChannelChangeDispatcher::<SourceEventWrapper>::new(16);
+            let receiver = dispatcher.create_receiver().await?;
+            self.dispatchers.write().await.push(Box::new(dispatcher));
+
+            Ok(SubscriptionResponse {
+                query_id: settings.query_id,
+                source_id: self.id.clone(),
+                receiver,
+                bootstrap_receiver: None,
+                position_handle: None,
+            })
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
+    }
 
     /// Helper: build a DrasiLib, start it, and return it.
     async fn build_and_start() -> DrasiLib {
@@ -636,5 +766,69 @@ mod tests {
         assert_eq!(info.source_type, "mock");
         assert_eq!(info.status, ComponentStatus::Added);
         assert!(info.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_source_schema_returns_opt_in_schema() {
+        let core = build_and_start().await;
+        core.add_source(SchemaAwareSource::new("schema-src"))
+            .await
+            .unwrap();
+
+        let schema = core
+            .get_source_schema("schema-src")
+            .await
+            .unwrap()
+            .expect("schema-aware source should expose schema");
+
+        assert_eq!(schema.nodes.len(), 2);
+        assert!(schema.nodes.iter().any(|node| node.label == "Sensor"));
+        assert!(schema
+            .relations
+            .iter()
+            .any(|relation| relation.label == "CONNECTS_TO"));
+    }
+
+    #[tokio::test]
+    async fn get_graph_schema_merges_source_and_query_context_end_to_end() {
+        let core = DrasiLib::builder()
+            .with_id("schema-e2e")
+            .build()
+            .await
+            .unwrap();
+        core.start().await.unwrap();
+        core.add_source(SchemaAwareSource::new("schema-src"))
+            .await
+            .unwrap();
+        core.add_query(
+            Query::cypher("schema-query")
+                .query("MATCH (s:Sensor)-[r:CONNECTS_TO]->(c:Counter) RETURN s, r, c")
+                .from_source("schema-src")
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        let schema = core.get_graph_schema().await.unwrap();
+
+        let sensor = schema
+            .nodes
+            .get("Sensor")
+            .expect("Sensor label should exist");
+        assert!(sensor.sources.contains("schema-src"));
+        assert!(sensor.queried_by.contains("schema-query"));
+        assert!(sensor
+            .properties
+            .iter()
+            .any(|property| property.name == "temperature"));
+
+        let relation = schema
+            .relations
+            .get("CONNECTS_TO")
+            .expect("CONNECTS_TO relation should exist");
+        assert!(relation.sources.contains("schema-src"));
+        assert!(relation.queried_by.contains("schema-query"));
+        assert_eq!(relation.from.as_deref(), Some("Sensor"));
+        assert_eq!(relation.to.as_deref(), Some("Counter"));
     }
 }

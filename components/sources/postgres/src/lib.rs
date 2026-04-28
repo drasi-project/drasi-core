@@ -179,9 +179,13 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use log::{error, info};
+use drasi_lib::config::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
+use log::{debug, error, info};
+use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -206,6 +210,127 @@ pub struct PostgresReplicationSource {
     base: SourceBase,
     /// PostgreSQL source configuration
     config: PostgresSourceConfig,
+    /// Best-effort cached schema populated from information_schema on start.
+    cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+}
+
+fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
+    match data_type {
+        "smallint" | "integer" | "bigint" => Some(PropertyType::Integer),
+        "real" | "double precision" | "numeric" | "decimal" => Some(PropertyType::Float),
+        "boolean" => Some(PropertyType::Boolean),
+        "timestamp without time zone"
+        | "timestamp with time zone"
+        | "date"
+        | "time without time zone"
+        | "time with time zone" => Some(PropertyType::Timestamp),
+        "json" | "jsonb" => Some(PropertyType::Json),
+        "character" | "character varying" | "text" | "uuid" | "bytea" => Some(PropertyType::String),
+        _ => None,
+    }
+}
+
+async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let mut pg_config = tokio_postgres::Config::new();
+    pg_config.host(&config.host);
+    pg_config.port(config.port);
+    pg_config.dbname(&config.database);
+    pg_config.user(&config.user);
+    if !config.password.is_empty() {
+        pg_config.password(&config.password);
+    }
+
+    let client = match config.ssl_mode {
+        SslMode::Require => {
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            debug!("Schema introspection: connecting with SSL (require)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+            debug!("Schema introspection: connecting with SSL (prefer)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Disable => {
+            debug!("Schema introspection: connecting without SSL");
+            let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+    };
+
+    let mut nodes = Vec::new();
+
+    for table in &config.tables {
+        let (schema_name, table_name) = table
+            .split_once('.')
+            .map(|(schema, name)| (schema.to_string(), name.to_string()))
+            .unwrap_or_else(|| ("public".to_string(), table.to_string()));
+
+        let rows = client
+            .query(
+                "SELECT column_name, data_type \
+                 FROM information_schema.columns \
+                 WHERE table_schema = $1 AND table_name = $2 \
+                 ORDER BY ordinal_position",
+                &[&schema_name, &table_name],
+            )
+            .await?;
+
+        let properties = rows
+            .into_iter()
+            .map(|row| PropertySchema {
+                name: row.get::<_, String>(0),
+                data_type: postgres_type_to_property_type(&row.get::<_, String>(1)),
+                description: None,
+            })
+            .collect();
+
+        nodes.push(NodeSchema {
+            label: normalize_table_label(&table_name),
+            properties,
+        });
+    }
+
+    Ok(Some(SourceSchema {
+        nodes,
+        relations: Vec::new(),
+    }))
 }
 
 impl PostgresReplicationSource {
@@ -266,6 +391,7 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -290,6 +416,7 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 }
@@ -318,6 +445,28 @@ impl Source for PostgresReplicationSource {
         self.base.get_auto_start()
     }
 
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.cached_schema
+            .read()
+            .ok()
+            .and_then(|schema| schema.clone())
+            .or_else(|| {
+                if self.config.tables.is_empty() {
+                    None
+                } else {
+                    Some(SourceSchema {
+                        nodes: self
+                            .config
+                            .tables
+                            .iter()
+                            .map(|table| NodeSchema::new(normalize_table_label(table)))
+                            .collect(),
+                        relations: Vec::new(),
+                    })
+                }
+            })
+    }
+
     async fn start(&self) -> Result<()> {
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
@@ -325,6 +474,21 @@ impl Source for PostgresReplicationSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting PostgreSQL replication source: {}", self.base.id);
+
+        match introspect_postgres_schema(&self.config).await {
+            Ok(Some(schema)) => {
+                if let Ok(mut cached) = self.cached_schema.write() {
+                    *cached = Some(schema);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Failed to introspect PostgreSQL schema for '{}': {e}",
+                    self.base.id
+                );
+            }
+        }
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
@@ -388,6 +552,11 @@ impl Source for PostgresReplicationSource {
         // Cancel the replication task
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
+        }
+
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
         }
 
         self.base
@@ -655,6 +824,7 @@ impl PostgresSourceBuilder {
         Ok(PostgresReplicationSource {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 }
@@ -795,6 +965,24 @@ mod tests {
             assert_eq!(tables.len(), 2);
             assert_eq!(tables[0], "users");
             assert_eq!(tables[1], "orders");
+        }
+
+        #[test]
+        fn test_describe_schema_falls_back_to_configured_tables() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .with_tables(vec!["public.users".to_string(), "orders".to_string()])
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("configured postgres tables should produce fallback schema");
+
+            assert_eq!(schema.nodes.len(), 2);
+            assert!(schema.nodes.iter().any(|node| node.label == "users"));
+            assert!(schema.nodes.iter().any(|node| node.label == "orders"));
         }
     }
 

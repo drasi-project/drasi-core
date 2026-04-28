@@ -157,9 +157,10 @@ pub use managers::{init_tracing, try_init_tracing};
 pub use config::snapshot::QuerySnapshot;
 /// Configuration types
 pub use config::{
-    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
-    QueryRuntime, ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
-    SourceSubscriptionSettings,
+    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, GraphNodeSchema, GraphRelationSchema,
+    GraphSchema, NodeSchema, PropertySchema, PropertyType, QueryConfig, QueryLanguage,
+    QueryRuntime, ReactionRuntime, ReactionSnapshot, RelationSchema, RuntimeConfig, SourceRuntime,
+    SourceSchema, SourceSnapshot, SourceSubscriptionSettings,
 };
 
 /// Storage backend configuration types

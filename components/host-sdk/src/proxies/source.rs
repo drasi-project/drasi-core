@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::SubscriptionResponse;
-use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::config::{SourceSchema, SourceSubscriptionSettings};
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
@@ -132,6 +132,23 @@ impl Source for SourceProxy {
 
     fn auto_start(&self) -> bool {
         (self.vtable.auto_start_fn)(self.vtable.state as *const c_void)
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        let json = unsafe {
+            (self.vtable.describe_schema_fn)(self.vtable.state as *const c_void).into_string()
+        };
+
+        match serde_json::from_str(&json) {
+            Ok(schema) => schema,
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse plugin schema for '{}': {e}",
+                    self.cached_id
+                );
+                None
+            }
+        }
     }
 
     async fn start(&self) -> anyhow::Result<()> {
