@@ -231,6 +231,26 @@ pub trait Source: Send + Sync {
         // Default implementation does nothing - sources that support bootstrap
         // should override this to delegate to their SourceBase
     }
+
+    /// Set the identity provider for this source.
+    ///
+    /// This method allows attaching a per-source identity provider after
+    /// construction (e.g. when wiring up a source from declarative config that
+    /// references a named identity provider). It is optional — sources that do
+    /// not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementation should delegate to `self.base.set_identity_provider(provider).await`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - sources that consume an
+        // identity provider should override this to delegate to their SourceBase.
+    }
 }
 
 /// Blanket implementation of Source for `Box<dyn Source>`
@@ -298,5 +318,12 @@ impl Source for Box<dyn Source + 'static> {
         provider: Box<dyn crate::bootstrap::BootstrapProvider + 'static>,
     ) {
         (**self).set_bootstrap_provider(provider).await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
     }
 }

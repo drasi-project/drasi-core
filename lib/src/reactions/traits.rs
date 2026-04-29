@@ -207,6 +207,27 @@ pub trait Reaction: Send + Sync {
     async fn deprovision(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Set the identity provider for this reaction.
+    ///
+    /// This method allows attaching a per-reaction identity provider after
+    /// construction (e.g. when wiring up a reaction from declarative config
+    /// that references a named identity provider). It is optional — reactions
+    /// that do not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementation should delegate to `self.base.set_identity_provider(provider).await`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - reactions that consume an
+        // identity provider should override this to delegate to their
+        // ReactionBase.
+    }
 }
 
 /// Blanket implementation of Reaction for `Box<dyn Reaction>`
@@ -256,5 +277,12 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn deprovision(&self) -> Result<()> {
         (**self).deprovision().await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
     }
 }
