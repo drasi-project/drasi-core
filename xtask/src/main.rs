@@ -27,6 +27,24 @@ struct Package {
     description: Option<String>,
     #[serde(default)]
     license: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct DrasiPluginMeta {
+    #[serde(default)]
+    tier: Option<u8>,
+}
+
+impl Package {
+    fn drasi_meta(&self) -> DrasiPluginMeta {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get("drasi"))
+            .and_then(|d| serde_json::from_value(d.clone()).ok())
+            .unwrap_or_default()
+    }
 }
 
 struct DiscoveryResult {
@@ -41,6 +59,7 @@ struct PluginInfo {
     package: Package,
     plugin_type: String,
     kind: String,
+    tier: Option<u8>,
 }
 
 /// Metadata JSON written alongside each built plugin binary for OCI publishing.
@@ -59,6 +78,8 @@ struct PluginArtifactMetadata {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<u8>,
 }
 
 /// Parse plugin type and kind from crate name.
@@ -143,10 +164,12 @@ fn discover_dynamic_plugins() -> DiscoveryResult {
         .filter(|p| p.features.contains_key("dynamic-plugin"))
         .filter_map(|p| {
             let (plugin_type, kind) = parse_plugin_type_kind(&p.name)?;
+            let meta = p.drasi_meta();
             Some(PluginInfo {
                 package: p,
                 plugin_type,
                 kind,
+                tier: meta.tier,
             })
         })
         .collect();
@@ -167,7 +190,7 @@ fn main() {
 
     match subcommand {
         Some("build-plugins") => build_plugins(&args[2..]),
-        Some("list-plugins") => list_plugins(),
+        Some("list-plugins") => list_plugins(&args[2..]),
         Some("publish-plugins") => publish_plugins(&args[2..]),
         _ => {
             eprintln!("Usage: cargo xtask <command>");
@@ -176,13 +199,17 @@ fn main() {
             eprintln!(
                 "  build-plugins [OPTIONS]    Build all dynamic plugins as cdylib shared libraries"
             );
-            eprintln!("  list-plugins               List all discovered dynamic plugin crates");
+            eprintln!("  list-plugins [OPTIONS]    List all discovered dynamic plugin crates");
             eprintln!("  publish-plugins [OPTIONS]   Publish built plugins as OCI artifacts");
             eprintln!();
             eprintln!("build-plugins options:");
             eprintln!("  --release             Build in release mode");
             eprintln!("  --jobs N              Number of parallel jobs");
             eprintln!("  --target TRIPLE       Cross-compile target triple");
+            eprintln!("  --tier <N>            Only build plugins at tier N or higher priority (lower number)");
+            eprintln!();
+            eprintln!("list-plugins options:");
+            eprintln!("  --tier <N>            Only list plugins at tier N or higher priority (lower number)");
             eprintln!();
             eprintln!("publish-plugins options:");
             eprintln!("  --registry <URL>      OCI registry (default: ghcr.io/drasi-project)");
@@ -196,6 +223,7 @@ fn main() {
                 "  --pre-release <LABEL> Append pre-release label (e.g., dev.1 → 0.1.8-dev.1)"
             );
             eprintln!("  --arch-suffix <SUFFIX> Append architecture suffix to tag (e.g., linux-amd64 → 0.1.8-linux-amd64)");
+            eprintln!("  --tier <N>            Only publish plugins at tier N or higher priority (lower number)");
             eprintln!("  --dry-run             Show what would be published without pushing");
             eprintln!("  --sign                Sign each published artifact with cosign (requires cosign in PATH)");
             std::process::exit(1);
@@ -203,24 +231,40 @@ fn main() {
     }
 }
 
-fn list_plugins() {
+fn list_plugins(args: &[String]) {
     let result = discover_dynamic_plugins();
-    if result.plugins.is_empty() {
+    let tier_filter = parse_tier_filter(args);
+    let plugins: Vec<&PluginInfo> = if let Some(max_tier) = tier_filter {
+        result
+            .plugins
+            .iter()
+            .filter(|p| p.tier.is_some_and(|t| t <= max_tier))
+            .collect()
+    } else {
+        result.plugins.iter().collect()
+    };
+
+    if plugins.is_empty() {
         println!("No dynamic plugins found.");
         return;
     }
-    println!("Dynamic plugins ({}):", result.plugins.len());
+    println!("Dynamic plugins ({}):", plugins.len());
     println!(
         "  SDK: {}, Core: {}, Lib: {}",
         result.sdk_version, result.core_version, result.lib_version
     );
     println!();
-    for p in &result.plugins {
+    for p in &plugins {
+        let tier_str = p
+            .tier
+            .map(|t| format!("tier {t}"))
+            .unwrap_or_else(|| "unclassified".to_string());
         println!(
-            "  {}/{} v{} ({})",
+            "  {}/{} v{} [{}] ({})",
             p.plugin_type,
             p.kind,
             p.package.version,
+            tier_str,
             p.package.manifest_path.display()
         );
     }
@@ -291,19 +335,39 @@ fn parse_flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+fn parse_tier_filter(args: &[String]) -> Option<u8> {
+    parse_flag_value(args, "--tier").and_then(|v| v.parse().ok())
+}
+
 fn build_plugins(args: &[String]) {
     let release = args.iter().any(|a| a == "--release");
     let jobs = parse_jobs(args);
     let target = parse_target(args);
     let result = discover_dynamic_plugins();
+    let tier_filter = parse_tier_filter(args);
 
     if result.plugins.is_empty() {
         println!("No dynamic plugins found.");
         return;
     }
 
+    let selected_plugins: Vec<&PluginInfo> = if let Some(max_tier) = tier_filter {
+        result
+            .plugins
+            .iter()
+            .filter(|p| p.tier.is_some_and(|t| t <= max_tier))
+            .collect()
+    } else {
+        result.plugins.iter().collect()
+    };
+
+    if selected_plugins.is_empty() {
+        println!("No dynamic plugins found.");
+        return;
+    }
+
     let mode = if release { "release" } else { "debug" };
-    let target_dir = result.target_directory;
+    let target_dir = result.target_directory.clone();
 
     let build_dir = match &target {
         Some(t) => target_dir.join(t).join(mode),
@@ -355,7 +419,7 @@ fn build_plugins(args: &[String]) {
 
     println!(
         "=== Building {} cdylib plugins ({}{}, {}, {} parallel jobs) ===",
-        result.plugins.len(),
+        selected_plugins.len(),
         mode,
         target
             .as_ref()
@@ -369,8 +433,7 @@ fn build_plugins(args: &[String]) {
     let target_dir = Arc::new(target_dir);
     let target = Arc::new(target);
     let build_tool_str = build_tool.to_string();
-    let plugins: Vec<_> = result
-        .plugins
+    let plugins_to_build: Vec<_> = selected_plugins
         .iter()
         .map(|p| (p.package.name.clone(), p.package.manifest_path.clone()))
         .collect();
@@ -378,7 +441,7 @@ fn build_plugins(args: &[String]) {
     if use_cross {
         // cross must run from workspace root using -p, and sequentially
         // (each invocation starts a Docker container)
-        for (name, _manifest) in &plugins {
+        for (name, _manifest) in &plugins_to_build {
             if failed.load(Ordering::Relaxed) {
                 break;
             }
@@ -407,7 +470,7 @@ fn build_plugins(args: &[String]) {
         // cargo: parallel builds with --manifest-path
         let build_tool = Arc::new(build_tool_str);
 
-        for chunk in plugins.chunks(jobs) {
+        for chunk in plugins_to_build.chunks(jobs) {
             if failed.load(Ordering::Relaxed) {
                 break;
             }
@@ -473,7 +536,7 @@ fn build_plugins(args: &[String]) {
     let lib_ext = plugin_lib_ext(target.as_deref());
     let mut missing_binaries = Vec::new();
 
-    for info in &result.plugins {
+    for info in &selected_plugins {
         let name = &info.package.name;
         let lib_name = plugin_lib_name(name, target.as_deref());
         let src = build_dir.join(format!("{lib_name}.{lib_ext}"));
@@ -505,6 +568,7 @@ fn build_plugins(args: &[String]) {
             target_triple: target_triple.clone(),
             description: info.package.description.clone(),
             license: info.package.license.clone(),
+            tier: info.tier,
         };
         let metadata_path = plugins_dir.join(format!("{lib_name}.metadata.json"));
         let metadata_json =
@@ -520,7 +584,7 @@ fn build_plugins(args: &[String]) {
         eprintln!(
             "\n=== {} of {} plugin binaries missing after build ===",
             missing_binaries.len(),
-            result.plugins.len()
+            selected_plugins.len()
         );
         for name in &missing_binaries {
             eprintln!("  - {name}");
@@ -703,6 +767,15 @@ fn publish_plugins(args: &[String]) {
     }
 
     let plugins = discover_publishable_plugins(&plugins_dir);
+    let tier_filter = parse_tier_filter(args);
+    let plugins: Vec<PublishablePlugin> = if let Some(max_tier) = tier_filter {
+        plugins
+            .into_iter()
+            .filter(|p| p.metadata.tier.is_some_and(|t| t <= max_tier))
+            .collect()
+    } else {
+        plugins
+    };
     if plugins.is_empty() {
         eprintln!("No publishable plugins found in {}", plugins_dir.display());
         std::process::exit(1);

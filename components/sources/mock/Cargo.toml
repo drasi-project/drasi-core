@@ -9,6 +9,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "source", "mock", "testing"]
 categories = ["development-tools::testing"]
 
+[package.metadata.drasi]
+tier = 1
+
 [lib]
 crate-type = ["lib", "cdylib"]
 
