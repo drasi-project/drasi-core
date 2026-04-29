@@ -36,6 +36,7 @@ members = [
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
   "components/reactions/sse",
+  "components/reactions/mcp",
   "components/reactions/platform",
   "components/reactions/profiler",
   "components/reactions/application",

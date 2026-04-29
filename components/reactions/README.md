@@ -39,6 +39,7 @@ Reactions are responsible for:
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
+| `drasi-reaction-mcp` | MCP server with resource subscriptions | `mcp/` |
 | `drasi-reaction-application` | Programmatic/in-memory for embedded use | `application/` |
 | `drasi-reaction-platform` | Redis Streams publisher for platform integration | `platform/` |
 | `drasi-reaction-profiler` | Performance profiling and metrics | `profiler/` |
