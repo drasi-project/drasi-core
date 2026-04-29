@@ -74,6 +74,12 @@ Each tier builds on all requirements from the previous tier, unless overridden b
 - The plugin must be included in the project's **end-to-end (E2E) test suite**.
 - Building and testing the plugin must not take substantially longer than other Tier 1 plugins or raise the maintenance burden of CI infrastructure.
 
+### Platform Support
+
+- The plugin must build and pass all tests on **Linux**, **macOS**, and **Windows**.
+- CI must include builds for all three platforms.
+- Platform-specific behavior (e.g., file paths, network configuration) must be handled correctly on all supported platforms.
+
 ### Documentation
 
 - The plugin must have comprehensive documentation published on [drasi.io](https://drasi.io), including:
@@ -110,6 +116,11 @@ Tier 2 plugins are maintained and functional, but carry fewer guarantees than Ti
 - The plugin is **encouraged** (but not required) to be included in the E2E test suite.
 - The plugin's maintainer(s) should regularly run the testsuite and fix failures in a reasonably timely fashion.
 
+### Platform Support
+
+- The plugin must build and pass all tests on **Linux**, **macOS**, and **Windows**.
+- CI must include builds for all three platforms.
+
 ### Documentation
 
 - The plugin must have a **README** in its source directory explaining:
@@ -145,6 +156,12 @@ Tier 3 is the entry point for new plugins. The Drasi project provides no officia
 - The plugin must **build** in CI. Compilation failures will block merges.
 - The plugin should have tests, but tests may be incomplete.
 - Tests must not be flaky or cause CI instability for other plugins.
+
+### Platform Support
+
+- There is no platform support requirement for Tier 3 plugins.
+- Plugins should document which platforms they support in their README.
+- Plugins that only support a subset of platforms must not break builds on unsupported platforms (e.g., via conditional compilation with `cfg` attributes).
 
 ### Documentation
 
