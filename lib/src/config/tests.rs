@@ -52,7 +52,7 @@ mod schema_tests {
         assert_eq!(config.id, "test-query");
         assert_eq!(config.sources.len(), 2);
         assert!(!config.auto_start);
-        assert_eq!(config.query_language, QueryLanguage::Cypher); // default
+        assert_eq!(config.query_language, QueryLanguage::GQL); // default
     }
 
     #[test]
@@ -67,7 +67,7 @@ mod schema_tests {
         });
 
         let config: QueryConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(config.query_language, QueryLanguage::Cypher);
+        assert_eq!(config.query_language, QueryLanguage::GQL);
     }
 
     #[test]

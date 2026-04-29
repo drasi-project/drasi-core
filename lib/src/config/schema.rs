@@ -27,22 +27,22 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///
 /// # Query Languages
 ///
-/// - **Cypher**: Default graph query language with pattern matching
-/// - **GQL**: GraphQL-style queries compiled to Cypher
+/// - **GQL**: Graph query language compiled to Cypher
+/// - **Cypher**: Native graph query language with pattern matching
 ///
 /// # Default Behavior
 ///
-/// If not specified, queries default to `QueryLanguage::Cypher`.
+/// If not specified, queries default to `QueryLanguage::GQL`.
 ///
 /// # Examples
 ///
-/// ## Using Cypher (Default)
+/// ## Using GQL (Default)
 ///
 /// ```yaml
 /// queries:
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
-///     queryLanguage: Cypher  # Optional, this is the default
+///     queryLanguage: GQL  # Optional, this is the default
 ///     sources: [orders_db]
 /// ```
 ///
@@ -69,8 +69,8 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// queries as they conflict with incremental result computation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum QueryLanguage {
-    #[default]
     Cypher,
+    #[default]
     GQL,
 }
 
@@ -275,8 +275,8 @@ impl Default for DrasiLibConfig {
 /// # Query Languages
 ///
 /// Queries can be written in either:
-/// - **Cypher**: Default graph pattern matching language
-/// - **GQL**: GraphQL-style queries (compiled to Cypher)
+/// - **GQL**: Graph query language
+/// - **Cypher**: Native graph pattern matching language
 ///
 /// **Important**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
 /// queries as they conflict with incremental result computation.
@@ -299,7 +299,7 @@ impl Default for DrasiLibConfig {
 ///
 /// - **id**: Unique identifier (referenced by reactions)
 /// - **query**: Query string in specified language
-/// - **queryLanguage**: Cypher or GQL (default: Cypher)
+/// - **queryLanguage**: Cypher or GQL (default: GQL)
 /// - **sources**: Source IDs to subscribe to
 /// - **auto_start**: Start automatically (default: true)
 /// - **joins**: Optional synthetic join definitions
@@ -317,7 +317,7 @@ impl Default for DrasiLibConfig {
 /// queries:
 ///   - id: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
-///     queryLanguage: Cypher  # Optional, this is default
+///     queryLanguage: GQL  # Optional, this is default
 ///     sources: [orders_db]
 ///     auto_start: true
 ///     enableBootstrap: true
@@ -388,7 +388,7 @@ pub struct QueryConfig {
     pub id: String,
     /// Query string (Cypher or GQL depending on query_language)
     pub query: String,
-    /// Query language to use (default: Cypher)
+    /// Query language to use (default: GQL)
     #[serde(default, rename = "queryLanguage")]
     pub query_language: QueryLanguage,
     /// Middleware configurations for this query
@@ -580,20 +580,22 @@ impl DrasiLibConfig {
     }
 }
 
+const DEFAULT_BOOTSTRAP_BUFFER_SIZE: usize = 10_000;
+
 fn default_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn default_auto_start() -> bool {
+pub fn default_auto_start() -> bool {
     true
 }
 
-fn default_enable_bootstrap() -> bool {
+pub fn default_enable_bootstrap() -> bool {
     true
 }
 
-fn default_bootstrap_buffer_size() -> usize {
-    10000
+pub fn default_bootstrap_buffer_size() -> usize {
+    DEFAULT_BOOTSTRAP_BUFFER_SIZE
 }
 
 // Conversion implementations for QueryJoin types

@@ -68,8 +68,8 @@ The main query evaluation logic is in `core/src/evaluation/` which processes con
 - **Storage Backends**: Supports in-memory, RocksDB, and Redis/Garnet for persistent indexing
 
 ### Query Languages
-- **Cypher**: Primary query language for graph traversal and pattern matching
-- **GraphQL**: Alternative query interface with GraphQL-to-Cypher compilation
+- **GraphQL**: Default query interface, compiled to Cypher under the hood
+- **Cypher**: Supported query language for graph traversal and pattern matching
 
 ### Storage Architecture
 - Default: In-memory indexes for development and testing
