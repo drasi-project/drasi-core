@@ -86,7 +86,6 @@ async fn aggregating_query_add_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(0.0),
@@ -115,7 +114,6 @@ async fn aggregating_query_add_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0),
@@ -144,7 +142,6 @@ async fn aggregating_query_add_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("bar"),
               "my_sum" => json!(0.0),
@@ -259,7 +256,6 @@ async fn aggregating_query_update_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0),
@@ -289,7 +285,6 @@ async fn aggregating_query_update_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(4.0),
@@ -319,7 +314,6 @@ async fn aggregating_query_update_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(9.0),
@@ -349,7 +343,6 @@ async fn aggregating_query_update_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: false,
             before: None,
             after: variablemap![
               "key" => json!("foo"),
@@ -435,7 +428,6 @@ async fn aggregating_query_remove_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: true,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0),
@@ -464,7 +456,6 @@ async fn aggregating_query_remove_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(1.0),
@@ -493,7 +484,6 @@ async fn aggregating_query_remove_solution() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec!["key".to_string()],
             default_before: false,
-            default_after: true,
             before: Some(variablemap![
               "key" => json!("foo"),
               "my_sum" => json!(3.0),
@@ -591,7 +581,6 @@ async fn group_switch() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap![
                   "key" => json!("bar"),
                   "my_sum" => json!(5.0)
@@ -605,7 +594,6 @@ async fn group_switch() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap![
                   "key" => json!("foo"),
                   "my_sum" => json!(3.0)
@@ -628,7 +616,7 @@ async fn group_switch() {
         .unwrap()
         .unwrap()
     {
-        ValueAccumulator::Sum { value } => value,
+        ValueAccumulator::Sum { value, .. } => value,
         _ => panic!(),
     };
 
@@ -641,7 +629,7 @@ async fn group_switch() {
         .unwrap()
         .unwrap()
     {
-        ValueAccumulator::Sum { value } => value,
+        ValueAccumulator::Sum { value, .. } => value,
         _ => panic!(),
     };
 
@@ -731,7 +719,6 @@ async fn group_switch_complex_accumulator() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap![
                   "key" => json!("bar"),
                   "my_avg" => json!(5.0)
@@ -745,7 +732,6 @@ async fn group_switch_complex_accumulator() {
             QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["key".to_string()],
                 default_before: false,
-                default_after: false,
                 before: Some(variablemap![
                   "key" => json!("foo"),
                   "my_avg" => json!(1.5)
@@ -839,7 +825,6 @@ async fn test_aggregating_function_sum_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "my_sum" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(0),0,0))
             ]),
@@ -864,7 +849,6 @@ async fn test_aggregating_function_sum_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "my_sum" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
             ]),
@@ -940,7 +924,6 @@ async fn test_aggregating_function_max_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "max_result" => json!(null)
             ]),
@@ -966,7 +949,6 @@ async fn test_aggregating_function_max_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "max_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
             ]),
@@ -992,7 +974,6 @@ async fn test_aggregating_function_max_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "max_result" => VariableValue::Duration(Duration::new(ChronoDuration::hours(2) + ChronoDuration::minutes(1)+ ChronoDuration::milliseconds(2),0,0))
             ]),
@@ -1083,7 +1064,6 @@ async fn test_aggregating_function_max_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "max_date" => json!(null),
               "max_localdatetime" => json!(null)
@@ -1111,7 +1091,6 @@ async fn test_aggregating_function_max_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
                 "max_date" => VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2021, 1, 1).unwrap()),
                 "max_localdatetime" => VariableValue::LocalDateTime(chrono::NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 6).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
@@ -1139,7 +1118,6 @@ async fn test_aggregating_function_max_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
                 "max_date" => VariableValue::Date(chrono::NaiveDate::from_ymd_opt(2021, 1, 2).unwrap()),
                 "max_localdatetime" => VariableValue::LocalDateTime(chrono::NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 7).unwrap(), chrono::NaiveTime::from_hms_opt(2, 2, 2).unwrap()))
@@ -1217,7 +1195,6 @@ async fn test_aggregating_function_min_temporal_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "min_result" => json!(null)
             ]),
@@ -1243,7 +1220,6 @@ async fn test_aggregating_function_min_temporal_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "min_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
             ]),
@@ -1269,7 +1245,6 @@ async fn test_aggregating_function_min_temporal_duration() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
               "min_result" => VariableValue::Duration(Duration::new(ChronoDuration::seconds(1),0,0))
             ]),
@@ -1359,7 +1334,6 @@ async fn test_aggregating_function_min_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
                 "min_time" => json!(null),
                 "min_localdatetime" => json!(null)
@@ -1389,7 +1363,6 @@ async fn test_aggregating_function_min_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_opt(21, 1, 1).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 6).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
@@ -1419,7 +1392,6 @@ async fn test_aggregating_function_min_temporal_instant() {
         vec![QueryPartEvaluationContext::Aggregation {
             grouping_keys: vec![],
             default_before: true,
-            default_after: false,
             before: Some(variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_milli_opt(11,32,23,123).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 1).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
@@ -1427,6 +1399,137 @@ async fn test_aggregating_function_min_temporal_instant() {
             after: variablemap![
                 "min_time" => VariableValue::LocalTime(NaiveTime::from_hms_milli_opt(11,32,23,123).unwrap()),
                 "min_localdatetime" => VariableValue::LocalDateTime(NaiveDateTime::new(chrono::NaiveDate::from_ymd_opt(2019, 6, 1).unwrap(), chrono::NaiveTime::from_hms_opt(1, 1, 1).unwrap()))
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn aggregating_query_remove_to_identity_emits_removing() {
+    // Removing the only contributor of a group should emit Removing,
+    // not an Aggregation diff that leaves a phantom identity row.
+    let query = build_query(
+        "MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum, min(a.Value1) as my_min",
+    );
+
+    let node1 = json!({
+      "id": 1,
+      "Value1": 5,
+      "Name": "foo"
+    });
+
+    let function_registry = create_aggregating_test_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let expr_evaluator = Arc::new(ExpressionEvaluator::new(
+        function_registry.clone(),
+        ari.clone(),
+    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
+
+    process_solution(
+        &query,
+        &evaluator,
+        QueryPartEvaluationContext::Adding {
+            after: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        },
+    )
+    .await;
+
+    let result = process_solution(
+        &query,
+        &evaluator,
+        QueryPartEvaluationContext::Removing {
+            before: variablemap!["a" => node1.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        vec![QueryPartEvaluationContext::Removing {
+            before: variablemap![
+              "key" => json!("foo"),
+              "my_sum" => json!(5.0),
+              "my_min" => json!(5.0)
+            ],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn aggregating_query_remove_keeps_group_with_remaining_contributors() {
+    // sum-of-mixed-signs reaching zero with contributors still present must
+    // NOT emit Removing. Identity is a property of contributor count, not
+    // the projected value.
+    let query = build_query("MATCH (a) RETURN a.Name as key, sum(a.Value1) as my_sum");
+
+    let node_pos = json!({
+      "id": 1,
+      "Value1": 5,
+      "Name": "foo"
+    });
+    let node_neg = json!({
+      "id": 2,
+      "Value1": -5,
+      "Name": "foo"
+    });
+
+    let function_registry = create_aggregating_test_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let expr_evaluator = Arc::new(ExpressionEvaluator::new(
+        function_registry.clone(),
+        ari.clone(),
+    ));
+    let evaluator = Arc::new(QueryPartEvaluator::new(expr_evaluator.clone(), ari.clone()));
+
+    process_solution(
+        &query,
+        &evaluator,
+        QueryPartEvaluationContext::Adding {
+            after: variablemap!["a" => node_pos.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        },
+    )
+    .await;
+
+    process_solution(
+        &query,
+        &evaluator,
+        QueryPartEvaluationContext::Adding {
+            after: variablemap!["a" => node_neg.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        },
+    )
+    .await;
+
+    // sum is now 0 with two contributors. Remove the positive contributor;
+    // one contributor remains so the group must persist.
+    let result = process_solution(
+        &query,
+        &evaluator,
+        QueryPartEvaluationContext::Removing {
+            before: variablemap!["a" => node_pos.clone()],
+            row_signature: IGNORED_ROW_SIGNATURE,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        vec![QueryPartEvaluationContext::Aggregation {
+            grouping_keys: vec!["key".to_string()],
+            default_before: false,
+            before: Some(variablemap![
+              "key" => json!("foo"),
+              "my_sum" => json!(0.0)
+            ]),
+            after: variablemap![
+              "key" => json!("foo"),
+              "my_sum" => json!(-5.0)
             ],
             row_signature: IGNORED_ROW_SIGNATURE,
         }]

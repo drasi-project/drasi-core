@@ -340,7 +340,7 @@ async fn test_source_to_query_to_reaction_data_flow() {
     assert_eq!(result.results.len(), 1, "Should have one result diff");
 
     match &result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert!(
                 data.get("s").is_some(),
                 "Result should contain variable 's' from RETURN clause"

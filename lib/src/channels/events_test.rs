@@ -106,6 +106,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,
@@ -125,6 +126,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: metadata.clone(),
             profiling: None,
@@ -205,6 +207,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,

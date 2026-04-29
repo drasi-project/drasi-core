@@ -161,7 +161,7 @@ async fn test_webhook_event_flows_to_reaction() {
 
     // Verify the result contains our data
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["name"], "Test Event");
             // Values may come as strings from template rendering
             let value = &data["value"];
@@ -268,7 +268,7 @@ async fn test_webhook_path_params_flow_to_reaction() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["user_id"], "user-42");
             assert_eq!(data["event_type"], "click");
         }
@@ -383,7 +383,7 @@ async fn test_webhook_hmac_auth_flows_correctly() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["data"], "confidential");
         }
         _ => panic!("Expected Add result"),
@@ -504,7 +504,7 @@ async fn test_webhook_bearer_auth_flows_correctly() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["content"], "important info");
         }
         _ => panic!("Expected Add result"),
@@ -670,7 +670,7 @@ async fn test_webhook_condition_routing_flows_correctly() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["type"], "Commit");
             assert_eq!(data["content"], "Fix bug");
         }
@@ -770,7 +770,7 @@ async fn test_webhook_yaml_content_flows_correctly() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["name"], "YAML Test");
             // YAML integers may be preserved or come as strings depending on template
             let count = &data["count"];
@@ -912,7 +912,7 @@ async fn test_webhook_update_operation_flows_correctly() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             assert_eq!(data["status"], "pending");
         }
         _ => panic!("Expected Add result for insert"),
@@ -1023,7 +1023,7 @@ async fn test_standard_mode_flows_to_reaction() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             // Standard mode should preserve integer types
             let value = &data["value"];
             assert!(
@@ -1232,7 +1232,7 @@ async fn test_webhook_payload_spread_as_properties() {
 
     let query_result = result.unwrap();
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             // All payload fields should be available as properties
             assert_eq!(data["id"], "evt-123");
             assert_eq!(data["name"], "Test Event");

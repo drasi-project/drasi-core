@@ -518,7 +518,6 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -545,7 +544,6 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -572,7 +570,6 @@ async fn aggregating_part_to_aggregating_part_add_solution() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -677,7 +674,6 @@ async fn aggregating_part_to_aggregating_part_update_solution() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -790,7 +786,6 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -819,7 +814,6 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
                 ],
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
@@ -833,7 +827,6 @@ async fn aggregating_part_to_aggregating_part_group_switch() {
                 ],
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             },
         ]
@@ -985,7 +978,6 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
             ],
             grouping_keys: vec!["Category".to_string()],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1014,7 +1006,6 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
                 ],
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             },
             QueryPartEvaluationContext::Aggregation {
@@ -1028,7 +1019,6 @@ async fn aggregating_part_to_aggregating_part_group_switch_with_comments() {
                 ],
                 grouping_keys: vec!["Category".to_string()],
                 default_before: false,
-                default_after: false,
                 row_signature: IGNORED_ROW_SIGNATURE,
             },
         ]
@@ -1096,7 +1086,6 @@ async fn sequential_aggregations1() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1121,7 +1110,6 @@ async fn sequential_aggregations1() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1146,7 +1134,6 @@ async fn sequential_aggregations1() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1171,7 +1158,6 @@ async fn sequential_aggregations1() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1196,7 +1182,6 @@ async fn sequential_aggregations1() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1262,7 +1247,6 @@ async fn sequential_aggregations2() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1287,7 +1271,6 @@ async fn sequential_aggregations2() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1312,7 +1295,6 @@ async fn sequential_aggregations2() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1337,7 +1319,6 @@ async fn sequential_aggregations2() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );
@@ -1362,7 +1343,6 @@ async fn sequential_aggregations2() {
             ],
             grouping_keys: vec![],
             default_before: false,
-            default_after: false,
             row_signature: IGNORED_ROW_SIGNATURE,
         }]
     );

@@ -433,6 +433,7 @@ mod tests {
         // Create a test query result
         let query_result = QueryResult::new(
             "test-query".to_string(),
+            0,
             chrono::Utc::now(),
             vec![],
             Default::default(),

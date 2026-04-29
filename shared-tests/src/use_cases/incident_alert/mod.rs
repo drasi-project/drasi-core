@@ -273,7 +273,6 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
@@ -393,7 +392,6 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: true,
-                default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
@@ -621,13 +619,17 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             .process_source_change(change.clone())
             .await
             .unwrap();
-        assert_eq!(result.len(), 2);
+        // The cross-group transition emits three diffs: an Aggregation for
+        // the new group (count 0 -> 4), a coalesced Aggregation tracking the
+        // old group's count walking down through the non-empty intermediate
+        // states (count 4 -> 1), and a Removing once the old group hits
+        // identity (no remaining contributors).
+        assert_eq!(result.len(), 3);
         println!("getting result {result:?}");
         assert!(contains_data(
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
@@ -653,28 +655,13 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
         ));
         assert!(contains_data(
             &result,
-            &QueryPartEvaluationContext::Aggregation {
-                default_before: false,
-                default_after: false,
-                grouping_keys: vec![
-                    "RegionName".into(),
-                    "IncidentId".into(),
-                    "IncidentSeverity".into(),
-                    "IncidentDescription".into()
-                ],
-                before: Some(variablemap!(
+            &QueryPartEvaluationContext::Removing {
+                before: variablemap!(
                   "IncidentId" => VariableValue::from(json!("in1000")),
                   "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
                   "RegionName" => VariableValue::from(json!("SoCal")),
-                  "IncidentSeverity" => VariableValue::from(json!("critical")),
-                  "EmployeeCount" => VariableValue::from(json!(0))
-                )),
-                after: variablemap!(
-                  "IncidentId" => VariableValue::from(json!("in1000")),
-                  "IncidentDescription" => VariableValue::from(json!("Forest Fire")),
-                  "RegionName" => VariableValue::from(json!("SoCal")),
-                  "IncidentSeverity" => VariableValue::from(json!("critical")),
-                  "EmployeeCount" => VariableValue::from(json!(4))
+                  "IncidentSeverity" => VariableValue::from(json!("extreme")),
+                  "EmployeeCount" => VariableValue::from(json!(1))
                 ),
                 row_signature: IGNORED_ROW_SIGNATURE,
             }
@@ -832,7 +819,6 @@ pub async fn incident_alert(config: &(impl QueryTestConfig + Send)) {
             &result,
             &QueryPartEvaluationContext::Aggregation {
                 default_before: false,
-                default_after: false,
                 grouping_keys: vec![
                     "RegionName".into(),
                     "IncidentId".into(),
