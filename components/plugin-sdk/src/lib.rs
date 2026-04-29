@@ -211,6 +211,7 @@ pub mod mapper;
 pub mod prelude;
 pub mod registration;
 pub mod resolver;
+pub mod schema_ui;
 
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;

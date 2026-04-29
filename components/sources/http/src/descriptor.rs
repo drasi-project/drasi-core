@@ -565,14 +565,49 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = HttpSourceSchemas::openapi();
-        serde_json::to_string(
+        let raw = serde_json::to_string(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(&raw, "source.http.HttpSourceConfig")
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("0.0.0.0")
+            })
+            .field("port", |f| {
+                f.group("Connection").order(2).placeholder("8081")
+            })
+            .field("endpoint", |f| {
+                f.group("Connection").order(3).placeholder("/api/data")
+            })
+            .field("timeoutMs", |f| {
+                f.group("Connection").order(4).placeholder("10000")
+            })
+            .field("webhooks", |f| f.group("Webhooks").order(1))
+            .field("adaptiveEnabled", |f| {
+                f.group("Adaptive Batching").order(1).collapsed(true)
+            })
+            .field("adaptiveMaxBatchSize", |f| {
+                f.group("Adaptive Batching").order(2)
+            })
+            .field("adaptiveMinBatchSize", |f| {
+                f.group("Adaptive Batching").order(3)
+            })
+            .field("adaptiveMaxWaitMs", |f| {
+                f.group("Adaptive Batching").order(4)
+            })
+            .field("adaptiveMinWaitMs", |f| {
+                f.group("Adaptive Batching").order(5)
+            })
+            .field("adaptiveWindowSecs", |f| {
+                f.group("Adaptive Batching").order(6)
+            })
+            .annotate()
     }
 
     async fn create_source(
