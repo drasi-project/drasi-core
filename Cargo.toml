@@ -43,6 +43,7 @@ members = [
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/qdrant",
 
   # Identity Provider Plugins
   "components/identity/azure",
