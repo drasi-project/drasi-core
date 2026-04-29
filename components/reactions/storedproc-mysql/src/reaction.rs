@@ -38,7 +38,7 @@ use drasi_lib::reactions::common::OperationType;
 /// Invokes MySQL stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct MySqlStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: MySqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MySqlExecutor>>>,
     parser: ParameterParser,
@@ -268,6 +268,10 @@ impl Reaction for MySqlStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{
             MySqlStoredProcReactionConfigDto, StoredProcQueryConfigDto, StoredProcTemplateSpecDto,
         };
@@ -306,11 +310,7 @@ impl Reaction for MySqlStoredProcReaction {
         };
 
         match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),
         }
     }

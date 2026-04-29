@@ -305,11 +305,13 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        // Fallback for builder-created components (no descriptor / no raw_config).
         match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                map.remove("password");
-                map.into_iter().collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),
         }
     }
@@ -768,7 +770,7 @@ mod tests {
         }
 
         #[test]
-        fn test_properties_does_not_expose_password() {
+        fn test_properties_includes_password() {
             let source = PostgresSourceBuilder::new("test")
                 .with_database("db")
                 .with_user("user")
@@ -777,8 +779,13 @@ mod tests {
                 .unwrap();
             let props = source.properties();
 
-            // Password should not be exposed in properties
-            assert!(!props.contains_key("password"));
+            // Password must be preserved for config persistence roundtrip
+            assert_eq!(
+                props.get("password"),
+                Some(&serde_json::Value::String(
+                    "super_secret_password".to_string()
+                ))
+            );
         }
 
         #[test]

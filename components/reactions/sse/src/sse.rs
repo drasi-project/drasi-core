@@ -78,7 +78,7 @@ fn pre_create_broadcasters_for_query_config(
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: SseReactionConfig,
     broadcasters: Arc<tokio::sync::RwLock<HashMap<String, broadcast::Sender<String>>>>,
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -228,6 +228,11 @@ impl Reaction for SseReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        // Fallback for builder-created components (no descriptor / no raw_config).
         match serde_json::to_value(&self.config) {
             Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),

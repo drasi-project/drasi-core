@@ -38,7 +38,7 @@ use crate::parser::ParameterParser;
 /// Invokes MS SQL Server stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct MsSqlStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MsSqlExecutor>>>,
     parser: ParameterParser,
@@ -269,6 +269,10 @@ impl Reaction for MsSqlStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{
             MsSqlStoredProcReactionConfigDto, StoredProcQueryConfigDto, StoredProcTemplateSpecDto,
         };
@@ -307,11 +311,7 @@ impl Reaction for MsSqlStoredProcReaction {
         };
 
         match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),
         }
     }

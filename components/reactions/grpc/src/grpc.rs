@@ -37,7 +37,7 @@ use crate::proto::{
 
 /// gRPC reaction that sends query results to an external gRPC service
 pub struct GrpcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: GrpcReactionConfig,
 }
 
@@ -356,6 +356,10 @@ impl Reaction for GrpcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::GrpcReactionConfigDto;
         use drasi_plugin_sdk::ConfigValue;
 

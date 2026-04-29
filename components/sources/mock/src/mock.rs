@@ -48,7 +48,7 @@ use tracing::Instrument;
 /// Internal state is protected by `RwLock`.
 pub struct MockSource {
     /// Base source implementation providing dispatchers, status tracking, and lifecycle management.
-    base: SourceBase,
+    pub(crate) base: SourceBase,
 
     /// Configuration specifying data type and generation interval.
     config: MockSourceConfig,
@@ -154,6 +154,10 @@ impl Source for MockSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         // Serialize through the DTO to get camelCase naming and structured output
         // matching the creation schema and config file format
         use crate::descriptor::{DataTypeDto, MockSourceConfigDto};

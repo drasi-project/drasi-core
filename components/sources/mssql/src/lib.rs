@@ -185,6 +185,10 @@ impl Source for MsSqlSource {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{
             AuthModeDto, EncryptionModeDto, MsSqlSourceConfigDto, StartPositionDto,
             TableKeyConfigDto,
@@ -234,11 +238,7 @@ impl Source for MsSqlSource {
         };
 
         match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => std::collections::HashMap::new(),
         }
     }

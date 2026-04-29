@@ -26,7 +26,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
 pub struct LogReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: LogReactionConfig,
 }
 
@@ -328,6 +328,10 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{LogReactionConfigDto, QueryConfigDto, TemplateSpecDto};
 
         fn map_spec_to_dto(spec: &crate::TemplateSpec) -> TemplateSpecDto {
