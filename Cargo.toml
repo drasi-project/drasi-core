@@ -55,6 +55,9 @@ members = [
   # State Store Plugins
   "components/state_stores/redb",
 
+  # WAL Plugins
+  "components/wals/redb",
+
   # FFI Primitives (shared FFI types and macros)
   "components/ffi-primitives",
 
