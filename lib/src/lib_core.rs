@@ -1805,6 +1805,412 @@ mod tests {
             assert!(bp.properties.contains_key("file_paths"));
         }
 
+        // -- Mock source with raw_config (simulates descriptor-created source) --
+
+        struct RawConfigSource {
+            id: String,
+            raw_config: serde_json::Value,
+            status_handle: crate::component_graph::ComponentStatusHandle,
+            dispatchers: Arc<
+                RwLock<
+                    Vec<
+                        Box<
+                            dyn crate::channels::ChangeDispatcher<
+                                crate::channels::SourceEventWrapper,
+                            >,
+                        >,
+                    >,
+                >,
+            >,
+        }
+
+        impl RawConfigSource {
+            fn new(id: &str, raw_config: serde_json::Value) -> Self {
+                Self {
+                    id: id.to_string(),
+                    raw_config,
+                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
+                    dispatchers: Arc::new(RwLock::new(Vec::new())),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl crate::sources::Source for RawConfigSource {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn type_name(&self) -> &str {
+                "test-postgres"
+            }
+            fn properties(&self) -> HashMap<String, serde_json::Value> {
+                // Return raw_config if set (simulates the pattern in real plugins)
+                if let serde_json::Value::Object(map) = &self.raw_config {
+                    return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                }
+                HashMap::new()
+            }
+            fn auto_start(&self) -> bool {
+                false
+            }
+            async fn start(&self) -> anyhow::Result<()> {
+                self.status_handle
+                    .set_status(
+                        crate::channels::ComponentStatus::Running,
+                        Some("Running".into()),
+                    )
+                    .await;
+                Ok(())
+            }
+            async fn stop(&self) -> anyhow::Result<()> {
+                self.status_handle
+                    .set_status(
+                        crate::channels::ComponentStatus::Stopped,
+                        Some("Stopped".into()),
+                    )
+                    .await;
+                Ok(())
+            }
+            async fn status(&self) -> crate::channels::ComponentStatus {
+                self.status_handle.get_status().await
+            }
+            async fn subscribe(
+                &self,
+                settings: crate::config::SourceSubscriptionSettings,
+            ) -> anyhow::Result<crate::channels::SubscriptionResponse> {
+                use crate::channels::ChannelChangeDispatcher;
+                let dispatcher =
+                    ChannelChangeDispatcher::<crate::channels::SourceEventWrapper>::new(100);
+                let receiver = dispatcher.create_receiver().await?;
+                self.dispatchers.write().await.push(Box::new(dispatcher));
+                Ok(crate::channels::SubscriptionResponse {
+                    query_id: settings.query_id,
+                    source_id: self.id.clone(),
+                    receiver,
+                    bootstrap_receiver: None,
+                    position_handle: None,
+                })
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            async fn initialize(&self, ctx: crate::context::SourceRuntimeContext) {
+                self.status_handle.wire(ctx.update_tx.clone()).await;
+            }
+        }
+
+        // -- Mock reaction with raw_config --
+
+        struct RawConfigReaction {
+            id: String,
+            queries: Vec<String>,
+            raw_config: serde_json::Value,
+            status_handle: crate::component_graph::ComponentStatusHandle,
+        }
+
+        impl RawConfigReaction {
+            fn new(id: &str, queries: Vec<String>, raw_config: serde_json::Value) -> Self {
+                Self {
+                    id: id.to_string(),
+                    queries,
+                    raw_config,
+                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Reaction for RawConfigReaction {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn type_name(&self) -> &str {
+                "test-http"
+            }
+            fn properties(&self) -> HashMap<String, serde_json::Value> {
+                if let serde_json::Value::Object(map) = &self.raw_config {
+                    return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                }
+                HashMap::new()
+            }
+            fn query_ids(&self) -> Vec<String> {
+                self.queries.clone()
+            }
+            fn auto_start(&self) -> bool {
+                false
+            }
+            async fn initialize(&self, ctx: crate::context::ReactionRuntimeContext) {
+                self.status_handle.wire(ctx.update_tx.clone()).await;
+            }
+            async fn start(&self) -> anyhow::Result<()> {
+                self.status_handle
+                    .set_status(
+                        crate::channels::ComponentStatus::Running,
+                        Some("Running".into()),
+                    )
+                    .await;
+                Ok(())
+            }
+            async fn stop(&self) -> anyhow::Result<()> {
+                self.status_handle
+                    .set_status(
+                        crate::channels::ComponentStatus::Stopped,
+                        Some("Stopped".into()),
+                    )
+                    .await;
+                Ok(())
+            }
+            async fn status(&self) -> crate::channels::ComponentStatus {
+                self.status_handle.get_status().await
+            }
+            async fn enqueue_query_result(
+                &self,
+                _result: crate::channels::QueryResult,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        // -- Tests for raw_config preservation --
+
+        #[tokio::test]
+        async fn snapshot_preserves_secret_references_in_source_properties() {
+            let raw_config = serde_json::json!({
+                "host": "db.example.com",
+                "port": 5432,
+                "password": { "kind": "secret", "name": "DB_PASSWORD" },
+                "sslMode": { "kind": "EnvironmentVariable", "name": "SSL_MODE", "default": "prefer" }
+            });
+
+            let source = RawConfigSource::new("pg-source", raw_config.clone());
+            let core = DrasiLib::builder()
+                .with_id("raw-config-test")
+                .with_source(source)
+                .with_query(
+                    Query::cypher("q1")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("pg-source")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+            let src = snapshot
+                .sources
+                .iter()
+                .find(|s| s.id == "pg-source")
+                .expect("pg-source should be in snapshot");
+
+            // Static values preserved
+            assert_eq!(
+                src.properties.get("host"),
+                Some(&serde_json::json!("db.example.com"))
+            );
+            assert_eq!(src.properties.get("port"), Some(&serde_json::json!(5432)));
+
+            // Secret reference preserved (not resolved to plaintext)
+            assert_eq!(
+                src.properties.get("password"),
+                Some(&serde_json::json!({"kind": "secret", "name": "DB_PASSWORD"}))
+            );
+
+            // Environment variable reference preserved (not resolved)
+            assert_eq!(
+                src.properties.get("sslMode"),
+                Some(
+                    &serde_json::json!({"kind": "EnvironmentVariable", "name": "SSL_MODE", "default": "prefer"})
+                )
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_preserves_secret_references_in_reaction_properties() {
+            // First, create a source so the query has something to reference
+            let source = PropertiedSource::new("pg-source");
+
+            let raw_config = serde_json::json!({
+                "endpoint": "https://api.example.com/webhook",
+                "apiKey": { "kind": "secret", "name": "API_KEY" },
+                "retryCount": 3,
+                "timeout": { "kind": "EnvironmentVariable", "name": "TIMEOUT_MS", "default": "5000" }
+            });
+
+            let reaction =
+                RawConfigReaction::new("http-reaction", vec!["q1".to_string()], raw_config);
+
+            let core = DrasiLib::builder()
+                .with_id("raw-config-reaction-test")
+                .with_source(source)
+                .with_query(
+                    Query::cypher("q1")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("pg-source")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+            core.add_reaction(reaction).await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+            let rxn = snapshot
+                .reactions
+                .iter()
+                .find(|r| r.id == "http-reaction")
+                .expect("http-reaction should be in snapshot");
+
+            // Secret reference preserved
+            assert_eq!(
+                rxn.properties.get("apiKey"),
+                Some(&serde_json::json!({"kind": "secret", "name": "API_KEY"}))
+            );
+
+            // Env var reference preserved
+            assert_eq!(
+                rxn.properties.get("timeout"),
+                Some(
+                    &serde_json::json!({"kind": "EnvironmentVariable", "name": "TIMEOUT_MS", "default": "5000"})
+                )
+            );
+
+            // Static values preserved
+            assert_eq!(
+                rxn.properties.get("endpoint"),
+                Some(&serde_json::json!("https://api.example.com/webhook"))
+            );
+            assert_eq!(
+                rxn.properties.get("retryCount"),
+                Some(&serde_json::json!(3))
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_preserves_camelcase_keys_from_raw_config() {
+            let raw_config = serde_json::json!({
+                "host": "localhost",
+                "port": 5432,
+                "slotName": "my_slot",
+                "publicationName": "my_pub",
+                "sslMode": "prefer"
+            });
+
+            let source = RawConfigSource::new("pg-source", raw_config);
+            let core = DrasiLib::builder()
+                .with_id("camelcase-test")
+                .with_source(source)
+                .with_query(
+                    Query::cypher("q1")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("pg-source")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+            let src = snapshot
+                .sources
+                .iter()
+                .find(|s| s.id == "pg-source")
+                .unwrap();
+
+            // Verify camelCase keys are preserved (not converted to snake_case)
+            assert!(
+                src.properties.contains_key("slotName"),
+                "Should have camelCase key 'slotName', got: {:?}",
+                src.properties.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                src.properties.contains_key("publicationName"),
+                "Should have camelCase key 'publicationName'"
+            );
+            assert!(
+                src.properties.contains_key("sslMode"),
+                "Should have camelCase key 'sslMode'"
+            );
+        }
+
+        #[tokio::test]
+        async fn snapshot_mixed_config_values_roundtrip() {
+            let raw_config = serde_json::json!({
+                "host": "db.example.com",
+                "port": 5432,
+                "database": "${DB_NAME:-mydb}",
+                "password": { "kind": "secret", "name": "DB_PASSWORD" },
+                "sslMode": { "kind": "EnvironmentVariable", "name": "SSL_MODE", "default": "prefer" },
+                "tables": [
+                    { "name": "users", "keys": ["id"] },
+                    { "name": "orders", "keys": ["order_id"] }
+                ]
+            });
+
+            let source = RawConfigSource::new("pg-source", raw_config);
+            let core = DrasiLib::builder()
+                .with_id("mixed-config-test")
+                .with_source(source)
+                .with_query(
+                    Query::cypher("q1")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("pg-source")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            // Serialize to JSON and back (simulates persistence roundtrip)
+            let json = serde_json::to_string_pretty(&snapshot).expect("Should serialize to JSON");
+            let restored: ConfigurationSnapshot =
+                serde_json::from_str(&json).expect("Should deserialize from JSON");
+
+            let src = restored
+                .sources
+                .iter()
+                .find(|s| s.id == "pg-source")
+                .unwrap();
+
+            // All value types survive JSON roundtrip
+            assert_eq!(
+                src.properties.get("host"),
+                Some(&serde_json::json!("db.example.com"))
+            );
+            assert_eq!(src.properties.get("port"), Some(&serde_json::json!(5432)));
+            assert_eq!(
+                src.properties.get("database"),
+                Some(&serde_json::json!("${DB_NAME:-mydb}"))
+            );
+            assert_eq!(
+                src.properties.get("password"),
+                Some(&serde_json::json!({"kind": "secret", "name": "DB_PASSWORD"}))
+            );
+            assert_eq!(
+                src.properties.get("sslMode"),
+                Some(
+                    &serde_json::json!({"kind": "EnvironmentVariable", "name": "SSL_MODE", "default": "prefer"})
+                )
+            );
+            assert_eq!(
+                src.properties.get("tables"),
+                Some(&serde_json::json!([
+                    {"name": "users", "keys": ["id"]},
+                    {"name": "orders", "keys": ["order_id"]}
+                ]))
+            );
+        }
+
         #[tokio::test]
         async fn snapshot_excludes_introspection_source() {
             let core = build_core_with_components().await;

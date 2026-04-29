@@ -38,7 +38,7 @@ use drasi_lib::reactions::common::OperationType;
 /// Invokes PostgreSQL stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct PostgresStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: PostgresStoredProcReactionConfig,
     executor: RwLock<Option<Arc<PostgresExecutor>>>,
     parser: ParameterParser,
@@ -279,6 +279,10 @@ impl Reaction for PostgresStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{
             PostgresStoredProcReactionConfigDto, StoredProcQueryConfigDto,
             StoredProcTemplateSpecDto,
@@ -318,11 +322,7 @@ impl Reaction for PostgresStoredProcReaction {
         };
 
         match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),
         }
     }

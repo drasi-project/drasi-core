@@ -33,7 +33,7 @@ use drasi_lib::Reaction;
 use super::HttpReactionBuilder;
 
 pub struct HttpReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: HttpReactionConfig,
 }
 
@@ -242,6 +242,10 @@ impl Reaction for HttpReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
         use crate::descriptor::{CallSpecDto, HttpQueryConfigDto, HttpReactionConfigDto};
         use drasi_plugin_sdk::ConfigValue;
 

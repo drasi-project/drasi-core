@@ -188,7 +188,9 @@ impl ReactionPluginDescriptor for MsSqlStoredProcReactionDescriptor {
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
-        let reaction = builder.build().await?;
+        let mut reaction = builder.build().await?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

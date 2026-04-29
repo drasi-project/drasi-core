@@ -103,11 +103,13 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
 
         let interval_ms: u64 = mapper.resolve_typed(&dto.interval_ms)?;
 
-        let source = MockSourceBuilder::new(id)
+        let mut source = MockSourceBuilder::new(id)
             .with_data_type(data_type)
             .with_interval_ms(interval_ms)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

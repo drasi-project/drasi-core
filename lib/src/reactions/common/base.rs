@@ -120,6 +120,9 @@ pub struct ReactionBase {
     /// Set either programmatically (via `set_identity_provider`) or automatically
     /// from the runtime context during `initialize()`.
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
+    /// Original raw config JSON from the descriptor, preserving ConfigValue
+    /// envelopes (secrets, env vars) for lossless persistence roundtrips.
+    raw_config: Option<serde_json::Value>,
 }
 
 impl ReactionBase {
@@ -140,6 +143,7 @@ impl ReactionBase {
             processing_task: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
+            raw_config: None,
         }
     }
 
@@ -209,6 +213,16 @@ impl ReactionBase {
         self.auto_start
     }
 
+    /// Set the original raw config JSON for lossless persistence roundtrips.
+    pub fn set_raw_config(&mut self, config: serde_json::Value) {
+        self.raw_config = Some(config);
+    }
+
+    /// Get the original raw config JSON, if set by a descriptor.
+    pub fn raw_config(&self) -> Option<&serde_json::Value> {
+        self.raw_config.as_ref()
+    }
+
     /// Clone the ReactionBase with shared Arc references
     ///
     /// This creates a new ReactionBase that shares the same underlying
@@ -226,6 +240,7 @@ impl ReactionBase {
             processing_task: self.processing_task.clone(),
             shutdown_tx: self.shutdown_tx.clone(),
             identity_provider: self.identity_provider.clone(),
+            raw_config: self.raw_config.clone(),
         }
     }
 

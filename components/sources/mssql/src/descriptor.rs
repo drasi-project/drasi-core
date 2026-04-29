@@ -254,7 +254,9 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
             builder = builder.with_table_key(tk.table.clone(), tk.key_columns.clone());
         }
 
-        let source = builder.build()?;
+        let mut source = builder.build()?;
+        source.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(source))
     }
 }

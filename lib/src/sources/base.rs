@@ -175,6 +175,9 @@ pub struct SourceBase {
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    /// Original raw config JSON from the descriptor, preserving ConfigValue
+    /// envelopes (secrets, env vars) for lossless persistence roundtrips.
+    raw_config: Option<serde_json::Value>,
 }
 
 impl SourceBase {
@@ -221,12 +224,30 @@ impl SourceBase {
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
+            raw_config: None,
         })
     }
 
     /// Get whether this source should auto-start
     pub fn get_auto_start(&self) -> bool {
         self.auto_start
+    }
+
+    /// Set the original raw config JSON for lossless persistence roundtrips.
+    ///
+    /// Called by plugin descriptors to preserve the original config JSON
+    /// (including `ConfigValue` envelopes for secrets and env vars) before
+    /// resolution to plain values.
+    pub fn set_raw_config(&mut self, config: serde_json::Value) {
+        self.raw_config = Some(config);
+    }
+
+    /// Get the original raw config JSON, if set by a descriptor.
+    ///
+    /// Returns `None` for builder-created components that don't have
+    /// a raw config JSON (they use DTO reconstruction in `properties()`).
+    pub fn raw_config(&self) -> Option<&serde_json::Value> {
+        self.raw_config.as_ref()
     }
 
     /// Initialize the source with runtime context.
@@ -385,6 +406,7 @@ impl SourceBase {
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
+            raw_config: self.raw_config.clone(),
         }
     }
 

@@ -899,6 +899,11 @@ impl Source for HttpSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        // Fallback for builder-created components (no descriptor / no raw_config).
         match serde_json::to_value(&self.config) {
             Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
             _ => HashMap::new(),

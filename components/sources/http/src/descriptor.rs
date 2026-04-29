@@ -602,10 +602,12 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
                 .transpose()?,
         };
 
-        let source = HttpSourceBuilder::new(id)
+        let mut source = HttpSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

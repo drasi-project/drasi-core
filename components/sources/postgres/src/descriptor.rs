@@ -173,10 +173,12 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
                 .collect(),
         };
 
-        let source = crate::PostgresSourceBuilder::new(id)
+        let mut source = crate::PostgresSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

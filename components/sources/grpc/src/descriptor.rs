@@ -93,10 +93,12 @@ impl SourcePluginDescriptor for GrpcSourceDescriptor {
             timeout_ms: mapper.resolve_typed(&dto.timeout_ms)?,
         };
 
-        let source = GrpcSourceBuilder::new(id)
+        let mut source = GrpcSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }
