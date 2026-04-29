@@ -20,6 +20,7 @@ members = [
   "components/bootstrappers/application",
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
+  "components/bootstrappers/dataverse",
 
   # Source Plugins
   "components/sources/postgres",
@@ -29,6 +30,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/mssql",
+  "components/sources/dataverse",
 
   # Reaction Plugins
   "components/reactions/http",

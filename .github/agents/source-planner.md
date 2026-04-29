@@ -63,6 +63,24 @@ For **Protocol/Local** sources:
 - Missing event types or change detection mechanisms
 - API limitations that require workarounds
 
+### 3.5. Authentication — Use Existing Identity Providers
+
+Before designing custom authentication logic, review the shared identity abstractions in `lib/src/identity/` and the component-specific identity providers under `components/identity/`:
+
+- **`IdentityProvider` trait** (`lib/src/identity/mod.rs`) — the standard interface for credential acquisition. Returns `Credentials::Token`, `Credentials::UsernamePassword`, or `Credentials::Certificate`. Accepts a `CredentialContext` that components can use to pass resource-specific properties (e.g., `scope` for token audience).
+- **`PasswordIdentityProvider`** (`lib/src/identity/password.rs`) — simple username/password provider.
+- **Azure identity provider** (`components/identity/azure/`) — supports managed identity, client secrets, developer tools (CLI/azd/PS), and workload identity. Respects `scope` from `CredentialContext` if provided, otherwise uses its default scope.
+- **AWS identity provider** (`components/identity/aws/`) — for AWS-based sources. Generates endpoint-specific RDS auth tokens using `CredentialContext` properties.
+
+**Plan should:**
+1. Determine which `Credentials` variant the target system needs (token, password, or certificate).
+2. Check if an existing provider (e.g., `AzureIdentityProvider`) already covers the auth flow.
+3. Design the source to accept `Option<Box<dyn IdentityProvider>>` via a `with_identity_provider()` builder method.
+4. Fall back to config-based credentials (client_id/secret, connection string, etc.) when no identity provider is set.
+5. Only implement custom auth logic if no existing provider fits.
+
+**Reference implementations:** See how `storedproc-postgres` and `storedproc-mssql` reactions use `with_identity_provider()`, and how the Dataverse source (`components/sources/dataverse/src/auth.rs`) implements `IdentityProvider` on its `TokenManager` for backward compatibility.
+
 ### 4. Determine Data Mapping Strategies
 
 - Decide how to map source data to Drasi's graph data model

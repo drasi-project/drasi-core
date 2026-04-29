@@ -107,10 +107,15 @@ impl AzureIdentityProvider {
 
 #[async_trait]
 impl IdentityProvider for AzureIdentityProvider {
-    async fn get_credentials(&self, _context: &CredentialContext) -> Result<Credentials> {
+    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
+        // Use scope from context if provided, otherwise fall back to the default scope.
+        // This allows components (e.g., Dataverse) to request resource-specific tokens
+        // without requiring the user to configure the scope on the identity provider.
+        let scope = context.get("scope").unwrap_or(&self.scope);
+
         let token_response = self
             .credential
-            .get_token(&[&self.scope], None)
+            .get_token(&[scope], None)
             .await
             .map_err(|e| anyhow!("Failed to get Azure AD token: {e}"))?;
 
