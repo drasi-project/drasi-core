@@ -23,6 +23,9 @@ repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "bootstrap", "script"]
 categories = ["filesystem"]
 
+[package.metadata.drasi]
+tier = 2
+
 [lib]
 crate-type = ["lib", "cdylib"]
 
