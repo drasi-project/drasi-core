@@ -492,7 +492,11 @@ impl SourceBase {
         // queries are deliberately excluded from the min-watermark so they
         // cannot pin upstream advancement.
         let position_handle = if settings.request_position_handle {
-            Some(self.create_position_handle(&settings.query_id).await)
+            let handle = self.create_position_handle(&settings.query_id).await;
+            if let Some(sequence) = settings.resume_from {
+                handle.store(sequence, Ordering::Relaxed);
+            }
+            Some(handle)
         } else {
             None
         };
@@ -1108,6 +1112,22 @@ mod tests {
             response.bootstrap_receiver.is_none(),
             "resume_from must override enable_bootstrap"
         );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_with_resume_from_initializes_position_handle() {
+        let base = make_base_with_bootstrap("sub-resume-handle");
+        let response = base
+            .subscribe_with_bootstrap(&make_settings("q1", false, Some(100), true), "test")
+            .await
+            .unwrap();
+        let handle = response.position_handle.expect("expected handle");
+        assert_eq!(
+            handle.load(Ordering::Relaxed),
+            100,
+            "resuming subscriber should pin the watermark immediately at its requested sequence"
+        );
+        assert_eq!(base.compute_confirmed_position().await, Some(100));
     }
 
     #[tokio::test]
