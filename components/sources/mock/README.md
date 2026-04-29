@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     // Subscribe to receive events
-    let mut rx = source.test_subscribe();
+    let mut rx = source.test_subscribe().await;
 
     // Start generating events
     source.start().await?;
@@ -145,7 +145,7 @@ async fn test_sensor_events() {
         .unwrap();
 
     // Subscribe to events directly (bypasses DrasiLib)
-    let mut rx = source.test_subscribe();
+    let mut rx = source.test_subscribe().await;
 
     source.start().await.unwrap();
 
@@ -289,7 +289,7 @@ Subscribe directly to source events, bypassing DrasiLib:
 
 ```rust
 let source = MockSource::builder("test").build()?;
-let mut rx = source.test_subscribe();
+let mut rx = source.test_subscribe().await;
 
 source.start().await?;
 
@@ -307,7 +307,7 @@ use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementRe
 use std::sync::Arc;
 
 let source = MockSource::builder("test").build()?;
-let mut rx = source.test_subscribe();
+let mut rx = source.test_subscribe().await;
 
 // Create custom element
 let reference = ElementReference::new("test", "custom_1");
