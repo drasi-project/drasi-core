@@ -134,14 +134,47 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = PostgresSourceSchemas::openapi();
-        serde_json::to_string(
+        let raw = serde_json::to_string(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(&raw, "source.postgres.PostgresSourceConfig")
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("localhost")
+            })
+            .field("port", |f| {
+                f.group("Connection").order(2).placeholder("5432")
+            })
+            .field("database", |f| {
+                f.group("Connection").order(3).placeholder("mydb")
+            })
+            .field("user", |f| {
+                f.group("Authentication").order(1).placeholder("postgres")
+            })
+            .field("password", |f| {
+                f.group("Authentication").order(2).widget("password")
+            })
+            .field("tables", |f| f.group("Tables").order(1))
+            .field("tableKeys", |f| f.group("Tables").order(2))
+            .field("slotName", |f| {
+                f.group("Replication")
+                    .order(1)
+                    .placeholder("drasi_slot")
+                    .collapsed(true)
+            })
+            .field("publicationName", |f| {
+                f.group("Replication")
+                    .order(2)
+                    .placeholder("drasi_publication")
+            })
+            .field("sslMode", |f| f.group("SSL").order(1).collapsed(true))
+            .annotate()
     }
 
     async fn create_source(
