@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::config::MqttSourceConfig;
 use crate::connection::MqttConnection;
 use crate::processor::MqttProcessor;
@@ -23,12 +22,15 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use drasi_lib::{identity, ComponentStatus};
 use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
+use drasi_batching_common::AdaptiveBatchConfig;
 use log::{error, info};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use drasi_lib::channels::{ComponentType, *};
@@ -53,6 +55,12 @@ pub struct MqttSource {
     config: MqttSourceConfig,
     /// Adaptive batching configuration for throughput optimization
     adaptive_config: AdaptiveBatchConfig,
+    /// Cancellation token for managing shutdown of async tasks
+    shutdown_token: CancellationToken,
+    /// Join handle for processing loop
+    processing_task_handle: RwLock<Option<JoinHandle<()>>>,
+    /// Join handle for batching loop
+    batching_task_handle: RwLock<Option<JoinHandle<()>>>,
 }
 
 impl MqttSource {
@@ -193,6 +201,9 @@ impl MqttSource {
                 base,
                 config,
                 adaptive_config,
+                shutdown_token: CancellationToken::new(),
+                processing_task_handle: RwLock::new(None),
+                batching_task_handle: RwLock::new(None),
             })
         } else {
             let mut adaptive_config_internal = AdaptiveBatchConfig::default();
@@ -220,6 +231,9 @@ impl MqttSource {
                 base,
                 config,
                 adaptive_config: adaptive_config_internal,
+                shutdown_token: CancellationToken::new(),
+                processing_task_handle: RwLock::new(None),
+                batching_task_handle: RwLock::new(None),
             })
         }
     }
@@ -240,6 +254,9 @@ impl MqttSource {
             base,
             config,
             adaptive_config,
+            shutdown_token: CancellationToken::new(),
+            processing_task_handle: RwLock::new(None),
+            batching_task_handle: RwLock::new(None),
         })
     }
 
@@ -344,17 +361,26 @@ impl Source for MqttSource {
 
         // start processor task
         let mut processor = MqttProcessor::new(&config);
-        processor.start_processing_loop(source_id.clone(), processor_rx, batch_tx);
+        let processing_join_handle = processor.start_processing_loop(
+            source_id.clone(),
+            processor_rx,
+            batch_tx,
+            self.shutdown_token.clone(),
+        )?;
 
         // start adaptive batcher task
         let dispatchers = self.base.dispatchers.clone();
         let adaptive_config = self.adaptive_config.clone();
-        processor.start_adaptive_batcher_loop(
+        let batching_join_handle = processor.start_adaptive_batcher_loop(
             source_id.clone(),
             batch_rx,
             dispatchers,
             adaptive_config,
-        );
+            self.shutdown_token.clone(),
+        )?;
+
+        *self.processing_task_handle.write().await = Some(processing_join_handle);
+        *self.batching_task_handle.write().await = Some(batching_join_handle);
 
         // Set the identity provider for unified access (use inside the connection task for authenticating with MQTT broker if needed).
         let identity_provider = self.base.identity_provider().await;
@@ -416,6 +442,15 @@ impl Source for MqttSource {
                         Some(format!("MQTT connection failed: {error:?}")),
                     )
                     .await;
+
+                if let Some(handle) = self.processing_task_handle.write().await.take() {
+                    handle.abort();
+                }
+
+                if let Some(handle) = self.batching_task_handle.write().await.take() {
+                    handle.abort();
+                }
+
                 return Err(anyhow::anyhow!("Failed to start MQTT source: {error:?}"));
             }
         }
@@ -446,12 +481,52 @@ impl Source for MqttSource {
             )
             .await;
 
+        // shutdown signal to the connection task
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
 
+        // stop the processor and adaptive batcher tasks by triggering the cancellation token
+        self.shutdown_token.cancel();
+
+        // wait for the tasks to stop gracefully, with a timeout as upper limit.
         if let Some(handle) = self.base.task_handle.write().await.take() {
-            let _ = timeout(Duration::from_secs(5), handle).await;
+            let mut handle = handle;
+            if timeout(Duration::from_secs(3), &mut handle).await.is_err() {
+                error!(
+                    "[{}] Timed out waiting for MQTT connection task to stop",
+                    self.base.id
+                );
+                handle.abort();
+            }
+        }
+
+        if let Some(handle) = self.processing_task_handle.write().await.take() {
+            let mut handle = handle;
+            match timeout(Duration::from_secs(3), &mut handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    error!(
+                        "[{}] Timed out waiting for MQTT processing task to stop; aborting",
+                        self.base.id
+                    );
+                    handle.abort();
+                }
+            }
+        }
+
+        if let Some(handle) = self.batching_task_handle.write().await.take() {
+            let mut handle = handle;
+            match timeout(Duration::from_secs(3), &mut handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    error!(
+                        "[{}] Timed out waiting for MQTT batching task to stop; aborting",
+                        self.base.id
+                    );
+                    handle.abort();
+                }
+            }
         }
 
         self.base
