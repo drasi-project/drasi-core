@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,19 +106,9 @@ impl PatternMatcher {
                         Err(anyhow::anyhow!("Expected primitive value in payload for PayloadAsField mode, got JSON object."))
                     }
                     Ok(val) => Ok(val),
-                    Err(e) => {
-                        match serde_json::Value::String(
-                            String::from_utf8_lossy(&packet.payload).to_string(),
-                        ) {
-                            serde_json::Value::String(s) => Ok(serde_json::Value::String(s)),
-                            _ => {
-                                error!("Failed to parse payload for PayloadAsField mode: {e}.");
-                                Err(anyhow::anyhow!(
-                                    "Failed to parse payload for PayloadAsField mode: {e}."
-                                ))
-                            }
-                        }
-                    }
+                    Err(_e) => Ok(serde_json::Value::String(
+                        String::from_utf8_lossy(&packet.payload).to_string(),
+                    )),
                 }?;
 
                 props.insert(field_name, val);

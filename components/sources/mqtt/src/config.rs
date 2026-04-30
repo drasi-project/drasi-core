@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -219,7 +219,9 @@ pub enum MappingMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InjectId {
+    #[serde(rename = "true")]
     True,
+    #[serde(rename = "false")]
     False,
 }
 
@@ -437,7 +439,7 @@ pub struct MqttSourceConfig {
     pub username: Option<String>,
 
     /// Password for MQTT authentication (if not using identity provider)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub password: Option<String>,
 }
 
@@ -461,6 +463,13 @@ impl MqttSourceConfig {
                     "Keep alive interval cannot be less than 5 seconds"
                 ));
             }
+        }
+
+        // validate event channel capacity bigger than zero
+        if self.event_channel_capacity == 0 {
+            return Err(anyhow::anyhow!(
+                "Event channel capacity must be greater than zero"
+            ));
         }
 
         // validate adaptive batching parameters
@@ -491,6 +500,7 @@ impl MqttSourceConfig {
         }
 
         // validate topic mappings
+        let mut router = matchit::Router::new();
         for topic_mapping in &self.topic_mappings {
             if topic_mapping.properties.mode == MappingMode::PayloadAsField
                 && topic_mapping.properties.field_name.is_none()
@@ -510,7 +520,7 @@ impl MqttSourceConfig {
                 ));
             }
 
-            Self::validate_mapping_placeholders(topic_mapping)?;
+            Self::validate_mapping_placeholders(topic_mapping, &mut router)?;
         }
 
         // validate authentication config
@@ -538,15 +548,25 @@ impl MqttSourceConfig {
         }
     }
 
-    fn validate_mapping_placeholders(mapping: &TopicMapping) -> anyhow::Result<()> {
+    fn validate_mapping_placeholders(
+        mapping: &TopicMapping,
+        router: &mut matchit::Router<()>,
+    ) -> anyhow::Result<()> {
         let mut node_ids = Vec::new();
-        let mut router = matchit::Router::new();
         router.insert(&mapping.pattern, ()).map_err(|e| {
-            anyhow::anyhow!("Invalid topic mapping pattern '{}': {}", mapping.pattern, e)
+            anyhow::anyhow!(
+                "Error in topic mapping pattern '{}': {}",
+                mapping.pattern,
+                e
+            )
         })?;
 
         let allowed = Self::extract_placeholders(&mapping.pattern).map_err(|e| {
-            anyhow::anyhow!("Invalid topic mapping pattern '{}': {}", mapping.pattern, e)
+            anyhow::anyhow!(
+                "Error in topic mapping pattern '{}': {}",
+                mapping.pattern,
+                e
+            )
         })?;
 
         Self::validate_template_placeholders(
@@ -970,7 +990,7 @@ mod tests {
             .validate()
             .expect_err("invalid pattern placeholder syntax should be rejected");
 
-        assert!(error.to_string().contains("Invalid topic mapping pattern"));
+        assert!(error.to_string().contains("Error in topic mapping pattern"));
     }
 
     #[test]
@@ -1403,5 +1423,42 @@ topic_mappings:
         let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
         let result = config.validate().expect_err("Validation error expected");
         assert!(result.to_string().contains("Unknown placeholder '{deice}' in relations[1].from for pattern 'building/{floor}/{room}/{device}'. Allowed placeholders come from the pattern."));
+    }
+
+    #[test]
+    fn yaml_validate_rejects_zero_event_channel_capacity() {
+        let yaml = r#"
+event_channel_capacity: 0
+"#;
+        let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
+        let result = config.validate().expect_err("Validation error expected");
+        assert!(result
+            .to_string()
+            .contains("Event channel capacity must be greater than zero"));
+    }
+
+    #[test]
+    fn yaml_validate_rejects_overlapping_topic_mapping_placeholders() {
+        let yaml = r#"
+topic_mappings:
+  - pattern: "building/{floor}/{room}/{device}"
+    entity:
+      label: "DEVICE"
+      id: "{room}:{device}"
+    properties:
+      mode: payload_as_field
+      field_name: "reading"
+  - pattern: "building/{floor}/{room}/{device}"
+    entity:
+      label: "DEVICE"
+      id: "{room}:{device}"
+    properties:
+      mode: payload_as_field
+      field_name: "reading"
+"#;
+
+        let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
+        let result = config.validate().expect_err("Validation error expected");
+        assert!(result.to_string().contains("Error in topic mapping pattern 'building/{floor}/{room}/{device}': Insertion failed due to conflict with previously registered route: building/{floor}/{room}/{device}"));
     }
 }

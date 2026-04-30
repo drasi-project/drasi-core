@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,23 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::schema::{convert_mqtt_to_source_change, MqttSourceChange};
 use crate::utils::MqttPacket;
 use crate::{config::MqttSourceConfig, pattern::PatternMatcher};
+use drasi_batching_common::{AdaptiveBatchConfig, AdaptiveBatcher};
 use drasi_lib::channels::SourceChangeEvent;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::SourceBase;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct MqttProcessor {
     mapper: Arc<PatternMatcher>,
-    processing_loop_handle: Option<JoinHandle<()>>,
-    adaptive_batcher_loop_handle: Option<JoinHandle<()>>,
     adaptive: bool,
 }
 
@@ -38,8 +37,6 @@ impl MqttProcessor {
     pub fn new(config: &MqttSourceConfig) -> Self {
         Self {
             mapper: Arc::new(PatternMatcher::new(&config.topic_mappings)),
-            processing_loop_handle: None,
-            adaptive_batcher_loop_handle: None,
             adaptive: config.adaptive_enabled.unwrap_or(false),
         }
     }
@@ -49,11 +46,19 @@ impl MqttProcessor {
         source_id: String,
         mut rx: mpsc::Receiver<MqttPacket>,
         batch_tx: mpsc::Sender<SourceChangeEvent>,
-    ) {
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<JoinHandle<()>> {
         let pattern_matcher = Arc::clone(&self.mapper);
-        self.processing_loop_handle = Some(tokio::spawn(async move {
-            Self::run_processing_loop(source_id.to_string(), pattern_matcher, rx, batch_tx).await;
-        }));
+        Ok(tokio::spawn(async move {
+            Self::run_processing_loop(
+                source_id.to_string(),
+                pattern_matcher,
+                rx,
+                batch_tx,
+                cancellation_token,
+            )
+            .await;
+        }))
     }
 
     pub fn start_adaptive_batcher_loop(
@@ -70,11 +75,18 @@ impl MqttProcessor {
             >,
         >,
         adaptive_config: AdaptiveBatchConfig,
-    ) {
-        self.adaptive_batcher_loop_handle = Some(tokio::spawn(async move {
-            Self::run_adaptive_batcher_loop(batch_rx, dispatchers, adaptive_config, source_id)
-                .await;
-        }));
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<(JoinHandle<()>)> {
+        Ok(tokio::spawn(async move {
+            Self::run_adaptive_batcher_loop(
+                batch_rx,
+                dispatchers,
+                adaptive_config,
+                cancellation_token,
+                source_id,
+            )
+            .await;
+        }))
     }
 
     //...... internal processing methods
@@ -91,80 +103,95 @@ impl MqttProcessor {
             >,
         >,
         adaptive_config: AdaptiveBatchConfig,
+        cancellation_token: CancellationToken,
         source_id: String,
     ) {
         let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config.clone());
         let mut total_events = 0u64;
         let mut total_batches = 0u64;
 
-        while let Some(batch) = batcher.next_batch().await {
-            if batch.is_empty() {
-                debug!("[{source_id}] MQTT Batcher received empty batch, skipping");
-                continue;
-            }
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("[{source_id}] MQTT  batching loop stopped - cancellation requested");
+                    break;
+                }
 
-            let batch_size = batch.len();
+                batch = batcher.next_batch() => {
 
-            total_events += batch_size as u64;
-            total_batches += 1;
+                    if let Some(batch) = batch {
 
-            debug!(
-                "[{source_id}] MQTT Batcher forwarding batch #{total_batches} with {batch_size} events to dispatchers"
-            );
+                        if batch.is_empty() {
+                            debug!("[{source_id}] MQTT  batcher received empty batch, skipping");
+                            continue;
+                        }
 
-            let mut sent_count = 0;
-            let mut failed_count = 0;
+                        let batch_size = batch.len();
 
-            for (idx, event) in batch.into_iter().enumerate() {
-                debug!(
-                    "[{source_id}] Batch #{total_batches}, dispatching event {}/{batch_size}",
-                    idx + 1
-                );
+                        total_events += batch_size as u64;
+                        total_batches += 1;
 
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+                        debug!(
+                            "[{source_id}] MQTT  batcher forwarding batch #{total_batches} with {batch_size} events to dispatchers"
+                        );
 
-                let wrapper = SourceEventWrapper::with_profiling(
-                    event.source_id.clone(),
-                    SourceEvent::Change(event.change),
-                    event.timestamp,
-                    profiling,
-                );
+                        let mut sent_count = 0;
+                        let mut failed_count = 0;
 
-                if let Err(e) =
-                    SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
-                        .await
-                {
-                    error!(
-                        "[{source_id}] Batch #{total_batches}, failed to dispatch event {}/{batch_size} (no subscribers): {e}", idx + 1
-                    );
-                    failed_count += 1;
-                } else {
-                    debug!(
-                        "[{source_id}] Batch #{total_batches}, successfully dispatched event {}/{batch_size}", idx + 1
-                    );
-                    sent_count += 1;
+                        for (idx, event) in batch.into_iter().enumerate() {
+                            debug!(
+                                "[{source_id}] Batch #{total_batches}, dispatching event {}/{batch_size}",
+                                idx + 1
+                            );
+
+                            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+                            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+                            let wrapper = SourceEventWrapper::with_profiling(
+                                event.source_id.clone(),
+                                SourceEvent::Change(event.change),
+                                event.timestamp,
+                                profiling,
+                            );
+
+                            if let Err(e) =
+                                SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
+                                    .await
+                            {
+                                error!(
+                                    "[{source_id}] Batch #{total_batches}, failed to dispatch event {}/{batch_size} (no subscribers): {e}", idx + 1
+                                );
+                                failed_count += 1;
+                            } else {
+                                debug!(
+                                    "[{source_id}] Batch #{total_batches}, successfully dispatched event {}/{batch_size}", idx + 1
+                                );
+                                sent_count += 1;
+                            }
+                        }
+
+                        debug!(
+                            "[{source_id}] Batch #{total_batches} complete: {sent_count} dispatched, {failed_count} failed"
+                        );
+
+                        if total_batches.is_multiple_of(100) {
+                            info!(
+                                "[{}] Adaptive MQTT metrics - Batches: {}, Events: {}, Avg batch size: {:.1}",
+                                source_id,
+                                total_batches,
+                                total_events,
+                                total_events as f64 / total_batches as f64
+                            );
+                        }
+                    } else {
+                        info!(
+                            "[{source_id}] MQTT batching loop stopped - Total batches: {total_batches}, Total events: {total_events}"
+                        );
+                        break;
+                    }
                 }
             }
-
-            debug!(
-                "[{source_id}] Batch #{total_batches} complete: {sent_count} dispatched, {failed_count} failed"
-            );
-
-            if total_batches.is_multiple_of(100) {
-                info!(
-                    "[{}] Adaptive MQTT metrics - Batches: {}, Events: {}, Avg batch size: {:.1}",
-                    source_id,
-                    total_batches,
-                    total_events,
-                    total_events as f64 / total_batches as f64
-                );
-            }
         }
-
-        info!(
-            "[{source_id}] Adaptive MQTT batcher stopped - Total batches: {total_batches}, Total events: {total_events}"
-        );
     }
 
     async fn run_processing_loop(
@@ -172,25 +199,43 @@ impl MqttProcessor {
         matcher: Arc<PatternMatcher>,
         mut rx: mpsc::Receiver<MqttPacket>,
         batch_tx: mpsc::Sender<SourceChangeEvent>,
+        cancellation_token: CancellationToken,
     ) {
-        while let Some(packet) = rx.recv().await {
-            // generate source changes from the packet and topic name
-            let source_changes = Self::process(&matcher, &packet);
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    info!("[{source_id}] MQTT processing loop stopped - cancellation requested");
+                    break;
+                }
+                packet = rx.recv() => {
+                    if let Some(packet) = packet {
+                        // generate source changes from the packet and topic name
+                        let source_changes = Self::process(&matcher, &packet);
 
-            // send to the batcher
-            Self::send_to_batcher(&source_id.clone(), &batch_tx, source_changes).await;
+                        // send to the batcher
+                        Self::send_to_batcher(
+                            &source_id.clone(),
+                            &batch_tx,
+                            source_changes,
+                            &cancellation_token,
+                        )
+                        .await;
+                    } else {
+                        info!("[{source_id}] MQTT processing loop stopped - channel closed");
+                        break;
+                    }
+                }
+            }
         }
-
-        info!("[{source_id}] MQTT processing loop stopped - source channel closed");
     }
 
     fn process(mapper: &PatternMatcher, packet: &MqttPacket) -> Vec<MqttSourceChange> {
         match mapper.generate_schema(packet) {
             Ok(changes) => changes,
             Err(e) => {
-                error!(
-                    "Error processing Mqtt packet with topic {}: {}",
-                    packet.topic, e
+                warn!(
+                    "Error processing MQTT packet with topic '{}': {e}",
+                    packet.topic
                 );
                 vec![]
             }
@@ -201,9 +246,15 @@ impl MqttProcessor {
         source_id: &str,
         batch_tx: &mpsc::Sender<SourceChangeEvent>,
         source_changes: Vec<MqttSourceChange>,
+        cancellation_token: &CancellationToken,
     ) {
         let source_id = source_id.to_string();
         for (idx, change) in source_changes.into_iter().enumerate() {
+            if cancellation_token.is_cancelled() {
+                debug!("[{source_id}] Stopping send-to-batcher loop due to cancellation");
+                break;
+            }
+
             let timestamp = match change {
                 MqttSourceChange::Update { timestamp, .. } => timestamp.unwrap_or_else(|| {
                     let now = std::time::SystemTime::now();
@@ -225,14 +276,22 @@ impl MqttProcessor {
                         ),
                     };
 
-                    if let Err(e) = batch_tx.send(change_event).await {
-                        error!(
-                            "[{source_id}] Failed to send change event to batcher for change {idx}: {e}"
-                        );
-                    } else {
-                        debug!(
-                            "[{source_id}] Successfully sent change event to batcher for change {idx}",
-                        );
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => {
+                            debug!("[{source_id}] Cancelled while waiting to send change {idx} to batcher");
+                            break;
+                        }
+                        send_result = batch_tx.send(change_event) => {
+                            if let Err(e) = send_result {
+                                error!(
+                                    "[{source_id}] Failed to send change event to batcher for change {idx}: {e}"
+                                );
+                            } else {
+                                debug!(
+                                    "[{source_id}] Successfully sent change event to batcher for change {idx}",
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {
