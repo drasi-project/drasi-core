@@ -48,7 +48,7 @@ topic_mappings:
     properties:
       mode: payload_as_field
       field_name: "reading"
-      inject_id: "true"
+      inject_id: true
       inject:
       - room: "{room}"
       - floor: "{floor}"
@@ -102,12 +102,7 @@ transport:
             MATCH (rd:DEVICE)-[:LOCATED_IN_ROOM]->(r:ROOM)-[:LOCATED_IN_FLOOR]->(f:FLOOR)
             WHERE rd.id = 'r1:d2' AND r.id = 'r1' AND f.id = 'f2'
             RETURN rd.reading as val,
-                   rd.room as room,
-                   rd.floor as floor,
-                   rd.device as device,
-                   rd.id as id,
-                   r.id as room_id,
-                   f.id as floor_id
+                    rd.room as room
         "#,
         )
         .from_source("mqtt-source")

@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod adaptive_batcher;
 pub mod config;
 pub mod connection;
 pub mod descriptor;
 pub mod schema;
 
-use adaptive_batcher::AdaptiveBatchConfig;
 use config::{
     default_base_retry_delay_secs, default_event_channel_capacity, default_host,
     default_max_retries, default_port, default_qos, MqttConnectProperties, MqttSourceConfig,
@@ -28,6 +26,7 @@ use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
 use anyhow::Result;
+use drasi_batching_common::AdaptiveBatchConfig;
 use log::error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,10 +153,10 @@ impl MqttSourceBuilder {
     }
 
     pub fn with_topic(mut self, topic: impl Into<String>) -> Self {
-        self.topics = vec![MqttTopicConfig {
+        self.topics.push(MqttTopicConfig {
             topic: topic.into(),
             qos: default_qos(),
-        }];
+        });
         self
     }
 
