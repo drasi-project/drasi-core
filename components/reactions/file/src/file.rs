@@ -16,15 +16,15 @@ use crate::config::{FileReactionConfig, WriteMode};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use log::{debug, error};
+use log::{debug, error, warn};
 use lru::LruCache;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -41,6 +41,8 @@ pub struct FileReaction {
     config: FileReactionConfig,
     handlebars: Arc<Handlebars<'static>>,
     file_locks: Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+    /// Tracks files that have been checked for partial trailing lines on first open.
+    repaired_files: Arc<Mutex<HashSet<String>>>,
 }
 
 impl FileReaction {
@@ -70,6 +72,7 @@ impl FileReaction {
             config,
             handlebars: Arc::new(Self::build_handlebars()),
             file_locks: Self::new_file_locks(),
+            repaired_files: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -90,6 +93,7 @@ impl FileReaction {
             config,
             handlebars: Arc::new(Self::build_handlebars()),
             file_locks: Self::new_file_locks(),
+            repaired_files: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -112,6 +116,7 @@ impl FileReaction {
             config,
             handlebars: Arc::new(Self::build_handlebars()),
             file_locks: Self::new_file_locks(),
+            repaired_files: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -221,6 +226,7 @@ impl FileReaction {
 
     async fn write_to_file(
         file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+        repaired_files: &Arc<Mutex<HashSet<String>>>,
         mode: &WriteMode,
         output_file: &Path,
         content: &str,
@@ -235,12 +241,18 @@ impl FileReaction {
             WriteMode::Append => {
                 let lock = Self::get_file_lock(file_locks, output_file).await;
                 let _guard = lock.lock().await;
+
+                // On first append to this file, repair any partial trailing line
+                // left by a previous crash.
+                Self::repair_append_file_once(repaired_files, output_file).await?;
+
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(output_file)
                     .await?;
                 file.write_all(content.as_bytes()).await?;
+                file.sync_all().await?;
             }
             WriteMode::Overwrite => {
                 let lock = Self::get_file_lock(file_locks, output_file).await;
@@ -259,6 +271,80 @@ impl FileReaction {
                 tokio::fs::rename(&tmp_path, output_file).await?;
             }
         }
+
+        Ok(())
+    }
+
+    /// On first access to a file in append mode, check if it ends with a
+    /// newline. If not, the file was left with a partial trailing line from a
+    /// previous crash — truncate that incomplete line so subsequent appends
+    /// produce valid output.
+    async fn repair_append_file_once(
+        repaired_files: &Arc<Mutex<HashSet<String>>>,
+        path: &Path,
+    ) -> Result<()> {
+        let key = path.to_string_lossy().to_string();
+
+        {
+            let repaired = repaired_files.lock().await;
+            if repaired.contains(&key) {
+                return Ok(());
+            }
+        }
+
+        if path.exists() {
+            Self::repair_partial_line(path).await?;
+        }
+
+        let mut repaired = repaired_files.lock().await;
+        repaired.insert(key);
+        Ok(())
+    }
+
+    /// Truncates any incomplete trailing line (content after the last newline).
+    async fn repair_partial_line(path: &Path) -> Result<()> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path).await?;
+
+        let file_len = file.metadata().await?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
+
+        // Read the last byte to check if file ends with newline.
+        file.seek(std::io::SeekFrom::End(-1)).await?;
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf).await?;
+
+        if buf[0] == b'\n' {
+            return Ok(());
+        }
+
+        // File doesn't end with newline — find the last newline and truncate after it.
+        // Read up to the last 8KB to find the last newline position.
+        let scan_len = file_len.min(8192);
+        let scan_start = file_len - scan_len;
+        file.seek(std::io::SeekFrom::Start(scan_start)).await?;
+        let mut scan_buf = vec![0u8; scan_len as usize];
+        file.read_exact(&mut scan_buf).await?;
+
+        let truncate_pos = if let Some(last_nl) = scan_buf.iter().rposition(|&b| b == b'\n') {
+            scan_start + last_nl as u64 + 1
+        } else {
+            // No newline found in the scanned region — the entire file content
+            // after scan_start is a partial line. If scan_start == 0, the whole
+            // file is one incomplete line; truncate to empty.
+            scan_start
+        };
+
+        file.set_len(truncate_pos).await?;
+        file.sync_all().await?;
+
+        warn!(
+            "Repaired partial trailing line in '{}': truncated from {} to {} bytes",
+            path.display(),
+            file_len,
+            truncate_pos
+        );
 
         Ok(())
     }
@@ -358,6 +444,7 @@ impl FileReaction {
         config: &FileReactionConfig,
         handlebars: &Handlebars<'static>,
         file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+        repaired_files: &Arc<Mutex<HashSet<String>>>,
         query_result: &QueryResult,
         reaction_name: &str,
     ) {
@@ -373,9 +460,14 @@ impl FileReaction {
                 diff,
             ) {
                 Ok((output_file, content)) => {
-                    if let Err(e) =
-                        Self::write_to_file(file_locks, &config.write_mode, &output_file, &content)
-                            .await
+                    if let Err(e) = Self::write_to_file(
+                        file_locks,
+                        repaired_files,
+                        &config.write_mode,
+                        &output_file,
+                        &content,
+                    )
+                    .await
                     {
                         error!(
                             "[{}] Failed to write output to '{}': {}",
@@ -595,6 +687,7 @@ impl Reaction for FileReaction {
         let config = self.config.clone();
         let handlebars = self.handlebars.clone();
         let file_locks = self.file_locks.clone();
+        let repaired_files = self.repaired_files.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         let processing_task = tokio::spawn(async move {
@@ -612,6 +705,7 @@ impl Reaction for FileReaction {
                     &config,
                     &handlebars,
                     &file_locks,
+                    &repaired_files,
                     query_result_arc.as_ref(),
                     &reaction_name,
                 )
@@ -743,7 +837,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
+        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
 
         let output_file = temp_dir.path().join("order_a_b_ADD.json");
         assert!(output_file.exists());
@@ -768,7 +862,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
+        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
 
         let output_file = temp_dir.path().join("orders_ADD_1.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -805,7 +899,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
+        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
 
         let output_file = temp_dir.path().join("unknown-query.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -851,7 +945,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &result, "test").await;
+        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
 
         let output_file = temp_dir.path().join("orders.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -865,5 +959,97 @@ mod tests {
             !content.contains("default-9"),
             "should not contain default template output, got: {content}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_repair_partial_line_truncates_incomplete_trailing_content() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.ndjson");
+
+        // Simulate a crash: write two complete lines followed by a partial third line.
+        tokio::fs::write(&file_path, b"{\"id\":1}\n{\"id\":2}\npartial")
+            .await
+            .unwrap();
+
+        FileReaction::repair_partial_line(&file_path).await.unwrap();
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "{\"id\":1}\n{\"id\":2}\n");
+    }
+
+    #[tokio::test]
+    async fn test_repair_partial_line_no_op_when_file_ends_with_newline() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.ndjson");
+
+        let original = "{\"id\":1}\n{\"id\":2}\n";
+        tokio::fs::write(&file_path, original.as_bytes())
+            .await
+            .unwrap();
+
+        FileReaction::repair_partial_line(&file_path).await.unwrap();
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[tokio::test]
+    async fn test_repair_partial_line_empty_file_is_no_op() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.ndjson");
+
+        tokio::fs::write(&file_path, b"").await.unwrap();
+
+        FileReaction::repair_partial_line(&file_path).await.unwrap();
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_repair_partial_line_entire_file_is_partial() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.ndjson");
+
+        // File with no newlines at all — entire content is one incomplete line.
+        tokio::fs::write(&file_path, b"partial content without newline")
+            .await
+            .unwrap();
+
+        FileReaction::repair_partial_line(&file_path).await.unwrap();
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_repair_append_file_once_only_repairs_first_time() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file_path = temp_dir.path().join("test.ndjson");
+        let repaired_files = Arc::new(Mutex::new(HashSet::new()));
+
+        // Write file with partial trailing line.
+        tokio::fs::write(&file_path, b"{\"id\":1}\npartial")
+            .await
+            .unwrap();
+
+        // First call should repair.
+        FileReaction::repair_append_file_once(&repaired_files, &file_path)
+            .await
+            .unwrap();
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "{\"id\":1}\n");
+
+        // Write a new partial line to simulate mid-write state.
+        tokio::fs::write(&file_path, b"{\"id\":1}\nnew partial")
+            .await
+            .unwrap();
+
+        // Second call should NOT repair (already marked as repaired).
+        FileReaction::repair_append_file_once(&repaired_files, &file_path)
+            .await
+            .unwrap();
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "{\"id\":1}\nnew partial");
     }
 }

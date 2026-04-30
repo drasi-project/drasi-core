@@ -33,6 +33,24 @@ async fn wait_for_file(path: &Path, timeout: Duration) -> Result<String> {
     Err(anyhow!("Timed out waiting for file '{}'", path.display()))
 }
 
+async fn wait_for_content(path: &Path, needle: &str, timeout: Duration) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if path.exists() {
+            let content = tokio::fs::read_to_string(path).await?;
+            if content.contains(needle) {
+                return Ok(content);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(anyhow!(
+        "Timed out waiting for file '{}' to contain '{}'",
+        path.display(),
+        needle,
+    ))
+}
+
 async fn wait_for_line_count(
     path: &Path,
     expected_lines: usize,
@@ -372,6 +390,132 @@ async fn test_file_reaction_aggregation_uses_updated_template() -> Result<()> {
     assert!(
         last_line.contains("after_count"),
         "Expected aggregation with updated template, got: {last_line}"
+    );
+
+    drasi.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_file_reaction_append_recovers_from_partial_line() -> Result<()> {
+    let temp = TempDir::new()?;
+    let output_dir = temp.path().to_string_lossy().to_string();
+    let output_file = temp.path().join("test-query.ndjson");
+
+    // Pre-seed the output file with a complete line followed by a simulated
+    // crash (partial trailing line without a newline terminator).
+    tokio::fs::write(
+        &output_file,
+        b"{\"op\":\"add\",\"id\":\"item-0\"}\npartial crash",
+    )
+    .await?;
+
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"op":"add","id":"{{after.id}}","name":"{{after.name}}"}"#,
+        )),
+        updated: None,
+        deleted: None,
+    };
+
+    let (drasi, app_handle) = setup_drasi_for_mode(
+        &output_dir,
+        WriteMode::Append,
+        "{{query_name}}.ndjson",
+        Some(default_template),
+    )
+    .await?;
+
+    drasi.start().await?;
+
+    // Send a new event — the reaction should repair the file first, then append.
+    app_handle
+        .send_node_insert(
+            "item-1",
+            vec!["Item"],
+            PropertyMapBuilder::new()
+                .with_string("id", "item-1")
+                .with_string("name", "Widget")
+                .build(),
+        )
+        .await?;
+
+    let content = wait_for_content(&output_file, "item-1", Duration::from_secs(10)).await?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    // The partial "partial crash" line should have been truncated.
+    // Line 1 should be the original complete line, line 2 the newly appended line.
+    assert_eq!(lines.len(), 2, "Expected exactly 2 lines, got: {content}");
+    assert!(
+        lines[0].contains("\"item-0\""),
+        "First line should be the pre-existing complete line"
+    );
+    assert!(
+        lines[1].contains("\"item-1\""),
+        "Second line should be the newly appended event, got: '{}'",
+        lines[1]
+    );
+    assert!(
+        !content.contains("partial crash"),
+        "Partial line should have been truncated"
+    );
+
+    drasi.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_file_reaction_append_fsync_produces_valid_ndjson() -> Result<()> {
+    let temp = TempDir::new()?;
+    let output_dir = temp.path().to_string_lossy().to_string();
+
+    let default_template = QueryConfig {
+        added: Some(TemplateSpec::new(r#"{"op":"add","id":"{{after.id}}"}"#)),
+        updated: None,
+        deleted: None,
+    };
+
+    let (drasi, app_handle) = setup_drasi_for_mode(
+        &output_dir,
+        WriteMode::Append,
+        "{{query_name}}.ndjson",
+        Some(default_template),
+    )
+    .await?;
+
+    drasi.start().await?;
+
+    // Send multiple events.
+    for i in 1..=5 {
+        let id = format!("item-{i}");
+        let name = format!("Widget {i}");
+        app_handle
+            .send_node_insert(
+                id.as_str(),
+                vec!["Item"],
+                PropertyMapBuilder::new()
+                    .with_string("id", &id)
+                    .with_string("name", &name)
+                    .build(),
+            )
+            .await?;
+    }
+
+    let output_file = temp.path().join("test-query.ndjson");
+    let content = wait_for_line_count(&output_file, 5, Duration::from_secs(10)).await?;
+
+    // Verify every line is valid JSON (valid NDJSON).
+    for (i, line) in content.lines().enumerate() {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "Line {i} is not valid JSON: {line}"
+        );
+    }
+
+    // Verify the file ends with a newline (proper NDJSON termination).
+    assert!(
+        content.ends_with('\n'),
+        "File should end with a newline character"
     );
 
     drasi.stop().await?;
