@@ -393,14 +393,51 @@ impl FileReaction {
     }
 }
 
-/// Replaces unsafe filename characters with `_`.
+/// Replaces unsafe filename characters with `_` and escapes Windows reserved device names.
 pub(crate) fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let sanitized: String = name
+        .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            c if c.is_control() => '_',
             _ => c,
         })
-        .collect()
+        .collect();
+
+    // Check for Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
+    // These are reserved with or without an extension (e.g. "CON.json" is also invalid).
+    let stem = sanitized.split('.').next().unwrap_or(&sanitized);
+    let is_reserved = matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+
+    if is_reserved {
+        format!("_{sanitized}")
+    } else {
+        sanitized
+    }
 }
 
 /// Builder for `FileReaction`.
@@ -628,6 +665,28 @@ mod tests {
             sanitize_filename(r#"bad/\:*?"<>|name"#),
             "bad_________name".to_string()
         );
+    }
+
+    #[test]
+    fn test_sanitize_filename_reserved_windows_names() {
+        assert_eq!(sanitize_filename("CON"), "_CON");
+        assert_eq!(sanitize_filename("con"), "_con");
+        assert_eq!(sanitize_filename("PRN"), "_PRN");
+        assert_eq!(sanitize_filename("AUX"), "_AUX");
+        assert_eq!(sanitize_filename("NUL"), "_NUL");
+        assert_eq!(sanitize_filename("COM1"), "_COM1");
+        assert_eq!(sanitize_filename("LPT9"), "_LPT9");
+        // Reserved names with extensions are also invalid on Windows
+        assert_eq!(sanitize_filename("CON.json"), "_CON.json");
+        assert_eq!(sanitize_filename("nul.txt"), "_nul.txt");
+        // Non-reserved names should pass through unchanged
+        assert_eq!(sanitize_filename("CONSOLE"), "CONSOLE");
+        assert_eq!(sanitize_filename("contact.json"), "contact.json");
+    }
+
+    #[test]
+    fn test_sanitize_filename_control_chars() {
+        assert_eq!(sanitize_filename("hello\x01world"), "hello_world");
     }
 
     #[test]
