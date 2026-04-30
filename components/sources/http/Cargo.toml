@@ -33,6 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
+drasi-batching-common = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"

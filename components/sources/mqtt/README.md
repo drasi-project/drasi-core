@@ -172,7 +172,7 @@ The source supports two property mapping modes:
 
 Additional mapping behavior:
 
-- `inject`: copies topic placeholder values into properties
+- `inject`: copies topic placeholder values into properties (overrides any payload values with the same keys in `payload_spread` mode)
 - `inject_id: true`: includes the mapped entity ID in properties
 - `nodes` and `relations`: defines related graph elements created from the same topic match
 

@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,8 +28,12 @@
 mod mosquitto_helpers;
 use crate::mosquitto_helpers::{generate_test_certs, MosquittoConfig, MosquittoGuard};
 use anyhow::Result;
+use drasi_lib::channels::ResultDiff;
+use drasi_lib::identity::{self, IdentityProvider};
 use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query, Source};
+use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
+use drasi_reaction_application::ApplicationReactionHandle;
 use drasi_source_mqtt::config::{
     InjectId, MappingEntity, MappingProperties, MqttTopicConfig, TopicMapping,
 };
@@ -113,7 +117,7 @@ async fn wait_for_source_status(
 pub async fn build_core(
     source_config: MqttSourceConfig,
     slot_name: String,
-) -> Result<Arc<DrasiLib>> {
+) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
     let source = MqttSource::builder(slot_name.clone())
         .with_config(source_config)
         .build()
@@ -132,7 +136,7 @@ pub async fn build_core(
         .auto_start(true)
         .build();
 
-    let (reaction, _handle) = ApplicationReaction::builder("test-reaction")
+    let (reaction, handle) = ApplicationReaction::builder("test-reaction")
         .with_query("test-query")
         .build();
 
@@ -145,13 +149,13 @@ pub async fn build_core(
             .build()
             .await?,
     );
-    Ok(core)
+    Ok((core, handle))
 }
 
 pub async fn build_core_for_input_as_node(
     source_config: MqttSourceConfig,
     slot_name: String,
-) -> Result<Arc<DrasiLib>> {
+) -> Result<(Arc<DrasiLib>, ApplicationReactionHandle)> {
     let source = MqttSource::builder(slot_name.clone())
         .with_config(source_config)
         .build()
@@ -170,7 +174,7 @@ pub async fn build_core_for_input_as_node(
         .auto_start(true)
         .build();
 
-    let (reaction, _handle) = ApplicationReaction::builder("test-reaction")
+    let (reaction, handle) = ApplicationReaction::builder("test-reaction")
         .with_query("test-query")
         .build();
 
@@ -183,7 +187,7 @@ pub async fn build_core_for_input_as_node(
             .await?,
     );
 
-    Ok(core)
+    Ok((core, handle))
 }
 
 //............................Tests.....
@@ -191,7 +195,6 @@ pub async fn build_core_for_input_as_node(
 #[tokio::test]
 #[serial]
 #[ignore]
-// TODO: This test is currently just testing that we can connect and publish to the broker. We should enhance it to also start the core with an MQTT source and verify that messages are received and processed correctly.
 async fn test_mqtt_publisher_client_connection() -> Result<()> {
     init_logging();
 
@@ -237,7 +240,6 @@ async fn test_mqtt_publisher_client_connection() -> Result<()> {
 #[tokio::test]
 #[serial]
 #[ignore]
-// TODO: This test is currently just testing that we can connect and publish to the broker. We should enhance it to also start the core with an MQTT source and verify that messages are received and processed correctly.
 async fn test_mqtt_publisher_client_connection_v5() -> Result<()> {
     init_logging();
 
@@ -307,7 +309,7 @@ async fn test_mqtt_version_fallback_from_v5_to_v3() -> Result<()> {
 
     // Start core with Mqtt Source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -347,7 +349,7 @@ async fn test_mqtt_version_v5() -> Result<()> {
 
     // Start core with Mqtt Source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -390,7 +392,7 @@ async fn test_mqtt_static_credentials_authentication() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -435,7 +437,7 @@ async fn test_mqtt_with_identity_provider_authentication() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -500,7 +502,7 @@ async fn test_mqtt_mtls_connection() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -566,7 +568,7 @@ async fn test_mqtt_mtls_connection_v3_1_1() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -634,7 +636,7 @@ async fn test_mqtt_reconnection_and_loopbackoff() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config, source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config, source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -764,7 +766,7 @@ async fn test_mqtt_query_results() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core = build_core(source_config.clone(), source_slot_name.clone()).await?;
+    let (core, _handle) = build_core(source_config.clone(), source_slot_name.clone()).await?;
     core.start().await?;
 
     wait_for_source_status(
@@ -969,7 +971,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
 
     // start core with mqtt source
     let source_slot_name = slot_name();
-    let core =
+    let (core, _handle) =
         build_core_for_input_as_node(source_config.clone(), source_slot_name.clone()).await?;
     core.start().await?;
 
@@ -1061,6 +1063,196 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
     wait_for_query_results(&core, "test-query", predicate).await?;
 
     info!("Successfully received expected query results");
+    // cleanup
+    core.stop().await?;
+    guard.cleanup().await;
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_full_pipeline_with_application_reaction() -> Result<()> {
+    init_logging();
+    init_rustls_crypto_provider();
+
+    // Generate certs
+    let certs =
+        generate_test_certs("localhost", true).expect("Failed to generate test certificates");
+
+    let client_cert = certs
+        .client_cert
+        .expect("Client cert should be present for mTLS test");
+    let client_key = certs
+        .client_key
+        .expect("Client key should be present for mTLS test");
+
+    // initialize config
+    let broker_config = MosquittoConfig::new()
+        .with_listener(8883)
+        .with_allow_anonymous(false)
+        .with_require_certificate(true)
+        .with_use_identity_as_username(true)
+        .with_ca(certs.ca.clone())
+        .with_server_cert(certs.server_cert.clone())
+        .with_server_key(certs.server_key.clone());
+
+    let source_config = MqttSourceConfig {
+        host: "localhost".to_string(),
+        port: broker_config.listener,
+        transport: Some(MqttTransportMode::TLS {
+            ca: Some(certs.ca.clone()),
+            ca_path: None,
+            alpn: None,
+            client_auth: Some((client_cert.into_bytes(), client_key.into_bytes())),
+            client_cert_path: None,
+            client_key_path: None,
+        }),
+        topics: vec![MqttTopicConfig {
+            topic: "building/+/+/+".to_string(),
+            qos: drasi_source_mqtt::MqttQoS::TWO,
+        }],
+        topic_mappings: vec![TopicMapping {
+            pattern: "building/{floor}/{room}/{device}".to_string(),
+            entity: MappingEntity {
+                label: "Device".to_string(),
+                id: "{room}:{device}".to_string(),
+            },
+            properties: MappingProperties {
+                mode: drasi_source_mqtt::config::MappingMode::PayloadAsField,
+                field_name: Some("reading".to_string()),
+                inject_id: Some(InjectId::True),
+                inject: vec![
+                    HashMap::from([("floor".to_string(), "{floor}".to_string())]),
+                    HashMap::from([("room".to_string(), "{room}".to_string())]),
+                ],
+            },
+            nodes: vec![
+                drasi_source_mqtt::config::MappingNode {
+                    label: "Room".to_string(),
+                    id: "{room}".to_string(),
+                },
+                drasi_source_mqtt::config::MappingNode {
+                    label: "Floor".to_string(),
+                    id: "{floor}".to_string(),
+                },
+            ],
+            relations: vec![
+                drasi_source_mqtt::config::MappingRelation {
+                    from: "{room}:{device}".to_string(),
+                    to: "{room}".to_string(),
+                    label: "LOCATED_IN_ROOM".to_string(),
+                },
+                drasi_source_mqtt::config::MappingRelation {
+                    from: "{room}".to_string(),
+                    to: "{floor}".to_string(),
+                    label: "LOCATED_IN_FLOOR".to_string(),
+                },
+            ],
+        }],
+        ..Default::default()
+    };
+
+    // start container
+    let mut guard = MosquittoGuard::new(&broker_config)
+        .await
+        .expect("Failed to start Mosquitto container");
+
+    // start core with mqtt source
+    let source_slot_name = slot_name();
+    let (core, handle) = build_core(source_config.clone(), source_slot_name.clone()).await?;
+    core.start().await?;
+
+    wait_for_source_status(
+        &core,
+        &source_slot_name,
+        drasi_lib::ComponentStatus::Running,
+    )
+    .await?;
+
+    // create application reaction subscription
+    let mut subscription = handle
+        .subscribe_with_options(SubscriptionOptions::default().with_timeout(Duration::from_secs(5)))
+        .await?;
+
+    // check the status of the query.
+    loop {
+        let query_status = core.get_query_status("test-query").await?;
+        if query_status == drasi_lib::ComponentStatus::Running {
+            break;
+        }
+        info!("Waiting for query to be running. Current status: {query_status:?}",);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // publish messages to the broker
+    let mqtt_options =
+        MqttConnection::config_to_mqtt_options_v5("mqtt-client-test", &source_config, None)
+            .await
+            .expect("Failed to convert config to MQTT options");
+    let client = guard
+        .get_client_v5(mqtt_options)
+        .await
+        .expect("Failed to create MQTT client");
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await; // wait a bit to ensure the core is ready to receive messages
+        match client
+            .publish(
+                "building/f2/r1/d2",
+                rumqttc::v5::mqttbytes::QoS::ExactlyOnce,
+                false,
+                "25.5".as_bytes(),
+            )
+            .await
+        {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
+        }
+        match client
+            .publish(
+                "building/f1/r2/d2",
+                rumqttc::v5::mqttbytes::QoS::ExactlyOnce,
+                false,
+                "30.2".as_bytes(),
+            )
+            .await
+        {
+            Ok(_) => (),
+            Err(e) => eprintln!("Failed to publish message: {e:?}"),
+        }
+    })
+    .await?;
+
+    // get the application reaction results
+    let result = subscription.recv().await;
+    assert!(result.is_some(), "Expected to receive query result");
+
+    let query_result = result.unwrap();
+    assert_eq!(query_result.query_id, "test-query");
+    assert!(
+        query_result.results.len() == 1,
+        "Expected exactly one result"
+    );
+
+    // verify the results
+    match &query_result.results[0] {
+        ResultDiff::Add { data } => {
+            let value = &data["val"];
+            let room = &data["room"];
+            let value_ok = value
+                .as_f64()
+                .map(|v| (v - 25.5).abs() < f64::EPSILON)
+                .unwrap_or(false);
+            let room_ok = room.as_str().map(|v| v == "r1").unwrap_or(false);
+            assert!(
+                value_ok && room_ok,
+                "Received unexpected query result: {data}"
+            );
+        }
+        _ => panic!("Expected an Add result"),
+    }
+
     // cleanup
     core.stop().await?;
     guard.cleanup().await;

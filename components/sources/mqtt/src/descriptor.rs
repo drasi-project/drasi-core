@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -138,14 +138,6 @@ pub enum MappingModeDto {
     PayloadSpread,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = source::mqtt::InjectId)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum InjectIdDto {
-    True,
-    False,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::mqtt::MappingProperties)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -154,7 +146,7 @@ pub struct MappingPropertiesDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inject_id: Option<InjectIdDto>,
+    pub inject_id: Option<bool>,
     /// JSON object mapping topic variables to graph properties.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inject: Vec<HashMap<String, String>>,
@@ -287,7 +279,6 @@ pub struct MqttSourceConfigDto {
     MqttTlsTransportConfigDto,
     MappingEntityDto,
     MappingModeDto,
-    InjectIdDto,
     MappingPropertiesDto,
     MappingNodeDto,
     MappingRelationDto,
@@ -300,15 +291,6 @@ impl MappingModeDto {
         match self {
             MappingModeDto::PayloadAsField => MappingMode::PayloadAsField,
             MappingModeDto::PayloadSpread => MappingMode::PayloadSpread,
-        }
-    }
-}
-
-impl InjectIdDto {
-    fn into_runtime(self) -> InjectId {
-        match self {
-            InjectIdDto::True => InjectId::True,
-            InjectIdDto::False => InjectId::False,
         }
     }
 }
@@ -400,7 +382,11 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
                 properties: MappingProperties {
                     mode: m.properties.mode.into_runtime(),
                     field_name: m.properties.field_name,
-                    inject_id: m.properties.inject_id.map(InjectIdDto::into_runtime),
+                    inject_id: match m.properties.inject_id {
+                        Some(true) => Some(InjectId::True),
+                        Some(false) => Some(InjectId::False),
+                        None => None,
+                    },
                     inject: m.properties.inject,
                 },
                 nodes: m

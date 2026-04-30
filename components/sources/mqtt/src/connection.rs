@@ -1,4 +1,4 @@
-// Copyright 2026 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ use core::error;
 use std::time::Duration;
 
 use crate::config::{
-    default_base_retry_delay_secs, default_max_retries, MqttQoS, MqttSourceConfig,
+    self, default_base_retry_delay_secs, default_max_retries, MqttQoS, MqttSourceConfig,
     MqttTransportMode,
 };
 use crate::utils::MqttPacket;
@@ -30,23 +30,10 @@ use rumqttc::{
 };
 use std::sync::Arc;
 
-macro_rules! common_config_to_mqtt_options {
+macro_rules! common_security_config_to_mqtt_options {
     ($options:expr, $config:expr, $identity_provider:expr) => {
-        if let Some(request_channel_capacity) = $config.request_channel_capacity {
-            $options.set_request_channel_capacity(request_channel_capacity);
-        }
-
-        if let Some(keep_alive) = $config.keep_alive {
-            $options.set_keep_alive(Duration::from_secs(keep_alive));
-        }
-
-        // authentication with the identity provider (higher precedence than static credentials from config if both are provided)
-        let effective_provider = $identity_provider.as_ref().map(|p| p.as_ref());
-        let config_provider = $config.identity_provider.as_deref();
-
         let mut optional_mtls_client_auth = None;
-        let provider = effective_provider.or(config_provider);
-        if let Some(provider) = provider {
+        if let Some(provider) = $identity_provider.as_ref() {
             let context = drasi_lib::identity::CredentialContext::new()
                 .with_property("hostname", &$config.host)
                 .with_property("port", $config.port.to_string());
@@ -111,7 +98,22 @@ macro_rules! common_config_to_mqtt_options {
                 }
             }
         }
-    }
+
+    };
+}
+
+macro_rules! common_config_to_mqtt_options {
+    ($options:expr, $config:expr, $identity_provider:expr) => {
+        if let Some(request_channel_capacity) = $config.request_channel_capacity {
+            $options.set_request_channel_capacity(request_channel_capacity);
+        }
+
+        if let Some(keep_alive) = $config.keep_alive {
+            $options.set_keep_alive(Duration::from_secs(keep_alive));
+        }
+
+        common_security_config_to_mqtt_options!($options, $config, $identity_provider);
+    };
 }
 
 trait ToMqttPacket {
@@ -159,7 +161,8 @@ pub enum MqttEventLoopWrapper {
 /// Mqtt connection manager that handles connection setup, authentication, and event loop management for both MQTT v5 and v3.1.1 brokers based on configuration and broker capabilities.
 pub struct MqttConnection {
     client: MqttAsyncClientWrapper,
-    event_loop_handle: Option<tokio::task::JoinHandle<()>>,
+    identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
+    config: Option<MqttSourceConfig>,
 }
 
 impl MqttConnection {
@@ -173,12 +176,22 @@ impl MqttConnection {
         let id_v5 = id.into().clone();
         let id_v3 = id_v5.clone();
 
+        // authentication with the identity provider (higher precedence than static credentials from config if both are provided)
+        let effective_provider = identity_provider;
+        let config_provider = config
+            .identity_provider
+            .as_ref()
+            .map(|p| Arc::from(p.clone_box()));
+
+        let provider = effective_provider.or(config_provider);
+
         // try Mqtt v5 first
-        match Self::mqtt5_connect(id_v5, config, &identity_provider).await {
+        match Self::mqtt5_connect(id_v5, config, &provider).await {
             Ok((client, event_loop)) => {
                 let mut connection = Self {
                     client: MqttAsyncClientWrapper::AsyncClientV5(client),
-                    event_loop_handle: None,
+                    identity_provider: provider,
+                    config: Some(config.clone()),
                 };
                 return Ok((connection, MqttEventLoopWrapper::EventLoopV5 { event_loop }));
             }
@@ -188,11 +201,12 @@ impl MqttConnection {
         }
 
         // fallback to Mqtt v3.1.1
-        match Self::mqttv3_connect(id_v3, config, &identity_provider).await {
+        match Self::mqttv3_connect(id_v3, config, &provider).await {
             Ok((client_v3, event_loop_v3)) => {
                 let mut connection = Self {
                     client: MqttAsyncClientWrapper::AsyncClientV3(client_v3),
-                    event_loop_handle: None,
+                    identity_provider: provider,
+                    config: Some(config.clone()),
                 };
                 return Ok((
                     connection,
@@ -216,9 +230,9 @@ impl MqttConnection {
         config: &MqttSourceConfig,
         mut processer_tx: tokio::sync::mpsc::Sender<MqttPacket>,
     ) -> anyhow::Result<()> {
-        self.subscribe_to_topics(config).await.unwrap_or_else(|e| {
-            error!("Failed to subscribe to topics: {e:?}");
-        });
+        self.subscribe_to_topics(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to subscribe to topics: {e:?}"))?;
 
         let mqtt_version: u8 = match &self.client {
             MqttAsyncClientWrapper::AsyncClientV5(_) => 5,
@@ -270,14 +284,18 @@ impl MqttConnection {
                             },
                             Err(e) => {
                                 error_count += 1;
-                                error!("MQTT event loop error: {e:?}");
                                 if error_count >= max_retries {
-                                    error!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
+                                    error!("MQTT event loop error: {e:?}. Encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
                                     return Err(anyhow::anyhow!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop."));
                                 } else {
                                     let delay = base_retry_delay_secs * doubler;
-                                    info!("Waiting for {delay} seconds before retrying MQTT event loop...");
+                                    info!("MQTT event loop error: {e:?}. Waiting for {delay} seconds before retrying MQTT event loop...");
                                     tokio::time::sleep(Duration::from_secs(delay)).await;
+
+                                    // refresh MQTT options security settings.
+                                    self.set_mqtt_options_v5_security(&mut event_loop_v5.options).await.unwrap_or_else(|e| {
+                                        error!("Failed to update MQTT options with security credentials: {e:?}");
+                                    });
                                     doubler *= 2; // exponential backoff
                                 }
                             }
@@ -323,15 +341,19 @@ impl MqttConnection {
                             Err(e) => {
                                 error_count += 1;
                                  if error_count >= max_retries {
-                                    error!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
+                                    error!("MQTT event loop error: {e:?}. Encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop.");
                                     return Err(anyhow::anyhow!("MQTT event loop has encountered {error_count} consecutive errors, exceeding the maximum of {max_retries}. Stopping the event loop."));
                                 } else {
                                     let delay = base_retry_delay_secs * doubler;
                                     info!("MQTT event loop error: {e:?}. Waiting for {delay} seconds before retrying...");
                                     tokio::time::sleep(Duration::from_secs(delay)).await;
+
+                                    // refresh MQTT options security settings.
+                                    self.set_mqtt_options_v3_security(&mut event_loop_v3.mqtt_options).await.unwrap_or_else(|e| {
+                                        error!("Failed to update MQTT options with security credentials: {e:?}");
+                                    });
                                     doubler *= 2; // exponential backoff
                                 }
-                                error!("MQTT event loop error: {e:?}");
                             }
                         }
                     }
@@ -365,7 +387,9 @@ impl MqttConnection {
                     error!(
                         "Failed to connect using MQTT v5 options: Unsupported protocol version."
                     );
-                    break;
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect using MQTT v5 options: Unsupported protocol version. The broker may not support MQTT v5."
+                    ));
                 }
                 Err(e) => {
                     error!(
@@ -459,6 +483,35 @@ impl MqttConnection {
             }
         }
         Ok(())
+    }
+
+    // needed if security tokens are expired
+    async fn set_mqtt_options_v5_security(
+        &self,
+        mqtt_options: &mut MqttOptionsV5,
+    ) -> anyhow::Result<()> {
+        if let Some(config) = self.config.as_ref() {
+            common_security_config_to_mqtt_options!(mqtt_options, config, &self.identity_provider); // calls the available macro
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "No configuration available to update MQTT options security settings"
+            ))
+        }
+    }
+
+    async fn set_mqtt_options_v3_security(
+        &self,
+        mqtt_options: &mut MqttOptions,
+    ) -> anyhow::Result<()> {
+        if let Some(config) = self.config.as_ref() {
+            common_security_config_to_mqtt_options!(mqtt_options, config, &self.identity_provider); // calls the available macro
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "No configuration available to update MQTT options security settings"
+            ))
+        }
     }
 
     pub async fn config_to_mqtt_options_v5(
