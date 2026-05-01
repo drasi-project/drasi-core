@@ -54,6 +54,10 @@ impl HttpBootstrapProvider {
         let timeout = Duration::from_secs(config.timeout_seconds);
         let client = Client::builder()
             .timeout(timeout)
+            // Force HTTP/1.1 to avoid HTTP/2 multiplexing issues when multiple
+            // bootstrap calls share this client concurrently. H2 frame reassembly
+            // under heavy multiplexing can corrupt large response bodies.
+            .http1_only()
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -157,10 +161,21 @@ impl HttpBootstrapProvider {
             });
 
             // Parse response body using the correct content type
-            let parsed_body =
-                content_parser::parse_body(&response_text, &ct).with_context(|| {
-                    format!("Failed to parse response from '{}' as {ct:?}", endpoint.url)
-                })?;
+            let parsed_body = match content_parser::parse_body(&response_text, &ct) {
+                Ok(body) => body,
+                Err(e) => {
+                    error!(
+                        "Failed to parse response from '{}' as {ct:?}. Body length: {}, first 200 chars: {:?}",
+                        endpoint.url,
+                        response_text.len(),
+                        &response_text[..response_text.len().min(200)]
+                    );
+                    return Err(e.context(format!(
+                        "Failed to parse response from '{}' as {ct:?}",
+                        endpoint.url
+                    )));
+                }
+            };
 
             // Extract items
             let items = response::extract_items(&parsed_body, &endpoint.response.items_path)?;
