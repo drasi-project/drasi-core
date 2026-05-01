@@ -263,10 +263,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
                         .get("offset")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0);
-                    let limit: usize = query
-                        .get("limit")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(5);
+                    let limit: usize = query.get("limit").and_then(|v| v.parse().ok()).unwrap_or(5);
                     let page: Vec<_> = items.iter().skip(offset).take(limit).cloned().collect();
                     Json(json!({
                         "items": page,
