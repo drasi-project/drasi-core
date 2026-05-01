@@ -209,6 +209,118 @@ pub enum PaginationConfig {
     },
 }
 
+impl HttpBootstrapConfig {
+    /// Validate the configuration and return an error if invalid.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.endpoints.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: at least one endpoint must be configured"
+            ));
+        }
+        if self.timeout_seconds == 0 {
+            return Err(anyhow::anyhow!(
+                "Validation error: timeoutSeconds must be greater than 0"
+            ));
+        }
+        for (i, endpoint) in self.endpoints.iter().enumerate() {
+            endpoint.validate(i)?;
+        }
+        Ok(())
+    }
+}
+
+impl EndpointConfig {
+    fn validate(&self, index: usize) -> anyhow::Result<()> {
+        if self.url.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: endpoint[{index}].url cannot be empty"
+            ));
+        }
+        if self.response.mappings.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: endpoint[{index}].response.mappings must have at least one mapping"
+            ));
+        }
+        if let Some(ref pagination) = self.pagination {
+            pagination.validate(index)?;
+        }
+        for (j, mapping) in self.response.mappings.iter().enumerate() {
+            mapping.validate(index, j)?;
+        }
+        Ok(())
+    }
+}
+
+impl PaginationConfig {
+    fn validate(&self, endpoint_index: usize) -> anyhow::Result<()> {
+        match self {
+            PaginationConfig::OffsetLimit { page_size, .. } => {
+                if *page_size == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Validation error: endpoint[{endpoint_index}].pagination.page_size must be greater than 0"
+                    ));
+                }
+            }
+            PaginationConfig::PageNumber { page_size, .. } => {
+                if *page_size == 0 {
+                    return Err(anyhow::anyhow!(
+                        "Validation error: endpoint[{endpoint_index}].pagination.page_size must be greater than 0"
+                    ));
+                }
+            }
+            PaginationConfig::Cursor { cursor_param, cursor_path, .. } => {
+                if cursor_param.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Validation error: endpoint[{endpoint_index}].pagination.cursor_param cannot be empty"
+                    ));
+                }
+                if cursor_path.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Validation error: endpoint[{endpoint_index}].pagination.cursor_path cannot be empty"
+                    ));
+                }
+            }
+            PaginationConfig::NextUrl { next_url_path, .. } => {
+                if next_url_path.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Validation error: endpoint[{endpoint_index}].pagination.next_url_path cannot be empty"
+                    ));
+                }
+            }
+            PaginationConfig::LinkHeader { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+impl ElementMappingConfig {
+    fn validate(&self, endpoint_index: usize, mapping_index: usize) -> anyhow::Result<()> {
+        if self.template.id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.id cannot be empty"
+            ));
+        }
+        if self.template.labels.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.labels must have at least one label"
+            ));
+        }
+        if self.element_type == ElementType::Relation {
+            if self.template.from.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.from is required for relation mappings"
+                ));
+            }
+            if self.template.to.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.to is required for relation mappings"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_offset_param() -> String {
     "offset".to_string()
 }
@@ -415,5 +527,103 @@ mod tests {
             }
             _ => panic!("Expected NextUrl pagination"),
         }
+    }
+
+    fn make_valid_config() -> HttpBootstrapConfig {
+        HttpBootstrapConfig {
+            endpoints: vec![EndpointConfig {
+                url: "https://api.example.com/users".to_string(),
+                method: HttpMethod::Get,
+                headers: HashMap::new(),
+                body: None,
+                auth: None,
+                pagination: None,
+                response: ResponseConfig {
+                    items_path: "$".to_string(),
+                    content_type: None,
+                    mappings: vec![ElementMappingConfig {
+                        element_type: ElementType::Node,
+                        template: ElementTemplate {
+                            id: "{{item.id}}".to_string(),
+                            labels: vec!["User".to_string()],
+                            properties: None,
+                            from: None,
+                            to: None,
+                        },
+                    }],
+                },
+            }],
+            timeout_seconds: 30,
+            max_retries: 3,
+            retry_delay_ms: 1000,
+        }
+    }
+
+    #[test]
+    fn test_validate_valid_config() {
+        let config = make_valid_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_endpoints() {
+        let mut config = make_valid_config();
+        config.endpoints.clear();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one endpoint"));
+    }
+
+    #[test]
+    fn test_validate_empty_url() {
+        let mut config = make_valid_config();
+        config.endpoints[0].url = String::new();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("url cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_no_mappings() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings.clear();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one mapping"));
+    }
+
+    #[test]
+    fn test_validate_zero_page_size() {
+        let mut config = make_valid_config();
+        config.endpoints[0].pagination = Some(PaginationConfig::OffsetLimit {
+            offset_param: "offset".to_string(),
+            limit_param: "limit".to_string(),
+            page_size: 0,
+            total_path: None,
+        });
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("page_size must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_zero_timeout() {
+        let mut config = make_valid_config();
+        config.timeout_seconds = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("timeoutSeconds must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_relation_missing_from() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        // from is None
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("from is required"));
+    }
+
+    #[test]
+    fn test_validate_empty_labels() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].template.labels.clear();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one label"));
     }
 }

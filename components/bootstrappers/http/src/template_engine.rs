@@ -57,6 +57,29 @@ impl TemplateEngine {
             .map_err(|e| anyhow!("Template render error: {e}"))
     }
 
+    /// Render a template and preserve the JSON value type.
+    ///
+    /// If the template is a simple variable reference like `{{item.field}}`,
+    /// this returns the original JSON value (preserving int/float/bool/string
+    /// types). Otherwise, it renders through Handlebars and returns a string.
+    pub fn render_value(&self, template: &str, context: &TemplateContext) -> Result<JsonValue> {
+        // If template is a simple reference, resolve directly to preserve type
+        if let Some(path) = extract_simple_path(template) {
+            let context_json = context_to_json(context);
+            if let Some(value) = resolve_path(&context_json, &path) {
+                return Ok(value.clone());
+            }
+        }
+
+        // Fall back to string rendering
+        let rendered = self.render_string(template, context)?;
+        if rendered.is_empty() {
+            Ok(JsonValue::Null)
+        } else {
+            Ok(JsonValue::String(rendered))
+        }
+    }
+
     /// Render properties from a JSON value template specification.
     /// Each value in the map is treated as a Handlebars template.
     pub fn render_properties(
@@ -84,11 +107,7 @@ impl TemplateEngine {
         context: &TemplateContext,
     ) -> Result<JsonValue> {
         match value {
-            JsonValue::String(template) => {
-                let rendered = self.render_string(template, context)?;
-                // Try to parse as a typed value
-                Ok(parse_rendered_value(&rendered))
-            }
+            JsonValue::String(template) => self.render_value(template, context),
             JsonValue::Object(map) => {
                 let mut result = serde_json::Map::new();
                 for (key, v) in map {
@@ -111,31 +130,44 @@ impl TemplateEngine {
     }
 }
 
-/// Parse a rendered string value, attempting to preserve types.
-fn parse_rendered_value(value: &str) -> JsonValue {
-    // Try integer
-    if let Ok(n) = value.parse::<i64>() {
-        return JsonValue::Number(n.into());
-    }
-    // Try float
-    if let Ok(n) = value.parse::<f64>() {
-        if let Some(num) = serde_json::Number::from_f64(n) {
-            return JsonValue::Number(num);
+/// Check if a template is a simple variable reference like `{{item.field}}`.
+/// Returns the path (e.g., `"item.field"`) if it is, None otherwise.
+fn extract_simple_path(template: &str) -> Option<String> {
+    let trimmed = template.trim();
+    if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
+        let inner = trimmed[2..trimmed.len() - 2].trim();
+        // Simple path: no spaces (helpers), no block markers, no extra braces
+        if !inner.contains(' ')
+            && !inner.contains('#')
+            && !inner.contains('/')
+            && !inner.contains('{')
+            && !inner.contains('}')
+        {
+            return Some(inner.to_string());
         }
     }
-    // Try boolean
-    if value == "true" {
-        return JsonValue::Bool(true);
+    None
+}
+
+/// Resolve a dot-separated path in a JSON value.
+fn resolve_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = match current {
+            JsonValue::Object(obj) => obj.get(part)?,
+            JsonValue::Array(arr) => {
+                let index: usize = part.parse().ok()?;
+                arr.get(index)?
+            }
+            _ => return None,
+        };
     }
-    if value == "false" {
-        return JsonValue::Bool(false);
-    }
-    // Try null
-    if value == "null" || value.is_empty() {
-        return JsonValue::Null;
-    }
-    // Default to string
-    JsonValue::String(value.to_string())
+    Some(current)
+}
+
+/// Convert TemplateContext to JSON for direct path resolution.
+fn context_to_json(context: &TemplateContext) -> JsonValue {
+    serde_json::to_value(context).unwrap_or(JsonValue::Null)
 }
 
 #[cfg(test)]
@@ -160,7 +192,51 @@ mod tests {
     }
 
     #[test]
-    fn test_render_properties() {
+    fn test_render_value_preserves_types() {
+        let engine = TemplateEngine::new();
+        let context = TemplateContext {
+            item: json!({"id": "str-123", "count": 42, "rate": 3.15, "active": true}),
+            index: 0,
+            source_id: "test-source".to_string(),
+        };
+
+        // Simple references preserve original type
+        assert_eq!(
+            engine.render_value("{{item.id}}", &context).unwrap(),
+            json!("str-123")
+        );
+        assert_eq!(
+            engine.render_value("{{item.count}}", &context).unwrap(),
+            json!(42)
+        );
+        assert_eq!(
+            engine.render_value("{{item.rate}}", &context).unwrap(),
+            json!(3.15)
+        );
+        assert_eq!(
+            engine.render_value("{{item.active}}", &context).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn test_render_value_complex_template_returns_string() {
+        let engine = TemplateEngine::new();
+        let context = TemplateContext {
+            item: json!({"id": 42, "prefix": "user"}),
+            index: 0,
+            source_id: "test-source".to_string(),
+        };
+
+        // Complex templates always produce strings
+        let result = engine
+            .render_value("{{item.prefix}}-{{item.id}}", &context)
+            .unwrap();
+        assert_eq!(result, json!("user-42"));
+    }
+
+    #[test]
+    fn test_render_properties_preserves_types() {
         let engine = TemplateEngine::new();
         let context = TemplateContext {
             item: json!({"id": "123", "name": "Alice", "age": 30}),
@@ -175,7 +251,7 @@ mod tests {
 
         let result = engine.render_properties(&props, &context).unwrap();
         assert_eq!(result["name"], json!("Alice"));
-        assert_eq!(result["age"], json!(30));
+        assert_eq!(result["age"], json!(30)); // preserved as integer
     }
 
     #[test]
@@ -187,18 +263,39 @@ mod tests {
             source_id: "test-source".to_string(),
         };
 
-        // Non-strict mode should render missing fields as empty string
+        // Non-strict mode: missing fields render as empty string
         let result = engine.render_string("{{item.nonexistent}}", &context).unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
-    fn test_parse_rendered_values() {
-        assert_eq!(parse_rendered_value("42"), json!(42));
-        assert_eq!(parse_rendered_value("3.15"), json!(3.15));
-        assert_eq!(parse_rendered_value("true"), json!(true));
-        assert_eq!(parse_rendered_value("false"), json!(false));
-        assert_eq!(parse_rendered_value("hello"), json!("hello"));
-        assert_eq!(parse_rendered_value(""), JsonValue::Null);
+    fn test_extract_simple_path() {
+        assert_eq!(
+            extract_simple_path("{{item.id}}"),
+            Some("item.id".to_string())
+        );
+        assert_eq!(
+            extract_simple_path("{{item.nested.field}}"),
+            Some("item.nested.field".to_string())
+        );
+        // Complex templates are not simple paths
+        assert_eq!(extract_simple_path("{{item.a}}-{{item.b}}"), None);
+        assert_eq!(extract_simple_path("prefix-{{item.id}}"), None);
+        assert_eq!(extract_simple_path("static text"), None);
+    }
+
+    #[test]
+    fn test_string_value_not_coerced_to_int() {
+        let engine = TemplateEngine::new();
+        let context = TemplateContext {
+            item: json!({"id": "42"}), // String "42", not integer 42
+            index: 0,
+            source_id: "test-source".to_string(),
+        };
+
+        // Should stay as string since the original value is a string
+        let result = engine.render_value("{{item.id}}", &context).unwrap();
+        assert_eq!(result, json!("42"));
+        assert!(result.is_string());
     }
 }

@@ -31,7 +31,7 @@ use crate::provider::HttpBootstrapProvider;
 /// Top-level configuration DTO for the HTTP bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::http::HttpBootstrapConfig)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpBootstrapConfigDto {
     /// Endpoint configurations.
     #[schema(value_type = Vec<bootstrap::http::EndpointConfig>)]
@@ -575,6 +575,8 @@ impl BootstrapPluginDescriptor for HttpBootstrapDescriptor {
         let mapper = DtoMapper::new();
         let config = map_config(&dto, &mapper)
             .map_err(|e| anyhow::anyhow!("Failed to resolve HTTP bootstrap config: {e}"))?;
+
+        config.validate()?;
 
         let provider = HttpBootstrapProvider::new(config)?;
         Ok(Box::new(provider))

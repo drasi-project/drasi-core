@@ -134,8 +134,17 @@ mod tests {
     fn test_parse_xml_simple() {
         let body = "<root><name>test</name><value>42</value></root>";
         let result = parse_body(body, &ContentType::Xml).unwrap();
-        // quick-xml wraps text content in $text field
         assert!(result.get("name").is_some());
         assert!(result.get("value").is_some());
+    }
+
+    #[test]
+    fn test_parse_xml_with_text_fields() {
+        // quick-xml wraps text content in $text for nested elements
+        let body = "<root><item><id>x1</id><name>Alice</name></item></root>";
+        let result = parse_body(body, &ContentType::Xml).unwrap();
+        let item = &result["item"];
+        // quick-xml produces {"$text": "x1"} for <id>x1</id>
+        assert!(item["id"].is_object() || item["id"].is_string());
     }
 }

@@ -19,7 +19,6 @@
 
 use anyhow::{anyhow, Context, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue};
-use log::warn;
 use ordered_float::OrderedFloat;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;

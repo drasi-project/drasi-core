@@ -1223,3 +1223,379 @@ async fn test_label_filtering() {
 
     assert_eq!(result.event_count, 0);
 }
+
+// ── Test: Descriptor/DTO layer (config goes through full deserialization pipeline) ──
+
+#[tokio::test]
+async fn test_descriptor_creates_provider_from_json_config() {
+    use drasi_bootstrap_http::descriptor::HttpBootstrapDescriptor;
+    use drasi_plugin_sdk::BootstrapPluginDescriptor;
+
+    let app = Router::new().route(
+        "/users",
+        get(|| async {
+            Json(json!([
+                {"id": "d1", "name": "DtoAlice"},
+                {"id": "d2", "name": "DtoBob"}
+            ]))
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    // Build config as raw JSON (as the host framework would pass it)
+    let config_json = json!({
+        "endpoints": [{
+            "url": format!("{base_url}/users"),
+            "method": "GET",
+            "response": {
+                "itemsPath": "$",
+                "mappings": [{
+                    "elementType": "node",
+                    "template": {
+                        "id": "{{item.id}}",
+                        "labels": ["User"],
+                        "properties": {"name": "{{item.name}}"}
+                    }
+                }]
+            }
+        }],
+        "timeoutSeconds": 10,
+        "maxRetries": 0,
+        "retryDelayMs": 100
+    });
+
+    let descriptor = HttpBootstrapDescriptor;
+    let source_config = json!({});
+    let provider = descriptor
+        .create_bootstrap_provider(&config_json, &source_config)
+        .await
+        .expect("Descriptor should create provider from JSON config");
+
+    let context = test_context("dto-source");
+    let request = test_request(vec!["User".to_string()], vec![]);
+    let (tx, mut rx) = mpsc::channel(100);
+    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+
+    assert_eq!(result.event_count, 2);
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 2);
+}
+
+#[tokio::test]
+async fn test_descriptor_rejects_unknown_fields() {
+    use drasi_bootstrap_http::descriptor::HttpBootstrapDescriptor;
+    use drasi_plugin_sdk::BootstrapPluginDescriptor;
+
+    let config_json = json!({
+        "endpoints": [{
+            "url": "https://example.com/api",
+            "response": {
+                "itemsPath": "$",
+                "mappings": [{
+                    "elementType": "node",
+                    "template": {
+                        "id": "{{item.id}}",
+                        "labels": ["Test"]
+                    }
+                }]
+            }
+        }],
+        "bogusField": true
+    });
+
+    let descriptor = HttpBootstrapDescriptor;
+    let source_config = json!({});
+    let result = descriptor
+        .create_bootstrap_provider(&config_json, &source_config)
+        .await;
+
+    assert!(result.is_err(), "Should reject unknown fields");
+    let err = result.err().unwrap().to_string();
+    assert!(
+        err.contains("bogusField") || err.contains("unknown field"),
+        "Error should mention the unknown field, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_descriptor_validation_catches_empty_url() {
+    use drasi_bootstrap_http::descriptor::HttpBootstrapDescriptor;
+    use drasi_plugin_sdk::BootstrapPluginDescriptor;
+
+    let config_json = json!({
+        "endpoints": [{
+            "url": "",
+            "response": {
+                "itemsPath": "$",
+                "mappings": [{
+                    "elementType": "node",
+                    "template": {
+                        "id": "{{item.id}}",
+                        "labels": ["Test"]
+                    }
+                }]
+            }
+        }]
+    });
+
+    let descriptor = HttpBootstrapDescriptor;
+    let source_config = json!({});
+    let result = descriptor
+        .create_bootstrap_provider(&config_json, &source_config)
+        .await;
+
+    assert!(result.is_err(), "Should reject empty URL");
+    let err = result.err().unwrap().to_string();
+    assert!(
+        err.contains("url cannot be empty"),
+        "Error should mention empty URL, got: {err}"
+    );
+}
+
+// ── Test: XML response parsing ──────────────────────────────────────────────
+// Note: quick-xml's serde deserializer to serde_json::Value does not preserve
+// repeated sibling elements as arrays (last element wins). XML responses that
+// contain arrays should wrap items in unique keys or use a flat structure.
+
+#[tokio::test]
+async fn test_xml_response_parsing() {
+    let app = Router::new().route(
+        "/data.xml",
+        get(|| async {
+            // Use a single-item XML with flat text nodes
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body(
+                    r#"<user><id>x1</id><name>XmlAlice</name><email>alice@xml.com</email></user>"#
+                        .to_string(),
+                )
+                .unwrap()
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/data.xml"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                // The root element is stripped by quick-xml, so the parsed JSON
+                // is {"id": ..., "name": ..., "email": ...} — a single object.
+                // extract_items wraps a single object in a vec.
+                items_path: "$".to_string(),
+                content_type: Some(ContentTypeOverride::Xml),
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["XmlNode".to_string()],
+                        properties: Some(json!({"name": "{{item.name}}", "email": "{{item.email}}"})),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("xml-source");
+    let request = test_request(vec!["XmlNode".to_string()], vec![]);
+
+    let (tx, mut rx) = mpsc::channel(100);
+    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+
+    assert_eq!(result.event_count, 1);
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 1);
+
+    match &events[0].change {
+        SourceChange::Insert { element } => match element {
+            Element::Node { metadata, .. } => {
+                assert_eq!(&*metadata.labels[0], "XmlNode");
+            }
+            _ => panic!("Expected Node"),
+        },
+        _ => panic!("Expected Insert"),
+    }
+}
+
+// ── Test: YAML response parsing ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_yaml_response_parsing() {
+    let app = Router::new().route(
+        "/data.yaml",
+        get(|| async {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/x-yaml")
+                .body(
+                    r#"- id: "y1"
+  name: YamlAlice
+- id: "y2"
+  name: YamlBob
+- id: "y3"
+  name: YamlCharlie
+"#
+                    .to_string(),
+                )
+                .unwrap()
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/data.yaml"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: Some(ContentTypeOverride::Yaml),
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["YamlNode".to_string()],
+                        properties: Some(json!({"name": "{{item.name}}"})),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("yaml-source");
+    let request = test_request(vec!["YamlNode".to_string()], vec![]);
+
+    let (tx, mut rx) = mpsc::channel(100);
+    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+
+    assert_eq!(result.event_count, 3);
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 3);
+
+    match &events[0].change {
+        SourceChange::Insert { element } => match element {
+            Element::Node { metadata, properties } => {
+                assert_eq!(&*metadata.labels[0], "YamlNode");
+                let name = properties.get("name").expect("name property missing");
+                match name {
+                    drasi_core::models::ElementValue::String(s) => assert_eq!(&**s, "YamlAlice"),
+                    other => panic!("Expected String, got {other:?}"),
+                }
+            }
+            _ => panic!("Expected Node"),
+        },
+        _ => panic!("Expected Insert"),
+    }
+}
+
+// ── Test: Type preservation through template engine ─────────────────────────
+
+#[tokio::test]
+async fn test_type_preservation_in_properties() {
+    let app = Router::new().route(
+        "/typed",
+        get(|| async {
+            Json(json!([
+                {"id": "t1", "count": 42, "rate": 3.15, "active": true, "zip": "00123"}
+            ]))
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/typed"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["TypedNode".to_string()],
+                        properties: Some(json!({
+                            "count": "{{item.count}}",
+                            "rate": "{{item.rate}}",
+                            "active": "{{item.active}}",
+                            "zip": "{{item.zip}}"
+                        })),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("typed-source");
+    let request = test_request(vec!["TypedNode".to_string()], vec![]);
+
+    let (tx, mut rx) = mpsc::channel(100);
+    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    assert_eq!(result.event_count, 1);
+
+    let events = collect_events(rx).await;
+    match &events[0].change {
+        SourceChange::Insert { element } => match element {
+            Element::Node { properties, .. } => {
+                use drasi_core::models::ElementValue;
+                use ordered_float::OrderedFloat;
+
+                // Integer stays integer
+                assert_eq!(
+                    properties.get("count"),
+                    Some(&ElementValue::Integer(42))
+                );
+                // Float stays float
+                assert_eq!(
+                    properties.get("rate"),
+                    Some(&ElementValue::Float(OrderedFloat(3.15)))
+                );
+                // Bool stays bool
+                assert_eq!(
+                    properties.get("active"),
+                    Some(&ElementValue::Bool(true))
+                );
+                // String "00123" stays string (not coerced to int 123)
+                let zip = properties.get("zip").expect("zip property missing");
+                match zip {
+                    ElementValue::String(s) => assert_eq!(&**s, "00123"),
+                    other => panic!("Expected zip to be String, got {other:?}"),
+                }
+            }
+            _ => panic!("Expected Node"),
+        },
+        _ => panic!("Expected Insert"),
+    }
+}
