@@ -268,7 +268,11 @@ impl PaginationConfig {
                     ));
                 }
             }
-            PaginationConfig::Cursor { cursor_param, cursor_path, .. } => {
+            PaginationConfig::Cursor {
+                cursor_param,
+                cursor_path,
+                ..
+            } => {
                 if cursor_param.is_empty() {
                     return Err(anyhow::anyhow!(
                         "Validation error: endpoint[{endpoint_index}].pagination.cursor_param cannot be empty"
@@ -494,9 +498,7 @@ mod tests {
         let config: AuthConfig = serde_json::from_str(json).unwrap();
         match config {
             AuthConfig::OAuth2ClientCredentials {
-                token_url,
-                scopes,
-                ..
+                token_url, scopes, ..
             } => {
                 assert_eq!(token_url, "https://auth.example.com/token");
                 assert_eq!(scopes, vec!["read", "write"]);
@@ -607,7 +609,9 @@ mod tests {
         let mut config = make_valid_config();
         config.timeout_seconds = 0;
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("timeoutSeconds must be greater than 0"));
+        assert!(err
+            .to_string()
+            .contains("timeoutSeconds must be greater than 0"));
     }
 
     #[test]
@@ -622,7 +626,10 @@ mod tests {
     #[test]
     fn test_validate_empty_labels() {
         let mut config = make_valid_config();
-        config.endpoints[0].response.mappings[0].template.labels.clear();
+        config.endpoints[0].response.mappings[0]
+            .template
+            .labels
+            .clear();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("at least one label"));
     }

@@ -26,11 +26,24 @@ use crate::config::{ApiKeyLocation, AuthConfig};
 
 /// Resolved authentication that can be applied to requests.
 pub enum ResolvedAuth {
-    Bearer { token: String },
-    ApiKeyHeader { name: String, value: String },
-    ApiKeyQuery { name: String, value: String },
-    Basic { username: String, password: String },
-    OAuth2 { token_provider: Arc<OAuth2TokenProvider> },
+    Bearer {
+        token: String,
+    },
+    ApiKeyHeader {
+        name: String,
+        value: String,
+    },
+    ApiKeyQuery {
+        name: String,
+        value: String,
+    },
+    Basic {
+        username: String,
+        password: String,
+    },
+    OAuth2 {
+        token_provider: Arc<OAuth2TokenProvider>,
+    },
 }
 
 /// OAuth2 token provider with caching.

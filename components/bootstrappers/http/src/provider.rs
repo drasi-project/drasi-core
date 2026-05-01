@@ -137,10 +137,7 @@ impl HttpBootstrapProvider {
             }
             last_url_and_params = Some(current_key);
 
-            debug!(
-                "Fetching page {page_num} from endpoint: {}",
-                endpoint.url
-            );
+            debug!("Fetching page {page_num} from endpoint: {}", endpoint.url);
 
             // Make the HTTP request with retries
             let (response_text, response_headers) = self
@@ -164,10 +161,7 @@ impl HttpBootstrapProvider {
             // Parse response body using the correct content type
             let parsed_body =
                 content_parser::parse_body(&response_text, &ct).with_context(|| {
-                    format!(
-                        "Failed to parse response from '{}' as {ct:?}",
-                        endpoint.url
-                    )
+                    format!("Failed to parse response from '{}' as {ct:?}", endpoint.url)
                 })?;
 
             // Extract items
@@ -269,10 +263,7 @@ impl HttpBootstrapProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            match self
-                .make_request(url, endpoint, auth, query_params)
-                .await
-            {
+            match self.make_request(url, endpoint, auth, query_params).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     warn!(

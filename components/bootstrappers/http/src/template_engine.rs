@@ -264,7 +264,9 @@ mod tests {
         };
 
         // Non-strict mode: missing fields render as empty string
-        let result = engine.render_string("{{item.nonexistent}}", &context).unwrap();
+        let result = engine
+            .render_string("{{item.nonexistent}}", &context)
+            .unwrap();
         assert_eq!(result, "");
     }
 

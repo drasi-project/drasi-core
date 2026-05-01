@@ -28,7 +28,9 @@ use axum::{
 use drasi_bootstrap_http::config::*;
 use drasi_bootstrap_http::HttpBootstrapProvider;
 use drasi_core::models::{Element, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEvent;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
@@ -67,9 +69,7 @@ fn test_request(node_labels: Vec<String>, relation_labels: Vec<String>) -> Boots
 }
 
 /// Collect all bootstrap events from the channel.
-async fn collect_events(
-    mut rx: mpsc::Receiver<BootstrapEvent>,
-) -> Vec<BootstrapEvent> {
+async fn collect_events(mut rx: mpsc::Receiver<BootstrapEvent>) -> Vec<BootstrapEvent> {
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
         events.push(event);
@@ -130,7 +130,10 @@ async fn test_simple_json_endpoint() {
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 3);
 
@@ -140,7 +143,10 @@ async fn test_simple_json_endpoint() {
     // Verify first event
     match &events[0].change {
         SourceChange::Insert { element } => match element {
-            Element::Node { metadata, properties } => {
+            Element::Node {
+                metadata,
+                properties,
+            } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(&*metadata.labels[0], "User");
             }
@@ -166,8 +172,14 @@ async fn test_offset_limit_pagination() {
         get(move |Query(params): Query<HashMap<String, String>>| {
             let items = items.clone();
             async move {
-                let offset: usize = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
-                let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(10);
+                let offset: usize = params
+                    .get("offset")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let limit: usize = params
+                    .get("limit")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10);
 
                 let page: Vec<&JsonValue> = items.iter().skip(offset).take(limit).collect();
                 let response = json!({
@@ -219,7 +231,10 @@ async fn test_offset_limit_pagination() {
     let request = test_request(vec!["User".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 25);
     let events = collect_events(rx).await;
@@ -242,15 +257,18 @@ async fn test_cursor_pagination_stripe_style() {
         get(move |Query(params): Query<HashMap<String, String>>| {
             let items = items.clone();
             async move {
-                let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(5);
+                let limit: usize = params
+                    .get("limit")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5);
                 let starting_after = params.get("starting_after").cloned();
 
                 let start_idx = match starting_after {
-                    Some(ref cursor) => {
-                        items.iter().position(|item| item["id"] == *cursor)
-                            .map(|pos| pos + 1)
-                            .unwrap_or(0)
-                    }
+                    Some(ref cursor) => items
+                        .iter()
+                        .position(|item| item["id"] == *cursor)
+                        .map(|pos| pos + 1)
+                        .unwrap_or(0),
                     None => 0,
                 };
 
@@ -308,7 +326,10 @@ async fn test_cursor_pagination_stripe_style() {
     let request = test_request(vec!["Customer".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 15);
     let events = collect_events(rx).await;
@@ -328,38 +349,45 @@ async fn test_link_header_pagination_github_style() {
 
     let app = Router::new().route(
         "/repos",
-        get(move |Query(params): Query<HashMap<String, String>>, req_headers: HeaderMap| {
-            let items = items.clone();
-            async move {
-                let page: usize = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
-                let per_page: usize = params.get("per_page").and_then(|v| v.parse().ok()).unwrap_or(5);
+        get(
+            move |Query(params): Query<HashMap<String, String>>, req_headers: HeaderMap| {
+                let items = items.clone();
+                async move {
+                    let page: usize = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    let per_page: usize = params
+                        .get("per_page")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(5);
 
-                let start = (page - 1) * per_page;
-                let page_items: Vec<&JsonValue> = items.iter().skip(start).take(per_page).collect();
-                let total_pages = items.len().div_ceil(per_page);
+                    let start = (page - 1) * per_page;
+                    let page_items: Vec<&JsonValue> =
+                        items.iter().skip(start).take(per_page).collect();
+                    let total_pages = items.len().div_ceil(per_page);
 
-                let host = req_headers
-                    .get("host")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("localhost");
+                    let host = req_headers
+                        .get("host")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("localhost");
 
-                let body = serde_json::to_string(&page_items).unwrap();
+                    let body = serde_json::to_string(&page_items).unwrap();
 
-                let mut response = Response::builder().status(StatusCode::OK);
+                    let mut response = Response::builder().status(StatusCode::OK);
 
-                // Add Link header if there's a next page
-                if page < total_pages {
-                    let next_url = format!("http://{host}/repos?page={}&per_page={per_page}", page + 1); // DevSkim: ignore DS137138
-                    let link_value = format!("<{next_url}>; rel=\"next\"");
-                    response = response.header("Link", link_value);
+                    // Add Link header if there's a next page
+                    if page < total_pages {
+                        let next_url =
+                            format!("http://{host}/repos?page={}&per_page={per_page}", page + 1); // DevSkim: ignore DS137138
+                        let link_value = format!("<{next_url}>; rel=\"next\"");
+                        response = response.header("Link", link_value);
+                    }
+
+                    response
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(body)
+                        .unwrap()
                 }
-
-                response
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(body)
-                    .unwrap()
-            }
-        }),
+            },
+        ),
     );
 
     let base_url = start_server(app).await;
@@ -400,7 +428,10 @@ async fn test_link_header_pagination_github_style() {
     let request = test_request(vec!["Repository".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 12);
     let events = collect_events(rx).await;
@@ -533,7 +564,10 @@ async fn test_next_url_pagination_salesforce_style() {
     let request = test_request(vec!["Account".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 18);
     let events = collect_events(rx).await;
@@ -599,7 +633,10 @@ async fn test_bearer_auth() {
     let request = test_request(vec!["Secret".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 1);
 
@@ -669,7 +706,10 @@ async fn test_api_key_header_auth() {
     let request = test_request(vec!["Product".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 2);
 
@@ -747,7 +787,10 @@ async fn test_basic_auth() {
     let request = test_request(vec!["Call".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 1);
 
@@ -842,7 +885,10 @@ async fn test_oauth2_client_credentials() {
     let request = test_request(vec!["Data".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 1);
 
@@ -939,7 +985,10 @@ async fn test_multi_endpoint_bootstrap() {
     let request = test_request(vec!["User".to_string(), "Order".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 5); // 2 users + 3 orders
     let events = collect_events(rx).await;
@@ -1007,7 +1056,10 @@ async fn test_retry_on_failure() {
     let request = test_request(vec!["Item".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 1);
     // Should have made 3 requests total (2 failures + 1 success)
@@ -1063,7 +1115,10 @@ async fn test_relations_mapping() {
     let request = test_request(vec![], vec!["FOLLOWS".to_string()]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 2);
 
@@ -1103,7 +1158,10 @@ async fn test_page_number_pagination() {
             let items = items.clone();
             async move {
                 let page: usize = params.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
-                let per_page: usize = params.get("per_page").and_then(|v| v.parse().ok()).unwrap_or(10);
+                let per_page: usize = params
+                    .get("per_page")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10);
 
                 let start = (page - 1) * per_page;
                 let page_items: Vec<&JsonValue> = items.iter().skip(start).take(per_page).collect();
@@ -1160,7 +1218,10 @@ async fn test_page_number_pagination() {
     let request = test_request(vec!["Item".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 22);
     let events = collect_events(rx).await;
@@ -1219,7 +1280,10 @@ async fn test_label_filtering() {
     let request = test_request(vec!["Animal".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 0);
 }
@@ -1275,7 +1339,10 @@ async fn test_descriptor_creates_provider_from_json_config() {
     let context = test_context("dto-source");
     let request = test_request(vec!["User".to_string()], vec![]);
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 2);
     let events = collect_events(rx).await;
@@ -1395,7 +1462,9 @@ async fn test_xml_response_parsing() {
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
                         labels: vec!["XmlNode".to_string()],
-                        properties: Some(json!({"name": "{{item.name}}", "email": "{{item.email}}"})),
+                        properties: Some(
+                            json!({"name": "{{item.name}}", "email": "{{item.email}}"}),
+                        ),
                         from: None,
                         to: None,
                     },
@@ -1412,7 +1481,10 @@ async fn test_xml_response_parsing() {
     let request = test_request(vec!["XmlNode".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 1);
     let events = collect_events(rx).await;
@@ -1487,7 +1559,10 @@ async fn test_yaml_response_parsing() {
     let request = test_request(vec!["YamlNode".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
 
     assert_eq!(result.event_count, 3);
     let events = collect_events(rx).await;
@@ -1495,7 +1570,10 @@ async fn test_yaml_response_parsing() {
 
     match &events[0].change {
         SourceChange::Insert { element } => match element {
-            Element::Node { metadata, properties } => {
+            Element::Node {
+                metadata,
+                properties,
+            } => {
                 assert_eq!(&*metadata.labels[0], "YamlNode");
                 let name = properties.get("name").expect("name property missing");
                 match name {
@@ -1562,7 +1640,10 @@ async fn test_type_preservation_in_properties() {
     let request = test_request(vec!["TypedNode".to_string()], vec![]);
 
     let (tx, mut rx) = mpsc::channel(100);
-    let result = provider.bootstrap(request, &context, tx, None).await.unwrap();
+    let result = provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
     assert_eq!(result.event_count, 1);
 
     let events = collect_events(rx).await;
@@ -1573,20 +1654,14 @@ async fn test_type_preservation_in_properties() {
                 use ordered_float::OrderedFloat;
 
                 // Integer stays integer
-                assert_eq!(
-                    properties.get("count"),
-                    Some(&ElementValue::Integer(42))
-                );
+                assert_eq!(properties.get("count"), Some(&ElementValue::Integer(42)));
                 // Float stays float
                 assert_eq!(
                     properties.get("rate"),
                     Some(&ElementValue::Float(OrderedFloat(3.15)))
                 );
                 // Bool stays bool
-                assert_eq!(
-                    properties.get("active"),
-                    Some(&ElementValue::Bool(true))
-                );
+                assert_eq!(properties.get("active"), Some(&ElementValue::Bool(true)));
                 // String "00123" stays string (not coerced to int 123)
                 let zip = properties.get("zip").expect("zip property missing");
                 match zip {

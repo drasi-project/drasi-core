@@ -349,9 +349,9 @@ pub fn extract_json_path_bool(value: &JsonValue, path: &str) -> Option<bool> {
 /// Navigate a JSON value using a simple JSONPath-like expression.
 /// Supports: $.field, $.field.nested, $.array[0], $.array[-1]
 pub fn navigate_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
-    let path = path.strip_prefix("$.").unwrap_or(
-        path.strip_prefix("$").unwrap_or(path),
-    );
+    let path = path
+        .strip_prefix("$.")
+        .unwrap_or(path.strip_prefix("$").unwrap_or(path));
 
     if path.is_empty() {
         return Some(value);
@@ -524,7 +524,13 @@ mod tests {
 
         let mut paginator = create_paginator(&config);
         let initial = paginator.initial_params();
-        assert_eq!(initial, vec![("offset".to_string(), "0".to_string()), ("limit".to_string(), "10".to_string())]);
+        assert_eq!(
+            initial,
+            vec![
+                ("offset".to_string(), "0".to_string()),
+                ("limit".to_string(), "10".to_string())
+            ]
+        );
 
         // Full page → should have next
         let headers = HeaderMap::new();
@@ -573,7 +579,10 @@ mod tests {
         let next = paginator.next_page(&body, &headers, 10).unwrap();
         match next {
             Some(NextPage::NewUrl(url)) => {
-                assert_eq!(url, "https://instance.salesforce.com/services/data/v56.0/query/abc-123");
+                assert_eq!(
+                    url,
+                    "https://instance.salesforce.com/services/data/v56.0/query/abc-123"
+                );
             }
             _ => panic!("Expected NewUrl"),
         }

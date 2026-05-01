@@ -18,7 +18,9 @@
 //! using the template engine.
 
 use anyhow::{anyhow, Context, Result};
-use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue};
+use drasi_core::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+};
 use ordered_float::OrderedFloat;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -31,8 +33,9 @@ use crate::template_engine::{TemplateContext, TemplateEngine};
 /// Extract items array from a response body using the configured items path.
 pub fn extract_items(body: &JsonValue, items_path: &str) -> Result<Vec<JsonValue>> {
     // Use the shared path navigator that supports bracket notation and negative indexes
-    let items_value = pagination::navigate_path(body, items_path)
-        .ok_or_else(|| anyhow!("Items path '{items_path}' did not resolve to a value in response"))?;
+    let items_value = pagination::navigate_path(body, items_path).ok_or_else(|| {
+        anyhow!("Items path '{items_path}' did not resolve to a value in response")
+    })?;
 
     match items_value {
         JsonValue::Array(arr) => Ok(arr.clone()),
@@ -179,15 +182,15 @@ fn json_value_to_element_value(value: &JsonValue) -> Option<ElementValue> {
         }
         JsonValue::String(s) => Some(ElementValue::String(s.clone().into())),
         JsonValue::Array(arr) => {
-            let elements: Vec<ElementValue> = arr
-                .iter()
-                .filter_map(json_value_to_element_value)
-                .collect();
+            let elements: Vec<ElementValue> =
+                arr.iter().filter_map(json_value_to_element_value).collect();
             Some(ElementValue::List(elements))
         }
         JsonValue::Object(map) => {
             // Convert object to a JSON string representation
-            Some(ElementValue::String(serde_json::to_string(map).unwrap_or_default().into()))
+            Some(ElementValue::String(
+                serde_json::to_string(map).unwrap_or_default().into(),
+            ))
         }
     }
 }
@@ -242,7 +245,10 @@ mod tests {
 
         let elem = results[0].as_ref().unwrap();
         match elem {
-            Element::Node { metadata, properties } => {
+            Element::Node {
+                metadata,
+                properties,
+            } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(&*metadata.labels[0], "User");
