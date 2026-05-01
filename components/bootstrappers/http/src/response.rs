@@ -187,10 +187,13 @@ fn json_value_to_element_value(value: &JsonValue) -> Option<ElementValue> {
             Some(ElementValue::List(elements))
         }
         JsonValue::Object(map) => {
-            // Convert object to a JSON string representation
-            Some(ElementValue::String(
-                serde_json::to_string(map).unwrap_or_default().into(),
-            ))
+            let mut props = ElementPropertyMap::new();
+            for (key, v) in map {
+                if let Some(ev) = json_value_to_element_value(v) {
+                    props.insert(key.as_str(), ev);
+                }
+            }
+            Some(ElementValue::Object(props))
         }
     }
 }

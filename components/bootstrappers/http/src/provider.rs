@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use log::{debug, error, info, warn};
 use reqwest::Client;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use drasi_core::models::SourceChange;
@@ -110,7 +111,7 @@ impl HttpBootstrapProvider {
         let mut current_url = endpoint.url.clone();
         let mut current_params = initial_params;
         let mut page_num = 0u64;
-        let mut last_url_and_params: Option<(String, Vec<(String, String)>)> = None;
+        let mut seen_requests: HashSet<(String, Vec<(String, String)>)> = HashSet::new();
 
         loop {
             page_num += 1;
@@ -124,18 +125,15 @@ impl HttpBootstrapProvider {
                 break;
             }
 
-            // Detect cycles: same URL + same params as last request
+            // Detect cycles: same URL + same params seen before
             let current_key = (current_url.clone(), current_params.clone());
-            if let Some(ref last) = last_url_and_params {
-                if *last == current_key {
-                    warn!(
-                        "Pagination cycle detected for endpoint '{}', stopping",
-                        endpoint.url
-                    );
-                    break;
-                }
+            if !seen_requests.insert(current_key) {
+                warn!(
+                    "Pagination cycle detected for endpoint '{}', stopping",
+                    endpoint.url
+                );
+                break;
             }
-            last_url_and_params = Some(current_key);
 
             debug!("Fetching page {page_num} from endpoint: {}", endpoint.url);
 
@@ -258,7 +256,8 @@ impl HttpBootstrapProvider {
 
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let delay = retry_delay.saturating_mul(attempt);
+                let factor = 1u64.checked_shl(attempt - 1).unwrap_or(u64::MAX);
+                let delay = retry_delay.saturating_mul(factor.min(u32::MAX as u64) as u32);
                 debug!("Retry attempt {attempt} after {delay:?} delay");
                 tokio::time::sleep(delay).await;
             }
@@ -325,8 +324,13 @@ impl HttpBootstrapProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unable to read error response".to_string());
+            let truncated = if body.len() > 256 {
+                format!("{}... (truncated)", &body[..256])
+            } else {
+                body
+            };
             return Err(anyhow::anyhow!(
-                "HTTP request returned error status {status}: {body}"
+                "HTTP request returned error status {status}: {truncated}"
             ));
         }
 
