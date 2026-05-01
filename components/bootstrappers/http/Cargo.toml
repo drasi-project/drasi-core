@@ -1,0 +1,59 @@
+# Copyright 2025 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-bootstrap-http"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "HTTP bootstrap plugin for Drasi - fetches initial state from REST APIs"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "bootstrap", "http"]
+categories = ["network-programming"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+log = "0.4"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+handlebars = "6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4"] }
+tokio = { version = "1.0", features = ["full"] }
+ordered-float = "3.0"
+jsonpath-rust = "0.7"
+quick-xml = { version = "0.31", features = ["serialize"] }
+
+[dev-dependencies]
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+env_logger = "0.11"
+base64 = "0.22"
+
+[features]
+dynamic-plugin = []

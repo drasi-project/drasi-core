@@ -21,6 +21,7 @@ members = [
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
   "components/bootstrappers/dataverse",
+  "components/bootstrappers/http",
 
   # Source Plugins
   "components/sources/postgres",
