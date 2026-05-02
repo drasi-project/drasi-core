@@ -16,8 +16,8 @@
 
 use crate::config::{
     InjectId, MappingEntity, MappingMode, MappingNode, MappingProperties, MappingRelation,
-    MqttConnectProperties, MqttQoS, MqttSourceConfig, MqttSubscribeProperties, MqttTopicConfig,
-    MqttTransportMode, TopicMapping,
+    MappingRelationEndpoint, MqttConnectProperties, MqttQoS, MqttSourceConfig,
+    MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
 };
 use crate::MqttSourceBuilder;
 use anyhow::anyhow;
@@ -161,12 +161,21 @@ pub struct MappingNodeDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[schema(as = source::mqtt::MappingRelationEndpoint)]
+#[serde(deny_unknown_fields)]
+pub struct MappingRelationEndpointDto {
+    pub label: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::mqtt::MappingRelation)]
 #[serde(deny_unknown_fields)]
 pub struct MappingRelationDto {
     pub label: String,
-    pub from: String,
-    pub to: String,
+    pub id: String,
+    pub from: MappingRelationEndpointDto,
+    pub to: MappingRelationEndpointDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -281,6 +290,7 @@ pub struct MqttSourceConfigDto {
     MappingModeDto,
     MappingPropertiesDto,
     MappingNodeDto,
+    MappingRelationEndpointDto,
     MappingRelationDto,
     TopicMappingDto,
 )))]
@@ -402,8 +412,15 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
                     .into_iter()
                     .map(|r| MappingRelation {
                         label: r.label,
-                        from: r.from,
-                        to: r.to,
+                        id: r.id,
+                        from: MappingRelationEndpoint {
+                            label: r.from.label,
+                            id: r.from.id,
+                        },
+                        to: MappingRelationEndpoint {
+                            label: r.to.label,
+                            id: r.to.id,
+                        },
                     })
                     .collect(),
             })

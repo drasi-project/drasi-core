@@ -745,14 +745,28 @@ async fn test_mqtt_query_results() -> Result<()> {
             ],
             relations: vec![
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "{room}:{device}".to_string(),
-                    to: "{room}".to_string(),
                     label: "LOCATED_IN_ROOM".to_string(),
+                    id: "{room}:{device}_located_in_room_{room}".to_string(),
+                    from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Device".to_string(),
+                        id: "{room}:{device}".to_string(),
+                    },
+                    to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Room".to_string(),
+                        id: "{room}".to_string(),
+                    },
                 },
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "{room}".to_string(),
-                    to: "{floor}".to_string(),
                     label: "LOCATED_IN_FLOOR".to_string(),
+                    id: "{room}_located_in_floor_{floor}".to_string(),
+                    from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Room".to_string(),
+                        id: "{room}".to_string(),
+                    },
+                    to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Floor".to_string(),
+                        id: "{floor}".to_string(),
+                    },
                 },
             ],
         }],
@@ -944,19 +958,40 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
                 ],
                 relations: vec![
                     drasi_source_mqtt::config::MappingRelation {
-                        from: "{room}:{device}".to_string(),
-                        to: "{room}".to_string(),
                         label: "LOCATED_IN_ROOM".to_string(),
+                        id: "{room}:{device}_located_in_room_{room}".to_string(),
+                        from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Device".to_string(),
+                            id: "{room}:{device}".to_string(),
+                        },
+                        to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Room".to_string(),
+                            id: "{room}".to_string(),
+                        },
                     },
                     drasi_source_mqtt::config::MappingRelation {
-                        from: "{room}".to_string(),
-                        to: "{floor}".to_string(),
                         label: "LOCATED_IN_FLOOR".to_string(),
+                        id: "{room}_located_in_floor_{floor}".to_string(),
+                        from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Room".to_string(),
+                            id: "{room}".to_string(),
+                        },
+                        to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Floor".to_string(),
+                            id: "{floor}".to_string(),
+                        },
                     },
                     drasi_source_mqtt::config::MappingRelation {
-                        from: "{room}:{device}".to_string(),
-                        to: "$.gateway_id".to_string(),
                         label: "LOCATED_IN_GATEWAY".to_string(),
+                        id: "{room}:{device}_located_in_gateway_$.gateway_id".to_string(),
+                        from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Device".to_string(),
+                            id: "{room}:{device}".to_string(),
+                        },
+                        to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                            label: "Gateway".to_string(),
+                            id: "$.gateway_id".to_string(),
+                        },
                     },
                 ],
             },
@@ -1139,14 +1174,28 @@ async fn test_full_pipeline_with_application_reaction() -> Result<()> {
             ],
             relations: vec![
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "{room}:{device}".to_string(),
-                    to: "{room}".to_string(),
                     label: "LOCATED_IN_ROOM".to_string(),
+                    id: "{room}:{device}_located_in_room_{room}".to_string(),
+                    from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Device".to_string(),
+                        id: "{room}:{device}".to_string(),
+                    },
+                    to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Room".to_string(),
+                        id: "{room}".to_string(),
+                    },
                 },
                 drasi_source_mqtt::config::MappingRelation {
-                    from: "{room}".to_string(),
-                    to: "{floor}".to_string(),
                     label: "LOCATED_IN_FLOOR".to_string(),
+                    id: "{room}_located_in_floor_{floor}".to_string(),
+                    from: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Room".to_string(),
+                        id: "{room}".to_string(),
+                    },
+                    to: drasi_source_mqtt::config::MappingRelationEndpoint {
+                        label: "Floor".to_string(),
+                        id: "{floor}".to_string(),
+                    },
                 },
             ],
         }],
