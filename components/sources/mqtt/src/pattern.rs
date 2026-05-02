@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use drasi_lib::error;
 use matchit::{Params, Router};
-use serde_yaml::mapping;
 
 use crate::schema::MqttSourceChange;
 use crate::utils::MqttPacket;
@@ -49,38 +47,49 @@ impl PatternMatcher {
     }
 
     pub fn generate_schema(&self, packet: &MqttPacket) -> anyhow::Result<Vec<MqttSourceChange>> {
-        match self.router.at(&packet.topic) {
-            Ok(matched) => {
-                let mut result = Vec::new();
-                let mapping = matched.value;
-                let params = matched.params;
+        let matched = self
+            .router
+            .at(&packet.topic)
+            .map_err(|_| anyhow::anyhow!("No pattern matched for topic: {}", packet.topic))?;
+        let mapping = matched.value;
+        let params = matched.params;
+        let timestamp = packet.timestamp;
 
-                let mut properties = Self::generate_packet_properties(mapping, &params, packet)?;
+        let mut result = Vec::new();
+        let mut emitted_ids: HashSet<String> = HashSet::new();
 
-                match Self::create_entity(mapping, &params, packet.timestamp, &mut properties) {
-                    Ok(change) => result.push(change),
-                    Err(e) => {
-                        error!(
-                            "Error processing matched pattern for topic {}: {}",
-                            packet.topic, e
-                        );
-                        return Err(e);
-                    }
-                }
+        let mut properties = Self::generate_packet_properties(mapping, &params, packet)?;
 
-                let timestamp = packet.timestamp;
-                Self::create_hierarchy(mapping, &params, timestamp, &mut properties, &mut result)?;
+        // entity
+        let entity_id = Self::map_template(&mapping.entity.id, &params);
+        result.push(Self::build_entity(
+            mapping,
+            &params,
+            &entity_id,
+            timestamp,
+            &mut properties,
+        ));
+        emitted_ids.insert(entity_id);
 
-                Ok(result)
-            }
-            Err(_) => {
-                // no pattern is matched
-                Err(anyhow::anyhow!(
-                    "No pattern matched for topic: {}",
-                    packet.topic
-                ))
+        // declared parent nodes
+        for node in &mapping.nodes {
+            let node_id = Self::map_template(&node.id, &params);
+            if emitted_ids.insert(node_id.clone()) {
+                result.push(Self::build_node(&node_id, &node.label, timestamp));
             }
         }
+
+        // relations + on-demand endpoint upsert
+        Self::append_relations(
+            mapping,
+            &params,
+            timestamp,
+            &properties,
+            &mut emitted_ids,
+            &mut result,
+        )?;
+
+        Ok(result)
     }
 
     fn generate_packet_properties(
@@ -132,13 +141,13 @@ impl PatternMatcher {
         }
     }
 
-    fn create_entity(
+    fn build_entity(
         mapping: &TopicMapping,
         params: &Params,
+        entity_id: &str,
         timestamp: u64,
-        mut properties: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<MqttSourceChange> {
-        // injection of topic variables as properties
+        properties: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> MqttSourceChange {
         for inject in &mapping.properties.inject {
             for (key, template) in inject {
                 let value = Self::map_template(template, params);
@@ -146,165 +155,171 @@ impl PatternMatcher {
             }
         }
 
-        // entity main id mapping
-        let entity_id = Self::map_template(&mapping.entity.id, params);
-
         if let Some(InjectId::True) = &mapping.properties.inject_id {
             properties.insert(
                 "id".to_string(),
-                serde_json::Value::String(entity_id.clone()),
+                serde_json::Value::String(entity_id.to_string()),
             );
         }
 
-        let element = MqttElement::Node {
-            id: entity_id.clone(),
-            labels: vec![mapping.entity.label.clone()],
-            properties: properties.clone(),
-        };
-        Ok(MqttSourceChange::Update {
-            element,
+        MqttSourceChange::Update {
+            element: MqttElement::Node {
+                id: entity_id.to_string(),
+                labels: vec![mapping.entity.label.clone()],
+                properties: properties.clone(),
+            },
             timestamp: Some(timestamp),
-        })
+        }
     }
 
-    fn create_hierarchy(
+    fn build_node(node_id: &str, label: &str, timestamp: u64) -> MqttSourceChange {
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "id".to_string(),
+            serde_json::Value::String(node_id.to_string()),
+        );
+        MqttSourceChange::Update {
+            element: MqttElement::Node {
+                id: node_id.to_string(),
+                labels: vec![label.to_string()],
+                properties: props,
+            },
+            timestamp: Some(timestamp),
+        }
+    }
+
+    fn build_relation(
+        relation_id: &str,
+        label: &str,
+        from: &str,
+        to: &str,
+        timestamp: u64,
+    ) -> MqttSourceChange {
+        let mut props = serde_json::Map::new();
+        props.insert(
+            "id".to_string(),
+            serde_json::Value::String(relation_id.to_string()),
+        );
+        MqttSourceChange::Update {
+            element: MqttElement::Relation {
+                id: relation_id.to_string(),
+                labels: vec![label.to_string()],
+                from: from.to_string(),
+                to: to.to_string(),
+                properties: props,
+            },
+            timestamp: Some(timestamp),
+        }
+    }
+
+    fn append_relations(
         mapping: &TopicMapping,
         params: &Params,
         timestamp: u64,
-        mut properties: &mut serde_json::Map<String, serde_json::Value>,
-        mut result: &mut Vec<MqttSourceChange>,
+        properties: &serde_json::Map<String, serde_json::Value>,
+        emitted_ids: &mut HashSet<String>,
+        result: &mut Vec<MqttSourceChange>,
     ) -> anyhow::Result<()> {
-        result.append(&mut Self::create_nodes(
-            mapping.nodes.as_ref(),
-            params,
-            timestamp,
-        ));
+        for relation in &mapping.relations {
+            let from_id =
+                Self::resolve_template(&relation.from.id, params, properties).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to resolve 'from.id' for relation '{}': {e}",
+                        relation.label
+                    )
+                })?;
+            if emitted_ids.insert(from_id.clone()) {
+                result.push(Self::build_node(&from_id, &relation.from.label, timestamp));
+            }
 
-        let total_results = Self::create_relations(
-            mapping.relations.as_ref(),
-            params,
-            timestamp,
-            properties,
-            result,
-        )?;
+            let to_id =
+                Self::resolve_template(&relation.to.id, params, properties).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to resolve 'to.id' for relation '{}': {e}",
+                        relation.label
+                    )
+                })?;
+            if emitted_ids.insert(to_id.clone()) {
+                result.push(Self::build_node(&to_id, &relation.to.label, timestamp));
+            }
 
-        result.extend(total_results);
-
+            let relation_id =
+                Self::resolve_template(&relation.id, params, properties).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to resolve 'id' for relation '{}': {e}",
+                        relation.label
+                    )
+                })?;
+            result.push(Self::build_relation(
+                &relation_id,
+                &relation.label,
+                &from_id,
+                &to_id,
+                timestamp,
+            ));
+        }
         Ok(())
     }
 
-    fn create_nodes(
-        nodes: &Vec<MappingNode>,
-        params: &Params,
-        timestamp: u64,
-    ) -> Vec<MqttSourceChange> {
-        let mut result = Vec::new();
-        for node in nodes {
-            let node_id = Self::map_template(&node.id, params);
-            let element = MqttElement::Node {
-                id: node_id.clone(),
-                labels: vec![node.label.clone()],
-                properties: {
-                    let mut props = serde_json::Map::new();
-                    props.insert("id".to_string(), serde_json::Value::String(node_id.clone()));
-                    props
-                },
-            };
-            result.push(MqttSourceChange::Update {
-                element,
-                timestamp: Some(timestamp),
-            });
-        }
-        result
-    }
-
-    fn create_relations(
-        relations: &Vec<MappingRelation>,
-        params: &Params,
-        timestamp: u64,
-        mut properties: &mut serde_json::Map<String, serde_json::Value>,
-        hierarchy_changes: &Vec<MqttSourceChange>,
-    ) -> anyhow::Result<Vec<MqttSourceChange>> {
-        let mut result = Vec::new();
-        for relation in relations {
-            let from_node = Self::get_node_ref_id(&relation.from, params, properties);
-            let to_node = Self::get_node_ref_id(&relation.to, params, properties);
-
-            match from_node {
-                Ok(from) => match to_node {
-                    Ok(to) => {
-                        let relation_id =
-                            from.clone() + "_" + &relation.label.to_lowercase() + "_" + &to;
-                        let element = MqttElement::Relation {
-                            id: relation_id.clone(),
-                            labels: vec![relation.label.clone()],
-                            from: from.clone(),
-                            to: to.clone(),
-                            properties: {
-                                let mut props = serde_json::Map::new();
-                                props.insert(
-                                    "id".to_string(),
-                                    serde_json::Value::String(relation_id.clone()),
-                                );
-                                props
-                            },
-                        };
-                        result.push(MqttSourceChange::Update {
-                            element,
-                            timestamp: Some(timestamp),
-                        });
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to resolve 'to' node for relation '{}': {}",
-                            relation.label, e
-                        );
-                        return Err(anyhow::anyhow!(
-                            "Failed to resolve 'to' node for relation '{}': {}",
-                            relation.label,
-                            e
-                        ));
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "Failed to resolve 'from' node for relation '{}': {}",
-                        relation.label, e
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Failed to resolve 'from' node for relation '{}': {}",
-                        relation.label,
-                        e
-                    ));
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    fn get_node_ref_id(
-        id: &str,
+    /// Resolve a template that may contain `{var}` topic placeholders and `$.path` payload
+    /// references in the same string. Topic placeholders are substituted from `params`;
+    /// payload references read primitive values from `properties`.
+    fn resolve_template(
+        template: &str,
         params: &Params,
         properties: &serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<String> {
-        if id.starts_with(FROM_TO_STARTS_WITH) {
-            let prop_id = id.trim_start_matches(FROM_TO_STARTS_WITH);
-            let value = properties.get(prop_id).ok_or_else(|| {
-                anyhow::anyhow!("Property '{prop_id}' not found for node reference")
-            })?;
+        let with_vars = Self::map_template(template, params);
+        Self::resolve_payload_refs(&with_vars, properties)
+    }
 
-            return match value {
-                serde_json::Value::String(s) => Ok(s.clone()),
-                serde_json::Value::Number(n) => Ok(n.to_string()),
-                serde_json::Value::Bool(b) => Ok(b.to_string()),
-                serde_json::Value::Null => Ok("null".to_string()),
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => Err(anyhow::anyhow!(
-                    "Property '{prop_id}' must be a primitive value for node reference"
-                )),
-            };
+    fn resolve_payload_refs(
+        s: &str,
+        properties: &serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<String> {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'.' {
+                let start = i + 2;
+                let mut end = start;
+                while end < bytes.len() {
+                    let c = bytes[end];
+                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if end == start {
+                    out.push_str("$.");
+                    i += 2;
+                    continue;
+                }
+                let path = &s[start..end];
+                let value = properties.get(path).ok_or_else(|| {
+                    anyhow::anyhow!("Property '{path}' not found for payload reference")
+                })?;
+                let stringified = match value {
+                    serde_json::Value::String(v) => v.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => "null".to_string(),
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        return Err(anyhow::anyhow!(
+                            "Property '{path}' must be a primitive value for payload reference"
+                        ));
+                    }
+                };
+                out.push_str(&stringified);
+                i = end;
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
         }
-
-        Ok(Self::map_template(id, params))
+        Ok(out)
     }
 
     fn map_template(template: &str, params: &Params) -> String {
@@ -356,13 +371,27 @@ mod tests {
             relations: vec![
                 MappingRelation {
                     label: "CONTAINS".to_string(),
-                    from: "{floor}".to_string(),
-                    to: "{room}".to_string(),
+                    id: "{floor}_contains_{room}".to_string(),
+                    from: crate::config::MappingRelationEndpoint {
+                        label: "FLOOR".to_string(),
+                        id: "{floor}".to_string(),
+                    },
+                    to: crate::config::MappingRelationEndpoint {
+                        label: "ROOM".to_string(),
+                        id: "{room}".to_string(),
+                    },
                 },
                 MappingRelation {
                     label: "LOCATED_IN".to_string(),
-                    from: "{device}".to_string(),
-                    to: "{room}".to_string(),
+                    id: "{room}:{device}_located_in_{room}".to_string(),
+                    from: crate::config::MappingRelationEndpoint {
+                        label: "DEVICE".to_string(),
+                        id: "{room}:{device}".to_string(),
+                    },
+                    to: crate::config::MappingRelationEndpoint {
+                        label: "ROOM".to_string(),
+                        id: "{room}".to_string(),
+                    },
                 },
             ],
         }
@@ -606,13 +635,13 @@ mod tests {
                         to,
                         properties,
                     } => {
-                        assert_eq!(id, "light_located_in_r8");
+                        assert_eq!(id, "r8:light_located_in_r8");
                         assert_eq!(labels, &vec!["LOCATED_IN".to_string()]);
-                        assert_eq!(from, "light");
+                        assert_eq!(from, "r8:light");
                         assert_eq!(to, "r8");
                         assert_eq!(
                             properties.get("id"),
-                            Some(&serde_json::json!("light_located_in_r8"))
+                            Some(&serde_json::json!("r8:light_located_in_r8"))
                         );
                     }
                     _ => panic!("fifth change should be relation"),
@@ -689,7 +718,14 @@ mod tests {
     #[test]
     fn topic_mapping_for_relation_from_id_from_properties() {
         let mut mapping = topic_mapping(MappingMode::PayloadSpread, Some("reading"));
-        mapping.relations[1].from = "$.level".to_string();
+        // Replace second relation's `from` endpoint with a payload-derived id.
+        // The endpoint label drives upsert of the new "Level" node since "5" is not in nodes[].
+        mapping.relations[1].from = crate::config::MappingRelationEndpoint {
+            label: "LEVEL".to_string(),
+            id: "$.level".to_string(),
+        };
+        // hyphen separates the payload path from following text so the path scan stops cleanly
+        mapping.relations[1].id = "level-$.level-for-{room}".to_string();
 
         let matcher = PatternMatcher::new(&vec![mapping]);
         let input = packet("building/f6/r8/light", br#"{"lux":99,"level": 5}"#, 777);
@@ -698,9 +734,25 @@ mod tests {
             .generate_schema(&input)
             .expect("expected schema generation to succeed");
 
-        assert_eq!(changes.len(), 5);
+        // entity + 2 declared nodes + relation 0 (no new endpoints) + endpoint upsert for "5" + relation 1 = 6
+        assert_eq!(changes.len(), 6);
 
+        // changes[4] is the upserted Level endpoint node
         match &changes[4] {
+            MqttSourceChange::Update { element, timestamp } => {
+                assert_eq!(*timestamp, Some(777));
+                match element {
+                    MqttElement::Node { id, labels, .. } => {
+                        assert_eq!(id, "5");
+                        assert_eq!(labels, &vec!["LEVEL".to_string()]);
+                    }
+                    _ => panic!("fifth change should be the upserted Level node"),
+                }
+            }
+            _ => panic!("fifth change should be update"),
+        }
+
+        match &changes[5] {
             MqttSourceChange::Update { element, timestamp } => {
                 assert_eq!(*timestamp, Some(777));
                 match element {
@@ -711,19 +763,104 @@ mod tests {
                         to,
                         properties,
                     } => {
-                        assert_eq!(id, "5_located_in_r8");
+                        assert_eq!(id, "level-5-for-r8");
                         assert_eq!(labels, &vec!["LOCATED_IN".to_string()]);
                         assert_eq!(from, "5");
                         assert_eq!(to, "r8");
                         assert_eq!(
                             properties.get("id"),
-                            Some(&serde_json::json!("5_located_in_r8"))
+                            Some(&serde_json::json!("level-5-for-r8"))
                         );
                     }
-                    _ => panic!("fifth change should be relation"),
+                    _ => panic!("sixth change should be relation"),
                 }
             }
-            _ => panic!("fifth change should be update"),
+            _ => panic!("sixth change should be update"),
         }
+    }
+
+    #[test]
+    fn endpoint_upsert_skipped_when_endpoint_id_matches_declared_node() {
+        // Relation endpoints all reference ids that are already covered by entity or nodes[];
+        // no extra endpoint Node updates should be emitted.
+        let matcher = PatternMatcher::new(&vec![topic_mapping(MappingMode::PayloadSpread, None)]);
+        let input = packet("building/f1/r2/sensor", br#"{"v":1}"#, 1);
+        let changes = matcher.generate_schema(&input).expect("schema");
+        // 1 entity + 2 nodes + 2 relations, no extra upserts
+        assert_eq!(changes.len(), 5);
+    }
+
+    #[test]
+    fn endpoint_upsert_emits_node_when_endpoint_id_not_in_nodes() {
+        let mut mapping = topic_mapping(MappingMode::PayloadSpread, None);
+        // Drop the room/floor parents and let the relation's `to` endpoint carry the label.
+        mapping.nodes.clear();
+        mapping.relations = vec![MappingRelation {
+            label: "ON_FLOOR".to_string(),
+            id: "{room}:{device}_on_floor_{floor}".to_string(),
+            from: crate::config::MappingRelationEndpoint {
+                label: "DEVICE".to_string(),
+                id: "{room}:{device}".to_string(),
+            },
+            to: crate::config::MappingRelationEndpoint {
+                label: "FLOOR".to_string(),
+                id: "{floor}".to_string(),
+            },
+        }];
+
+        let matcher = PatternMatcher::new(&vec![mapping]);
+        let input = packet("building/f1/r2/sensor", br#"{"v":1}"#, 7);
+        let changes = matcher.generate_schema(&input).expect("schema");
+
+        // entity + endpoint Floor (upserted by relation.to) + relation = 3
+        // (from endpoint matches the entity id and is skipped)
+        assert_eq!(changes.len(), 3);
+
+        match &changes[1] {
+            MqttSourceChange::Update {
+                element: MqttElement::Node { id, labels, .. },
+                ..
+            } => {
+                assert_eq!(id, "f1");
+                assert_eq!(labels, &vec!["FLOOR".to_string()]);
+            }
+            _ => panic!("second change should be the upserted Floor node"),
+        }
+    }
+
+    #[test]
+    fn relation_id_supports_mixed_topic_var_and_payload_ref() {
+        let mut mapping = topic_mapping(MappingMode::PayloadSpread, None);
+        mapping.relations[0].id = "{floor}-to-$.gateway".to_string();
+        mapping.relations.truncate(1);
+
+        let matcher = PatternMatcher::new(&vec![mapping]);
+        let input = packet("building/f9/r3/dev", br#"{"gateway":"gw7","v":1}"#, 42);
+        let changes = matcher.generate_schema(&input).expect("schema");
+
+        let last = changes.last().expect("at least one change");
+        match last {
+            MqttSourceChange::Update {
+                element: MqttElement::Relation { id, .. },
+                ..
+            } => {
+                assert_eq!(id, "f9-to-gw7");
+            }
+            _ => panic!("last change should be the relation"),
+        }
+    }
+
+    #[test]
+    fn relation_payload_ref_errors_when_property_missing() {
+        let mut mapping = topic_mapping(MappingMode::PayloadSpread, None);
+        mapping.relations[0].to = crate::config::MappingRelationEndpoint {
+            label: "GATEWAY".to_string(),
+            id: "$.missing".to_string(),
+        };
+
+        let matcher = PatternMatcher::new(&vec![mapping]);
+        let input = packet("building/f1/r1/dev", br#"{"v":1}"#, 1);
+        let err = matcher.generate_schema(&input).expect_err("should error");
+        assert!(err.to_string().contains("not found for payload reference"));
     }
 }

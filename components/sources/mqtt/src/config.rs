@@ -18,7 +18,6 @@
 use crate::FROM_TO_STARTS_WITH;
 use bytes::Bytes;
 use drasi_lib::identity::IdentityProvider;
-use log::warn;
 use rumqttc::{v5::MqttOptions as MqttOptionsV5, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -245,10 +244,18 @@ pub struct MappingNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct MappingRelationEndpoint {
+    pub label: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct MappingRelation {
-    pub label: String, // relation label
-    pub from: String,  // source node id pattern
-    pub to: String,    // target node id pattern
+    pub label: String,
+    pub id: String,
+    pub from: MappingRelationEndpoint,
+    pub to: MappingRelationEndpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -552,7 +559,6 @@ impl MqttSourceConfig {
         mapping: &TopicMapping,
         router: &mut matchit::Router<()>,
     ) -> anyhow::Result<()> {
-        let mut node_ids = Vec::new();
         router.insert(&mapping.pattern, ()).map_err(|e| {
             anyhow::anyhow!(
                 "Error in topic mapping pattern '{}': {}",
@@ -575,8 +581,6 @@ impl MqttSourceConfig {
             "entity.id",
             &mapping.pattern,
         )?;
-
-        node_ids.push(mapping.entity.id.clone());
 
         if let Some(field_name) = mapping.properties.field_name.as_ref() {
             Self::validate_template_placeholders(
@@ -607,51 +611,78 @@ impl MqttSourceConfig {
                 &format!("nodes[{idx}].id"),
                 &mapping.pattern,
             )?;
-
-            node_ids.push(node.id.clone());
         }
 
-        // validate relation id's and from/to patterns
+        // validate relation id, label, and from/to endpoints
         for (idx, relation) in mapping.relations.iter().enumerate() {
-            if (!relation.from.starts_with(FROM_TO_STARTS_WITH)) {
-                Self::validate_template_placeholders(
-                    &relation.from,
-                    &allowed,
-                    &format!("relations[{idx}].from"),
-                    &mapping.pattern,
-                )?;
-
-                if (!node_ids.contains(&relation.from)) {
-                    warn!("relations[{idx}].from references a node/entity id '{}' that is not defined in nodes for pattern '{}'. It should be defined in nodes.",
-                        relation.from, mapping.pattern
-                    );
-                }
-            } else if (mapping.properties.mode == MappingMode::PayloadAsField) {
+            if relation.label.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "relations[{idx}].from cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern '{}'",
+                    "relations[{idx}].label must not be empty in topic mapping with pattern '{}'",
                     mapping.pattern
                 ));
             }
 
-            if (!relation.to.starts_with(FROM_TO_STARTS_WITH)) {
-                Self::validate_template_placeholders(
-                    &relation.to,
-                    &allowed,
-                    &format!("relations[{idx}].to"),
-                    &mapping.pattern,
-                )?;
+            Self::validate_id_template(
+                &relation.id,
+                &allowed,
+                &format!("relations[{idx}].id"),
+                mapping,
+            )?;
 
-                if (!node_ids.contains(&relation.to)) {
-                    warn!("relations[{idx}].to references a node/entity id '{}' that is not defined in nodes for pattern '{}'. It should be defined in nodes.",
-                        relation.to, mapping.pattern
-                    );
-                }
-            } else if (mapping.properties.mode == MappingMode::PayloadAsField) {
-                return Err(anyhow::anyhow!(
-                    "relations[{idx}].to cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern '{}'",
-                    mapping.pattern
-                ));
-            }
+            Self::validate_relation_endpoint(
+                &relation.from,
+                &allowed,
+                &format!("relations[{idx}].from"),
+                mapping,
+            )?;
+            Self::validate_relation_endpoint(
+                &relation.to,
+                &allowed,
+                &format!("relations[{idx}].to"),
+                mapping,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_relation_endpoint(
+        endpoint: &MappingRelationEndpoint,
+        allowed: &HashSet<String>,
+        field_prefix: &str,
+        mapping: &TopicMapping,
+    ) -> anyhow::Result<()> {
+        if endpoint.label.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{field_prefix}.label must not be empty in topic mapping with pattern '{}'",
+                mapping.pattern
+            ));
+        }
+        Self::validate_id_template(
+            &endpoint.id,
+            allowed,
+            &format!("{field_prefix}.id"),
+            mapping,
+        )
+    }
+
+    /// Validate an id template that may contain `{var}` placeholders and `$.path` payload
+    /// references. `$.` references are only valid when properties.mode is PayloadSpread.
+    fn validate_id_template(
+        template: &str,
+        allowed: &HashSet<String>,
+        field_name: &str,
+        mapping: &TopicMapping,
+    ) -> anyhow::Result<()> {
+        Self::validate_template_placeholders(template, allowed, field_name, &mapping.pattern)?;
+
+        if template.contains(FROM_TO_STARTS_WITH)
+            && mapping.properties.mode == MappingMode::PayloadAsField
+        {
+            return Err(anyhow::anyhow!(
+                "{field_name} cannot reference payload properties (containing '$.') when properties.mode is PayloadAsField in topic mapping with pattern '{}'",
+                mapping.pattern
+            ));
         }
 
         Ok(())
@@ -791,8 +822,15 @@ mod tests {
             }],
             relations: vec![MappingRelation {
                 label: "CONTAINS".to_string(),
-                from: "{floor}".to_string(),
-                to: "{room}:{device}".to_string(),
+                id: "{floor}_contains_{room}:{device}".to_string(),
+                from: MappingRelationEndpoint {
+                    label: "FLOOR".to_string(),
+                    id: "{floor}".to_string(),
+                },
+                to: MappingRelationEndpoint {
+                    label: "DEVICE".to_string(),
+                    id: "{room}:{device}".to_string(),
+                },
             }],
         }
     }
@@ -1045,11 +1083,13 @@ topic_mappings:
         id: "{room}"
     relations:
       - label: "CONTAINS"
-        from: "FLOOR"
-        to: "ROOM"
+        id: "{floor}_contains_{room}"
+        from: { label: "FLOOR", id: "{floor}" }
+        to: { label: "ROOM", id: "{room}" }
       - label: "LOCATED_IN"
-        from: "{room}:{device}"
-        to: "{room}"
+        id: "{room}:{device}_located_in_{room}"
+        from: { label: "DEVICE", id: "{room}:{device}" }
+        to: { label: "ROOM", id: "{room}" }
 event_channel_capacity: 64
 adaptive_enabled: true
 adaptive_min_batch_size: 2
@@ -1356,11 +1396,13 @@ topic_mappings:
           id: "{room}"
     relations:
     - label: "CONTAINS"
-      from: "{floor}"
-      to: "{room}:{device}"
+      id: "{floor}_contains_{room}:{device}"
+      from: { label: "FLOOR", id: "{floor}" }
+      to: { label: "DEVICE", id: "{room}:{device}" }
     - label: "LOCATED_IN"
-      from: "{device}"
-      to: "$.reading"
+      id: "{device}_located_in_$.reading"
+      from: { label: "DEVICE", id: "{device}" }
+      to: { label: "READING", id: "$.reading" }
 "#;
         let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
         let result = config.validate();
@@ -1385,15 +1427,17 @@ topic_mappings:
           id: "{room}"
     relations:
     - label: "CONTAINS"
-      from: "{floor}"
-      to: "{room}:{device}"
+      id: "{floor}_contains_{room}:{device}"
+      from: { label: "FLOOR", id: "{floor}" }
+      to: { label: "DEVICE", id: "{room}:{device}" }
     - label: "LOCATED_IN"
-      from: "{device}"
-      to: "$.reading"
+      id: "{device}_located_in_reading"
+      from: { label: "DEVICE", id: "{device}" }
+      to: { label: "READING", id: "$.reading" }
 "#;
         let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
         let result = config.validate().expect_err("Validation error expected");
-        assert!(result.to_string().contains("cannot reference payload properties (starting with '$.') when properties.mode is PayloadAsField in topic mapping with pattern 'building/{floor}/{room}/{device}"));
+        assert!(result.to_string().contains("cannot reference payload properties (containing '$.') when properties.mode is PayloadAsField in topic mapping with pattern 'building/{floor}/{room}/{device}"));
     }
 
     #[test]
@@ -1405,8 +1449,7 @@ topic_mappings:
       label: "DEVICE"
       id: "{room}:{device}"
     properties:
-      mode: payload_as_field
-      field_name: "reading"
+      mode: payload_spread
     nodes:
         - label: "FLOOR"
           id: "{floor}"
@@ -1414,15 +1457,17 @@ topic_mappings:
           id: "{room}"
     relations:
     - label: "CONTAINS"
-      from: "{floor}"
-      to: "{room}:{device}"
+      id: "{floor}_contains_{room}:{device}"
+      from: { label: "FLOOR", id: "{floor}" }
+      to: { label: "DEVICE", id: "{room}:{device}" }
     - label: "LOCATED_IN"
-      from: "{deice}"
-      to: "$.reading"
+      id: "{device}_located_in_reading"
+      from: { label: "DEVICE", id: "{deice}" }
+      to: { label: "READING", id: "$.reading" }
 "#;
         let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
         let result = config.validate().expect_err("Validation error expected");
-        assert!(result.to_string().contains("Unknown placeholder '{deice}' in relations[1].from for pattern 'building/{floor}/{room}/{device}'. Allowed placeholders come from the pattern."));
+        assert!(result.to_string().contains("Unknown placeholder '{deice}' in relations[1].from.id for pattern 'building/{floor}/{room}/{device}'. Allowed placeholders come from the pattern."));
     }
 
     #[test]
