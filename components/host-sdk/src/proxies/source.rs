@@ -40,23 +40,30 @@ use crate::state_store_bridge::StateStoreVtableBuilder;
 /// Runs the pinned future on a new OS thread with a current-thread tokio runtime.
 /// This avoids nesting issues with the host's multi-thread runtime.
 extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
-    // Wrap the raw pointer to make it Send-safe for std::thread::spawn
-    let send_ptr = drasi_plugin_sdk::ffi::SendMutPtr(future_ptr);
-    let result = std::thread::spawn(move || {
-        let boxed_future = unsafe {
-            Box::from_raw(send_ptr.as_ptr()
-                as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>)
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime for source proxy");
-        // Wrap the result in SendMutPtr to satisfy Send bound
-        drasi_plugin_sdk::ffi::SendMutPtr(rt.block_on(*boxed_future))
-    })
-    .join()
-    .expect("host executor thread panicked");
-    result.as_ptr()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Wrap the raw pointer to make it Send-safe for std::thread::spawn
+        let send_ptr = drasi_plugin_sdk::ffi::SendMutPtr(future_ptr);
+        let result = std::thread::spawn(move || {
+            let boxed_future = unsafe {
+                Box::from_raw(send_ptr.as_ptr()
+                    as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>)
+            };
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return drasi_plugin_sdk::ffi::SendMutPtr(std::ptr::null_mut()),
+            };
+            // Wrap the result in SendMutPtr to satisfy Send bound
+            drasi_plugin_sdk::ffi::SendMutPtr(rt.block_on(*boxed_future))
+        })
+        .join()
+        .map(|p| p.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+        result
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Wraps a `SourceVtable` into a DrasiLib `Source` trait implementation.
@@ -154,6 +161,8 @@ impl Source for SourceProxy {
             FfiComponentStatus::Stopped => ComponentStatus::Stopped,
             FfiComponentStatus::Reconfiguring => ComponentStatus::Reconfiguring,
             FfiComponentStatus::Error => ComponentStatus::Error,
+            FfiComponentStatus::Added => ComponentStatus::Added,
+            FfiComponentStatus::Removed => ComponentStatus::Removed,
         }
     }
 
@@ -265,10 +274,15 @@ impl Source for SourceProxy {
             update_tx: context.update_tx.clone(),
         });
 
-        // Use as_ptr (no refcount increment) — the Arc in _callback_ctx keeps
-        // the context alive for the proxy's lifetime. This avoids the memory
-        // leak that Arc::into_raw would cause (no matching from_raw).
-        let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
+        // Bug C fix: hand the plugin a strong reference (Arc::into_raw bumps
+        // the refcount) so log/lifecycle callbacks emitted late by the plugin
+        // (e.g. from inside stop_fn or from internal tasks shutting down) do
+        // not deref freed memory. The matching `mem::forget` happens in Drop
+        // and intentionally leaks one strong ref per instance — acceptable
+        // because the cdylib itself is intentionally process-leaked (see
+        // host-sdk/src/loader.rs).
+        let ctx_for_plugin = per_instance_ctx.clone();
+        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
 
         // Store the Arc so it stays alive as long as this proxy
         if let Ok(mut guard) = self._callback_ctx.lock() {
@@ -316,6 +330,17 @@ impl Drop for SourceProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+
+        // Bug C fix: leak the per-instance callback context Arc unconditionally.
+        // The strong reference handed to the plugin via `Arc::into_raw` in
+        // initialize() is never reclaimed — late log/lifecycle callbacks
+        // emitted by the plugin (during stop_fn or from internal tasks) must
+        // still find a valid pointer. Matches the pattern in ReactionProxy.
+        if let Ok(mut guard) = self._callback_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
     }
 }
 

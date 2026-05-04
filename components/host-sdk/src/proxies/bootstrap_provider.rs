@@ -155,26 +155,30 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     let state = Box::into_raw(Box::new(std_tx)) as *mut c_void;
 
     extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
-        let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
-        if event.is_null() {
-            return -1;
-        }
-        let ffi_event = unsafe { &*event };
-        let bootstrap_event = unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
-        // Free the FFI envelope but not the opaque (we took ownership)
-        unsafe { drop(Box::from_raw(event)) };
-        match tx.send(bootstrap_event) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
+            if event.is_null() {
+                return -1;
+            }
+            let ffi_event = unsafe { &*event };
+            let bootstrap_event =
+                unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
+            // Free the FFI envelope but not the opaque (we took ownership)
+            unsafe { drop(Box::from_raw(event)) };
+            match tx.send(bootstrap_event) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            }
+        }))
+        .unwrap_or(-1)
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             drop(Box::from_raw(
                 state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
             ))
-        };
+        }));
     }
 
     FfiBootstrapSender {

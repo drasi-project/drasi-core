@@ -55,6 +55,9 @@ peg::parser! {
         rule kw_yield()     = ("YIELD" / "yield")
         rule kw_filter()    = ("FILTER" / "filter")
         rule kw_next()      = ("NEXT" / "next")
+        rule kw_starts()    = ("STARTS" / "starts")
+        rule kw_ends()      = ("ENDS" / "ends")
+        rule kw_contains()  = ("CONTAINS" / "contains")
 
         rule _()
             = quiet!{[' ']}
@@ -248,6 +251,9 @@ peg::parser! {
                 a:(@) __* "<=" __* b:@ { BinaryExpression::le(a, b) }
                 a:(@) __* ">"  __* b:@ { BinaryExpression::gt(a, b) }
                 a:(@) __* ">=" __* b:@ { BinaryExpression::ge(a, b) }
+                a:(@) __+ kw_starts() __+ ("WITH" / "with") __+ b:@ { BinaryExpression::starts_with(a, b) }
+                a:(@) __+ kw_ends() __+ ("WITH" / "with") __+ b:@ { BinaryExpression::ends_with(a, b) }
+                a:(@) __+ kw_contains() __+ b:@ { BinaryExpression::contains(a, b) }
                 --
                 a:(@) __* "+" __* b:@ { BinaryExpression::add(a, b) }
                 a:(@) __* "-" __* b:@ { BinaryExpression::subtract(a, b) }

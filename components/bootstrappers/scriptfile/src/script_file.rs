@@ -114,7 +114,7 @@ impl ScriptFileBootstrapProvider {
     fn convert_node_to_element(source_id: &str, node: &NodeRecord) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &node.properties {
-            convert_json_to_element_properties(obj)?
+            convert_json_to_element_properties(obj)
         } else if node.properties.is_null() {
             Default::default()
         } else {
@@ -148,7 +148,7 @@ impl ScriptFileBootstrapProvider {
     fn convert_relation_to_element(source_id: &str, relation: &RelationRecord) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &relation.properties {
-            convert_json_to_element_properties(obj)?
+            convert_json_to_element_properties(obj)
         } else if relation.properties.is_null() {
             Default::default()
         } else {

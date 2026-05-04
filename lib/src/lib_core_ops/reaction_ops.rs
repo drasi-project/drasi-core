@@ -54,7 +54,7 @@ impl DrasiLib {
     /// Add a reaction to a running server with additional metadata.
     ///
     /// Same as [`add_reaction`](Self::add_reaction) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub async fn add_reaction_with_metadata(
         &self,
         reaction: impl Reaction + 'static,
@@ -668,7 +668,7 @@ mod tests {
         core.add_reaction(reaction).await.unwrap();
 
         let status = core.get_reaction_status("r-status").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
@@ -740,7 +740,7 @@ mod tests {
         let info = core.get_reaction_info("r-info").await.unwrap();
         assert_eq!(info.id, "r-info");
         assert_eq!(info.reaction_type, "test-log");
-        assert_eq!(info.status, ComponentStatus::Stopped);
+        assert_eq!(info.status, ComponentStatus::Added);
         assert_eq!(info.queries, vec!["q1".to_string()]);
     }
 }

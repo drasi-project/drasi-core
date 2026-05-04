@@ -279,7 +279,7 @@ impl DrasiLibBuilder {
     /// Add a source instance with additional component metadata.
     ///
     /// Like [`with_source`](Self::with_source) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_source_metadata(
         mut self,
         source: impl SourceTrait + 'static,
@@ -318,7 +318,7 @@ impl DrasiLibBuilder {
     /// Add a reaction instance with additional component metadata.
     ///
     /// Like [`with_reaction`](Self::with_reaction) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_reaction_metadata(
         mut self,
         reaction: impl ReactionTrait + 'static,
