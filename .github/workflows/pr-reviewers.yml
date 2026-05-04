@@ -44,8 +44,10 @@ jobs:
     steps:
       - name: Determine reviewers
         id: reviewers
+        env:
+          LABEL: ${{ github.event.label.name }}
         run: |
-          label='${{ github.event.label.name }}'
+          label="$LABEL"
           case "$label" in
             review:correctness) workflows="pr-correctness-reviewer.lock.yml" ;;
             review:security)    workflows="pr-security-reviewer.lock.yml" ;;
