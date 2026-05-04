@@ -1,0 +1,75 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Caller workflow that forwards PR review requests to the centralized
+# Drasi agentic reviewers in drasi-project/.github. Each job is gated by
+# the same label conditions used by the original reviewers and forwards
+# the PR URL to the reusable workflow.
+#
+# Required org-level secrets: COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN
+
+name: Trigger PR Reviewers
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  correctness:
+    if: github.event.label.name == 'review:correctness' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-correctness-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
+
+  security:
+    if: github.event.label.name == 'review:security' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-security-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
+
+  design:
+    if: github.event.label.name == 'review:design' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-design-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
+
+  docs:
+    if: github.event.label.name == 'review:docs' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-docs-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
+
+  testing:
+    if: github.event.label.name == 'review:testing' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-testing-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
+
+  prior-art:
+    if: github.event.label.name == 'review:prior-art' || github.event.label.name == 'review:all'
+    uses: drasi-project/.github/.github/workflows/pr-prior-art-reviewer.lock.yml@main
+    with:
+      pr_url: ${{ github.event.pull_request.html_url }}
+    secrets: inherit
