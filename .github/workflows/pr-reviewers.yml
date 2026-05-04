@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Caller workflow that forwards PR review requests to the centralized
-# Drasi agentic reviewers in drasi-project/.github. Each job is gated by
-# the same label conditions used by the original reviewers and forwards
-# the PR URL to the reusable workflow.
+# Caller workflow that triggers the centralized Drasi agentic PR reviewers
+# in drasi-project/.github via workflow_dispatch (cross-repo API call).
+# The reviewer runs in the target repo's context, where the org-level
+# secrets (COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN) are available, and
+# posts its comment back to this PR using its own configured token.
 #
-# Required org-level secrets: COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN
+# Required caller-repo secret:
+#   DISPATCH_TOKEN - PAT or GitHub App token with `actions: write` (or
+#                    classic `workflow` scope) on drasi-project/.github.
 
 name: Trigger PR Reviewers
 
@@ -27,49 +30,43 @@ on:
 
 permissions:
   contents: read
-  actions: read
-  issues: write
-  pull-requests: write
+  pull-requests: read
+
+env:
+  REVIEWER_REPO: drasi-project/.github
+  REVIEWER_REF: main
 
 jobs:
-  correctness:
-    if: github.event.label.name == 'review:correctness' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-correctness-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
+  dispatch:
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.label.name, 'review:')
+    steps:
+      - name: Determine reviewers
+        id: reviewers
+        run: |
+          label='${{ github.event.label.name }}'
+          case "$label" in
+            review:correctness) workflows="pr-correctness-reviewer.lock.yml" ;;
+            review:security)    workflows="pr-security-reviewer.lock.yml" ;;
+            review:design)      workflows="pr-design-reviewer.lock.yml" ;;
+            review:docs)        workflows="pr-docs-reviewer.lock.yml" ;;
+            review:testing)     workflows="pr-testing-reviewer.lock.yml" ;;
+            review:prior-art)   workflows="pr-prior-art-reviewer.lock.yml" ;;
+            review:all)         workflows="pr-correctness-reviewer.lock.yml pr-security-reviewer.lock.yml pr-design-reviewer.lock.yml pr-docs-reviewer.lock.yml pr-testing-reviewer.lock.yml pr-prior-art-reviewer.lock.yml" ;;
+            *)                  workflows="" ;;
+          esac
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
 
-  security:
-    if: github.event.label.name == 'review:security' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-security-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
-
-  design:
-    if: github.event.label.name == 'review:design' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-design-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
-
-  docs:
-    if: github.event.label.name == 'review:docs' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-docs-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
-
-  testing:
-    if: github.event.label.name == 'review:testing' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-testing-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
-
-  prior-art:
-    if: github.event.label.name == 'review:prior-art' || github.event.label.name == 'review:all'
-    uses: drasi-project/.github/.github/workflows/pr-prior-art-reviewer.lock.yml@main
-    with:
-      pr_url: ${{ github.event.pull_request.html_url }}
-    secrets: inherit
+      - name: Dispatch reviewers
+        if: steps.reviewers.outputs.workflows != ''
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          for wf in ${{ steps.reviewers.outputs.workflows }}; do
+            echo "Dispatching $wf for $PR_URL"
+            gh workflow run "$wf" \
+              --repo "$REVIEWER_REPO" \
+              --ref "$REVIEWER_REF" \
+              -f pr_url="$PR_URL"
+          done
