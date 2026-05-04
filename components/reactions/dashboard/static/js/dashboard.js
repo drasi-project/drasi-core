@@ -164,9 +164,13 @@ export class DashboardDesigner {
       try {
         const resp = await fetch(`/api/queries/${encodeURIComponent(queryId)}/snapshot`);
         if (!resp.ok) return;
-        const rows = await resp.json();
-        if (Array.isArray(rows) && rows.length > 0) {
+        const snapshot = await resp.json();
+        const rows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+        if (rows.length > 0) {
           const fields = Object.keys(rows[0]).sort();
+          updateFieldSelects(fields);
+        } else if (snapshot.aggregation && typeof snapshot.aggregation === "object") {
+          const fields = Object.keys(snapshot.aggregation).sort();
           updateFieldSelects(fields);
         }
       } catch (_) { /* ignore */ }
