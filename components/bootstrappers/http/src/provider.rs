@@ -372,7 +372,7 @@ fn should_include_element(
             metadata
                 .labels
                 .iter()
-                .any(|l| request.node_labels.contains(&l.to_string()))
+                .any(|l| request.node_labels.iter().any(|nl| nl.as_str() == &**l))
         }
         drasi_core::models::Element::Relation { metadata, .. } => {
             if request.relation_labels.is_empty() {
@@ -381,7 +381,7 @@ fn should_include_element(
             metadata
                 .labels
                 .iter()
-                .any(|l| request.relation_labels.contains(&l.to_string()))
+                .any(|l| request.relation_labels.iter().any(|rl| rl.as_str() == &**l))
         }
     }
 }

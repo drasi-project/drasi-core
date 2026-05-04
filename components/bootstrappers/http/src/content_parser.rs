@@ -17,7 +17,7 @@
 //! Supports JSON, XML, YAML content types with automatic detection
 //! from Content-Type header.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 
 use crate::config::ContentTypeOverride;

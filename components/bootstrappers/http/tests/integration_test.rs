@@ -18,7 +18,7 @@
 //! the full bootstrap flow: HTTP request → parse → map → emit events.
 
 use axum::{
-    extract::{Query, State},
+    extract::Query,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -28,13 +28,10 @@ use axum::{
 use drasi_bootstrap_http::config::*;
 use drasi_bootstrap_http::HttpBootstrapProvider;
 use drasi_core::models::{Element, SourceChange};
-use drasi_lib::bootstrap::{
-    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
-};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
 use drasi_lib::channels::BootstrapEvent;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -45,7 +42,7 @@ use tokio::sync::mpsc;
 #[allow(clippy::unwrap_used)]
 /// Start a test server and return its base URL.
 async fn start_server(app: Router) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -129,7 +126,7 @@ async fn test_simple_json_endpoint() {
     let context = test_context("test-source");
     let request = test_request(vec!["User".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -143,10 +140,7 @@ async fn test_simple_json_endpoint() {
     // Verify first event
     match &events[0].change {
         SourceChange::Insert { element } => match element {
-            Element::Node {
-                metadata,
-                properties,
-            } => {
+            Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(&*metadata.labels[0], "User");
             }

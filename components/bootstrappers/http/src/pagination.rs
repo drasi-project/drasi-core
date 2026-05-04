@@ -14,7 +14,7 @@
 
 //! Pagination strategies for HTTP bootstrap requests.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::header::HeaderMap;
 use serde_json::Value as JsonValue;
 

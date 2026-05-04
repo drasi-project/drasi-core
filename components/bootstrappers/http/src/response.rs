@@ -248,10 +248,7 @@ mod tests {
 
         let elem = results[0].as_ref().unwrap();
         match elem {
-            Element::Node {
-                metadata,
-                properties,
-            } => {
+            Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(metadata.labels.len(), 1);
                 assert_eq!(&*metadata.labels[0], "User");
