@@ -59,3 +59,60 @@ impl<T: Clone> TimestampBound<&T> {
         }
     }
 }
+
+impl TimestampRange<ElementTimestamp> {
+    /// Returns true if the given timestamp falls within this range.
+    ///
+    /// The lower bound is inclusive for `Included`, and treated as exclusive
+    /// for `StartFromPrevious` (the previous value itself is not part of the
+    /// new range). The upper bound `to` is inclusive.
+    pub fn contains(&self, ts: ElementTimestamp) -> bool {
+        if ts > self.to {
+            return false;
+        }
+        match &self.from {
+            TimestampBound::Included(from) => ts >= *from,
+            TimestampBound::StartFromPrevious(from) => ts > *from,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_included_lower_bound() {
+        let range = TimestampRange {
+            from: TimestampBound::Included(10u64),
+            to: 20u64,
+        };
+        assert!(range.contains(10));
+        assert!(range.contains(15));
+        assert!(range.contains(20));
+        assert!(!range.contains(9));
+        assert!(!range.contains(21));
+    }
+
+    #[test]
+    fn contains_start_from_previous_is_exclusive_lower() {
+        let range = TimestampRange {
+            from: TimestampBound::StartFromPrevious(10u64),
+            to: 20u64,
+        };
+        assert!(!range.contains(10));
+        assert!(range.contains(11));
+        assert!(range.contains(20));
+    }
+
+    #[test]
+    fn contains_empty_range_when_from_equals_to_included() {
+        let range = TimestampRange {
+            from: TimestampBound::Included(5u64),
+            to: 5u64,
+        };
+        assert!(range.contains(5));
+        assert!(!range.contains(4));
+        assert!(!range.contains(6));
+    }
+}
