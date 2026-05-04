@@ -14,9 +14,11 @@
 
 # Caller workflow that triggers the centralized Drasi agentic PR reviewers
 # in drasi-project/.github via workflow_dispatch (cross-repo API call).
-# The reviewer runs in the target repo's context, where the org-level
-# secrets (COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN) are available, and
-# posts its comment back to this PR using its own configured token.
+# The reviewer workflows execute in the centralized drasi-project/.github
+# repository context, so any secrets or tokens they use (e.g.
+# COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN) must be configured there.
+# They receive this PR URL as input and post comments back to the
+# target PR using their own configured token.
 #
 # Required org-level secret (must grant access to this repository):
 #   ORG_DISPATCH_TOKEN - PAT or GitHub App token with `actions: write`
@@ -26,12 +28,10 @@
 name: Trigger PR Reviewers
 
 on:
-  pull_request:
+  pull_request_target:
     types: [labeled]
 
-permissions:
-  contents: read
-  pull-requests: read
+permissions: {}
 
 env:
   REVIEWER_REPO: drasi-project/.github
