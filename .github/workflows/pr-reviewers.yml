@@ -18,9 +18,10 @@
 # secrets (COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN) are available, and
 # posts its comment back to this PR using its own configured token.
 #
-# Required caller-repo secret:
-#   DISPATCH_TOKEN - PAT or GitHub App token with `actions: write` (or
-#                    classic `workflow` scope) on drasi-project/.github.
+# Required org-level secret (must grant access to this repository):
+#   ORG_DISPATCH_TOKEN - PAT or GitHub App token with `actions: write`
+#                        (or classic `workflow` scope) on
+#                        drasi-project/.github.
 
 name: Trigger PR Reviewers
 
@@ -60,9 +61,13 @@ jobs:
       - name: Dispatch reviewers
         if: steps.reviewers.outputs.workflows != ''
         env:
-          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::ORG_DISPATCH_TOKEN is not set or not accessible to this repository."
+            exit 1
+          fi
           for wf in ${{ steps.reviewers.outputs.workflows }}; do
             echo "Dispatching $wf for $PR_URL"
             gh workflow run "$wf" \
