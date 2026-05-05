@@ -430,7 +430,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         .await
         .context("Did not observe INSERT change for types test")?;
 
-        if let ResultDiff::Add { data } = &change {
+        if let ResultDiff::Add { data, .. } = &change {
             // Integers should be JSON numbers, not strings
             assert!(
                 data.get("int_val").unwrap().is_number(),
