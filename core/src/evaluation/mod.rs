@@ -73,6 +73,7 @@ pub enum FunctionEvaluationError {
     OutofRange,
     InvalidFormat { expected: String },
     CorruptData,
+    DomainError,
     InvalidType { expected: String },
     EvaluationError(Box<EvaluationError>),
 }
@@ -84,6 +85,7 @@ impl PartialEq for FunctionEvaluationError {
                 FunctionEvaluationError::InvalidArgument(a),
                 FunctionEvaluationError::InvalidArgument(b),
             ) => a == b,
+            (FunctionEvaluationError::DomainError, FunctionEvaluationError::DomainError) => true,
             (
                 FunctionEvaluationError::InvalidArgumentCount,
                 FunctionEvaluationError::InvalidArgumentCount,
@@ -124,6 +126,7 @@ impl fmt::Display for FunctionEvaluationError {
             FunctionEvaluationError::InvalidType { expected } => {
                 write!(f, "Invalid type, expected: {expected}")
             }
+            FunctionEvaluationError::DomainError => write!(f, "Domain error"),
             FunctionEvaluationError::EvaluationError(err) => write!(f, "Evaluation error: {err}"),
         }
     }

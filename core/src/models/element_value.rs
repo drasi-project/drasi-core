@@ -110,7 +110,10 @@ impl From<&ElementValue> for serde_json::Value {
             ElementValue::Null => serde_json::Value::Null,
             ElementValue::Bool(b) => serde_json::Value::Bool(*b),
             ElementValue::Float(f) => {
-                serde_json::Value::Number(serde_json::Number::from_f64(f.into_inner()).unwrap())
+                // Handle infinity and NaN - JSON doesn't support them, so convert to null
+                serde_json::Number::from_f64(f.into_inner())
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
             }
             ElementValue::Integer(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
             ElementValue::String(s) => serde_json::Value::String(s.to_string()),
