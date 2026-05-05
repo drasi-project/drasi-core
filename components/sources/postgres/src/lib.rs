@@ -305,15 +305,10 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
+        use crate::descriptor::PostgresSourceConfigDto;
 
-        // Fallback for builder-created components (no descriptor / no raw_config).
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base
+            .properties_or_serialize(&PostgresSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
@@ -826,9 +821,9 @@ mod tests {
         }
 
         fn ensure_test_secret_resolver() {
-            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(
-                std::sync::Arc::new(TestSecretResolver),
-            );
+            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+                TestSecretResolver,
+            ));
         }
 
         #[tokio::test]
@@ -905,6 +900,62 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[test]
+        fn test_builder_fallback_produces_camel_case() {
+            use drasi_lib::sources::Source;
+
+            let source = PostgresSourceBuilder::new("pg-fallback")
+                .with_host("myhost.example.com")
+                .with_port(5433)
+                .with_database("mydb")
+                .with_user("admin")
+                .with_password("secret123")
+                .with_ssl_mode(SslMode::Require)
+                .with_slot_name("custom_slot")
+                .with_publication_name("custom_pub")
+                .build()
+                .unwrap();
+
+            let props = source.properties();
+
+            // Must use camelCase keys (DTO serialization)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+            assert!(
+                props.contains_key("sslMode"),
+                "expected camelCase 'sslMode'"
+            );
+
+            // Must NOT have snake_case keys
+            assert!(
+                !props.contains_key("slot_name"),
+                "should not have snake_case 'slot_name'"
+            );
+            assert!(
+                !props.contains_key("publication_name"),
+                "should not have snake_case 'publication_name'"
+            );
+
+            // Values should be correct
+            assert_eq!(
+                props.get("host").and_then(|v| v.as_str()),
+                Some("myhost.example.com")
+            );
+            assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(5433));
+            assert_eq!(props.get("database").and_then(|v| v.as_str()), Some("mydb"));
+            assert_eq!(
+                props.get("password").and_then(|v| v.as_str()),
+                Some("secret123")
+            );
         }
     }
 

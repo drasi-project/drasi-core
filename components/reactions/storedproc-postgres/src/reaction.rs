@@ -279,10 +279,6 @@ impl Reaction for PostgresStoredProcReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
-
         use crate::descriptor::{
             PostgresStoredProcReactionConfigDto, StoredProcQueryConfigDto,
             StoredProcTemplateSpecDto,
@@ -321,10 +317,7 @@ impl Reaction for PostgresStoredProcReaction {
             retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -328,10 +328,6 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
-
         use crate::descriptor::{LogReactionConfigDto, QueryConfigDto, TemplateSpecDto};
 
         fn map_spec_to_dto(spec: &crate::TemplateSpec) -> TemplateSpecDto {
@@ -358,10 +354,7 @@ impl Reaction for LogReaction {
             default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {

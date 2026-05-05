@@ -246,10 +246,6 @@ impl Source for GrpcSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
-
         use crate::descriptor::GrpcSourceConfigDto;
         use drasi_plugin_sdk::ConfigValue;
 
@@ -264,10 +260,7 @@ impl Source for GrpcSource {
             timeout_ms: ConfigValue::Static(self.config.timeout_ms),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {

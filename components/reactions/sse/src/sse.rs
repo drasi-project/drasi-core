@@ -228,15 +228,10 @@ impl Reaction for SseReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
+        use crate::descriptor::SseReactionConfigDto;
 
-        // Fallback for builder-created components (no descriptor / no raw_config).
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base
+            .properties_or_serialize(&SseReactionConfigDto::from(&self.config))
     }
 
     fn query_ids(&self) -> Vec<String> {

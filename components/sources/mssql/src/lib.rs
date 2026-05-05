@@ -185,10 +185,6 @@ impl Source for MsSqlSource {
     }
 
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        if let Some(serde_json::Value::Object(map)) = self.base.raw_config() {
-            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        }
-
         use crate::descriptor::{
             AuthModeDto, EncryptionModeDto, MsSqlSourceConfigDto, StartPositionDto,
             TableKeyConfigDto,
@@ -237,10 +233,7 @@ impl Source for MsSqlSource {
             start_position: ConfigValue::Static(start_position_dto),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => std::collections::HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {

@@ -223,6 +223,27 @@ impl ReactionBase {
         self.raw_config.as_ref()
     }
 
+    /// Build the properties map for this reaction.
+    ///
+    /// If `raw_config` was set (descriptor path), returns its top-level keys.
+    /// Otherwise, serializes `fallback_dto` (the DTO reconstructed from typed
+    /// config) to produce camelCase output.
+    ///
+    /// This eliminates the duplicated if-let + serialize pattern from plugins.
+    pub fn properties_or_serialize<D: serde::Serialize>(
+        &self,
+        fallback_dto: &D,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.raw_config.as_ref() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        match serde_json::to_value(fallback_dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => std::collections::HashMap::new(),
+        }
+    }
+
     /// Clone the ReactionBase with shared Arc references
     ///
     /// This creates a new ReactionBase that shares the same underlying
