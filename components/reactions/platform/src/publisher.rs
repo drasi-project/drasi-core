@@ -63,7 +63,7 @@ impl RedisStreamPublisher {
             }
         }
 
-        unreachable!("Loop should have returned or errored");
+        Err(anyhow::anyhow!("Failed to connect to Redis after {max_retries} attempts"))
     }
 
     /// Publish a CloudEvent to a Redis Stream
@@ -129,7 +129,7 @@ impl RedisStreamPublisher {
             }
         }
 
-        unreachable!("Loop should have returned or errored");
+        Err(anyhow::anyhow!("Failed to publish CloudEvent after {max_retries} attempts"))
     }
 
     /// Publish multiple CloudEvents in a single Redis pipeline
@@ -239,7 +239,7 @@ impl RedisStreamPublisher {
             }
         }
 
-        unreachable!("Loop should have returned or errored");
+        Err(anyhow::anyhow!("Failed to publish batch after {max_retries} attempts"))
     }
 }
 
