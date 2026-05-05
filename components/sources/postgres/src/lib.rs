@@ -808,6 +808,95 @@ mod tests {
     mod lifecycle {
         use super::*;
 
+        /// A test secret resolver that returns a fixed value for any secret name.
+        struct TestSecretResolver;
+
+        impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
+            fn resolve_to_string(
+                &self,
+                value: &drasi_plugin_sdk::ConfigValue<String>,
+            ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
+                match value {
+                    drasi_plugin_sdk::ConfigValue::Secret { name } => {
+                        Ok(format!("resolved-secret-{name}"))
+                    }
+                    _ => Err(drasi_plugin_sdk::resolver::ResolverError::WrongResolverType),
+                }
+            }
+        }
+
+        fn ensure_test_secret_resolver() {
+            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(
+                std::sync::Arc::new(TestSecretResolver),
+            );
+        }
+
+        #[tokio::test]
+        async fn test_descriptor_preserves_secret_envelope() {
+            use crate::descriptor::PostgresSourceDescriptor;
+            use drasi_lib::sources::Source;
+            use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
+
+            ensure_test_secret_resolver();
+
+            let config_json = serde_json::json!({
+                "host": "db.example.com",
+                "port": 5432,
+                "database": "mydb",
+                "user": "app_user",
+                "password": {
+                    "kind": "Secret",
+                    "name": "db-password"
+                },
+                "tables": ["users"],
+                "slotName": "drasi_slot",
+                "publicationName": "drasi_pub"
+            });
+
+            let descriptor = PostgresSourceDescriptor;
+            let source = descriptor
+                .create_source("pg-secret-test", &config_json, true)
+                .await
+                .expect("descriptor should create source");
+
+            let props = source.properties();
+
+            // Password must be the Secret envelope, NOT the resolved value
+            let password = props.get("password").expect("password must be present");
+            assert!(
+                password.is_object(),
+                "password should be Secret envelope, got: {password}"
+            );
+            assert_eq!(
+                password.get("kind").and_then(|v| v.as_str()),
+                Some("Secret"),
+                "envelope kind must be Secret"
+            );
+            assert_eq!(
+                password.get("name").and_then(|v| v.as_str()),
+                Some("db-password"),
+                "secret name must be preserved"
+            );
+
+            // Resolved value must NOT leak into persisted properties
+            let props_str = serde_json::to_string(&props).unwrap();
+            assert!(
+                !props_str.contains("resolved-secret-db-password"),
+                "resolved secret must not appear in properties"
+            );
+
+            // Keys must be camelCase (from raw_config)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+        }
+
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
             let source = PostgresSourceBuilder::new("test")
