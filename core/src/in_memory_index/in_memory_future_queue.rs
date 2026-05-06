@@ -166,3 +166,27 @@ impl FutureQueue for InMemoryFutureQueue {
         Ok(())
     }
 }
+
+impl InMemoryFutureQueue {
+    pub async fn drain_due(&self, now: i64) -> Vec<FutureElementRef> {
+        let mut data = self.data.write().await;
+        let mut out = Vec::new();
+        loop {
+            let due = match data.queue.peek() {
+                Some((_, t)) => -*t,
+                None => break,
+            };
+            if due > now {
+                break;
+            }
+            let (key, _) = data.queue.pop().unwrap();
+            out.push(key.1);
+        }
+        out
+    }
+
+    pub async fn len(&self) -> usize {
+        let data = self.data.read().await;
+        data.queue.len() + data.map.len()
+    }
+}
