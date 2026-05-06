@@ -22,8 +22,9 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   resolve:
