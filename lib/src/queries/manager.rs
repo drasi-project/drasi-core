@@ -156,24 +156,47 @@ async fn dispatch_query_results(
     let converted_results: Vec<ResultDiff> = results
         .iter()
         .map(|ctx| match ctx {
-            QueryPartEvaluationContext::Adding { after, .. } => ResultDiff::Add {
+            QueryPartEvaluationContext::Adding {
+                after,
+                row_signature,
+            } => ResultDiff::Add {
                 data: convert_query_variables_to_json(after),
+                row_signature: *row_signature,
             },
-            QueryPartEvaluationContext::Removing { before, .. } => ResultDiff::Delete {
+            QueryPartEvaluationContext::Removing {
+                before,
+                row_signature,
+            } => ResultDiff::Delete {
                 data: convert_query_variables_to_json(before),
+                row_signature: *row_signature,
             },
-            QueryPartEvaluationContext::Updating { before, after, .. } => ResultDiff::Update {
+            QueryPartEvaluationContext::Updating {
+                before,
+                after,
+                row_signature,
+            } => ResultDiff::Update {
                 data: convert_query_variables_to_json(after),
                 before: convert_query_variables_to_json(before),
                 after: convert_query_variables_to_json(after),
                 grouping_keys: None,
+                row_signature: *row_signature,
             },
-            QueryPartEvaluationContext::Aggregation { before, after, .. } => {
-                ResultDiff::Aggregation {
-                    before: before.as_ref().map(convert_query_variables_to_json),
-                    after: convert_query_variables_to_json(after),
-                }
-            }
+            // NOTE: When a group empties (last contributor removed), core emits
+            // Aggregation { default_after: true, .. } with identity values (count:0,
+            // sum:0, etc.) rather than Removing. Proper empty-group → Delete detection
+            // requires core-level `is_at_identity()` on each accumulator (see PR #409).
+            // Without that infrastructure, this conversion preserves current behavior:
+            // the row stays in the result set with zeroed-out values.
+            QueryPartEvaluationContext::Aggregation {
+                before,
+                after,
+                row_signature,
+                ..
+            } => ResultDiff::Aggregation {
+                before: before.as_ref().map(convert_query_variables_to_json),
+                after: convert_query_variables_to_json(after),
+                row_signature: *row_signature,
+            },
             QueryPartEvaluationContext::Noop => ResultDiff::Noop,
         })
         .collect();
@@ -182,10 +205,10 @@ async fn dispatch_query_results(
     let mut result_set = current_results.write().await;
     for result in &converted_results {
         match result {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 result_set.push(data.clone());
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 result_set.retain(|item| item != data);
             }
             ResultDiff::Update { before, after, .. } => {
@@ -197,7 +220,7 @@ async fn dispatch_query_results(
                     result_set.push(after.clone());
                 }
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 if let Some(before) = before {
                     if let Some(pos) = result_set.iter().position(|item| item == before) {
                         result_set[pos] = after.clone();
@@ -214,8 +237,12 @@ async fn dispatch_query_results(
     }
     drop(result_set);
 
+    // sequence is set to 0 here. The result-sequence counter that increments
+    // per emission lands in a follow-up issue (see #396 / Reaction Recovery
+    // doc 01 section 1).
     let query_result = QueryResult::with_profiling(
         query_id.to_string(),
+        0,
         chrono::Utc::now(),
         converted_results,
         {
@@ -708,6 +735,7 @@ impl Query for DrasiQuery {
 
             let control_result = QueryResult::new(
                 self.base.config.id.clone(),
+                0,
                 chrono::Utc::now(),
                 vec![],
                 metadata,
@@ -854,6 +882,7 @@ impl Query for DrasiQuery {
 
                             let control_result = QueryResult::new(
                                 query_id_clone.clone(),
+                                0,
                                 chrono::Utc::now(),
                                 vec![],
                                 metadata,
