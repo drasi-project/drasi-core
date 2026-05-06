@@ -62,7 +62,7 @@ fn test_sse_builder_with_heartbeat() {
     let props = reaction.properties();
     assert_eq!(reaction.id(), "test-reaction");
     assert_eq!(
-        props.get("sse_path"),
+        props.get("ssePath"),
         Some(&serde_json::Value::String("/events".to_string()))
     );
 }
@@ -104,7 +104,7 @@ fn test_sse_builder_chaining() {
         Some(&serde_json::Value::Number(3000.into()))
     );
     assert_eq!(
-        props.get("sse_path"),
+        props.get("ssePath"),
         Some(&serde_json::Value::String("/events/stream".to_string()))
     );
 }
@@ -352,4 +352,54 @@ fn test_config_with_default_template_serialization() {
     let deserialized: SseReactionConfig = serde_json::from_str(&serialized).unwrap();
 
     assert_eq!(config, deserialized);
+}
+
+#[test]
+fn test_builder_fallback_produces_camel_case() {
+    let reaction = SseReactionBuilder::new("sse-fallback")
+        .with_host("127.0.0.1")
+        .with_port(9090)
+        .with_sse_path("/custom-events")
+        .with_heartbeat_interval_ms(15000)
+        .with_queries(vec!["q1".to_string()])
+        .build()
+        .unwrap();
+
+    let props = reaction.properties();
+
+    // Must use camelCase keys (DTO serialization)
+    assert!(
+        props.contains_key("ssePath"),
+        "expected camelCase 'ssePath', got keys: {:?}",
+        props.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        props.contains_key("heartbeatIntervalMs"),
+        "expected camelCase 'heartbeatIntervalMs'"
+    );
+
+    // Must NOT have snake_case keys
+    assert!(
+        !props.contains_key("sse_path"),
+        "should not have snake_case 'sse_path'"
+    );
+    assert!(
+        !props.contains_key("heartbeat_interval_ms"),
+        "should not have snake_case 'heartbeat_interval_ms'"
+    );
+
+    // Values should be correct
+    assert_eq!(
+        props.get("host").and_then(|v| v.as_str()),
+        Some("127.0.0.1")
+    );
+    assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(9090));
+    assert_eq!(
+        props.get("ssePath").and_then(|v| v.as_str()),
+        Some("/custom-events")
+    );
+    assert_eq!(
+        props.get("heartbeatIntervalMs").and_then(|v| v.as_u64()),
+        Some(15000)
+    );
 }

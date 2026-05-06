@@ -80,6 +80,46 @@ impl From<SslModeDto> for SslMode {
     }
 }
 
+impl From<&SslMode> for SslModeDto {
+    fn from(mode: &SslMode) -> Self {
+        match mode {
+            SslMode::Disable => SslModeDto::Disable,
+            SslMode::Prefer => SslModeDto::Prefer,
+            SslMode::Require => SslModeDto::Require,
+        }
+    }
+}
+
+impl From<&TableKeyConfig> for TableKeyConfigDto {
+    fn from(tk: &TableKeyConfig) -> Self {
+        Self {
+            table: tk.table.clone(),
+            key_columns: tk.key_columns.clone(),
+        }
+    }
+}
+
+impl From<&PostgresSourceConfig> for PostgresSourceConfigDto {
+    fn from(config: &PostgresSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            database: ConfigValue::Static(config.database.clone()),
+            user: ConfigValue::Static(config.user.clone()),
+            password: ConfigValue::Static(config.password.clone()),
+            tables: config.tables.clone(),
+            slot_name: config.slot_name.clone(),
+            publication_name: config.publication_name.clone(),
+            ssl_mode: ConfigValue::Static(SslModeDto::from(&config.ssl_mode)),
+            table_keys: config
+                .table_keys
+                .iter()
+                .map(TableKeyConfigDto::from)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::postgres::TableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -173,10 +213,12 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
                 .collect(),
         };
 
-        let source = crate::PostgresSourceBuilder::new(id)
+        let mut source = crate::PostgresSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

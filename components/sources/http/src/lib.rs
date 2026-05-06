@@ -899,10 +899,10 @@ impl Source for HttpSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        use crate::descriptor::HttpSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&HttpSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
@@ -1917,6 +1917,75 @@ mod tests {
                 default_config.min_batch_size
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use drasi_lib::sources::Source;
+
+    #[test]
+    fn test_builder_fallback_produces_camel_case() {
+        let source = HttpSourceBuilder::new("http-fallback")
+            .with_host("0.0.0.0")
+            .with_port(9090)
+            .with_endpoint("/ingest")
+            .with_timeout_ms(5000)
+            .with_adaptive_max_batch_size(500)
+            .with_adaptive_min_batch_size(10)
+            .with_adaptive_max_wait_ms(2000)
+            .with_adaptive_min_wait_ms(100)
+            .build()
+            .unwrap();
+
+        let props = source.properties();
+
+        // Must use camelCase keys (DTO serialization)
+        assert!(
+            props.contains_key("timeoutMs"),
+            "expected camelCase 'timeoutMs', got keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            props.contains_key("adaptiveMaxBatchSize"),
+            "expected camelCase 'adaptiveMaxBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinBatchSize"),
+            "expected camelCase 'adaptiveMinBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMaxWaitMs"),
+            "expected camelCase 'adaptiveMaxWaitMs'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinWaitMs"),
+            "expected camelCase 'adaptiveMinWaitMs'"
+        );
+
+        // Must NOT have snake_case keys
+        assert!(
+            !props.contains_key("timeout_ms"),
+            "should not have snake_case 'timeout_ms'"
+        );
+        assert!(
+            !props.contains_key("adaptive_max_batch_size"),
+            "should not have snake_case 'adaptive_max_batch_size'"
+        );
+
+        // Values should be correct
+        assert_eq!(props.get("host").and_then(|v| v.as_str()), Some("0.0.0.0"));
+        assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(9090));
+        assert_eq!(
+            props.get("endpoint").and_then(|v| v.as_str()),
+            Some("/ingest")
+        );
+        assert_eq!(props.get("timeoutMs").and_then(|v| v.as_u64()), Some(5000));
+        assert_eq!(
+            props.get("adaptiveMaxBatchSize").and_then(|v| v.as_u64()),
+            Some(500)
+        );
     }
 }
 

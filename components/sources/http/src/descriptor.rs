@@ -524,6 +524,243 @@ fn map_element_template(
     })
 }
 
+// --- Reverse mapping: internal config → DTO ---
+
+impl From<&ErrorBehavior> for ErrorBehaviorDto {
+    fn from(eb: &ErrorBehavior) -> Self {
+        match eb {
+            ErrorBehavior::AcceptAndLog => ErrorBehaviorDto::AcceptAndLog,
+            ErrorBehavior::AcceptAndSkip => ErrorBehaviorDto::AcceptAndSkip,
+            ErrorBehavior::Reject => ErrorBehaviorDto::Reject,
+        }
+    }
+}
+
+impl From<&HttpMethod> for HttpMethodDto {
+    fn from(m: &HttpMethod) -> Self {
+        match m {
+            HttpMethod::Get => HttpMethodDto::Get,
+            HttpMethod::Post => HttpMethodDto::Post,
+            HttpMethod::Put => HttpMethodDto::Put,
+            HttpMethod::Patch => HttpMethodDto::Patch,
+            HttpMethod::Delete => HttpMethodDto::Delete,
+        }
+    }
+}
+
+impl From<&SignatureAlgorithm> for SignatureAlgorithmDto {
+    fn from(a: &SignatureAlgorithm) -> Self {
+        match a {
+            SignatureAlgorithm::HmacSha1 => SignatureAlgorithmDto::HmacSha1,
+            SignatureAlgorithm::HmacSha256 => SignatureAlgorithmDto::HmacSha256,
+        }
+    }
+}
+
+impl From<&SignatureEncoding> for SignatureEncodingDto {
+    fn from(e: &SignatureEncoding) -> Self {
+        match e {
+            SignatureEncoding::Hex => SignatureEncodingDto::Hex,
+            SignatureEncoding::Base64 => SignatureEncodingDto::Base64,
+        }
+    }
+}
+
+impl From<&OperationType> for OperationTypeDto {
+    fn from(op: &OperationType) -> Self {
+        match op {
+            OperationType::Insert => OperationTypeDto::Insert,
+            OperationType::Update => OperationTypeDto::Update,
+            OperationType::Delete => OperationTypeDto::Delete,
+        }
+    }
+}
+
+impl From<&ElementType> for ElementTypeDto {
+    fn from(et: &ElementType) -> Self {
+        match et {
+            ElementType::Node => ElementTypeDto::Node,
+            ElementType::Relation => ElementTypeDto::Relation,
+        }
+    }
+}
+
+impl From<&TimestampFormat> for TimestampFormatDto {
+    fn from(f: &TimestampFormat) -> Self {
+        match f {
+            TimestampFormat::Iso8601 => TimestampFormatDto::Iso8601,
+            TimestampFormat::UnixSeconds => TimestampFormatDto::UnixSeconds,
+            TimestampFormat::UnixMillis => TimestampFormatDto::UnixMillis,
+            TimestampFormat::UnixNanos => TimestampFormatDto::UnixNanos,
+        }
+    }
+}
+
+impl From<&MappingCondition> for MappingConditionDto {
+    fn from(c: &MappingCondition) -> Self {
+        Self {
+            header: c.header.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            field: c.field.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            equals: c.equals.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            contains: c.contains.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            regex: c.regex.as_ref().map(|v| ConfigValue::Static(v.clone())),
+        }
+    }
+}
+
+impl From<&EffectiveFromConfig> for EffectiveFromConfigDto {
+    fn from(e: &EffectiveFromConfig) -> Self {
+        match e {
+            EffectiveFromConfig::Simple(v) => {
+                EffectiveFromConfigDto::Simple(ConfigValue::Static(v.clone()))
+            }
+            EffectiveFromConfig::Explicit { value, format } => EffectiveFromConfigDto::Explicit {
+                value: ConfigValue::Static(value.clone()),
+                format: TimestampFormatDto::from(format),
+            },
+        }
+    }
+}
+
+impl From<&ElementTemplate> for ElementTemplateDto {
+    fn from(t: &ElementTemplate) -> Self {
+        Self {
+            id: ConfigValue::Static(t.id.clone()),
+            labels: t
+                .labels
+                .iter()
+                .map(|l| ConfigValue::Static(l.clone()))
+                .collect(),
+            properties: t.properties.clone(),
+            from: t.from.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            to: t.to.as_ref().map(|v| ConfigValue::Static(v.clone())),
+        }
+    }
+}
+
+impl From<&WebhookMapping> for WebhookMappingDto {
+    fn from(m: &WebhookMapping) -> Self {
+        Self {
+            when: m.when.as_ref().map(MappingConditionDto::from),
+            operation: m.operation.as_ref().map(OperationTypeDto::from),
+            operation_from: m
+                .operation_from
+                .as_ref()
+                .map(|v| ConfigValue::Static(v.clone())),
+            operation_map: m.operation_map.as_ref().map(|om| {
+                om.iter()
+                    .map(|(k, v)| (k.clone(), OperationTypeDto::from(v)))
+                    .collect()
+            }),
+            element_type: ElementTypeDto::from(&m.element_type),
+            effective_from: m.effective_from.as_ref().map(EffectiveFromConfigDto::from),
+            template: ElementTemplateDto::from(&m.template),
+        }
+    }
+}
+
+impl From<&SignatureConfig> for SignatureConfigDto {
+    fn from(s: &SignatureConfig) -> Self {
+        Self {
+            algorithm: SignatureAlgorithmDto::from(&s.algorithm),
+            secret_env: ConfigValue::Static(s.secret_env.clone()),
+            header: ConfigValue::Static(s.header.clone()),
+            prefix: s.prefix.as_ref().map(|v| ConfigValue::Static(v.clone())),
+            encoding: SignatureEncodingDto::from(&s.encoding),
+        }
+    }
+}
+
+impl From<&BearerConfig> for BearerConfigDto {
+    fn from(b: &BearerConfig) -> Self {
+        Self {
+            token_env: ConfigValue::Static(b.token_env.clone()),
+        }
+    }
+}
+
+impl From<&AuthConfig> for AuthConfigDto {
+    fn from(a: &AuthConfig) -> Self {
+        Self {
+            signature: a.signature.as_ref().map(SignatureConfigDto::from),
+            bearer: a.bearer.as_ref().map(BearerConfigDto::from),
+        }
+    }
+}
+
+impl From<&WebhookRoute> for WebhookRouteDto {
+    fn from(r: &WebhookRoute) -> Self {
+        Self {
+            path: ConfigValue::Static(r.path.clone()),
+            methods: r.methods.iter().map(HttpMethodDto::from).collect(),
+            auth: r.auth.as_ref().map(AuthConfigDto::from),
+            error_behavior: r.error_behavior.as_ref().map(ErrorBehaviorDto::from),
+            mappings: r.mappings.iter().map(WebhookMappingDto::from).collect(),
+        }
+    }
+}
+
+impl From<&CorsConfig> for CorsConfigDto {
+    fn from(c: &CorsConfig) -> Self {
+        Self {
+            enabled: c.enabled,
+            allow_origins: c
+                .allow_origins
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_methods: c
+                .allow_methods
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_headers: c
+                .allow_headers
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            expose_headers: c
+                .expose_headers
+                .iter()
+                .map(|v| ConfigValue::Static(v.clone()))
+                .collect(),
+            allow_credentials: c.allow_credentials,
+            max_age: c.max_age,
+        }
+    }
+}
+
+impl From<&WebhookConfig> for WebhookConfigDto {
+    fn from(w: &WebhookConfig) -> Self {
+        Self {
+            error_behavior: ErrorBehaviorDto::from(&w.error_behavior),
+            cors: w.cors.as_ref().map(CorsConfigDto::from),
+            routes: w.routes.iter().map(WebhookRouteDto::from).collect(),
+        }
+    }
+}
+
+impl From<&HttpSourceConfig> for HttpSourceConfigDto {
+    fn from(config: &HttpSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            endpoint: config
+                .endpoint
+                .as_ref()
+                .map(|v| ConfigValue::Static(v.clone())),
+            timeout_ms: ConfigValue::Static(config.timeout_ms),
+            adaptive_max_batch_size: config.adaptive_max_batch_size.map(ConfigValue::Static),
+            adaptive_min_batch_size: config.adaptive_min_batch_size.map(ConfigValue::Static),
+            adaptive_max_wait_ms: config.adaptive_max_wait_ms.map(ConfigValue::Static),
+            adaptive_min_wait_ms: config.adaptive_min_wait_ms.map(ConfigValue::Static),
+            adaptive_window_secs: config.adaptive_window_secs.map(ConfigValue::Static),
+            adaptive_enabled: config.adaptive_enabled.map(ConfigValue::Static),
+            webhooks: config.webhooks.as_ref().map(WebhookConfigDto::from),
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     HttpSourceConfigDto,
@@ -602,10 +839,12 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
                 .transpose()?,
         };
 
-        let source = HttpSourceBuilder::new(id)
+        let mut source = HttpSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }
