@@ -20,7 +20,9 @@ use base64::Engine;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEventSender;
 use log::{info, warn};
 use ordered_float::OrderedFloat;
@@ -111,13 +113,13 @@ impl BootstrapProvider for SqliteBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!("Starting SQLite bootstrap for query '{}'", request.query_id);
 
         let changes = {
             let Some(path) = &self.path else {
                 warn!("SQLite bootstrap skipped for in-memory database");
-                return Ok(0);
+                return Ok(BootstrapResult::default());
             };
 
             let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -172,7 +174,10 @@ impl BootstrapProvider for SqliteBootstrapProvider {
             "SQLite bootstrap completed for query '{}': {} rows",
             request.query_id, count
         );
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            ..Default::default()
+        })
     }
 }
 

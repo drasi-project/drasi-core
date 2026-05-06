@@ -255,10 +255,7 @@ mod tests {
             properties.get("tables"),
             Some(&serde_json::json!(["sensors"]))
         );
-        assert_eq!(
-            properties.get("rest_api_enabled"),
-            Some(&serde_json::Value::Bool(true))
-        );
+        assert!(properties.contains_key("restApi"));
         assert!(!source.auto_start());
     }
 }

@@ -295,31 +295,10 @@ impl Source for SqliteSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "path".to_string(),
-            match &self.config.path {
-                Some(path) => serde_json::Value::String(path.clone()),
-                None => serde_json::Value::String(":memory:".to_string()),
-            },
-        );
+        use crate::descriptor::SqliteSourceConfigDto;
 
-        if let Some(tables) = &self.config.tables {
-            props.insert(
-                "tables".to_string(),
-                serde_json::Value::Array(
-                    tables
-                        .iter()
-                        .map(|table| serde_json::Value::String(table.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        props.insert(
-            "rest_api_enabled".to_string(),
-            serde_json::Value::Bool(self.config.rest_api.is_some()),
-        );
-        props
+        self.base
+            .properties_or_serialize(&SqliteSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {

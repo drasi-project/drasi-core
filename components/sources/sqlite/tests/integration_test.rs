@@ -148,7 +148,7 @@ async fn sqlite_handle_create_update_delete_flow() {
         .await
         .unwrap();
     wait_for_diff(&mut subscription, "insert add diff", |diff| match diff {
-        ResultDiff::Add { data } => data.get("name") == Some(&json!("sensor-a")),
+        ResultDiff::Add { data, .. } => data.get("name") == Some(&json!("sensor-a")),
         _ => false,
     })
     .await;
@@ -171,7 +171,7 @@ async fn sqlite_handle_create_update_delete_flow() {
         .await
         .unwrap();
     wait_for_diff(&mut subscription, "delete diff", |diff| match diff {
-        ResultDiff::Delete { data } => {
+        ResultDiff::Delete { data, .. } => {
             data.get("name") == Some(&json!("sensor-a-updated"))
                 && id_matches(data.get("id").unwrap_or(&serde_json::Value::Null), 1)
         }
@@ -250,7 +250,7 @@ async fn sqlite_rest_crud_and_batch_flow() {
         &mut subscription,
         "rest insert add diff",
         |diff| match diff {
-            ResultDiff::Add { data } => data.get("name") == Some(&json!("rest-insert")),
+            ResultDiff::Add { data, .. } => data.get("name") == Some(&json!("rest-insert")),
             _ => false,
         },
     )
@@ -276,7 +276,7 @@ async fn sqlite_rest_crud_and_batch_flow() {
         .unwrap();
     assert_eq!(delete_response.status(), 200);
     wait_for_diff(&mut subscription, "rest delete diff", |diff| match diff {
-        ResultDiff::Delete { data } => data.get("name") == Some(&json!("rest-updated")),
+        ResultDiff::Delete { data, .. } => data.get("name") == Some(&json!("rest-updated")),
         _ => false,
     })
     .await;
@@ -374,6 +374,8 @@ async fn sqlite_bootstrap_loads_existing_rows() {
         query_id: "sqlite-bootstrap-query".to_string(),
         nodes: HashSet::from(["sensors".to_string()]),
         relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
     };
 
     let response = source.subscribe(settings).await.unwrap();
@@ -482,13 +484,17 @@ async fn sqlite_multi_table_changes_flow_to_queries() {
             match result.query_id.as_str() {
                 "sqlite-sensors-query" => {
                     saw_sensor_query = result.results.iter().any(|diff| match diff {
-                        ResultDiff::Add { data } => data.get("name") == Some(&json!("sensor-one")),
+                        ResultDiff::Add { data, .. } => {
+                            data.get("name") == Some(&json!("sensor-one"))
+                        }
                         _ => false,
                     });
                 }
                 "sqlite-devices-query" => {
                     saw_device_query = result.results.iter().any(|diff| match diff {
-                        ResultDiff::Add { data } => data.get("name") == Some(&json!("device-nine")),
+                        ResultDiff::Add { data, .. } => {
+                            data.get("name") == Some(&json!("device-nine"))
+                        }
                         _ => false,
                     });
                 }

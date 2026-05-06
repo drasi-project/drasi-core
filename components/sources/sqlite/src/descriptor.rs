@@ -70,6 +70,41 @@ pub struct TableKeyConfigDto {
     pub key_columns: Vec<String>,
 }
 
+// ── From impls ───────────────────────────────────────────────────────────────
+
+impl From<&TableKeyConfig> for TableKeyConfigDto {
+    fn from(tk: &TableKeyConfig) -> Self {
+        Self {
+            table: tk.table.clone(),
+            key_columns: tk.key_columns.clone(),
+        }
+    }
+}
+
+impl From<&RestApiConfig> for RestApiConfigDto {
+    fn from(config: &RestApiConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+        }
+    }
+}
+
+impl From<&SqliteSourceConfig> for SqliteSourceConfigDto {
+    fn from(config: &SqliteSourceConfig) -> Self {
+        Self {
+            path: config.path.as_ref().map(|p| ConfigValue::Static(p.clone())),
+            tables: config.tables.clone(),
+            table_keys: config
+                .table_keys
+                .iter()
+                .map(TableKeyConfigDto::from)
+                .collect(),
+            rest_api: config.rest_api.as_ref().map(RestApiConfigDto::from),
+        }
+    }
+}
+
 fn default_rest_host() -> ConfigValue<String> {
     ConfigValue::Static("0.0.0.0".to_string())
 }
@@ -168,6 +203,9 @@ impl SourcePluginDescriptor for SqliteSourceDescriptor {
         }
         builder = builder.auto_start(auto_start);
 
-        Ok(Box::new(builder.build()?))
+        let mut source = builder.build()?;
+        source.base.set_raw_config(config_json.clone());
+
+        Ok(Box::new(source))
     }
 }
