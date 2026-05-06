@@ -253,6 +253,26 @@ pub(crate) fn map_predefined_dashboard(dto: &PredefinedDashboardDto) -> Dashboar
 }
 
 // ---------------------------------------------------------------------------
+// Domain model → DTO conversion (for properties() fallback on builder path)
+// ---------------------------------------------------------------------------
+
+impl From<&crate::config::DashboardReactionConfig> for DashboardReactionConfigDto {
+    fn from(config: &crate::config::DashboardReactionConfig) -> Self {
+        Self {
+            host: Some(ConfigValue::Static(config.host.clone())),
+            port: Some(ConfigValue::Static(config.port)),
+            heartbeat_interval_ms: Some(ConfigValue::Static(config.heartbeat_interval_ms)),
+            results_api_url: config
+                .results_api_url
+                .as_ref()
+                .map(|u| ConfigValue::Static(u.clone())),
+            priority_queue_capacity: None,
+            predefined_dashboards: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OpenAPI schema registration
 // ---------------------------------------------------------------------------
 
@@ -335,6 +355,9 @@ impl ReactionPluginDescriptor for DashboardReactionDescriptor {
             builder = builder.with_dashboard(map_predefined_dashboard(dashboard_dto));
         }
 
-        Ok(Box::new(builder.build()?))
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
+        Ok(Box::new(reaction))
     }
 }

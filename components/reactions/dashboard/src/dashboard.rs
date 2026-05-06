@@ -48,7 +48,7 @@ struct DashboardAssets;
 
 /// Dashboard reaction hosting a web UI and websocket data stream.
 pub struct DashboardReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: DashboardReactionConfig,
     websocket_hub: WebSocketHub,
     snapshot_store: QuerySnapshotStore,
@@ -183,10 +183,10 @@ impl Reaction for DashboardReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        use crate::descriptor::DashboardReactionConfigDto;
+
+        let dto = DashboardReactionConfigDto::from(&self.config);
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {

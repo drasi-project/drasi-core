@@ -42,7 +42,7 @@ fn test_dashboard_builder_defaults() {
         Some(&serde_json::Value::Number(3000_u16.into()))
     );
     assert_eq!(
-        properties.get("heartbeat_interval_ms"),
+        properties.get("heartbeatIntervalMs"),
         Some(&serde_json::Value::Number(30_000_u64.into()))
     );
 }
@@ -449,9 +449,9 @@ async fn test_create_reaction_minimal_config() {
     assert!(reaction.auto_start());
 
     let props = reaction.properties();
-    assert_eq!(props["host"], "0.0.0.0");
-    assert_eq!(props["port"], 3000);
-    assert_eq!(props["heartbeat_interval_ms"], 30000);
+    // With raw_config set, properties() returns the original JSON as-is.
+    // Empty config means no keys (defaults are internal, not persisted).
+    assert!(props.is_empty());
 }
 
 #[tokio::test]
@@ -493,10 +493,11 @@ async fn test_create_reaction_full_config() {
     assert!(!reaction.auto_start());
 
     let props = reaction.properties();
+    // raw_config preserves original camelCase keys and values
     assert_eq!(props["host"], "127.0.0.1");
     assert_eq!(props["port"], 9090);
-    assert_eq!(props["heartbeat_interval_ms"], 10000);
-    assert_eq!(props["results_api_url"], "http://localhost:8080");
+    assert_eq!(props["heartbeatIntervalMs"], 10000);
+    assert_eq!(props["resultsApiUrl"], "http://localhost:8080");
 }
 
 #[tokio::test]
@@ -528,8 +529,9 @@ async fn test_create_reaction_with_env_var_config_value() {
         .expect("env var config values with defaults should resolve");
 
     let props = reaction.properties();
-    assert_eq!(props["host"], "0.0.0.0");
-    assert_eq!(props["port"], 4000);
+    // raw_config preserves original unresolved ConfigValue strings
+    assert_eq!(props["host"], "${DASHBOARD_HOST:-0.0.0.0}");
+    assert_eq!(props["port"], "${DASHBOARD_PORT:-4000}");
 }
 
 // -----------------------------------------------------------------------
