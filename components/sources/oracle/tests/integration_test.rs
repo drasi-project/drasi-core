@@ -51,8 +51,8 @@ fn field_matches(data: &Value, field: &str, expected: &str) -> bool {
 
 fn matches_change(entry: &ResultDiff, change_type: &str, fields: &[(&str, &str)]) -> bool {
     match (change_type, entry) {
-        ("ADD", ResultDiff::Add { data })
-        | ("DELETE", ResultDiff::Delete { data })
+        ("ADD", ResultDiff::Add { data, .. })
+        | ("DELETE", ResultDiff::Delete { data, .. })
         | ("UPDATE", ResultDiff::Update { data, .. }) => fields
             .iter()
             .all(|(field, expected)| field_matches(data, field, expected)),
