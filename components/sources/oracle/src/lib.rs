@@ -89,27 +89,10 @@ impl Source for OracleSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert("host".to_string(), self.config.host.clone().into());
-        props.insert("port".to_string(), self.config.port.into());
-        props.insert("service".to_string(), self.config.database.clone().into());
-        props.insert("user".to_string(), self.config.user.clone().into());
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-        props.insert(
-            "poll_interval_ms".to_string(),
-            serde_json::Value::Number(self.config.poll_interval_ms.into()),
-        );
-        props
+        use crate::descriptor::OracleSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&OracleSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
@@ -234,7 +217,12 @@ impl Source for OracleSource {
         let mut bootstrap_properties = HashMap::new();
         let receiver = self.base.create_streaming_receiver().await?;
 
-        if settings.enable_bootstrap {
+        // resume_from overrides bootstrap: a resuming query already has base
+        // state in its persistent index and just needs replay from the
+        // requested sequence. Re-bootstrapping would corrupt that state.
+        let should_bootstrap = settings.resume_from.is_none() && settings.enable_bootstrap;
+
+        if should_bootstrap {
             let bootstrap_config = self.config.clone();
             let bootstrap_scn =
                 tokio::task::spawn_blocking(move || stream::fetch_bootstrap_scn(&bootstrap_config))
@@ -250,10 +238,16 @@ impl Source for OracleSource {
             );
         }
 
-        let bootstrap_receiver = if settings.enable_bootstrap {
+        let bootstrap_receiver = if should_bootstrap {
             self.base
                 .create_bootstrap_receiver(&settings, "Oracle", bootstrap_properties)
                 .await?
+        } else {
+            None
+        };
+
+        let position_handle = if settings.request_position_handle {
+            Some(self.base.create_position_handle(&settings.query_id).await)
         } else {
             None
         };
@@ -263,6 +257,7 @@ impl Source for OracleSource {
             source_id,
             receiver,
             bootstrap_receiver,
+            position_handle,
         })
     }
 

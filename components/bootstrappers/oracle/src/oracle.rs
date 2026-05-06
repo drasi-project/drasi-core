@@ -17,7 +17,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
 use drasi_oracle_common::{
     extract_row_properties, split_table_name, OracleConnection, OracleSourceConfig,
@@ -47,7 +49,7 @@ impl BootstrapProvider for OracleBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let config = self.config.clone();
         let source_id = context.source_id.clone();
         let snapshot_scn = context
@@ -71,7 +73,11 @@ impl BootstrapProvider for OracleBootstrapProvider {
                 .await?;
         }
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

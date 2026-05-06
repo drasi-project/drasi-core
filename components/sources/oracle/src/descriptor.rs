@@ -14,7 +14,7 @@
 
 //! Oracle source plugin descriptor.
 
-use crate::{OracleSourceBuilder, SslMode, StartPosition, TableKeyConfig};
+use crate::{OracleSourceBuilder, OracleSourceConfig, SslMode, StartPosition, TableKeyConfig};
 use drasi_plugin_sdk::prelude::*;
 use std::str::FromStr;
 use utoipa::OpenApi;
@@ -105,6 +105,54 @@ impl FromStr for SslModeDto {
             "disable" => Ok(Self::Disable),
             "require" => Ok(Self::Require),
             _ => Err(format!("Invalid Oracle SSL mode: {value}")),
+        }
+    }
+}
+
+impl From<&OracleSourceConfig> for OracleSourceConfigDto {
+    fn from(config: &OracleSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            service: ConfigValue::Static(config.database.clone()),
+            user: ConfigValue::Static(config.user.clone()),
+            password: ConfigValue::Static(config.password.clone()),
+            tables: config.tables.clone(),
+            poll_interval_ms: ConfigValue::Static(config.poll_interval_ms),
+            start_position: ConfigValue::Static(StartPositionDto::from(&config.start_position)),
+            ssl_mode: ConfigValue::Static(SslModeDto::from(&config.ssl_mode)),
+            table_keys: config
+                .table_keys
+                .iter()
+                .map(TableKeyConfigDto::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<&StartPosition> for StartPositionDto {
+    fn from(value: &StartPosition) -> Self {
+        match value {
+            StartPosition::Beginning => Self::Beginning,
+            StartPosition::Current => Self::Current,
+        }
+    }
+}
+
+impl From<&SslMode> for SslModeDto {
+    fn from(value: &SslMode) -> Self {
+        match value {
+            SslMode::Disable => Self::Disable,
+            SslMode::Require => Self::Require,
+        }
+    }
+}
+
+impl From<&TableKeyConfig> for TableKeyConfigDto {
+    fn from(tk: &TableKeyConfig) -> Self {
+        Self {
+            table: tk.table.clone(),
+            key_columns: tk.key_columns.clone(),
         }
     }
 }
@@ -202,6 +250,9 @@ impl SourcePluginDescriptor for OracleSourceDescriptor {
             builder = builder.with_table_key(table_key.table, table_key.key_columns);
         }
 
-        Ok(Box::new(builder.build()?))
+        let mut source = builder.build()?;
+        source.base.set_raw_config(config_json.clone());
+
+        Ok(Box::new(source))
     }
 }
