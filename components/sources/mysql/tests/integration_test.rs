@@ -193,8 +193,8 @@ async fn test_mysql_source_change_detection() {
 
 fn matches_row(diff: &ResultDiff, name: &str, email: &str) -> bool {
     let data = match diff {
-        ResultDiff::Add { data } => data,
-        ResultDiff::Delete { data } => data,
+        ResultDiff::Add { data, .. } => data,
+        ResultDiff::Delete { data, .. } => data,
         ResultDiff::Update { after, .. } => after,
         ResultDiff::Aggregation { .. } => return false,
         ResultDiff::Noop => return false,
@@ -377,7 +377,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
     for _ in 0..20 {
         if let Ok(Some(result)) = timeout(Duration::from_secs(2), subscription.recv()).await {
             for row in &result.results {
-                if let ResultDiff::Add { data } = row {
+                if let ResultDiff::Add { data, .. } = row {
                     if data.get("marker").and_then(|v| v.as_str()) == Some("v1") {
                         bootstrap_data = Some(data.clone());
                     }

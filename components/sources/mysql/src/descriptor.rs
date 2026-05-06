@@ -14,7 +14,7 @@
 
 //! MySQL source plugin descriptor and configuration DTOs.
 
-use crate::{MySqlSourceBuilder, SslMode, StartPosition, TableKeyConfig};
+use crate::{MySqlSourceBuilder, MySqlSourceConfig, SslMode, StartPosition, TableKeyConfig};
 use drasi_plugin_sdk::prelude::*;
 use std::str::FromStr;
 use utoipa::OpenApi;
@@ -107,6 +107,18 @@ impl From<SslModeDto> for SslMode {
     }
 }
 
+impl From<&SslMode> for SslModeDto {
+    fn from(mode: &SslMode) -> Self {
+        match mode {
+            SslMode::Disabled => SslModeDto::Disabled,
+            SslMode::IfAvailable => SslModeDto::IfAvailable,
+            SslMode::Require => SslModeDto::Require,
+            SslMode::RequireVerifyCa => SslModeDto::RequireVerifyCa,
+            SslMode::RequireVerifyFull => SslModeDto::RequireVerifyFull,
+        }
+    }
+}
+
 /// Start position DTO (mirrors [`StartPosition`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::mysql::StartPosition)]
@@ -144,6 +156,51 @@ impl From<StartPositionDto> for StartPosition {
                 StartPosition::FromPosition { file, position }
             }
             StartPositionDto::FromGtid(gtid) => StartPosition::FromGtid(gtid),
+        }
+    }
+}
+
+impl From<&StartPosition> for StartPositionDto {
+    fn from(pos: &StartPosition) -> Self {
+        match pos {
+            StartPosition::FromStart => StartPositionDto::FromStart,
+            StartPosition::FromEnd => StartPositionDto::FromEnd,
+            StartPosition::FromPosition { file, position } => StartPositionDto::FromPosition {
+                file: file.clone(),
+                position: *position,
+            },
+            StartPosition::FromGtid(gtid) => StartPositionDto::FromGtid(gtid.clone()),
+        }
+    }
+}
+
+impl From<&TableKeyConfig> for TableKeyConfigDto {
+    fn from(tk: &TableKeyConfig) -> Self {
+        Self {
+            table: tk.table.clone(),
+            key_columns: tk.key_columns.clone(),
+        }
+    }
+}
+
+impl From<&MySqlSourceConfig> for MySqlSourceConfigDto {
+    fn from(config: &MySqlSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            database: ConfigValue::Static(config.database.clone()),
+            user: ConfigValue::Static(config.user.clone()),
+            password: ConfigValue::Static(config.password.clone()),
+            tables: config.tables.clone(),
+            ssl_mode: ConfigValue::Static(SslModeDto::from(&config.ssl_mode)),
+            table_keys: config
+                .table_keys
+                .iter()
+                .map(TableKeyConfigDto::from)
+                .collect(),
+            start_position: ConfigValue::Static(StartPositionDto::from(&config.start_position)),
+            server_id: ConfigValue::Static(config.server_id),
+            heartbeat_interval_seconds: ConfigValue::Static(config.heartbeat_interval_seconds),
         }
     }
 }
@@ -255,7 +312,9 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
             });
         }
 
-        let source = builder.build()?;
+        let mut source = builder.build()?;
+        source.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(source))
     }
 }

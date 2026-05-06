@@ -97,38 +97,10 @@ impl Source for MySqlReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "database".to_string(),
-            serde_json::Value::String(self.config.database.clone()),
-        );
-        props.insert(
-            "user".to_string(),
-            serde_json::Value::String(self.config.user.clone()),
-        );
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-        props.insert(
-            "ssl_mode".to_string(),
-            serde_json::Value::String(format!("{:?}", self.config.ssl_mode)),
-        );
-        props
+        use crate::descriptor::MySqlSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&MySqlSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
