@@ -68,6 +68,37 @@ pub struct GtfsRtSourceConfigDto {
     pub start_from_timestamp_ms: Option<i64>,
 }
 
+impl From<&GtfsRtSourceConfig> for GtfsRtSourceConfigDto {
+    fn from(config: &GtfsRtSourceConfig) -> Self {
+        let (start_from_now, start_from_timestamp_ms) = match config.initial_cursor_mode {
+            InitialCursorMode::StartFromBeginning => (false, None),
+            InitialCursorMode::StartFromNow => (true, None),
+            InitialCursorMode::StartFromTimestamp(timestamp_ms) => (false, Some(timestamp_ms)),
+        };
+
+        Self {
+            trip_updates_url: config
+                .trip_updates_url
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            vehicle_positions_url: config
+                .vehicle_positions_url
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            alerts_url: config
+                .alerts_url
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            poll_interval_secs: ConfigValue::Static(config.poll_interval_secs),
+            headers: config.headers.clone(),
+            timeout_secs: ConfigValue::Static(config.timeout_secs),
+            language: ConfigValue::Static(config.language.clone()),
+            start_from_now,
+            start_from_timestamp_ms,
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(GtfsRtSourceConfigDto,)))]
 struct GtfsRtSourceSchemas;
@@ -136,10 +167,12 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
 
         config.validate()?;
 
-        let source = GtfsRtSourceBuilder::new(id)
+        let mut source = GtfsRtSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

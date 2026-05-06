@@ -107,7 +107,7 @@ impl GraphItem {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<serde_json::Map<String, Value>>();
-        convert_json_to_element_properties(&json_properties)
+        Ok(convert_json_to_element_properties(&json_properties))
     }
 
     fn hash(&self) -> u64 {

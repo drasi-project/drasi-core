@@ -21,7 +21,9 @@ pub use config::GtfsRtBootstrapConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{Element, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use drasi_source_gtfs_rt::mapping::{build_graph_snapshot, snapshot_insert_changes};
 use drasi_source_gtfs_rt::GtfsRtFeedType;
@@ -62,7 +64,7 @@ impl BootstrapProvider for GtfsRtBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting GTFS-RT bootstrap for query '{}' on source '{}'",
             request.query_id, context.source_id
@@ -94,7 +96,10 @@ impl BootstrapProvider for GtfsRtBootstrapProvider {
             request.query_id, sent
         );
 
-        Ok(sent)
+        Ok(BootstrapResult {
+            event_count: sent,
+            ..Default::default()
+        })
     }
 }
 

@@ -54,65 +54,10 @@ impl Source for GtfsRtSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "trip_updates_url".to_string(),
-            self.config
-                .trip_updates_url
-                .clone()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        properties.insert(
-            "vehicle_positions_url".to_string(),
-            self.config
-                .vehicle_positions_url
-                .clone()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        properties.insert(
-            "alerts_url".to_string(),
-            self.config
-                .alerts_url
-                .clone()
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null),
-        );
-        properties.insert(
-            "poll_interval_secs".to_string(),
-            serde_json::Value::Number(self.config.poll_interval_secs.into()),
-        );
-        properties.insert(
-            "timeout_secs".to_string(),
-            serde_json::Value::Number(self.config.timeout_secs.into()),
-        );
-        properties.insert(
-            "language".to_string(),
-            serde_json::Value::String(self.config.language.clone()),
-        );
-        properties.insert(
-            "header_keys".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .headers
-                    .keys()
-                    .map(|key| serde_json::Value::String(key.clone()))
-                    .collect(),
-            ),
-        );
-        properties.insert(
-            "initial_cursor_mode".to_string(),
-            serde_json::Value::String(match self.config.initial_cursor_mode {
-                InitialCursorMode::StartFromBeginning => "start_from_beginning".to_string(),
-                InitialCursorMode::StartFromNow => "start_from_now".to_string(),
-                InitialCursorMode::StartFromTimestamp(ts) => {
-                    format!("start_from_timestamp:{ts}")
-                }
-            }),
-        );
+        use crate::descriptor::GtfsRtSourceConfigDto;
 
-        properties
+        self.base
+            .properties_or_serialize(&GtfsRtSourceConfigDto::from(&self.config))
     }
 
     fn dispatch_mode(&self) -> DispatchMode {

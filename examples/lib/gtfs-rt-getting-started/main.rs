@@ -423,11 +423,11 @@ fn apply_result_diffs(rows: &mut Vec<Value>, diffs: &[ResultDiff]) -> usize {
 
     for diff in diffs {
         match diff {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 rows.push(data.clone());
                 changes += 1;
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 if remove_first(rows, data) {
                     changes += 1;
                 }
@@ -441,7 +441,7 @@ fn apply_result_diffs(rows: &mut Vec<Value>, diffs: &[ResultDiff]) -> usize {
                 }
                 changes += 1;
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 if let Some(before) = before {
                     let _ = remove_first(rows, before);
                 }
