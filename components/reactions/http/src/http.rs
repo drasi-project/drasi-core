@@ -442,7 +442,7 @@ impl Reaction for HttpReaction {
                 // Process each result
                 for result in &query_result.results {
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             if let Some(spec) = query_config.added.as_ref() {
                                 if let Err(e) = Self::process_result(
                                     &client,
@@ -461,7 +461,7 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             if let Some(spec) = query_config.deleted.as_ref() {
                                 if let Err(e) = Self::process_result(
                                     &client,

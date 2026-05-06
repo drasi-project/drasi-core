@@ -478,7 +478,7 @@ impl Reaction for LogReaction {
                         .or(config.default_template.as_ref());
 
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             context.insert("operation".to_string(), Value::String("ADD".into()));
                             context.insert("after".to_string(), data.clone());
 
@@ -509,7 +509,7 @@ impl Reaction for LogReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             context.insert("operation".to_string(), Value::String("DELETE".into()));
                             context.insert("before".to_string(), data.clone());
 

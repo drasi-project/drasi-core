@@ -30,7 +30,7 @@
 //!     .build();
 //!
 //! // Or using configuration
-//! use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
+//! use drasi_bootstrap_scriptfile::ScriptFileBootstrapConfig;
 //!
 //! let config = ScriptFileBootstrapConfig {
 //!     file_paths: vec!["/path/to/data.jsonl".to_string()],

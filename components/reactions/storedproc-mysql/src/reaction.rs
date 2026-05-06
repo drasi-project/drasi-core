@@ -194,10 +194,10 @@ impl MySqlStoredProcReaction {
                 for result_item in &query_result.results {
                     let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after } => {
+                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { before, after, .. } => {
                             aggregation_data = json!({
                                 "before": before,
                                 "after": after,

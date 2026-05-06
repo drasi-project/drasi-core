@@ -35,8 +35,9 @@ use serde_json::Value;
 /// (e.g., unsupported JSON structure).
 #[allow(dead_code)]
 pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::models::ElementValue> {
-    drasi_lib::sources::convert_json_to_element_value(json_value)
-        .with_context(|| format!("Failed to convert JSON value to Element value: {json_value:?}"))
+    Ok(drasi_lib::sources::convert_json_to_element_value(
+        json_value,
+    ))
 }
 
 /// Converts a JSON value to an Element value, returning a default on failure.
@@ -55,15 +56,9 @@ pub fn safe_json_to_element_value(json_value: &Value) -> Result<drasi_core::mode
 /// if conversion fails (with a warning logged).
 pub fn json_to_element_value_or_default(
     json_value: &Value,
-    default: drasi_core::models::ElementValue,
+    _default: drasi_core::models::ElementValue,
 ) -> drasi_core::models::ElementValue {
-    match drasi_lib::sources::convert_json_to_element_value(json_value) {
-        Ok(value) => value,
-        Err(e) => {
-            log::warn!("Failed to convert JSON to Element value, using default: {e}");
-            default
-        }
-    }
+    drasi_lib::sources::convert_json_to_element_value(json_value)
 }
 
 /// Converts multiple JSON values to Element values, filtering failures.
@@ -85,17 +80,7 @@ pub fn batch_json_to_element_values<'a>(
     values: impl Iterator<Item = &'a Value>,
 ) -> Vec<drasi_core::models::ElementValue> {
     values
-        .filter_map(|json_value| {
-            match drasi_lib::sources::convert_json_to_element_value(json_value) {
-                Ok(value) => Some(value),
-                Err(e) => {
-                    log::debug!(
-                        "Skipping unconvertible JSON value during batch conversion: {json_value:?}, error: {e}"
-                    );
-                    None
-                }
-            }
-        })
+        .map(drasi_lib::sources::convert_json_to_element_value)
         .collect()
 }
 

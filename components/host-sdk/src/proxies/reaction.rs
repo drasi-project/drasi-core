@@ -291,8 +291,7 @@ impl Reaction for ReactionProxy {
         let result = std::thread::spawn(move || (stop_fn)(state.as_ptr()))
             .join()
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
-        let r = unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) };
-        r
+        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -304,6 +303,8 @@ impl Reaction for ReactionProxy {
             FfiComponentStatus::Stopped => ComponentStatus::Stopped,
             FfiComponentStatus::Reconfiguring => ComponentStatus::Reconfiguring,
             FfiComponentStatus::Error => ComponentStatus::Error,
+            FfiComponentStatus::Added => ComponentStatus::Added,
+            FfiComponentStatus::Removed => ComponentStatus::Removed,
         }
     }
 
