@@ -12,94 +12,112 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Checkpoint Store Trait
+//!
+//! Atomic checkpoint persistence for source sequence tracking, opaque source
+//! position bytes (for native stream resumption), and config hashing.
+//!
+//! Implementations are paired with an [`IndexBackendPlugin`](super::IndexBackendPlugin)
+//! and share the same session state. [`CheckpointStore::stage_checkpoint`] writes
+//! into the currently-active session transaction (opened by
+//! [`SessionControl::begin`](super::SessionControl)) and is committed by the
+//! session's outer commit alongside the index updates. All other methods operate
+//! outside a session transaction and commit independently.
+//!
+//! This trait lives in core (not lib) so that index plugins can implement it
+//! without taking a reverse dependency on `drasi-lib`.
+
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::IndexError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultSequence {
-    pub sequence: u64,
-    pub source_id: Arc<str>,
-}
-
-impl Default for ResultSequence {
-    fn default() -> Self {
-        ResultSequence {
-            sequence: 0,
-            source_id: Arc::from(""),
-        }
-    }
-}
-
-/// Extended checkpoint that includes per-source opaque position bytes.
-/// Used for stream resumption on restart — sources interpret these bytes
-/// to seek back into their native change stream.
+/// Per-source checkpoint data.
 ///
-/// Each source that feeds a query has its own position entry in
-/// `source_positions`. On restart, the query looks up the position
-/// for each source individually and passes it via `resume_from`.
+/// Contains the monotonic sequence number and an optional opaque position
+/// that the source interprets to seek back into its native change stream
+/// (e.g., Postgres LSN, Kafka offset, EventHub sequence number).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultCheckpoint {
+pub struct SourceCheckpoint {
     pub sequence: u64,
-    pub source_id: Arc<str>,
-    /// Per-source resume positions. Keyed by source_id.
-    pub source_positions: HashMap<Arc<str>, Bytes>,
+    /// Opaque position bytes for native stream resumption.
+    /// Sources interpret these to seek back into their change stream.
+    pub source_position: Option<Bytes>,
 }
 
-impl Default for ResultCheckpoint {
-    fn default() -> Self {
-        ResultCheckpoint {
-            sequence: 0,
-            source_id: Arc::from(""),
-            source_positions: HashMap::new(),
+impl SourceCheckpoint {
+    pub fn new(sequence: u64, source_position: Option<Bytes>) -> Self {
+        Self {
+            sequence,
+            source_position,
         }
     }
 }
 
-impl ResultCheckpoint {
-    /// Get the position for a specific source, if available.
-    pub fn get_source_position(&self, source_id: &str) -> Option<&Bytes> {
-        self.source_positions.get(source_id)
-    }
-}
-
-impl From<ResultCheckpoint> for ResultSequence {
-    fn from(checkpoint: ResultCheckpoint) -> Self {
-        ResultSequence {
-            sequence: checkpoint.sequence,
-            source_id: checkpoint.source_id,
-        }
-    }
-}
-
-impl From<ResultSequence> for ResultCheckpoint {
-    fn from(seq: ResultSequence) -> Self {
-        ResultCheckpoint {
-            sequence: seq.sequence,
-            source_id: seq.source_id,
-            source_positions: HashMap::new(),
-        }
-    }
-}
-
+/// Atomic checkpoint persistence for source sequence tracking and config hashing.
+///
+/// # Method semantics
+///
+/// - [`stage_checkpoint`](Self::stage_checkpoint) SHOULD be called between
+///   `SessionControl::begin` and `SessionControl::commit` for persistent backends.
+///   The write is staged into the active session transaction and persisted by the
+///   outer commit. For volatile (in-memory) backends, it applies immediately.
+/// - All other methods operate independently of the session transaction and
+///   commit on their own.
+///
+/// # Source positions
+///
+/// Each source feeding a query has its own checkpoint entry. The opaque
+/// `source_position` bytes allow native stream resumption — on restart, the
+/// query reads each source's position and passes it via `resume_from`.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
-    async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
-
-    async fn apply_checkpoint(
+    /// Stage a source checkpoint into the active session transaction.
+    ///
+    /// For persistent backends, must be called inside an open session (between
+    /// `SessionControl::begin` and `SessionControl::commit`). Returns an error
+    /// if no session is active.
+    ///
+    /// For volatile backends (in-memory), applies immediately.
+    async fn stage_checkpoint(
         &self,
-        sequence: u64,
         source_id: &str,
+        sequence: u64,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError>;
 
-    async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError>;
+    /// Read the committed checkpoint for a single source.
+    ///
+    /// Returns `None` if no checkpoint has been written for `source_id`.
+    /// Reads committed state directly; does not require an active session.
+    async fn read_checkpoint(
+        &self,
+        source_id: &str,
+    ) -> Result<Option<SourceCheckpoint>, IndexError>;
 
-    /// Get the position for a specific source, if stored.
-    /// This avoids needing to scan all keys when only one source's position is needed.
-    async fn get_source_position(&self, source_id: &str) -> Result<Option<Bytes>, IndexError>;
+    /// Read all committed source checkpoints, keyed by source id.
+    ///
+    /// Returns an empty map if no checkpoints have been written.
+    /// Reads committed state directly; does not require an active session.
+    async fn read_all_checkpoints(&self) -> Result<HashMap<String, SourceCheckpoint>, IndexError>;
+
+    /// Delete all source checkpoints and the config hash.
+    ///
+    /// Used during auto-reset recovery and `delete_query(cleanup: true)`.
+    /// Standalone commit; not part of any outer session transaction.
+    async fn clear_checkpoints(&self) -> Result<(), IndexError>;
+
+    /// Write the query config hash.
+    ///
+    /// Used at startup to detect query configuration changes that require a
+    /// full re-bootstrap. Standalone commit.
+    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError>;
+
+    /// Read the stored config hash.
+    ///
+    /// Returns `None` if no hash has been written. Called at startup before
+    /// any session transaction begins.
+    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError>;
 }

@@ -12,144 +12,142 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, ResultCheckpoint, ResultSequence};
+use drasi_core::interface::{CheckpointStore, SourceCheckpoint};
 
+/// Basic sequence counter test for CheckpointStore implementations.
+///
+/// Validates stage_checkpoint / read_checkpoint round-trip.
 pub async fn sequence_counter(subject: &dyn CheckpointStore) {
-    let result = subject.get_sequence().await.expect("get_sequence failed");
-    assert_eq!(result, ResultSequence::default());
+    // Initially no checkpoint for "foo"
+    let result = subject
+        .read_checkpoint("foo")
+        .await
+        .expect("read_checkpoint failed");
+    assert_eq!(result, None);
 
     subject
-        .apply_checkpoint(2, "foo", None)
+        .stage_checkpoint("foo", 2, None)
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let result = subject.get_sequence().await.expect("get_sequence failed");
+    let result = subject
+        .read_checkpoint("foo")
+        .await
+        .expect("read_checkpoint failed");
     assert_eq!(
         result,
-        ResultSequence {
+        Some(SourceCheckpoint {
             sequence: 2,
-            source_id: Arc::from("foo"),
-        }
+            source_position: None,
+        })
     );
 }
 
 /// Test checkpoint round-trip with per-source position storage.
 ///
-/// Validates that `apply_checkpoint` / `get_checkpoint` correctly persist
+/// Validates that `stage_checkpoint` / `read_checkpoint` correctly persist
 /// and retrieve opaque source position bytes of different sizes, stored per-source:
 /// - 8 bytes (Postgres WAL LSN)
 /// - 20 bytes (MSSQL change tracking version)
 /// - 80+ bytes (opaque tokens like MongoDB/Cosmos DB resume tokens)
 pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
-    // Initially returns default checkpoint (no positions)
-    let checkpoint = subject
-        .get_checkpoint()
+    // Initially returns no checkpoints
+    let all = subject
+        .read_all_checkpoints()
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint, ResultCheckpoint::default());
-    assert!(checkpoint.source_positions.is_empty());
+        .expect("read_all_checkpoints failed");
+    assert!(all.is_empty());
 
-    // Apply checkpoint with 8-byte position (Postgres-like)
+    // Stage checkpoint with 8-byte position (Postgres-like)
     let pos_8 = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     subject
-        .apply_checkpoint(10, "source-pg", Some(&pos_8))
+        .stage_checkpoint("source-pg", 10, Some(&pos_8))
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let checkpoint = subject
-        .get_checkpoint()
+    let cp = subject
+        .read_checkpoint("source-pg")
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint.sequence, 10);
-    assert_eq!(checkpoint.source_id.as_ref(), "source-pg");
-    assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
+        .expect("read_checkpoint failed")
+        .expect("expected checkpoint for source-pg");
+    assert_eq!(cp.sequence, 10);
+    assert_eq!(cp.source_position.as_ref(), Some(&pos_8));
 
-    // Also verify via the trait's get_source_position method
-    let pos = subject
-        .get_source_position("source-pg")
-        .await
-        .expect("get_source_position failed");
-    assert_eq!(pos.as_ref(), Some(&pos_8));
-
-    // Apply checkpoint with 20-byte position (MSSQL-like)
+    // Stage checkpoint with 20-byte position (MSSQL-like)
     let pos_20 = Bytes::from(vec![0xAA; 20]);
     subject
-        .apply_checkpoint(20, "source-mssql", Some(&pos_20))
+        .stage_checkpoint("source-mssql", 20, Some(&pos_20))
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let checkpoint = subject
-        .get_checkpoint()
+    let cp = subject
+        .read_checkpoint("source-mssql")
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint.sequence, 20);
-    assert_eq!(checkpoint.source_id.as_ref(), "source-mssql");
-    assert_eq!(
-        checkpoint.get_source_position("source-mssql"),
-        Some(&pos_20)
-    );
-    // Previous source position should still be there
-    assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
+        .expect("read_checkpoint failed")
+        .expect("expected checkpoint for source-mssql");
+    assert_eq!(cp.sequence, 20);
+    assert_eq!(cp.source_position.as_ref(), Some(&pos_20));
 
-    // Apply checkpoint with 80-byte position (Cosmos DB-like resume token)
+    // Previous source's checkpoint should still be there
+    let all = subject
+        .read_all_checkpoints()
+        .await
+        .expect("read_all_checkpoints failed");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_8));
+    assert_eq!(all["source-mssql"].source_position.as_ref(), Some(&pos_20));
+
+    // Stage checkpoint with 80-byte position (Cosmos DB-like resume token)
     let pos_80 = Bytes::from(vec![0xBB; 80]);
     subject
-        .apply_checkpoint(30, "source-cosmos", Some(&pos_80))
+        .stage_checkpoint("source-cosmos", 30, Some(&pos_80))
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let checkpoint = subject
-        .get_checkpoint()
+    let all = subject
+        .read_all_checkpoints()
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint.sequence, 30);
-    assert_eq!(checkpoint.source_id.as_ref(), "source-cosmos");
-    assert_eq!(
-        checkpoint.get_source_position("source-cosmos"),
-        Some(&pos_80)
-    );
-    // All previous positions remain
-    assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
-    assert_eq!(
-        checkpoint.get_source_position("source-mssql"),
-        Some(&pos_20)
-    );
+        .expect("read_all_checkpoints failed");
+    assert_eq!(all.len(), 3);
+    assert_eq!(all["source-cosmos"].source_position.as_ref(), Some(&pos_80));
+    assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_8));
+    assert_eq!(all["source-mssql"].source_position.as_ref(), Some(&pos_20));
 
-    // Apply checkpoint with None position — removes that source's position
+    // Stage checkpoint with None position
     subject
-        .apply_checkpoint(40, "source-volatile", None)
+        .stage_checkpoint("source-volatile", 40, None)
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let checkpoint = subject
-        .get_checkpoint()
+    let cp = subject
+        .read_checkpoint("source-volatile")
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint.sequence, 40);
-    assert_eq!(checkpoint.source_id.as_ref(), "source-volatile");
-    assert_eq!(checkpoint.get_source_position("source-volatile"), None);
-    // Other sources' positions remain
-    assert_eq!(
-        checkpoint.get_source_position("source-cosmos"),
-        Some(&pos_80)
-    );
+        .expect("read_checkpoint failed")
+        .expect("expected checkpoint for source-volatile");
+    assert_eq!(cp.sequence, 40);
+    assert_eq!(cp.source_position, None);
 
-    // Verify that apply_checkpoint with None position is consistent with get_sequence
+    // All checkpoints remain
+    let all = subject
+        .read_all_checkpoints()
+        .await
+        .expect("read_all_checkpoints failed");
+    assert_eq!(all.len(), 4);
+    assert_eq!(all["source-cosmos"].source_position.as_ref(), Some(&pos_80));
+
+    // Overwrite an existing source with new sequence and position
+    let pos_updated = Bytes::from_static(&[0xFF; 8]);
     subject
-        .apply_checkpoint(50, "source-legacy", None)
+        .stage_checkpoint("source-pg", 50, Some(&pos_updated))
         .await
-        .expect("apply_checkpoint failed");
+        .expect("stage_checkpoint failed");
 
-    let checkpoint = subject
-        .get_checkpoint()
+    let cp = subject
+        .read_checkpoint("source-pg")
         .await
-        .expect("get_checkpoint failed");
-    assert_eq!(checkpoint.sequence, 50);
-    assert_eq!(checkpoint.source_id.as_ref(), "source-legacy");
-    let seq = subject.get_sequence().await.expect("get_sequence failed");
-    assert_eq!(seq.sequence, 50);
-    assert_eq!(seq.source_id.as_ref(), "source-legacy");
+        .expect("read_checkpoint failed")
+        .expect("expected checkpoint for source-pg");
+    assert_eq!(cp.sequence, 50);
+    assert_eq!(cp.source_position.as_ref(), Some(&pos_updated));
 }

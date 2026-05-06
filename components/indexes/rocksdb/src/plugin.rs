@@ -31,11 +31,12 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
 use rocksdb::{OptimisticTransactionDB, Options};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::checkpoint::{self, RocksDbCheckpointStore};
 use crate::element_index::{self, RocksDbElementIndex, RocksIndexOptions};
 use crate::future_queue::{self, RocksDbFutureQueue};
 use crate::result_index::{self, RocksDbResultIndex};
@@ -76,6 +77,7 @@ pub fn open_unified_db(
     let mut cfs = element_index::element_cf_descriptors(options);
     cfs.extend(result_index::result_cf_descriptors());
     cfs.extend(future_queue::future_queue_cf_descriptors());
+    cfs.push(checkpoint::stream_state_cf_descriptor());
 
     let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
@@ -147,7 +149,7 @@ impl RocksDbIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for RocksDbIndexProvider {
-    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
         let path = self.path.to_string_lossy().to_string();
         let options = RocksIndexOptions {
             archive_enabled: self.enable_archive,
@@ -170,14 +172,18 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
             session_state.clone(),
         ));
         let result_index = Arc::new(RocksDbResultIndex::new(db.clone(), session_state.clone()));
-        let future_queue = Arc::new(RocksDbFutureQueue::new(db, session_state));
+        let future_queue = Arc::new(RocksDbFutureQueue::new(db.clone(), session_state.clone()));
+        let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db, session_state));
 
-        Ok(IndexSet {
-            element_index: element_index.clone(),
-            archive_index: element_index,
-            result_index,
-            future_queue,
-            session_control,
+        Ok(CreatedIndexes {
+            set: IndexSet {
+                element_index: element_index.clone(),
+                archive_index: element_index,
+                result_index,
+                future_queue,
+                session_control,
+            },
+            checkpoint_store: Some(checkpoint_store),
         })
     }
 
@@ -233,7 +239,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), true, false);
 
-        let result = provider.create_index_set("test_query").await;
+        let result = provider.create_indexes("test_query").await;
         assert!(result.is_ok());
     }
 
@@ -242,9 +248,9 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let provider = RocksDbIndexProvider::new(temp_dir.path(), false, false);
 
-        let result1 = provider.create_index_set("query1").await;
-        let result2 = provider.create_index_set("query2").await;
-        let result3 = provider.create_index_set("query3").await;
+        let result1 = provider.create_indexes("query1").await;
+        let result2 = provider.create_indexes("query2").await;
+        let result3 = provider.create_indexes("query3").await;
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());

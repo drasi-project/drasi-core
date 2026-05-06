@@ -23,10 +23,9 @@ use ordered_float::OrderedFloat;
 
 use crate::evaluation::functions::aggregation::ValueAccumulator;
 
-use super::CheckpointStore;
 use super::IndexError;
 
-pub trait ResultIndex: AccumulatorIndex + CheckpointStore {}
+pub trait ResultIndex: AccumulatorIndex {}
 
 #[async_trait]
 pub trait AccumulatorIndex: LazySortedSetStore {

@@ -25,8 +25,8 @@ use drasi_core::{
     evaluation::context::{QueryPartEvaluationContext, QueryVariables},
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
-    in_memory_index::in_memory_result_index::InMemoryResultIndex,
-    interface::ResultIndex,
+    in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
+    interface::CheckpointStore,
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -277,8 +277,8 @@ pub struct DrasiQuery {
     middleware_registry: Arc<MiddlewareTypeRegistry>,
     // FutureQueueSource for temporal query support
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
-    // Persisted result_index across stop/start cycles for checkpoint recovery
-    result_index: Arc<RwLock<Option<Arc<dyn ResultIndex>>>>,
+    // Persisted checkpoint_store across stop/start cycles for checkpoint recovery
+    checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
 }
 
 impl DrasiQuery {
@@ -308,7 +308,7 @@ impl DrasiQuery {
             index_factory,
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
-            result_index: Arc::new(RwLock::new(None)),
+            checkpoint_store: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -332,9 +332,9 @@ impl DrasiQuery {
         self.subscription_tasks.read().await.len()
     }
 
-    /// Access the result index for checkpoint verification in tests
-    pub async fn get_result_index(&self) -> Option<Arc<dyn ResultIndex>> {
-        self.result_index.read().await.clone()
+    /// Access the checkpoint store for verification in tests
+    pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
+        self.checkpoint_store.read().await.clone()
     }
 }
 
@@ -426,10 +426,10 @@ impl Query for DrasiQuery {
         }
 
         // Build indexes - either from configured backend or default in-memory.
-        // Keep a reference to the result_index for checkpoint persistence.
-        // Reuse the persisted result_index across stop/start cycles so that
+        // Keep a reference to the checkpoint_store for persistence.
+        // Reuse the persisted checkpoint_store across stop/start cycles so that
         // in-memory checkpoints survive restarts within the same process lifetime.
-        let result_index: Arc<dyn ResultIndex>;
+        let checkpoint_store: Arc<dyn CheckpointStore>;
         if let Some(backend_ref) = &self.base.config.storage_backend {
             debug!(
                 "Query '{}' using storage backend: {:?}",
@@ -437,31 +437,39 @@ impl Query for DrasiQuery {
             );
             let index_factory = self.index_factory.clone();
 
-            let index_set = index_factory
+            let created = index_factory
                 .build(backend_ref, &self.base.config.id)
                 .await
-                .context("Failed to build index set")?;
+                .context("Failed to build indexes")?;
 
-            result_index = index_set.result_index.clone();
+            // Use backend-provided checkpoint store, or create in-memory fallback
+            checkpoint_store = match created.checkpoint_store {
+                Some(store) => store,
+                None => {
+                    // Backend didn't provide one; reuse persisted or create new
+                    let existing = self.checkpoint_store.read().await.clone();
+                    existing.unwrap_or_else(|| Arc::new(InMemoryCheckpointStore::new()))
+                }
+            };
+
             builder = builder
-                .with_element_index(index_set.element_index)
-                .with_archive_index(index_set.archive_index)
-                .with_result_index(index_set.result_index)
-                .with_future_queue(index_set.future_queue)
-                .with_session_control(index_set.session_control);
+                .with_element_index(created.set.element_index)
+                .with_archive_index(created.set.archive_index)
+                .with_result_index(created.set.result_index)
+                .with_future_queue(created.set.future_queue)
+                .with_session_control(created.set.session_control);
         } else {
             debug!(
                 "Query '{}' using default in-memory indexes",
                 self.base.config.id
             );
-            // Reuse persisted result_index if available (e.g., after stop/restart)
-            let existing = self.result_index.read().await.clone();
-            result_index = existing.unwrap_or_else(|| Arc::new(InMemoryResultIndex::new()));
-            builder = builder.with_result_index(result_index.clone());
+            // Reuse persisted checkpoint_store if available (e.g., after stop/restart)
+            let existing = self.checkpoint_store.read().await.clone();
+            checkpoint_store = existing.unwrap_or_else(|| Arc::new(InMemoryCheckpointStore::new()));
         };
 
-        // Persist the result_index for future stop/start cycles
-        *self.result_index.write().await = Some(result_index.clone());
+        // Persist the checkpoint_store for future stop/start cycles
+        *self.checkpoint_store.write().await = Some(checkpoint_store.clone());
 
         let continuous_query = match builder.try_build().await {
             Ok(query) => query,
@@ -519,39 +527,31 @@ impl Query for DrasiQuery {
                 }
             };
 
-        // Read the last checkpoint and propagate source_position to subscription settings
+        // Read the last checkpoints and propagate source_position to subscription settings
         // so sources can resume from where they left off.
         let mut subscription_settings = subscription_settings;
         let mut last_checkpoint_sequence: u64 = 0;
-        match result_index.get_checkpoint().await {
-            Ok(checkpoint) => {
-                if checkpoint.sequence > 0 {
-                    last_checkpoint_sequence = checkpoint.sequence;
-                    debug!(
-                        "Query '{}' resuming from checkpoint: seq={}, source_id='{}'",
-                        self.base.config.id, checkpoint.sequence, checkpoint.source_id
-                    );
-                    // Look up per-source positions individually
-                    for settings in &mut subscription_settings {
-                        settings.last_sequence = Some(checkpoint.sequence);
-                        match result_index.get_source_position(&settings.source_id).await {
-                            Ok(Some(pos)) => {
-                                settings.resume_from = Some(pos);
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                warn!(
-                                    "Query '{}' failed to read source position for '{}': {e}",
-                                    self.base.config.id, settings.source_id
-                                );
-                            }
+        match checkpoint_store.read_all_checkpoints().await {
+            Ok(checkpoints) => {
+                for settings in &mut subscription_settings {
+                    if let Some(cp) = checkpoints.get(&settings.source_id) {
+                        if cp.sequence > last_checkpoint_sequence {
+                            last_checkpoint_sequence = cp.sequence;
                         }
+                        settings.last_sequence = Some(cp.sequence);
+                        if let Some(pos) = &cp.source_position {
+                            settings.resume_from = Some(pos.clone());
+                        }
+                        debug!(
+                            "Query '{}' resuming source '{}' from checkpoint: seq={}",
+                            self.base.config.id, settings.source_id, cp.sequence
+                        );
                     }
                 }
             }
             Err(e) => {
                 warn!(
-                    "Query '{}' failed to read checkpoint, starting fresh: {e}",
+                    "Query '{}' failed to read checkpoints, starting fresh: {e}",
                     self.base.config.id
                 );
             }
@@ -1026,7 +1026,7 @@ impl Query for DrasiQuery {
 
         // Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
-        let result_index_for_processor = result_index.clone();
+        let checkpoint_store_for_processor = checkpoint_store.clone();
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
         let current_results = self.current_results.clone();
@@ -1218,10 +1218,10 @@ impl Query for DrasiQuery {
 
                                             // Persist checkpoint after successful processing
                                             if let Some(seq) = sequence {
-                                                if let Err(e) = result_index_for_processor
-                                                    .apply_checkpoint(
-                                                        seq,
+                                                if let Err(e) = checkpoint_store_for_processor
+                                                    .stage_checkpoint(
                                                         &source_id,
+                                                        seq,
                                                         source_position.as_ref(),
                                                     )
                                                     .await

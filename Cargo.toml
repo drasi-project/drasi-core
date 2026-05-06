@@ -98,7 +98,7 @@ categories = ["database"]
 drasi-query-ast = { version = "0.3.4", path = "query-ast" }
 drasi-query-cypher = { version = "0.3.4", path = "query-cypher" }
 drasi-query-gql = { version = "0.3.4", path = "query-gql" }
-drasi-core = { version = "0.4.3", path = "core" }
+drasi-core = { version = "0.5.0", path = "core" }
 drasi-functions-cypher = { version = "0.4.3", path = "functions-cypher" }
 drasi-functions-gql = { version = "0.4.3", path = "functions-gql" }
 drasi-middleware = { version = "0.4.3", path = "middleware" }
@@ -111,8 +111,8 @@ drasi-host-sdk = { version = "0.6.2", path = "components/host-sdk" }
 
 # Common dependencies
 utoipa = { version = "4", features = ["chrono"] }
-drasi-index-rocksdb = { version = "0.3.3", path = "components/indexes/rocksdb" }
-drasi-index-garnet = { version = "0.1.10", path = "components/indexes/garnet" }
+drasi-index-rocksdb = { version = "0.4.0", path = "components/indexes/rocksdb" }
+drasi-index-garnet = { version = "0.2.0", path = "components/indexes/garnet" }
 
 # Component plugins
 drasi-source-mssql = { version = "0.1.7", path = "components/sources/mssql" }

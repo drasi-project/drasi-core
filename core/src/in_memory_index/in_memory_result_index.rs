@@ -19,11 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use bytes::Bytes;
-
-use crate::interface::{
-    CheckpointStore, ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence,
-};
+use crate::interface::{ResultIndex, ResultKey, ResultOwner};
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;
 use ordered_float::OrderedFloat;
@@ -37,7 +33,6 @@ use crate::{
 pub struct InMemoryResultIndex {
     values: Arc<RwLock<HashMap<u64, ValueAccumulator>>>,
     sorted_sets: Arc<RwLock<HashMap<u64, BTreeMap<OrderedFloat<f64>, isize>>>>,
-    checkpoint: Arc<RwLock<ResultCheckpoint>>,
 }
 
 impl Default for InMemoryResultIndex {
@@ -51,7 +46,6 @@ impl InMemoryResultIndex {
         InMemoryResultIndex {
             values: Arc::new(RwLock::new(HashMap::new())),
             sorted_sets: Arc::new(RwLock::new(HashMap::new())),
-            checkpoint: Arc::new(RwLock::new(ResultCheckpoint::default())),
         }
     }
 }
@@ -178,120 +172,4 @@ impl LazySortedSetStore for InMemoryResultIndex {
     }
 }
 
-#[async_trait]
-impl CheckpointStore for InMemoryResultIndex {
-    async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
-        let data = self.checkpoint.read().await;
-        Ok(ResultSequence {
-            sequence: data.sequence,
-            source_id: data.source_id.clone(),
-        })
-    }
-
-    async fn apply_checkpoint(
-        &self,
-        sequence: u64,
-        source_id: &str,
-        source_position: Option<&Bytes>,
-    ) -> Result<(), IndexError> {
-        let mut data = self.checkpoint.write().await;
-        data.sequence = sequence;
-        data.source_id = Arc::from(source_id);
-        // Upsert into per-source position map
-        if let Some(pos) = source_position {
-            data.source_positions
-                .insert(Arc::from(source_id), pos.clone());
-        } else {
-            data.source_positions.remove(source_id);
-        }
-        Ok(())
-    }
-
-    async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError> {
-        let data = self.checkpoint.read().await;
-        Ok(data.clone())
-    }
-
-    async fn get_source_position(&self, source_id: &str) -> Result<Option<Bytes>, IndexError> {
-        let data = self.checkpoint.read().await;
-        Ok(data.source_positions.get(source_id).cloned())
-    }
-}
-
 impl ResultIndex for InMemoryResultIndex {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_checkpoint_round_trip() {
-        let index = InMemoryResultIndex::new();
-
-        // Initially default
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 0);
-        assert!(cp.source_positions.is_empty());
-
-        // Apply with 8-byte position for source "src-1"
-        let pos = Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        index
-            .apply_checkpoint(5, "src-1", Some(&pos))
-            .await
-            .unwrap();
-
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 5);
-        assert_eq!(cp.source_id.as_ref(), "src-1");
-        assert_eq!(cp.get_source_position("src-1"), Some(&pos));
-
-        // Apply with position for a second source — first source position preserved
-        let pos2 = Bytes::from_static(&[9, 10, 11, 12]);
-        index
-            .apply_checkpoint(6, "src-2", Some(&pos2))
-            .await
-            .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 6);
-        assert_eq!(cp.get_source_position("src-1"), Some(&pos));
-        assert_eq!(cp.get_source_position("src-2"), Some(&pos2));
-
-        // Apply with None position removes that source's entry
-        index.apply_checkpoint(10, "src-1", None).await.unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 10);
-        assert_eq!(cp.get_source_position("src-1"), None);
-        assert_eq!(cp.get_source_position("src-2"), Some(&pos2));
-
-        // Apply with large position (100 bytes)
-        let big_pos = Bytes::from(vec![0xAB; 100]);
-        index
-            .apply_checkpoint(20, "src-cosmos", Some(&big_pos))
-            .await
-            .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 20);
-        assert_eq!(cp.get_source_position("src-cosmos"), Some(&big_pos));
-    }
-
-    #[tokio::test]
-    async fn test_sequence_and_checkpoint_consistency() {
-        let index = InMemoryResultIndex::new();
-
-        // apply_checkpoint(None) should be visible via get_checkpoint
-        index.apply_checkpoint(7, "change-a", None).await.unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
-        assert_eq!(cp.sequence, 7);
-        assert_eq!(cp.source_id.as_ref(), "change-a");
-
-        // apply_checkpoint should be visible via get_sequence
-        let pos = Bytes::from_static(b"position-data");
-        index
-            .apply_checkpoint(15, "change-b", Some(&pos))
-            .await
-            .unwrap();
-        let seq = index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 15);
-        assert_eq!(seq.source_id.as_ref(), "change-b");
-    }
-}

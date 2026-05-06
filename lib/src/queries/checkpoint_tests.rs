@@ -24,8 +24,8 @@
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-    use drasi_core::interface::{CheckpointStore, ResultIndex};
+    use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
+    use drasi_core::interface::CheckpointStore;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -559,87 +559,108 @@ mod tests {
         );
     }
 
-    /// Test that checkpoint persistence works with the in-memory result index directly.
+    /// Test that checkpoint persistence works with the in-memory checkpoint store directly.
     /// This is a focused unit test that doesn't require the full query manager pipeline.
     #[tokio::test]
     async fn test_in_memory_checkpoint_various_sizes() {
-        let index = InMemoryResultIndex::new();
+        let store = InMemoryCheckpointStore::new();
 
         // Postgres-like: 8 bytes (WAL LSN)
         let pg_pos = Bytes::copy_from_slice(&42u64.to_le_bytes());
-        index
-            .apply_checkpoint(1, "pg-source", Some(&pg_pos))
+        store
+            .stage_checkpoint("pg-source", 1, Some(&pg_pos))
             .await
             .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        let cp = store.read_checkpoint("pg-source").await.unwrap().unwrap();
         assert_eq!(cp.sequence, 1);
-        assert_eq!(cp.get_source_position("pg-source"), Some(&pg_pos));
+        assert_eq!(cp.source_position.as_ref(), Some(&pg_pos));
 
         // MSSQL-like: 20 bytes
         let mssql_pos = Bytes::from(vec![0xAA; 20]);
-        index
-            .apply_checkpoint(2, "mssql-source", Some(&mssql_pos))
+        store
+            .stage_checkpoint("mssql-source", 2, Some(&mssql_pos))
             .await
             .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        let cp = store
+            .read_checkpoint("mssql-source")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 2);
-        assert_eq!(cp.get_source_position("mssql-source"), Some(&mssql_pos));
+        assert_eq!(cp.source_position.as_ref(), Some(&mssql_pos));
         // Previous source's position should still be stored
-        assert_eq!(cp.get_source_position("pg-source"), Some(&pg_pos));
+        let all = store.read_all_checkpoints().await.unwrap();
+        assert_eq!(all["pg-source"].source_position.as_ref(), Some(&pg_pos));
 
         // MongoDB-like: 80 bytes
         let mongo_pos = Bytes::from(vec![0xBB; 80]);
-        index
-            .apply_checkpoint(3, "mongo-source", Some(&mongo_pos))
+        store
+            .stage_checkpoint("mongo-source", 3, Some(&mongo_pos))
             .await
             .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        let cp = store
+            .read_checkpoint("mongo-source")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 3);
-        assert_eq!(cp.get_source_position("mongo-source"), Some(&mongo_pos));
+        assert_eq!(cp.source_position.as_ref(), Some(&mongo_pos));
 
         // Cosmos DB-like: 120 bytes (resume token)
         let cosmos_pos = Bytes::from(vec![0xCC; 120]);
-        index
-            .apply_checkpoint(4, "cosmos-source", Some(&cosmos_pos))
+        store
+            .stage_checkpoint("cosmos-source", 4, Some(&cosmos_pos))
             .await
             .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        let cp = store
+            .read_checkpoint("cosmos-source")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 4);
-        assert_eq!(cp.get_source_position("cosmos-source"), Some(&cosmos_pos));
+        assert_eq!(cp.source_position.as_ref(), Some(&cosmos_pos));
 
-        // Volatile source: None position removes the entry
-        index
-            .apply_checkpoint(5, "volatile-source", None)
+        // Volatile source: None position
+        store
+            .stage_checkpoint("volatile-source", 5, None)
             .await
             .unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        let cp = store
+            .read_checkpoint("volatile-source")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.sequence, 5);
-        assert_eq!(cp.get_source_position("volatile-source"), None);
+        assert_eq!(cp.source_position, None);
         // Others still present
-        assert_eq!(cp.get_source_position("cosmos-source"), Some(&cosmos_pos));
+        let all = store.read_all_checkpoints().await.unwrap();
+        assert_eq!(
+            all["cosmos-source"].source_position.as_ref(),
+            Some(&cosmos_pos)
+        );
     }
 
-    /// Test that get_sequence and get_checkpoint are consistent views of the same data.
+    /// Test that stage_checkpoint and read_checkpoint are consistent.
     #[tokio::test]
     async fn test_checkpoint_and_sequence_consistency() {
-        let index = InMemoryResultIndex::new();
+        let store = InMemoryCheckpointStore::new();
 
-        // Writing via apply_checkpoint should be readable via get_sequence
+        // Write a checkpoint with position
         let pos = Bytes::from_static(b"test-position");
-        index
-            .apply_checkpoint(42, "src-a", Some(&pos))
+        store
+            .stage_checkpoint("src-a", 42, Some(&pos))
             .await
             .unwrap();
 
-        let seq = index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 42);
-        assert_eq!(seq.source_id.as_ref(), "src-a");
+        let cp = store.read_checkpoint("src-a").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 42);
+        assert_eq!(cp.source_position.as_ref(), Some(&pos));
 
-        // Writing via apply_checkpoint(None) should be readable via get_checkpoint
-        index.apply_checkpoint(99, "src-b", None).await.unwrap();
-        let cp = index.get_checkpoint().await.unwrap();
+        // Write checkpoint without position
+        store.stage_checkpoint("src-b", 99, None).await.unwrap();
+        let cp = store.read_checkpoint("src-b").await.unwrap().unwrap();
         assert_eq!(cp.sequence, 99);
-        assert_eq!(cp.source_id.as_ref(), "src-b");
+        assert_eq!(cp.source_position, None);
     }
 
     /// Test that resume_from is correctly passed to source on initial subscribe
@@ -840,10 +861,15 @@ mod tests {
             .as_any()
             .downcast_ref::<DrasiQuery>()
             .unwrap();
-        let result_index = drasi_query.get_result_index().await.unwrap();
-        let checkpoint = result_index.get_checkpoint().await.unwrap();
+        let result_index = drasi_query.get_checkpoint_store().await.unwrap();
+        let all_checkpoints = result_index.read_all_checkpoints().await.unwrap();
+        let max_seq = all_checkpoints
+            .values()
+            .map(|cp| cp.sequence)
+            .max()
+            .unwrap_or(0);
         assert_eq!(
-            checkpoint.sequence, 4,
+            max_seq, 4,
             "After restart + new event, checkpoint should be at sequence 4"
         );
     }
@@ -1363,9 +1389,13 @@ mod tests {
             .as_any()
             .downcast_ref::<DrasiQuery>()
             .unwrap();
-        let result_index = drasi_query.get_result_index().await.unwrap();
-        let checkpoint_before = result_index.get_checkpoint().await.unwrap();
-        assert_eq!(checkpoint_before.sequence, 3);
+        let checkpoint_store = drasi_query.get_checkpoint_store().await.unwrap();
+        let cp_before = checkpoint_store
+            .read_checkpoint("recov-source")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cp_before.sequence, 3);
 
         // Stop and restart
         query_manager
@@ -1438,9 +1468,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         // Verify checkpoint advanced to seq 4 (not 1)
-        let checkpoint_after = result_index.get_checkpoint().await.unwrap();
+        let cp_after = checkpoint_store
+            .read_checkpoint("recov-source")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            checkpoint_after.sequence, 4,
+            cp_after.sequence, 4,
             "After restart, next event should get sequence 4 (not 1)"
         );
     }
