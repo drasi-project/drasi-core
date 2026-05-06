@@ -174,7 +174,8 @@ impl QueryOutputState {
 }
 
 /// Error returned when the requested outbox position has been evicted.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[error("Outbox gap: requested after seq {requested}, but earliest available is {earliest_available} (latest: {latest_sequence})")]
 pub struct OutboxGap {
     /// The sequence the caller requested (wants entries after this).
     pub requested: u64,
@@ -184,53 +185,22 @@ pub struct OutboxGap {
     pub latest_sequence: u64,
 }
 
-impl std::fmt::Display for OutboxGap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Outbox gap: requested after seq {}, but earliest available is {} (latest: {})",
-            self.requested, self.earliest_available, self.latest_sequence
-        )
-    }
-}
-
-impl std::error::Error for OutboxGap {}
-
 /// Error returned by `fetch_snapshot` or `fetch_outbox` when the query is not
 /// in a state that can serve the request.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FetchError {
     /// The query finished bootstrapping but ended in a non-Running state
     /// (e.g., Error, Stopped). The snapshot/outbox may be incomplete.
+    #[error("Query is not running (status: {status:?})")]
     NotRunning {
         status: crate::channels::ComponentStatus,
     },
     /// The bootstrap did not complete within the allowed timeout.
+    #[error("Timed out waiting for query to finish bootstrapping")]
     TimedOut,
     /// (fetch_outbox only) The requested outbox position has been evicted.
-    OutboxGap(OutboxGap),
-}
-
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FetchError::NotRunning { status } => {
-                write!(f, "Query is not running (status: {status:?})")
-            }
-            FetchError::TimedOut => {
-                write!(f, "Timed out waiting for query to finish bootstrapping")
-            }
-            FetchError::OutboxGap(gap) => gap.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for FetchError {}
-
-impl From<OutboxGap> for FetchError {
-    fn from(gap: OutboxGap) -> Self {
-        FetchError::OutboxGap(gap)
-    }
+    #[error(transparent)]
+    OutboxGap(#[from] OutboxGap),
 }
 
 /// Response from `fetch_snapshot` on the Query trait.

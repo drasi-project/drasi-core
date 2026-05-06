@@ -353,24 +353,40 @@ impl DrasiQuery {
     /// Returns `Err(FetchError::TimedOut)` if bootstrap doesn't complete within 5 minutes.
     async fn wait_until_running(&self) -> Result<(), FetchError> {
         const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-        let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
 
-        loop {
-            let status = self.base.status_handle().get_status().await;
-            match status {
-                ComponentStatus::Running => return Ok(()),
-                ComponentStatus::Starting => {
-                    // Still bootstrapping — check timeout
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(FetchError::TimedOut);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                other => {
-                    // Terminal non-running state (Error, Stopped, etc.)
-                    return Err(FetchError::NotRunning { status: other });
+        let mut status_rx = self.base.status_handle().subscribe_status();
+
+        // Check current value first (avoids waiting if already transitioned)
+        let current = *status_rx.borrow_and_update();
+        match current {
+            ComponentStatus::Running => return Ok(()),
+            ComponentStatus::Starting => {} // need to wait
+            other => return Err(FetchError::NotRunning { status: other }),
+        }
+
+        // Wait for a non-Starting status, with timeout
+        let result = tokio::time::timeout(
+            BOOTSTRAP_TIMEOUT,
+            status_rx.wait_for(|s| *s != ComponentStatus::Starting),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(status_ref)) => {
+                let status = *status_ref;
+                if status == ComponentStatus::Running {
+                    Ok(())
+                } else {
+                    Err(FetchError::NotRunning { status })
                 }
             }
+            Ok(Err(_)) => {
+                // Watch channel closed — sender dropped, treat as not running
+                Err(FetchError::NotRunning {
+                    status: ComponentStatus::Stopped,
+                })
+            }
+            Err(_) => Err(FetchError::TimedOut),
         }
     }
 }

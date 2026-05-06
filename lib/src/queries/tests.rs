@@ -22,7 +22,9 @@ mod manager_tests {
     use crate::sources::SourceManager;
     use crate::test_helpers::wait_for_component_status;
     use drasi_core::middleware::MiddlewareTypeRegistry;
-    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
     use std::sync::Arc;
 
     /// Creates a test query configuration
@@ -1113,10 +1115,7 @@ mod output_state_integration_tests {
 
         let config = create_test_query_config("snap-query", vec!["snap-src".to_string()]);
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("snap-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("snap-query".to_string()).await.unwrap();
 
         // Drain the Starting event
         wait_for_component_status(
@@ -1136,7 +1135,10 @@ mod output_state_integration_tests {
 
         // Give it a moment — it should NOT resolve yet
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(!snapshot_handle.is_finished(), "fetch_snapshot should block during bootstrap");
+        assert!(
+            !snapshot_handle.is_finished(),
+            "fetch_snapshot should block during bootstrap"
+        );
 
         // Send a bootstrap event, then close the channel to complete bootstrap
         let insert = make_person_insert("snap-src", "p1", "Alice");
@@ -1156,14 +1158,11 @@ mod output_state_integration_tests {
         .await;
 
         // Now fetch_snapshot should resolve
-        let snapshot = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            snapshot_handle,
-        )
-        .await
-        .expect("fetch_snapshot should complete after bootstrap")
-        .unwrap()
-        .expect("fetch_snapshot should return Ok");
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_handle)
+            .await
+            .expect("fetch_snapshot should complete after bootstrap")
+            .unwrap()
+            .expect("fetch_snapshot should return Ok");
 
         // After bootstrap: results should contain the bootstrapped data,
         // sequence should be 0 (bootstrap doesn't advance sequence)
@@ -1184,10 +1183,7 @@ mod output_state_integration_tests {
 
         let config = create_test_query_config("live-query", vec!["live-src".to_string()]);
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("live-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("live-query".to_string()).await.unwrap();
 
         // Wait for Running
         wait_for_component_status(
@@ -1211,7 +1207,10 @@ mod output_state_integration_tests {
         assert_eq!(outbox.latest_sequence, 0);
 
         // Inject a live event via the source manager
-        let source_arc = source_manager.get_source_instance("live-src").await.unwrap();
+        let source_arc = source_manager
+            .get_source_instance("live-src")
+            .await
+            .unwrap();
         let mock_source = source_arc
             .as_any()
             .downcast_ref::<crate::sources::tests::TestMockSource>()
@@ -1267,10 +1266,7 @@ mod output_state_integration_tests {
             outbox_capacity: 2, // Very small — will evict quickly
         };
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("gap-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("gap-query".to_string()).await.unwrap();
 
         wait_for_component_status(
             &mut event_rx,
@@ -1318,10 +1314,7 @@ mod output_state_integration_tests {
 
         let config = create_test_query_config("err-query", vec!["err-src".to_string()]);
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("err-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("err-query".to_string()).await.unwrap();
 
         // Wait for Running
         wait_for_component_status(
@@ -1333,10 +1326,7 @@ mod output_state_integration_tests {
         .await;
 
         // Stop the query to put it into Stopped state
-        manager
-            .stop_query("err-query".to_string())
-            .await
-            .unwrap();
+        manager.stop_query("err-query".to_string()).await.unwrap();
 
         wait_for_component_status(
             &mut event_rx,
@@ -1375,10 +1365,7 @@ mod output_state_integration_tests {
 
         let config = create_test_query_config("bs-query2", vec!["bs-src2".to_string()]);
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("bs-query2".to_string())
-            .await
-            .unwrap();
+        manager.start_query("bs-query2".to_string()).await.unwrap();
 
         // Wait for Starting
         wait_for_component_status(
@@ -1461,10 +1448,7 @@ mod output_state_integration_tests {
             outbox_capacity: 100,
         };
         add_query(&manager, &graph, config).await.unwrap();
-        manager
-            .start_query("noop-query".to_string())
-            .await
-            .unwrap();
+        manager.start_query("noop-query".to_string()).await.unwrap();
 
         wait_for_component_status(
             &mut event_rx,
