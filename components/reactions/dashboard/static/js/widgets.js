@@ -13,7 +13,7 @@ const DARK_THEME = {
   title: { textStyle: { color: "#f0f0f5" }, subtextStyle: { color: "#6b6b80" } },
   legend: { textStyle: { color: "#9d9db5" } },
   tooltip: {
-    backgroundColor: "rgba(26, 26, 40, 0.95)",
+    backgroundColor: "rgba(26, 40, 32, 0.95)",
     borderColor: "rgba(255,255,255,0.1)",
     textStyle: { color: "#f0f0f5", fontSize: 12 },
     extraCssText: "border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.5);backdrop-filter:blur(8px);",
@@ -33,8 +33,39 @@ const DARK_THEME = {
   color: CHART_COLORS,
 };
 
+const LIGHT_THEME = {
+  backgroundColor: "transparent",
+  textStyle: { color: "#4a5e52" },
+  title: { textStyle: { color: "#1a2e22" }, subtextStyle: { color: "#7a8e82" } },
+  legend: { textStyle: { color: "#4a5e52" } },
+  tooltip: {
+    backgroundColor: "rgba(255, 255, 255, 0.95)",
+    borderColor: "rgba(0,0,0,0.1)",
+    textStyle: { color: "#1a2e22", fontSize: 12 },
+    extraCssText: "border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.1);backdrop-filter:blur(8px);",
+  },
+  categoryAxis: {
+    axisLine: { lineStyle: { color: "rgba(0,0,0,0.1)" } },
+    axisTick: { lineStyle: { color: "rgba(0,0,0,0.1)" } },
+    axisLabel: { color: "#7a8e82" },
+    splitLine: { lineStyle: { color: "rgba(0,0,0,0.06)" } },
+  },
+  valueAxis: {
+    axisLine: { lineStyle: { color: "rgba(0,0,0,0.1)" } },
+    axisTick: { lineStyle: { color: "rgba(0,0,0,0.1)" } },
+    axisLabel: { color: "#7a8e82" },
+    splitLine: { lineStyle: { color: "rgba(0,0,0,0.06)" } },
+  },
+  color: CHART_COLORS,
+};
+
 if (window.echarts) {
   window.echarts.registerTheme("drasi-dark", DARK_THEME);
+  window.echarts.registerTheme("drasi-light", LIGHT_THEME);
+}
+
+function getEChartsTheme() {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "drasi-light" : "drasi-dark";
 }
 
 // ─── Handlebars helpers ─────────────────────────────────────
@@ -339,10 +370,22 @@ export function detectFields(runtime) {
 
 // ─── Chart instance management ──────────────────────────────
 
+function getThemeColors() {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    accent: style.getPropertyValue("--accent").trim(),
+    textPrimary: style.getPropertyValue("--text-primary").trim(),
+    textSecondary: style.getPropertyValue("--text-secondary").trim(),
+    textMuted: style.getPropertyValue("--text-muted").trim(),
+    bgElevated: style.getPropertyValue("--bg-elevated").trim(),
+    borderSubtle: style.getPropertyValue("--border-subtle").trim(),
+  };
+}
+
 function getChart(container) {
   const existing = chartInstances.get(container);
   if (existing) return existing;
-  const chart = window.echarts.init(container, "drasi-dark");
+  const chart = window.echarts.init(container, getEChartsTheme());
   chartInstances.set(container, chart);
   return chart;
 }
@@ -350,6 +393,17 @@ function getChart(container) {
 export function resizeAllCharts() {
   for (const chart of chartInstances.values()) {
     chart.resize();
+  }
+}
+
+export function reThemeAllCharts() {
+  const theme = getEChartsTheme();
+  for (const [container, chart] of chartInstances.entries()) {
+    const opts = chart.getOption();
+    chart.dispose();
+    const newChart = window.echarts.init(container, theme);
+    newChart.setOption(opts);
+    chartInstances.set(container, newChart);
   }
 }
 
@@ -420,13 +474,14 @@ function renderPieChart(widget, runtime, container) {
   const valF = widget.config?.valueField ?? "value";
 
   const chart = getChart(container);
+  const tc = getThemeColors();
   chart.setOption({
     tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
     series: [{
       type: "pie",
       radius: ["35%", "65%"],
-      itemStyle: { borderRadius: 6, borderColor: "#1a2820", borderWidth: 2 },
-      label: { color: "#9d9db5", fontSize: 11 },
+      itemStyle: { borderRadius: 6, borderColor: tc.bgElevated, borderWidth: 2 },
+      label: { color: tc.textSecondary, fontSize: 11 },
       data: rows.map((r) => ({ name: r?.[nameF] ?? "item", value: asNumber(r?.[valF]) })),
     }],
   }, true);
@@ -440,19 +495,20 @@ function renderGauge(widget, runtime, container) {
   const value = getAggregatedValue(runtime, valF, mode, widget.config?.filterField, widget.config?.filterValue);
 
   const chart = getChart(container);
+  const tc = getThemeColors();
   chart.setOption({
     series: [{
       type: "gauge",
       min,
       max,
-      progress: { show: true, width: 12, itemStyle: { color: "#4ade80" } },
-      axisLine: { lineStyle: { width: 12, color: [[1, "rgba(255,255,255,0.06)"]] } },
+      progress: { show: true, width: 12, itemStyle: { color: tc.accent } },
+      axisLine: { lineStyle: { width: 12, color: [[1, tc.borderSubtle]] } },
       axisTick: { show: false },
-      splitLine: { length: 8, lineStyle: { width: 1.5, color: "rgba(255,255,255,0.12)" } },
-      axisLabel: { distance: 16, color: "#6b6b80", fontSize: 10 },
-      pointer: { length: "55%", width: 4, itemStyle: { color: "#4ade80" } },
-      anchor: { show: true, size: 10, itemStyle: { color: "#4ade80", borderColor: "#1a2820", borderWidth: 3 } },
-      detail: { valueAnimation: true, fontSize: 20, fontWeight: 700, color: "#f0f0f5", offsetCenter: [0, "70%"], formatter: (v) => formatNumber(v) },
+      splitLine: { length: 8, lineStyle: { width: 1.5, color: tc.borderSubtle } },
+      axisLabel: { distance: 16, color: tc.textMuted, fontSize: 10 },
+      pointer: { length: "55%", width: 4, itemStyle: { color: tc.accent } },
+      anchor: { show: true, size: 10, itemStyle: { color: tc.accent, borderColor: tc.bgElevated, borderWidth: 3 } },
+      detail: { valueAnimation: true, fontSize: 20, fontWeight: 700, color: tc.textPrimary, offsetCenter: [0, "70%"], formatter: (v) => formatNumber(v) },
       data: [{ value }],
     }],
   }, true);

@@ -1,6 +1,15 @@
 import { DashboardDesigner } from "./dashboard.js";
 import { DashboardSocket } from "./websocket.js";
 import { promptModal, confirmModal, showToast } from "./modal.js";
+import { initTheme, toggleTheme } from "./theme.js";
+import { reThemeAllCharts } from "./widgets.js";
+
+// ─── Theme ──────────────────────────────────────────────────
+initTheme();
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  toggleTheme();
+  reThemeAllCharts();
+});
 
 // ─── DOM References ─────────────────────────────────────────
 const listView = document.getElementById("dashboard-list-view");
