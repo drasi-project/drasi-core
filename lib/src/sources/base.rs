@@ -175,6 +175,9 @@ pub struct SourceBase {
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    /// Original raw config JSON from the descriptor, preserving ConfigValue
+    /// envelopes (secrets, env vars) for lossless persistence roundtrips.
+    raw_config: Option<serde_json::Value>,
 }
 
 impl SourceBase {
@@ -221,12 +224,51 @@ impl SourceBase {
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
+            raw_config: None,
         })
     }
 
     /// Get whether this source should auto-start
     pub fn get_auto_start(&self) -> bool {
         self.auto_start
+    }
+
+    /// Set the original raw config JSON for lossless persistence roundtrips.
+    ///
+    /// Called by plugin descriptors to preserve the original config JSON
+    /// (including `ConfigValue` envelopes for secrets and env vars) before
+    /// resolution to plain values.
+    pub fn set_raw_config(&mut self, config: serde_json::Value) {
+        self.raw_config = Some(config);
+    }
+
+    /// Get the original raw config JSON, if set by a descriptor.
+    ///
+    /// Returns `None` for builder-created components that don't have
+    /// a raw config JSON (they use DTO reconstruction in `properties()`).
+    pub fn raw_config(&self) -> Option<&serde_json::Value> {
+        self.raw_config.as_ref()
+    }
+
+    /// Build the properties map for this source.
+    ///
+    /// If `raw_config` was set (descriptor path), returns its top-level keys.
+    /// Otherwise, serializes `fallback_dto` (the DTO reconstructed from typed
+    /// config) to produce camelCase output.
+    ///
+    /// This eliminates the duplicated if-let + serialize pattern from plugins.
+    pub fn properties_or_serialize<D: serde::Serialize>(
+        &self,
+        fallback_dto: &D,
+    ) -> HashMap<String, serde_json::Value> {
+        if let Some(serde_json::Value::Object(map)) = self.raw_config.as_ref() {
+            return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        }
+
+        match serde_json::to_value(fallback_dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     /// Initialize the source with runtime context.
@@ -385,6 +427,7 @@ impl SourceBase {
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
+            raw_config: self.raw_config.clone(),
         }
     }
 
