@@ -287,6 +287,7 @@ mod tests {
             dispatch_mode: mode,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         }
     }
 
@@ -528,6 +529,7 @@ mod tests {
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         };
 
         let base = QueryBase::new(config).unwrap();
@@ -576,6 +578,7 @@ mod tests {
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         };
 
         let base = QueryBase::new(config).unwrap();

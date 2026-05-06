@@ -434,6 +434,11 @@ pub struct QueryConfig {
         rename = "recoveryPolicy"
     )]
     pub recovery_policy: Option<RecoveryPolicy>,
+    /// Maximum number of recent QueryResult emissions retained in the outbox ring buffer.
+    /// Reactions use this buffer for gap recovery via `fetch_outbox`.
+    /// Default: 1000.
+    #[serde(default = "default_outbox_capacity", rename = "outboxCapacity")]
+    pub outbox_capacity: usize,
 }
 
 /// Synthetic join configuration for queries
@@ -594,6 +599,10 @@ fn default_enable_bootstrap() -> bool {
 
 fn default_bootstrap_buffer_size() -> usize {
     10000
+}
+
+fn default_outbox_capacity() -> usize {
+    crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY
 }
 
 // Conversion implementations for QueryJoin types

@@ -142,6 +142,7 @@ mod schema_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         assert_eq!(config.queries.len(), 1);
@@ -181,6 +182,7 @@ mod persistence_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         // Serialize to YAML
@@ -254,6 +256,7 @@ mod persistence_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         // Save config
@@ -300,6 +303,7 @@ mod runtime_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         };
 
         let runtime = QueryRuntime::from(config.clone());
@@ -343,6 +347,7 @@ mod runtime_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         };
 
         let runtime = QueryRuntime::from(config.clone());
@@ -566,6 +571,7 @@ mod runtime_tests {
                 dispatch_mode: None,
                 storage_backend: None,
                 recovery_policy: None,
+            outbox_capacity: 1000,
             }],
         };
 
@@ -607,6 +613,7 @@ mod runtime_tests {
                     dispatch_mode: None,
                     storage_backend: None,
                     recovery_policy: None,
+            outbox_capacity: 1000,
                 },
                 QueryConfig {
                     id: "q2".to_string(),
@@ -623,6 +630,7 @@ mod runtime_tests {
                     dispatch_mode: None,
                     storage_backend: None,
                     recovery_policy: None,
+            outbox_capacity: 1000,
                 },
             ],
         };
@@ -808,6 +816,7 @@ mod dispatch_mode_tests {
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         config.queries.push(QueryConfig {
@@ -830,6 +839,7 @@ mod dispatch_mode_tests {
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         config.queries.push(QueryConfig {
@@ -852,6 +862,7 @@ mod dispatch_mode_tests {
             dispatch_mode: None, // Default
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         });
 
         assert_eq!(config.queries.len(), 3);

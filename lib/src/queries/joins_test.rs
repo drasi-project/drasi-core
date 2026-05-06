@@ -70,6 +70,7 @@ mod query_joins_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
         }
     }
 
