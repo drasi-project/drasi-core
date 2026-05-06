@@ -7,6 +7,9 @@ name: pr-all-reviewers
 # review at the same time.
 
 on:
+  push:
+    branches: 
+      - drasi-core-reviewer-concurrency
   pull_request:
     types: [labeled]
   workflow_dispatch:
