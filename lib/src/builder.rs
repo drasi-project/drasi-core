@@ -130,6 +130,9 @@ pub struct DrasiLibBuilder {
         Box<dyn ReactionTrait>,
         std::collections::HashMap<String, String>,
     )>,
+    /// Bootstrap provider metadata to register in the component graph.
+    /// Each entry: (source_id, kind, properties).
+    bootstrap_metadata: Vec<(String, String, std::collections::HashMap<String, serde_json::Value>)>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
@@ -152,6 +155,7 @@ impl DrasiLibBuilder {
             query_configs: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
+            bootstrap_metadata: Vec::new(),
             index_provider: None,
             state_store_provider: None,
             identity_provider: None,
@@ -293,6 +297,35 @@ impl DrasiLibBuilder {
     /// Add a query configuration.
     pub fn with_query(mut self, config: QueryConfig) -> Self {
         self.query_configs.push(config);
+        self
+    }
+
+    /// Register bootstrap provider metadata for a source.
+    ///
+    /// This records the bootstrap provider's kind and configuration properties
+    /// so they can be persisted in the component graph and included in
+    /// `snapshot_configuration()` output.
+    ///
+    /// # Arguments
+    /// * `source_id` - The ID of the source this bootstrap provider is attached to
+    /// * `kind` - Bootstrap provider kind (e.g., "http", "postgres", "scriptfile")
+    /// * `properties` - Configuration properties for persistence (raw config with
+    ///   ConfigValue envelopes intact for lossless roundtripping)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let builder = DrasiLib::builder()
+    ///     .with_source(my_source)
+    ///     .with_bootstrap_for_source("my-source", "http", config_properties);
+    /// ```
+    pub fn with_bootstrap_for_source(
+        mut self,
+        source_id: impl Into<String>,
+        kind: impl Into<String>,
+        properties: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.bootstrap_metadata
+            .push((source_id.into(), kind.into(), properties));
         self
     }
 
@@ -444,6 +477,30 @@ impl DrasiLibBuilder {
                     "add",
                     format!("Failed to provision: {e}"),
                 ));
+            }
+        }
+
+        // Register bootstrap provider metadata in the component graph.
+        // This enables snapshot_configuration() to persist and reconstruct
+        // bootstrap provider configurations.
+        for (source_id, kind, properties) in self.bootstrap_metadata {
+            let bp_id = format!("{}-bootstrap", source_id);
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), kind);
+            for (key, value) in properties {
+                metadata.insert(
+                    key,
+                    serde_json::to_string(&value).unwrap_or_default(),
+                );
+            }
+            let mut graph = core.component_graph.write().await;
+            if let Err(e) =
+                graph.register_bootstrap_provider(&bp_id, metadata, &[source_id.clone()])
+            {
+                log::warn!(
+                    "Failed to register bootstrap provider metadata for source '{}': {e}",
+                    source_id
+                );
             }
         }
 
