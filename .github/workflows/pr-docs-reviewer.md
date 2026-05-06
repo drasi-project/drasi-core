@@ -1,5 +1,11 @@
 ---
 on:
+  workflow_call:
+    inputs:
+      pr_url:
+        description: "Full URL of the PR to review"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       pr_url:
@@ -8,7 +14,7 @@ on:
         type: string
   pull_request:
     types: [labeled]
-if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review:docs'
+if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || github.event.label.name == 'review:docs'
 concurrency:
   group: pr-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
   cancel-in-progress: false

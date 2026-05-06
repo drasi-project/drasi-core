@@ -1,15 +1,13 @@
 name: pr-all-reviewers
 
-# Orchestrator: when the `review:all` label is applied to a PR, dispatch each
-# reviewer workflow one at a time and wait for it to complete before moving on
-# to the next. This avoids parallel collisions on the GitHub
-# `pulls/:n/reviews` endpoint that occur when 6 reviewers race to post a
-# review at the same time.
+# Orchestrator for the `review:all` label.
+#
+# Each reviewer is a reusable workflow (declares `on: workflow_call`).
+# This file chains them as jobs that `uses:` the reviewer's compiled
+# `.lock.yml`, with `needs:` ensuring sequential execution. No polling,
+# no extra GitHub App permissions, native pass/fail propagation.
 
 on:
-  push:
-    branches: 
-      - drasi-core-reviewer-concurrency
   pull_request:
     types: [labeled]
   workflow_dispatch:
@@ -19,9 +17,6 @@ on:
         required: true
         type: string
 
-# Serialize orchestrator runs per PR. Individual reviewer workflows already
-# share a `pr-reviewers-<pr>` concurrency group, so dispatched runs queue
-# behind whatever the orchestrator is currently driving.
 concurrency:
   group: pr-all-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
   cancel-in-progress: false
@@ -31,9 +26,11 @@ permissions:
   pull-requests: read
 
 jobs:
-  orchestrate:
+  resolve:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review:all'
     runs-on: ubuntu-latest
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pr_url }}
     steps:
       - name: Resolve PR URL
         id: pr
@@ -48,93 +45,56 @@ jobs:
             PR_URL="$EVENT_PR_URL"
           fi
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-          echo "Dispatching reviewers for: $PR_URL"
+          echo "Sequential review chain target: $PR_URL"
 
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.DRASI_REVIEWER_APP_ID }}
-          private-key: ${{ secrets.DRASI_REVIEWER_APP_PRIVATE_KEY }}
+  # Each reviewer runs only after the previous one finishes. `if: always()`
+  # ensures a failed reviewer does NOT abort the chain — subsequent
+  # reviewers still run. We still gate on `resolve` succeeding so the
+  # chain stops if PR-URL resolution itself failed.
+  correctness:
+    needs: resolve
+    if: ${{ needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-correctness-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
 
-      - name: Run reviewers sequentially
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_URL: ${{ steps.pr.outputs.pr_url }}
-          REPO: ${{ github.repository }}
-          # Dispatch reviewers from the same ref this orchestrator is running on
-          # so feature-branch changes are picked up. github.ref_name is the
-          # branch for push/workflow_dispatch and the PR base branch for
-          # pull_request events; head_ref is the PR head branch (only set on
-          # pull_request* events). Prefer head_ref when present.
-          REF: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
+  security:
+    needs: [resolve, correctness]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-security-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
 
-          # Reviewers run in this order. Each entry is a workflow file name
-          # under .github/workflows/. Add or reorder as needed.
-          REVIEWERS=(
-            "pr-correctness-reviewer.lock.yml"
-            "pr-security-reviewer.lock.yml"
-            "pr-design-reviewer.lock.yml"
-            "pr-testing-reviewer.lock.yml"
-            "pr-docs-reviewer.lock.yml"
-            "pr-prior-art-reviewer.lock.yml"
-          )
+  design:
+    needs: [resolve, security]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-design-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
 
-          dispatch_and_wait() {
-            local workflow="$1"
-            echo "::group::Dispatching $workflow"
+  testing:
+    needs: [resolve, design]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-testing-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
 
-            # Capture the most recent run id for this workflow before
-            # dispatch so we can detect the new run we create.
-            local before_id
-            before_id="$(gh run list \
-              --repo "$REPO" \
-              --workflow "$workflow" \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId // 0')"
-            echo "Most recent existing run id: $before_id"
+  docs:
+    needs: [resolve, testing]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-docs-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
 
-            gh workflow run "$workflow" \
-              --repo "$REPO" \
-              --ref "$REF" \
-              -f pr_url="$PR_URL"
-
-            # Poll until a newer run appears (workflow_dispatch is async).
-            local new_id=""
-            for i in $(seq 1 30); do
-              new_id="$(gh run list \
-                --repo "$REPO" \
-                --workflow "$workflow" \
-                --event workflow_dispatch \
-                --limit 1 \
-                --json databaseId \
-                --jq '.[0].databaseId // 0')"
-              if [ "$new_id" != "0" ] && [ "$new_id" != "$before_id" ]; then
-                break
-              fi
-              sleep 2
-            done
-
-            if [ -z "$new_id" ] || [ "$new_id" = "0" ] || [ "$new_id" = "$before_id" ]; then
-              echo "::error::Did not observe a new run for $workflow within timeout"
-              return 1
-            fi
-
-            echo "Watching new run id: $new_id"
-            # `gh run watch --exit-status` returns non-zero when the run fails.
-            # We do NOT want a failing reviewer to abort the rest of the
-            # sequence, so swallow the exit code and just log it.
-            if gh run watch "$new_id" --repo "$REPO" --exit-status --interval 10; then
-              echo "$workflow completed successfully"
-            else
-              echo "::warning::$workflow finished with non-zero status; continuing"
-            fi
-            echo "::endgroup::"
-          }
-
-          for wf in "${REVIEWERS[@]}"; do
-            dispatch_and_wait "$wf"
-          done
+  prior_art:
+    needs: [resolve, docs]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    uses: ./.github/workflows/pr-prior-art-reviewer.lock.yml
+    secrets: inherit
+    with:
+      pr_url: ${{ needs.resolve.outputs.pr_url }}
