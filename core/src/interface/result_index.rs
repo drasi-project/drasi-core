@@ -23,8 +23,8 @@ use ordered_float::OrderedFloat;
 
 use crate::evaluation::functions::aggregation::ValueAccumulator;
 
-use super::IndexError;
 use super::CheckpointStore;
+use super::IndexError;
 
 pub trait ResultIndex: AccumulatorIndex + CheckpointStore {}
 

@@ -22,7 +22,7 @@ use std::{
 use bytes::Bytes;
 
 use crate::interface::{
-    ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence, CheckpointStore,
+    CheckpointStore, ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence,
 };
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;

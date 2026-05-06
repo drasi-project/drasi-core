@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use drasi_core::interface::{ResultCheckpoint, ResultSequence, CheckpointStore};
+use drasi_core::interface::{CheckpointStore, ResultCheckpoint, ResultSequence};
 
 pub async fn sequence_counter(subject: &dyn CheckpointStore) {
     let result = subject.get_sequence().await.expect("get_sequence failed");

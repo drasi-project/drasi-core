@@ -22,8 +22,8 @@ use bytes::Bytes as BytesType;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, CheckpointStore,
+        AccumulatorIndex, CheckpointStore, IndexError, LazySortedSetStore, ResultCheckpoint,
+        ResultIndex, ResultKey, ResultOwner, ResultSequence,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -352,12 +352,8 @@ impl CheckpointStore for RocksDbResultIndex {
             session_state.with_txn(|txn| {
                 txn.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes())
                     .map_err(IndexError::other)?;
-                txn.put_cf(
-                    &metadata_cf,
-                    "source_id",
-                    source_id.as_bytes(),
-                )
-                .map_err(IndexError::other)?;
+                txn.put_cf(&metadata_cf, "source_id", source_id.as_bytes())
+                    .map_err(IndexError::other)?;
 
                 // Store per-source position keyed by "sp:{source_id}"
                 let sp_key = format!("sp:{source_id}");

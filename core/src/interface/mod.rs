@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod checkpoint_store;
 mod element_index;
 mod future_queue;
 mod index_backend;
 mod query_clock;
-mod checkpoint_store;
 mod result_index;
 mod session_control;
 mod source_middleware;
@@ -24,6 +24,9 @@ mod source_middleware;
 use std::error::Error;
 use std::fmt::Display;
 
+pub use checkpoint_store::CheckpointStore;
+pub use checkpoint_store::ResultCheckpoint;
+pub use checkpoint_store::ResultSequence;
 use drasi_query_ast::api::QueryParseError;
 pub use element_index::ElementArchiveIndex;
 pub use element_index::ElementIndex;
@@ -41,9 +44,6 @@ pub use result_index::LazySortedSetStore;
 pub use result_index::ResultIndex;
 pub use result_index::ResultKey;
 pub use result_index::ResultOwner;
-pub use checkpoint_store::CheckpointStore;
-pub use checkpoint_store::ResultCheckpoint;
-pub use checkpoint_store::ResultSequence;
 pub use session_control::NoOpSessionControl;
 pub use session_control::SessionControl;
 pub use session_control::SessionGuard;

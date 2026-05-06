@@ -23,8 +23,8 @@ use bytes::Bytes as BytesType;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, CheckpointStore,
+        AccumulatorIndex, CheckpointStore, IndexError, LazySortedSetStore, ResultCheckpoint,
+        ResultIndex, ResultKey, ResultOwner, ResultSequence,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -563,10 +563,7 @@ impl GarnetResultIndex {
         };
 
         let source_id = match con
-            .get::<String, Option<String>>(format!(
-                "metadata:{{{}}}:source_id",
-                self.query_id
-            ))
+            .get::<String, Option<String>>(format!("metadata:{{{}}}:source_id", self.query_id))
             .await
         {
             Ok(v) => v.unwrap_or_default(),
@@ -591,10 +588,7 @@ impl GarnetResultIndex {
         };
 
         let source_id = match con
-            .get::<String, Option<String>>(format!(
-                "metadata:{{{}}}:source_id",
-                self.query_id
-            ))
+            .get::<String, Option<String>>(format!("metadata:{{{}}}:source_id", self.query_id))
             .await
         {
             Ok(v) => v.unwrap_or_default(),

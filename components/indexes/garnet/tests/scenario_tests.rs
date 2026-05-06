@@ -441,8 +441,8 @@ mod session {
     use drasi_core::{
         evaluation::functions::aggregation::ValueAccumulator,
         interface::{
-            AccumulatorIndex, ElementIndex, FutureQueue, LazySortedSetStore, PushType, ResultKey,
-            ResultOwner, CheckpointStore, SessionControl,
+            AccumulatorIndex, CheckpointStore, ElementIndex, FutureQueue, LazySortedSetStore,
+            PushType, ResultKey, ResultOwner, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };

@@ -25,7 +25,7 @@
 mod tests {
     use bytes::Bytes;
     use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-    use drasi_core::interface::{ResultIndex, CheckpointStore};
+    use drasi_core::interface::{CheckpointStore, ResultIndex};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
