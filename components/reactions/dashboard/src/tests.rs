@@ -685,6 +685,7 @@ use std::collections::HashMap;
 fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
     QueryResult {
         query_id: query_id.to_string(),
+        sequence: 0,
         timestamp: Utc::now(),
         results: diffs,
         metadata: HashMap::new(),
@@ -700,9 +701,11 @@ async fn test_snapshot_store_add_rows() {
         vec![
             ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "name": "Alice"}),
+                row_signature: 0,
             },
             ResultDiff::Add {
                 data: serde_json::json!({"id": 2, "name": "Bob"}),
+                row_signature: 0,
             },
         ],
     );
@@ -720,10 +723,12 @@ async fn test_snapshot_store_aggregation_separated_from_rows() {
         vec![
             ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "temp": 22.5}),
+                row_signature: 0,
             },
             ResultDiff::Aggregation {
                 before: None,
                 after: serde_json::json!({"avg_temp": 22.5, "count": 1}),
+                row_signature: 0,
             },
         ],
     );
@@ -749,6 +754,7 @@ async fn test_snapshot_store_aggregation_update_replaces() {
             vec![ResultDiff::Aggregation {
                 before: None,
                 after: serde_json::json!({"count": 1}),
+                row_signature: 0,
             }],
         ))
         .await;
@@ -758,6 +764,7 @@ async fn test_snapshot_store_aggregation_update_replaces() {
             vec![ResultDiff::Aggregation {
                 before: Some(serde_json::json!({"count": 1})),
                 after: serde_json::json!({"count": 2}),
+                row_signature: 0,
             }],
         ))
         .await;
@@ -775,9 +782,11 @@ async fn test_snapshot_store_delete_row() {
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
+                    row_signature: 0,
                 },
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 2}),
+                    row_signature: 0,
                 },
             ],
         ))
@@ -787,6 +796,7 @@ async fn test_snapshot_store_delete_row() {
             "q1",
             vec![ResultDiff::Delete {
                 data: serde_json::json!({"id": 1}),
+                row_signature: 0,
             }],
         ))
         .await;
@@ -803,6 +813,7 @@ async fn test_snapshot_store_update_row() {
             "q1",
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 1, "name": "Alice"}),
+                row_signature: 0,
             }],
         ))
         .await;
@@ -814,6 +825,7 @@ async fn test_snapshot_store_update_row() {
                 before: serde_json::json!({"id": 1, "name": "Alice"}),
                 after: serde_json::json!({"id": 1, "name": "Alicia"}),
                 grouping_keys: None,
+                row_signature: 0,
             }],
         ))
         .await;
@@ -831,16 +843,20 @@ async fn test_snapshot_store_fifo_eviction_rows_only() {
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
+                    row_signature: 0,
                 },
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 2}),
+                    row_signature: 0,
                 },
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 3}),
+                    row_signature: 0,
                 },
                 ResultDiff::Aggregation {
                     before: None,
                     after: serde_json::json!({"total": 6}),
+                    row_signature: 0,
                 },
             ],
         ))
@@ -872,6 +888,7 @@ async fn test_snapshot_store_has_data() {
             vec![ResultDiff::Aggregation {
                 before: None,
                 after: serde_json::json!({"count": 1}),
+                row_signature: 0,
             }],
         ))
         .await;
@@ -887,10 +904,12 @@ async fn test_snapshot_serialization_format() {
             vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"id": 1}),
+                    row_signature: 0,
                 },
                 ResultDiff::Aggregation {
                     before: None,
                     after: serde_json::json!({"total": 42}),
+                    row_signature: 0,
                 },
             ],
         ))

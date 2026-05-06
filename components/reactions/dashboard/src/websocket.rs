@@ -94,14 +94,14 @@ impl HubMessage {
             .results
             .iter()
             .map(|result_diff| match result_diff {
-                ResultDiff::Add { data } => WebSocketResultDiff {
+                ResultDiff::Add { data, .. } => WebSocketResultDiff {
                     op: "add".to_string(),
                     data: Some(data.clone()),
                     before: None,
                     after: None,
                     grouping_keys: None,
                 },
-                ResultDiff::Delete { data } => WebSocketResultDiff {
+                ResultDiff::Delete { data, .. } => WebSocketResultDiff {
                     op: "delete".to_string(),
                     data: Some(data.clone()),
                     before: None,
@@ -113,6 +113,7 @@ impl HubMessage {
                     before,
                     after,
                     grouping_keys,
+                    ..
                 } => WebSocketResultDiff {
                     op: "update".to_string(),
                     data: Some(data.clone()),
@@ -120,7 +121,7 @@ impl HubMessage {
                     after: Some(after.clone()),
                     grouping_keys: grouping_keys.clone(),
                 },
-                ResultDiff::Aggregation { before, after } => WebSocketResultDiff {
+                ResultDiff::Aggregation { before, after, .. } => WebSocketResultDiff {
                     op: "aggregation".to_string(),
                     data: None,
                     before: before.clone(),
@@ -223,10 +224,10 @@ impl QuerySnapshotStore {
 
         for diff in &query_result.results {
             match diff {
-                ResultDiff::Add { data } => {
+                ResultDiff::Add { data, .. } => {
                     snapshot.rows.push(data.clone());
                 }
-                ResultDiff::Delete { data } => {
+                ResultDiff::Delete { data, .. } => {
                     if let Some(idx) = find_row_index(&snapshot.rows, data) {
                         snapshot.rows.remove(idx);
                     }
@@ -415,19 +416,23 @@ mod tests {
     fn test_query_result_message_serialization() {
         let query_result = QueryResult {
             query_id: "test-query".to_string(),
+            sequence: 0,
             timestamp: Utc::now(),
             results: vec![
                 ResultDiff::Add {
                     data: serde_json::json!({"name":"Alice"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Update {
                     data: serde_json::json!({"name":"Alice Updated"}),
                     before: serde_json::json!({"name":"Alice"}),
                     after: serde_json::json!({"name":"Alice Updated"}),
                     grouping_keys: None,
+                    row_signature: 0,
                 },
                 ResultDiff::Delete {
                     data: serde_json::json!({"name":"Alice Updated"}),
+                    row_signature: 0,
                 },
             ],
             metadata: HashMap::new(),
