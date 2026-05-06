@@ -50,12 +50,16 @@ pub struct QueryOutputState {
 }
 
 impl QueryOutputState {
+    /// Maximum allowed outbox capacity to prevent memory exhaustion from misconfiguration.
+    const MAX_OUTBOX_CAPACITY: usize = 1_000_000;
+
     /// Create a new empty `QueryOutputState` with the given outbox capacity.
     ///
     /// A capacity of 0 is treated as 1 (at least one entry must be retainable
-    /// for correct dispatch semantics).
+    /// for correct dispatch semantics). Values above `MAX_OUTBOX_CAPACITY` (1M)
+    /// are clamped to prevent unbounded memory growth from misconfiguration.
     pub fn new(outbox_capacity: usize) -> Self {
-        let effective_capacity = outbox_capacity.max(1);
+        let effective_capacity = outbox_capacity.clamp(1, Self::MAX_OUTBOX_CAPACITY);
         Self {
             results: im::HashMap::new(),
             as_of_sequence: 0,
@@ -106,7 +110,7 @@ impl QueryOutputState {
     /// and return the `Arc<QueryResult>` for zero-copy dispatch.
     /// Evicts the oldest entry if the outbox is at capacity.
     pub fn advance_sequence_and_push(&mut self, mut result: QueryResult) -> Arc<QueryResult> {
-        self.as_of_sequence += 1;
+        self.as_of_sequence = self.as_of_sequence.saturating_add(1);
         result.sequence = self.as_of_sequence;
 
         let arc_result = Arc::new(result);
