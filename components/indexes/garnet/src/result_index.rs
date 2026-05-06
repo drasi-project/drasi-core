@@ -19,11 +19,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes as BytesType;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
-        ResultSequence, ResultSequenceCounter,
+        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex,
+        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -415,9 +416,172 @@ impl ResultSequenceCounter for GarnetResultIndex {
             source_change_id: Arc::from(source_change_id),
         })
     }
+
+    async fn apply_checkpoint(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+        source_position: Option<&BytesType>,
+    ) -> Result<(), IndexError> {
+        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_change_id);
+        let list_key = format!("metadata:{{{}}}:source_id_list", self.query_id);
+
+        // Read current source ID list (buffer first, then Redis)
+        let current_list = self.read_source_id_list(&list_key).await?;
+        let mut source_ids: Vec<String> = if current_list.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&current_list).unwrap_or_default()
+        };
+
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.string_set(seq_key, sequence.to_string().into_bytes());
+        buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
+        match source_position {
+            Some(pos) => {
+                buffer.string_set(sp_key, pos.to_vec());
+                if !source_ids.contains(&source_change_id.to_string()) {
+                    source_ids.push(source_change_id.to_string());
+                }
+            }
+            None => {
+                buffer.del(sp_key);
+                source_ids.retain(|id| id != source_change_id);
+            }
+        }
+        let serialized = serde_json::to_string(&source_ids).unwrap_or_default();
+        buffer.string_set(list_key, serialized.into_bytes());
+        Ok(())
+    }
+
+    async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError> {
+        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let list_key = format!("metadata:{{{}}}:source_id_list", self.query_id);
+
+        let (seq_val, scid_val, list_val) = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            let seq_val = buffer.string_get(&seq_key);
+            let scid_val = buffer.string_get(&scid_key);
+            let list_val = buffer.string_get(&list_key);
+            (seq_val, scid_val, list_val)
+        };
+
+        let sequence = match seq_val {
+            BufferReadResult::Found(bytes) => {
+                let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                s.parse::<u64>().map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => 0,
+            BufferReadResult::NotInBuffer => {
+                return self.get_checkpoint_from_redis().await;
+            }
+        };
+
+        let source_change_id = match scid_val {
+            BufferReadResult::Found(bytes) => {
+                String::from_utf8(bytes).map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => String::new(),
+            BufferReadResult::NotInBuffer => {
+                return self.get_checkpoint_from_redis().await;
+            }
+        };
+
+        // Read the source ID list and fetch each position from buffer/redis
+        let source_ids: Vec<String> = match list_val {
+            BufferReadResult::Found(bytes) => {
+                let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                serde_json::from_str(&s).unwrap_or_default()
+            }
+            BufferReadResult::KeyDeleted => Vec::new(),
+            BufferReadResult::NotInBuffer => Vec::new(),
+        };
+
+        let mut source_positions = std::collections::HashMap::new();
+        for source_id in &source_ids {
+            if let Some(pos) = self.get_source_position(source_id).await? {
+                source_positions.insert(Arc::from(source_id.as_str()), pos);
+            }
+        }
+
+        Ok(ResultCheckpoint {
+            sequence,
+            source_change_id: Arc::from(source_change_id),
+            source_positions,
+        })
+    }
+
+    async fn get_source_position(&self, source_id: &str) -> Result<Option<BytesType>, IndexError> {
+        let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_id);
+
+        let val = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            buffer.string_get(&sp_key)
+        };
+
+        match val {
+            BufferReadResult::Found(bytes) => Ok(Some(BytesType::from(bytes))),
+            BufferReadResult::KeyDeleted => Ok(None),
+            BufferReadResult::NotInBuffer => {
+                // Fall through to Redis
+                let mut con = self.connection.clone();
+                match con.get::<String, Option<Vec<u8>>>(sp_key).await {
+                    Ok(Some(v)) => Ok(Some(BytesType::from(v))),
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(IndexError::other(e)),
+                }
+            }
+        }
+    }
 }
 
 impl GarnetResultIndex {
+    /// Read the source ID list from session buffer or Redis.
+    async fn read_source_id_list(&self, list_key: &str) -> Result<String, IndexError> {
+        let val = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            buffer.string_get(list_key)
+        };
+
+        match val {
+            BufferReadResult::Found(bytes) => {
+                String::from_utf8(bytes).map_err(IndexError::other)
+            }
+            BufferReadResult::KeyDeleted => Ok(String::new()),
+            BufferReadResult::NotInBuffer => {
+                let mut con = self.connection.clone();
+                match con.get::<&str, Option<String>>(list_key).await {
+                    Ok(Some(s)) => Ok(s),
+                    Ok(None) => Ok(String::new()),
+                    Err(e) => Err(IndexError::other(e)),
+                }
+            }
+        }
+    }
+
     async fn get_sequence_from_redis(&self) -> Result<ResultSequence, IndexError> {
         let mut con = self.connection.clone();
 
@@ -443,6 +607,60 @@ impl GarnetResultIndex {
         Ok(ResultSequence {
             sequence,
             source_change_id: Arc::from(source_change_id),
+        })
+    }
+
+    async fn get_checkpoint_from_redis(&self) -> Result<ResultCheckpoint, IndexError> {
+        let mut con = self.connection.clone();
+
+        let sequence = match con
+            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.query_id))
+            .await
+        {
+            Ok(v) => v.unwrap_or(0),
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        let source_change_id = match con
+            .get::<String, Option<String>>(format!(
+                "metadata:{{{}}}:source_change_id",
+                self.query_id
+            ))
+            .await
+        {
+            Ok(v) => v.unwrap_or_default(),
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        // Read source ID list from Redis and fetch each position
+        let source_ids: Vec<String> = match con
+            .get::<String, Option<String>>(format!(
+                "metadata:{{{}}}:source_id_list",
+                self.query_id
+            ))
+            .await
+        {
+            Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(None) => Vec::new(),
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        let mut source_positions = std::collections::HashMap::new();
+        for source_id in &source_ids {
+            let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_id);
+            match con.get::<String, Option<Vec<u8>>>(sp_key).await {
+                Ok(Some(v)) => {
+                    source_positions.insert(Arc::from(source_id.as_str()), BytesType::from(v));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(IndexError::other(e)),
+            }
+        }
+
+        Ok(ResultCheckpoint {
+            sequence,
+            source_change_id: Arc::from(source_change_id),
+            source_positions,
         })
     }
 }

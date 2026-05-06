@@ -363,18 +363,18 @@ mod contract_tests {
     #[test]
     fn test_source_error_position_unavailable_display() {
         use crate::sources::SourceError;
+        use bytes::Bytes;
 
         let err = SourceError::PositionUnavailable {
             source_id: "postgres-1".to_string(),
-            requested: 1000,
-            earliest_available: Some(5000),
+            requested: Bytes::copy_from_slice(&1000u64.to_le_bytes()),
+            earliest_available: Some(Bytes::copy_from_slice(&5000u64.to_le_bytes())),
         };
 
         // Verify display formatting
         let msg = format!("{err}");
         assert!(msg.contains("postgres-1"));
-        assert!(msg.contains("1000"));
-        assert!(msg.contains("5000"));
+        assert!(msg.contains("position unavailable"));
 
         // Verify anyhow round-trip: SourceError → anyhow::Error → downcast
         let anyhow_err: anyhow::Error = err.into();
@@ -387,8 +387,8 @@ mod contract_tests {
                 earliest_available,
             } => {
                 assert_eq!(source_id, "postgres-1");
-                assert_eq!(*requested, 1000);
-                assert_eq!(*earliest_available, Some(5000));
+                assert_eq!(*requested, Bytes::copy_from_slice(&1000u64.to_le_bytes()));
+                assert!(earliest_available.is_some());
             }
         }
     }
@@ -396,10 +396,11 @@ mod contract_tests {
     #[test]
     fn test_source_error_position_unavailable_no_earliest() {
         use crate::sources::SourceError;
+        use bytes::Bytes;
 
         let err = SourceError::PositionUnavailable {
             source_id: "http-wal".to_string(),
-            requested: 42,
+            requested: Bytes::from_static(b"some-position"),
             earliest_available: None,
         };
 

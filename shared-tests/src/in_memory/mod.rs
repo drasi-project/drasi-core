@@ -326,6 +326,12 @@ mod unit_tests {
         let subject = InMemoryResultIndex::new();
         sequence_counter::sequence_counter(&subject).await;
     }
+
+    #[tokio::test]
+    pub async fn checkpoint_round_trip() {
+        let subject = InMemoryResultIndex::new();
+        sequence_counter::checkpoint_round_trip(&subject).await;
+    }
 }
 
 mod index {

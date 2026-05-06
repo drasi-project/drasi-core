@@ -1459,3 +1459,44 @@ mod source_update_upsert {
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
     }
 }
+
+mod checkpoint_tests {
+    use super::*;
+    use drasi_core::interface::{AccumulatorIndex, ResultSequenceCounter, SessionControl};
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn sequence_counter() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let subject = GarnetResultIndex::new(&query_id, connection, session_state);
+
+        subject.clear().await.unwrap();
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn checkpoint_round_trip() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let subject = GarnetResultIndex::new(&query_id, connection, session_state);
+
+        subject.clear().await.unwrap();
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+}

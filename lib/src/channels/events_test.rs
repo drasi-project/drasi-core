@@ -94,6 +94,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             profiling: None,
             sequence: None,
+            source_position: None,
         };
 
         assert_eq!(wrapper.source_id, "test-source");

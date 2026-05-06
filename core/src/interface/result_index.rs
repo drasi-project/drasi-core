@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use crate::{
     evaluation::{context::QueryVariables, variable_value::VariableValue},
     models::ElementReference,
@@ -78,11 +80,75 @@ impl Default for ResultSequence {
     }
 }
 
+/// Extended checkpoint that includes per-source opaque position bytes.
+/// Used for stream resumption on restart — sources interpret these bytes
+/// to seek back into their native change stream.
+///
+/// Each source that feeds a query has its own position entry in
+/// `source_positions`. On restart, the query looks up the position
+/// for each source individually and passes it via `resume_from`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultCheckpoint {
+    pub sequence: u64,
+    pub source_change_id: Arc<str>,
+    /// Per-source resume positions. Keyed by source_id.
+    pub source_positions: HashMap<Arc<str>, Bytes>,
+}
+
+impl Default for ResultCheckpoint {
+    fn default() -> Self {
+        ResultCheckpoint {
+            sequence: 0,
+            source_change_id: Arc::from(""),
+            source_positions: HashMap::new(),
+        }
+    }
+}
+
+impl ResultCheckpoint {
+    /// Get the position for a specific source, if available.
+    pub fn get_source_position(&self, source_id: &str) -> Option<&Bytes> {
+        self.source_positions.get(source_id)
+    }
+}
+
+impl From<ResultCheckpoint> for ResultSequence {
+    fn from(checkpoint: ResultCheckpoint) -> Self {
+        ResultSequence {
+            sequence: checkpoint.sequence,
+            source_change_id: checkpoint.source_change_id,
+        }
+    }
+}
+
+impl From<ResultSequence> for ResultCheckpoint {
+    fn from(seq: ResultSequence) -> Self {
+        ResultCheckpoint {
+            sequence: seq.sequence,
+            source_change_id: seq.source_change_id,
+            source_positions: HashMap::new(),
+        }
+    }
+}
+
 #[async_trait]
 pub trait ResultSequenceCounter: Send + Sync {
     async fn apply_sequence(&self, sequence: u64, source_change_id: &str)
         -> Result<(), IndexError>;
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
+
+    async fn apply_checkpoint(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+        source_position: Option<&Bytes>,
+    ) -> Result<(), IndexError>;
+
+    async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError>;
+
+    /// Get the position for a specific source, if stored.
+    /// This avoids needing to scan all keys when only one source's position is needed.
+    async fn get_source_position(&self, source_id: &str) -> Result<Option<Bytes>, IndexError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Hash)]

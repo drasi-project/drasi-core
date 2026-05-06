@@ -377,6 +377,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         query_id: FfiStr,
         nodes_json: FfiStr,
         relations_json: FfiStr,
+        resume_from_ptr: *const u8,
+        resume_from_len: u32,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -387,14 +389,22 @@ pub fn build_source_vtable<T: Source + 'static>(
         let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
         let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
 
+        let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
+            None
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
+            Some(bytes::Bytes::copy_from_slice(slice))
+        };
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
             query_id: qid,
             nodes,
             relations,
-            resume_from: None,
+            resume_from,
             request_position_handle: false,
+            last_sequence: None,
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -707,6 +717,8 @@ pub fn build_source_vtable_from_boxed(
         query_id: FfiStr,
         nodes_json: FfiStr,
         relations_json: FfiStr,
+        resume_from_ptr: *const u8,
+        resume_from_len: u32,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -717,14 +729,22 @@ pub fn build_source_vtable_from_boxed(
         let nodes: HashSet<String> = serde_json::from_str(&nodes_str).unwrap_or_default();
         let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
 
+        let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
+            None
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
+            Some(bytes::Bytes::copy_from_slice(slice))
+        };
+
         let settings = SourceSubscriptionSettings {
             source_id: source_id_str,
             enable_bootstrap,
             query_id: qid,
             nodes,
             relations,
-            resume_from: None,
+            resume_from,
             request_position_handle: false,
+            last_sequence: None,
         };
 
         let handle = (w.runtime_handle)().handle().clone();

@@ -26,6 +26,9 @@ mod tests;
 #[cfg(test)]
 mod joins_test;
 
+#[cfg(test)]
+mod checkpoint_tests;
+
 pub use base::QueryBase;
 pub use config_hash::compute_config_hash;
 pub use label_extractor::*;

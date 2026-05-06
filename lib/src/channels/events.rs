@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::profiling::ProfilingMetadata;
+use bytes::Bytes;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,10 +224,16 @@ pub struct SourceEventWrapper {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Optional profiling metadata for performance tracking
     pub profiling: Option<ProfilingMetadata>,
-    /// Monotonic, replayable sequence number stamped by the source.
+    /// Monotonic sequence number assigned by the framework.
+    /// Used for ordering, watermarks, gap detection, and dedup.
     /// `None` for volatile sources that don't support replay.
-    /// When present, must be strictly increasing per source.
     pub sequence: Option<u64>,
+    /// Opaque source position bytes for stream resumption on restart.
+    /// Only the source can interpret these bytes — the framework persists
+    /// them alongside the sequence and returns them on restart via
+    /// subscribe(resume_from: ...).
+    /// `None` for volatile sources that don't support replay.
+    pub source_position: Option<Bytes>,
 }
 
 impl SourceEventWrapper {
@@ -242,6 +249,7 @@ impl SourceEventWrapper {
             timestamp,
             profiling: None,
             sequence: None,
+            source_position: None,
         }
     }
 
@@ -258,6 +266,7 @@ impl SourceEventWrapper {
             timestamp,
             profiling: Some(profiling),
             sequence: None,
+            source_position: None,
         }
     }
 
@@ -275,7 +284,14 @@ impl SourceEventWrapper {
             timestamp,
             profiling,
             sequence: Some(sequence),
+            source_position: None,
         }
+    }
+
+    /// Set the opaque source position bytes for stream resumption.
+    /// Only called by source plugins to attach their native position token.
+    pub fn set_source_position(&mut self, position: Bytes) {
+        self.source_position = Some(position);
     }
 
     /// Consume this wrapper and return its components.
@@ -288,6 +304,7 @@ impl SourceEventWrapper {
         chrono::DateTime<chrono::Utc>,
         Option<ProfilingMetadata>,
         Option<u64>,
+        Option<Bytes>,
     ) {
         (
             self.source_id,
@@ -295,6 +312,7 @@ impl SourceEventWrapper {
             self.timestamp,
             self.profiling,
             self.sequence,
+            self.source_position,
         )
     }
 
@@ -313,6 +331,7 @@ impl SourceEventWrapper {
             chrono::DateTime<chrono::Utc>,
             Option<ProfilingMetadata>,
             Option<u64>,
+            Option<Bytes>,
         ),
         Arc<Self>,
     > {
@@ -592,7 +611,7 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let (source_id, event, _timestamp, profiling, _sequence) = wrapper.into_parts();
+        let (source_id, event, _timestamp, profiling, _sequence, _source_position) = wrapper.into_parts();
 
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
@@ -613,7 +632,7 @@ mod tests {
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
-        let (source_id, event, _timestamp, _profiling, _sequence) = result.unwrap();
+        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) = result.unwrap();
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
     }
@@ -650,7 +669,7 @@ mod tests {
         let arc = Arc::new(wrapper);
 
         // This is the zero-copy path - when we have sole ownership
-        let (source_id, event, _timestamp, _profiling, _sequence) =
+        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) =
             match SourceEventWrapper::try_unwrap_arc(arc) {
                 Ok(parts) => parts,
                 Err(arc) => {
@@ -661,6 +680,7 @@ mod tests {
                         arc.timestamp,
                         arc.profiling.clone(),
                         arc.sequence,
+                        arc.source_position.clone(),
                     )
                 }
             };
@@ -688,7 +708,7 @@ mod tests {
         assert_eq!(wrapper.sequence, Some(42));
         assert!(wrapper.profiling.is_none());
 
-        let (_source_id, _event, _timestamp, _profiling, sequence) = wrapper.into_parts();
+        let (_source_id, _event, _timestamp, _profiling, sequence, _source_position) = wrapper.into_parts();
         assert_eq!(sequence, Some(42));
     }
 
@@ -720,16 +740,18 @@ mod tests {
     #[test]
     fn test_subscription_settings_with_resume_from() {
         use std::collections::HashSet;
+        let position_bytes = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
         let settings = crate::config::SourceSubscriptionSettings {
             source_id: "test-source".to_string(),
             enable_bootstrap: false,
             query_id: "test-query".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
-            resume_from: Some(500),
+            resume_from: Some(position_bytes.clone()),
             request_position_handle: true,
+            last_sequence: None,
         };
-        assert_eq!(settings.resume_from, Some(500));
+        assert_eq!(settings.resume_from, Some(position_bytes));
         assert!(settings.request_position_handle);
     }
 }

@@ -179,6 +179,12 @@ impl Source for SourceProxy {
         let relations_ffi = FfiStr::from_str(&relations_json);
         let enable_bootstrap = settings.enable_bootstrap;
 
+        // Pass resume_from position bytes across FFI (null ptr + 0 len if None)
+        let (resume_from_ptr, resume_from_len) = match &settings.resume_from {
+            Some(bytes) => (bytes.as_ptr(), bytes.len() as u32),
+            None => (std::ptr::null(), 0u32),
+        };
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -186,6 +192,8 @@ impl Source for SourceProxy {
             query_id_ffi,
             nodes_ffi,
             relations_ffi,
+            resume_from_ptr,
+            resume_from_len,
         );
 
         if resp_ptr.is_null() {

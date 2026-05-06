@@ -18,6 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use caches::{lru::CacheError, Cache, DefaultHashBuilder, LRUCache};
 use hashers::builtin::DefaultHasher;
 use ordered_float::OrderedFloat;
@@ -26,8 +27,8 @@ use tokio::sync::RwLock;
 use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
-        ResultSequence, ResultSequenceCounter,
+        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex,
+        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
     },
 };
 
@@ -172,6 +173,25 @@ impl ResultSequenceCounter for CachedResultIndex {
 
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         self.inner.get_sequence().await
+    }
+
+    async fn apply_checkpoint(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+        source_position: Option<&Bytes>,
+    ) -> Result<(), IndexError> {
+        self.inner
+            .apply_checkpoint(sequence, source_change_id, source_position)
+            .await
+    }
+
+    async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError> {
+        self.inner.get_checkpoint().await
+    }
+
+    async fn get_source_position(&self, source_id: &str) -> Result<Option<Bytes>, IndexError> {
+        self.inner.get_source_position(source_id).await
     }
 }
 
