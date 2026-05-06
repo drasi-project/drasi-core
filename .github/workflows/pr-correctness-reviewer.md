@@ -18,7 +18,6 @@ if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_c
 permissions:
   contents: read
   pull-requests: read
-checkout: false
 network:
   allowed:
     - defaults
