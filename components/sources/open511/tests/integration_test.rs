@@ -297,7 +297,7 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
             &mut subscription,
             Duration::from_secs(10),
             |diff| match diff {
-                ResultDiff::Add { data } => data["event_id"] == "test-EVT-003",
+                ResultDiff::Add { data, .. } => data["event_id"] == "test-EVT-003",
                 _ => false,
             },
         )
@@ -320,7 +320,7 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
                 ResultDiff::Update { after, .. } => {
                     after["event_id"] == "test-EVT-001" && after["severity"] == "MINOR"
                 }
-                ResultDiff::Add { data } => {
+                ResultDiff::Add { data, .. } => {
                     data["event_id"] == "test-EVT-001" && data["severity"] == "MINOR"
                 }
                 _ => false,
@@ -340,7 +340,7 @@ async fn test_open511_change_detection_with_client_harness() -> Result<()> {
             &mut subscription,
             Duration::from_secs(12),
             |diff| match diff {
-                ResultDiff::Delete { data } => data["event_id"] == "test-EVT-002",
+                ResultDiff::Delete { data, .. } => data["event_id"] == "test-EVT-002",
                 _ => false,
             },
         )

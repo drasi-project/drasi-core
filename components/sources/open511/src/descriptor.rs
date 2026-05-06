@@ -136,6 +136,64 @@ fn default_status_filter() -> Option<ConfigValue<String>> {
     Some(ConfigValue::Static("ACTIVE".to_string()))
 }
 
+impl From<&InitialCursorBehavior> for InitialCursorBehaviorDto {
+    fn from(value: &InitialCursorBehavior) -> Self {
+        match value {
+            InitialCursorBehavior::StartFromBeginning => Self::StartFromBeginning,
+            InitialCursorBehavior::StartFromNow => Self::StartFromNow,
+            InitialCursorBehavior::StartFromTimestamp { timestamp_millis } => {
+                Self::StartFromTimestamp {
+                    timestamp_millis: *timestamp_millis,
+                }
+            }
+        }
+    }
+}
+
+impl From<&Open511SourceConfig> for Open511SourceConfigDto {
+    fn from(config: &Open511SourceConfig) -> Self {
+        Self {
+            base_url: ConfigValue::Static(config.base_url.clone()),
+            poll_interval_secs: ConfigValue::Static(config.poll_interval_secs),
+            full_sweep_interval: ConfigValue::Static(config.full_sweep_interval),
+            request_timeout_secs: ConfigValue::Static(config.request_timeout_secs),
+            page_size: ConfigValue::Static(config.page_size),
+            status_filter: config
+                .status_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            severity_filter: config
+                .severity_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            event_type_filter: config
+                .event_type_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            area_id_filter: config
+                .area_id_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            road_name_filter: config
+                .road_name_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            jurisdiction_filter: config
+                .jurisdiction_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            bbox_filter: config
+                .bbox_filter
+                .as_ref()
+                .map(|value| ConfigValue::Static(value.clone())),
+            auto_delete_archived: ConfigValue::Static(config.auto_delete_archived),
+            initial_cursor_behavior: ConfigValue::Static(InitialCursorBehaviorDto::from(
+                &config.initial_cursor_behavior,
+            )),
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(Open511SourceConfigDto, InitialCursorBehaviorDto)))]
 struct Open511SourceSchemas;
@@ -233,10 +291,12 @@ impl SourcePluginDescriptor for Open511SourceDescriptor {
             initial_cursor_behavior,
         };
 
-        let source = Open511SourceBuilder::new(id)
+        let mut source = Open511SourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

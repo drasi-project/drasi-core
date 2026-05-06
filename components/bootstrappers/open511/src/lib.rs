@@ -20,7 +20,9 @@ pub mod descriptor;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEvent;
 use drasi_source_open511::api::Open511ApiClient;
 use drasi_source_open511::config::{InitialCursorBehavior, Open511SourceConfig};
@@ -191,7 +193,7 @@ impl BootstrapProvider for Open511BootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let source_config = Open511SourceConfig {
             base_url: self.config.base_url.clone(),
             poll_interval_secs: 60,
@@ -237,7 +239,10 @@ impl BootstrapProvider for Open511BootstrapProvider {
             }
         }
 
-        Ok(sent)
+        Ok(BootstrapResult {
+            event_count: sent,
+            ..Default::default()
+        })
     }
 }
 

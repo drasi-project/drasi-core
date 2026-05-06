@@ -99,46 +99,10 @@ impl Source for Open511Source {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "base_url".to_string(),
-            serde_json::Value::String(self.config.base_url.clone()),
-        );
-        props.insert(
-            "poll_interval_secs".to_string(),
-            serde_json::Value::Number(self.config.poll_interval_secs.into()),
-        );
-        props.insert(
-            "full_sweep_interval".to_string(),
-            serde_json::Value::Number(self.config.full_sweep_interval.into()),
-        );
-        props.insert(
-            "request_timeout_secs".to_string(),
-            serde_json::Value::Number(self.config.request_timeout_secs.into()),
-        );
-        props.insert(
-            "page_size".to_string(),
-            serde_json::Value::Number((self.config.page_size as u64).into()),
-        );
-        if let Some(ref status) = self.config.status_filter {
-            props.insert(
-                "status_filter".to_string(),
-                serde_json::Value::String(status.clone()),
-            );
-        }
-        if let Some(ref severity) = self.config.severity_filter {
-            props.insert(
-                "severity_filter".to_string(),
-                serde_json::Value::String(severity.clone()),
-            );
-        }
-        if let Some(ref event_type) = self.config.event_type_filter {
-            props.insert(
-                "event_type_filter".to_string(),
-                serde_json::Value::String(event_type.clone()),
-            );
-        }
-        props
+        use crate::descriptor::Open511SourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&Open511SourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
