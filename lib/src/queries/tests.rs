@@ -62,6 +62,7 @@ mod manager_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -91,6 +92,7 @@ mod manager_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -911,6 +913,7 @@ mod query_core_tests {
                 storage_backend: None,
                 recovery_policy: None,
                 outbox_capacity: 1000,
+                bootstrap_timeout_secs: 300,
             };
 
             // Just verify the config can be created
@@ -936,6 +939,7 @@ mod query_core_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         };
 
         // Empty queries should be caught during validation
@@ -987,6 +991,7 @@ mod output_state_integration_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -1264,6 +1269,7 @@ mod output_state_integration_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 2, // Very small — will evict quickly
+            bootstrap_timeout_secs: 300,
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("gap-query".to_string()).await.unwrap();
@@ -1446,6 +1452,7 @@ mod output_state_integration_tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 100,
+            bootstrap_timeout_secs: 300,
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager.start_query("noop-query".to_string()).await.unwrap();

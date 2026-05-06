@@ -288,6 +288,7 @@ mod tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -530,6 +531,7 @@ mod tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         };
 
         let base = QueryBase::new(config).unwrap();
@@ -579,6 +581,7 @@ mod tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         };
 
         let base = QueryBase::new(config).unwrap();

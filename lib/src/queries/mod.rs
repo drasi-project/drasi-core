@@ -31,7 +31,7 @@ pub use base::QueryBase;
 pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
-pub use output_state::*;
+pub use output_state::{FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse};
 pub use priority_queue::*;
 pub use sequence_dedup::SequenceDedup;
 pub use subscription_builder::*;

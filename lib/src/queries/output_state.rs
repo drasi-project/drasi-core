@@ -33,18 +33,22 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
 /// This struct is held behind `Arc<RwLock<...>>` in `DrasiQuery`. Writers acquire
 /// a write lock to apply diffs and push to the outbox. Readers (e.g., `fetch_snapshot`)
 /// acquire a read lock and clone the `im::HashMap` in O(1) via structural sharing.
+///
+/// All fields are private to enforce invariants (sequence monotonicity, ring buffer
+/// bounds). Use accessor methods for read access and `apply_diffs` /
+/// `advance_sequence_and_push` for mutations.
 #[derive(Debug, Clone)]
 pub struct QueryOutputState {
     /// Live result set, keyed by `row_signature` for O(1) updates.
     /// Uses `im::HashMap` for O(1) structural-sharing clones (the clone itself is
     /// constant-time; access still requires the enclosing `RwLock` read lock).
-    pub results: im::HashMap<u64, serde_json::Value>,
+    results: im::HashMap<u64, serde_json::Value>,
     /// The result sequence number the snapshot reflects.
     /// Incremented only when non-empty diffs are emitted.
-    pub as_of_sequence: u64,
+    as_of_sequence: u64,
     /// Ring buffer of recent `QueryResult` emissions (bounded by `outbox_capacity`).
     /// Stored as `Arc` for zero-copy dispatch to reactions.
-    pub outbox: VecDeque<Arc<QueryResult>>,
+    outbox: VecDeque<Arc<QueryResult>>,
     /// Maximum number of entries retained in the outbox.
     outbox_capacity: usize,
 }
@@ -134,6 +138,26 @@ impl QueryOutputState {
         self.outbox_capacity
     }
 
+    /// Return the current sequence number.
+    pub fn as_of_sequence(&self) -> u64 {
+        self.as_of_sequence
+    }
+
+    /// Return the number of entries currently in the outbox.
+    pub fn outbox_len(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Return the number of results in the live result set.
+    pub fn results_len(&self) -> usize {
+        self.results.len()
+    }
+
+    /// Get a result by its row signature.
+    pub fn get_result(&self, row_signature: &u64) -> Option<&serde_json::Value> {
+        self.results.get(row_signature)
+    }
+
     /// Fetch outbox entries after the given sequence number.
     ///
     /// Returns `Ok(entries)` if the requested position is available in the ring buffer,
@@ -143,7 +167,7 @@ impl QueryOutputState {
         after_sequence: u64,
     ) -> Result<Vec<Arc<QueryResult>>, OutboxGap> {
         if after_sequence >= self.as_of_sequence {
-            // Caller is fully caught up
+            // Caller is at or ahead of the current sequence — nothing to return
             return Ok(Vec::new());
         }
 
@@ -208,7 +232,8 @@ pub enum FetchError {
 #[derive(Debug, Clone)]
 pub struct SnapshotResponse {
     /// The live result set at the time of the snapshot.
-    pub results: im::HashMap<u64, serde_json::Value>,
+    /// This is a collected `Vec` decoupled from the internal storage representation.
+    pub results: Vec<serde_json::Value>,
     /// The sequence number this snapshot reflects.
     pub as_of_sequence: u64,
 }

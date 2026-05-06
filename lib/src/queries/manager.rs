@@ -302,6 +302,8 @@ pub struct DrasiQuery {
     middleware_registry: Arc<MiddlewareTypeRegistry>,
     // FutureQueueSource for temporal query support
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
+    // Configurable bootstrap timeout for fetch APIs
+    bootstrap_timeout: std::time::Duration,
 }
 
 impl DrasiQuery {
@@ -316,6 +318,7 @@ impl DrasiQuery {
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
         let outbox_capacity = config.outbox_capacity;
+        let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
 
         // Create QueryBase for common functionality
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
@@ -332,6 +335,7 @@ impl DrasiQuery {
             index_factory,
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
+            bootstrap_timeout,
         })
     }
 
@@ -351,10 +355,9 @@ impl DrasiQuery {
     ///
     /// Returns `Ok(())` if the query reaches `Running` status.
     /// Returns `Err(FetchError::NotRunning)` if it reaches a terminal non-Running state.
-    /// Returns `Err(FetchError::TimedOut)` if bootstrap doesn't complete within 5 minutes.
+    /// Returns `Err(FetchError::TimedOut)` if bootstrap doesn't complete within the
+    /// configured `bootstrap_timeout_secs`.
     async fn wait_until_running(&self) -> Result<(), FetchError> {
-        const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
         let mut status_rx = self.base.status_handle().subscribe_status();
 
         // Check current value first (avoids waiting if already transitioned)
@@ -367,7 +370,7 @@ impl DrasiQuery {
 
         // Wait for a non-Starting status, with timeout
         let result = tokio::time::timeout(
-            BOOTSTRAP_TIMEOUT,
+            self.bootstrap_timeout,
             status_rx.wait_for(|s| *s != ComponentStatus::Starting),
         )
         .await;
@@ -1313,8 +1316,8 @@ impl Query for DrasiQuery {
 
         let state = self.output_state.read().await;
         Ok(SnapshotResponse {
-            results: state.results.clone(),
-            as_of_sequence: state.as_of_sequence,
+            results: state.get_results_as_vec(),
+            as_of_sequence: state.as_of_sequence(),
         })
     }
 
@@ -1325,7 +1328,7 @@ impl Query for DrasiQuery {
         let state = self.output_state.read().await;
         let results = state.fetch_outbox_after(after_sequence)?;
         Ok(OutboxResponse {
-            latest_sequence: state.as_of_sequence,
+            latest_sequence: state.as_of_sequence(),
             results,
         })
     }

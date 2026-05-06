@@ -186,6 +186,7 @@ mod tests {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 

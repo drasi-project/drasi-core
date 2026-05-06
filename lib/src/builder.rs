@@ -550,6 +550,7 @@ pub struct Query {
     storage_backend: Option<crate::indexes::StorageBackendRef>,
     recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     outbox_capacity: usize,
+    bootstrap_timeout_secs: u64,
 }
 
 impl Query {
@@ -571,6 +572,7 @@ impl Query {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -592,6 +594,7 @@ impl Query {
             storage_backend: None,
             recovery_policy: None,
             outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -698,6 +701,15 @@ impl Query {
         self
     }
 
+    /// Set the bootstrap timeout in seconds.
+    /// This controls how long `fetch_snapshot` / `fetch_outbox` will wait for
+    /// the query to finish bootstrapping before returning `FetchError::TimedOut`.
+    /// Default: 300 (5 minutes).
+    pub fn with_bootstrap_timeout_secs(mut self, secs: u64) -> Self {
+        self.bootstrap_timeout_secs = secs;
+        self
+    }
+
     /// Build the query configuration.
     pub fn build(self) -> QueryConfig {
         QueryConfig {
@@ -716,6 +728,7 @@ impl Query {
             storage_backend: self.storage_backend,
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
         }
     }
 }
