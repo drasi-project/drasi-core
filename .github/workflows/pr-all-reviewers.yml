@@ -62,7 +62,12 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
           REPO: ${{ github.repository }}
-          REF: ${{ github.event.repository.default_branch }}
+          # Dispatch reviewers from the same ref this orchestrator is running on
+          # so feature-branch changes are picked up. github.ref_name is the
+          # branch for push/workflow_dispatch and the PR base branch for
+          # pull_request events; head_ref is the PR head branch (only set on
+          # pull_request* events). Prefer head_ref when present.
+          REF: ${{ github.head_ref || github.ref_name }}
         run: |
           set -euo pipefail
 
