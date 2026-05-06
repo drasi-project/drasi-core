@@ -36,7 +36,8 @@ pub const DEFAULT_OUTBOX_CAPACITY: usize = 1000;
 #[derive(Debug, Clone)]
 pub struct QueryOutputState {
     /// Live result set, keyed by `row_signature` for O(1) updates.
-    /// Uses `im::HashMap` for O(1) lock-free snapshot cloning.
+    /// Uses `im::HashMap` for O(1) structural-sharing clones (the clone itself is
+    /// constant-time; access still requires the enclosing `RwLock` read lock).
     pub results: im::HashMap<u64, serde_json::Value>,
     /// The result sequence number the snapshot reflects.
     /// Incremented only when non-empty diffs are emitted.

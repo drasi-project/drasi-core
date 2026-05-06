@@ -176,35 +176,35 @@ async fn dispatch_query_results(
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
-    // Convert Drasi results to our QueryResult format
+    // Convert Drasi results to our QueryResult format, filtering out Noops
     let converted_results: Vec<ResultDiff> = results
         .iter()
-        .map(|ctx| match ctx {
+        .filter_map(|ctx| match ctx {
             QueryPartEvaluationContext::Adding {
                 after,
                 row_signature,
-            } => ResultDiff::Add {
+            } => Some(ResultDiff::Add {
                 data: convert_query_variables_to_json(after),
                 row_signature: *row_signature,
-            },
+            }),
             QueryPartEvaluationContext::Removing {
                 before,
                 row_signature,
-            } => ResultDiff::Delete {
+            } => Some(ResultDiff::Delete {
                 data: convert_query_variables_to_json(before),
                 row_signature: *row_signature,
-            },
+            }),
             QueryPartEvaluationContext::Updating {
                 before,
                 after,
                 row_signature,
-            } => ResultDiff::Update {
+            } => Some(ResultDiff::Update {
                 data: convert_query_variables_to_json(after),
                 before: convert_query_variables_to_json(before),
                 after: convert_query_variables_to_json(after),
                 grouping_keys: None,
                 row_signature: *row_signature,
-            },
+            }),
             // NOTE: When a group empties (last contributor removed), core emits
             // Aggregation { default_after: true, .. } with identity values (count:0,
             // sum:0, etc.) rather than Removing. Proper empty-group → Delete detection
@@ -216,14 +216,19 @@ async fn dispatch_query_results(
                 after,
                 row_signature,
                 ..
-            } => ResultDiff::Aggregation {
+            } => Some(ResultDiff::Aggregation {
                 before: before.as_ref().map(convert_query_variables_to_json),
                 after: convert_query_variables_to_json(after),
                 row_signature: *row_signature,
-            },
-            QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+            }),
+            QueryPartEvaluationContext::Noop => None,
         })
         .collect();
+
+    // If all results were Noops, skip outbox/sequence advancement and dispatch
+    if converted_results.is_empty() {
+        return;
+    }
 
     // Apply diffs to the output state, build QueryResult, increment sequence,
     // push to outbox, and get back the Arc for zero-copy dispatch — all in one
