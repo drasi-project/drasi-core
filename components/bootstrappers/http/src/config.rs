@@ -95,7 +95,7 @@ pub enum HttpMethod {
 
 /// Authentication configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum AuthConfig {
     /// Bearer token authentication.
     Bearer {
@@ -120,7 +120,7 @@ pub enum AuthConfig {
         password_env: Option<String>,
     },
     /// OAuth2 Client Credentials flow.
-    #[serde(rename = "oauth2_client_credentials")]
+    #[serde(rename = "oauth2-client-credentials")]
     OAuth2ClientCredentials {
         /// Token endpoint URL.
         token_url: String,
@@ -136,7 +136,7 @@ pub enum AuthConfig {
 
 /// Where to place an API key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum ApiKeyLocation {
     Header,
     Query,
@@ -144,7 +144,7 @@ pub enum ApiKeyLocation {
 
 /// Pagination configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PaginationConfig {
     /// Offset/limit pagination.
     OffsetLimit {
@@ -428,7 +428,7 @@ mod tests {
                     "token_env": "API_TOKEN"
                 },
                 "pagination": {
-                    "type": "offset_limit",
+                    "type": "offset-limit",
                     "offset_param": "offset",
                     "limit_param": "limit",
                     "page_size": 100
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn test_deserialize_oauth2_auth() {
         let json = r#"{
-            "type": "oauth2_client_credentials",
+            "type": "oauth2-client-credentials",
             "token_url": "https://auth.example.com/token",
             "client_id_env": "CLIENT_ID",
             "client_secret_env": "CLIENT_SECRET",
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn test_deserialize_next_url_pagination() {
         let json = r#"{
-            "type": "next_url",
+            "type": "next-url",
             "next_url_path": "$.nextRecordsUrl",
             "base_url": "https://instance.salesforce.com"
         }"#;

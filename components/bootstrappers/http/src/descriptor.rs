@@ -115,7 +115,7 @@ pub enum HttpMethodDto {
 /// Authentication configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::http::AuthConfig)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum AuthConfigDto {
     /// Bearer token authentication.
     Bearer {
@@ -141,7 +141,7 @@ pub enum AuthConfigDto {
         password_env: Option<ConfigValue<String>>,
     },
     /// OAuth2 Client Credentials flow.
-    #[serde(rename = "oauth2_client_credentials")]
+    #[serde(rename = "oauth2-client-credentials")]
     OAuth2ClientCredentials {
         /// Token endpoint URL.
         token_url: ConfigValue<String>,
@@ -158,7 +158,7 @@ pub enum AuthConfigDto {
 /// Where to place an API key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::http::ApiKeyLocation)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum ApiKeyLocationDto {
     Header,
     Query,
@@ -167,7 +167,7 @@ pub enum ApiKeyLocationDto {
 /// Pagination configuration DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = bootstrap::http::PaginationConfig)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum PaginationConfigDto {
     /// Offset/limit pagination.
     OffsetLimit {

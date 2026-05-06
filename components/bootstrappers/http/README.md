@@ -47,7 +47,7 @@ Fetches initial state from REST APIs to populate Drasi continuous queries. Suppo
 #### API Key (Header or Query)
 ```json
 {
-  "type": "api_key",
+  "type": "api-key",
   "location": "header",
   "name": "X-API-Key",
   "value_env": "MY_API_KEY"
@@ -56,7 +56,7 @@ Fetches initial state from REST APIs to populate Drasi continuous queries. Suppo
 
 ```json
 {
-  "type": "api_key",
+  "type": "api-key",
   "location": "query",
   "name": "api_key",
   "value_env": "MY_API_KEY"
@@ -75,7 +75,7 @@ Fetches initial state from REST APIs to populate Drasi continuous queries. Suppo
 #### OAuth2 Client Credentials
 ```json
 {
-  "type": "oauth2_client_credentials",
+  "type": "oauth2-client-credentials",
   "token_url": "https://auth.example.com/oauth/token",
   "client_id_env": "MY_CLIENT_ID",
   "client_secret_env": "MY_CLIENT_SECRET",
@@ -90,7 +90,7 @@ Classic offset-based pagination. Increments offset by `page_size` each request.
 
 ```json
 {
-  "type": "offset_limit",
+  "type": "offset-limit",
   "offset_param": "offset",
   "limit_param": "limit",
   "page_size": 100,
@@ -105,7 +105,7 @@ Simple page number pagination. Increments page number each request.
 
 ```json
 {
-  "type": "page_number",
+  "type": "page-number",
   "page_param": "page",
   "page_size_param": "per_page",
   "page_size": 100,
@@ -136,7 +136,7 @@ Follows the `rel="next"` URL in the RFC 5988 `Link` response header.
 
 ```json
 {
-  "type": "link_header",
+  "type": "link-header",
   "page_size_param": "per_page",
   "page_size": 100
 }
@@ -149,7 +149,7 @@ Extracts the next page URL from the response body.
 
 ```json
 {
-  "type": "next_url",
+  "type": "next-url",
   "next_url_path": "$.nextRecordsUrl",
   "base_url": "https://instance.salesforce.com"
 }
@@ -222,7 +222,7 @@ Fetch all repositories for an organization. Uses **Link header** pagination and 
         "token_env": "GITHUB_TOKEN"
       },
       "pagination": {
-        "type": "link_header",
+        "type": "link-header",
         "page_size_param": "per_page",
         "page_size": 100
       },
@@ -266,13 +266,13 @@ Fetch products from a Shopify store. Uses **Link header** pagination (with curso
       "url": "https://mystore.myshopify.com/admin/api/2024-01/products.json",
       "method": "GET",
       "auth": {
-        "type": "api_key",
+        "type": "api-key",
         "location": "header",
         "name": "X-Shopify-Access-Token",
         "value_env": "SHOPIFY_ACCESS_TOKEN"
       },
       "pagination": {
-        "type": "link_header",
+        "type": "link-header",
         "page_size_param": "limit",
         "page_size": 50
       },
@@ -363,14 +363,14 @@ Fetch Accounts via SOQL query. Uses **next-URL** pagination (`nextRecordsUrl`) a
       "url": "https://myinstance.salesforce.com/services/data/v59.0/query?q=SELECT+Id,Name,Industry,AnnualRevenue+FROM+Account",
       "method": "GET",
       "auth": {
-        "type": "oauth2_client_credentials",
+        "type": "oauth2-client-credentials",
         "token_url": "https://login.salesforce.com/services/oauth2/token",
         "client_id_env": "SF_CLIENT_ID",
         "client_secret_env": "SF_CLIENT_SECRET",
         "scopes": []
       },
       "pagination": {
-        "type": "next_url",
+        "type": "next-url",
         "next_url_path": "$.nextRecordsUrl",
         "base_url": "https://myinstance.salesforce.com"
       },
@@ -415,7 +415,7 @@ Fetch call records. Uses **next-URL** pagination (`next_page_uri`) and **Basic**
         "password_env": "TWILIO_AUTH_TOKEN"
       },
       "pagination": {
-        "type": "next_url",
+        "type": "next-url",
         "next_url_path": "$.next_page_uri",
         "base_url": "https://api.twilio.com"
       },
