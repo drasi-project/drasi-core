@@ -28,7 +28,7 @@ safe-outputs:
     private-key: ${{ secrets.DRASI_REVIEWER_APP_PRIVATE_KEY }}
     repositories: ["*"]
   create-pull-request-review-comment:
-    max: 20
+    max: 10
     side: "RIGHT"
     target: "*"
     target-repo: "drasi-project/drasi-core"
