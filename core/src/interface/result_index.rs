@@ -133,8 +133,6 @@ impl From<ResultSequence> for ResultCheckpoint {
 
 #[async_trait]
 pub trait ResultSequenceCounter: Send + Sync {
-    async fn apply_sequence(&self, sequence: u64, source_change_id: &str)
-        -> Result<(), IndexError>;
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
 
     async fn apply_checkpoint(

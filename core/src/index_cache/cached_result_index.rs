@@ -163,14 +163,6 @@ impl LazySortedSetStore for CachedResultIndex {
 
 #[async_trait]
 impl ResultSequenceCounter for CachedResultIndex {
-    async fn apply_sequence(
-        &self,
-        sequence: u64,
-        source_change_id: &str,
-    ) -> Result<(), IndexError> {
-        self.inner.apply_sequence(sequence, source_change_id).await
-    }
-
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         self.inner.get_sequence().await
     }

@@ -180,17 +180,6 @@ impl LazySortedSetStore for InMemoryResultIndex {
 
 #[async_trait]
 impl ResultSequenceCounter for InMemoryResultIndex {
-    async fn apply_sequence(
-        &self,
-        sequence: u64,
-        source_change_id: &str,
-    ) -> Result<(), IndexError> {
-        let mut data = self.checkpoint.write().await;
-        data.sequence = sequence;
-        data.source_change_id = Arc::from(source_change_id);
-        Ok(())
-    }
-
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let data = self.checkpoint.read().await;
         Ok(ResultSequence {
@@ -289,8 +278,8 @@ mod tests {
     async fn test_sequence_and_checkpoint_consistency() {
         let index = InMemoryResultIndex::new();
 
-        // apply_sequence should be visible via get_checkpoint
-        index.apply_sequence(7, "change-a").await.unwrap();
+        // apply_checkpoint(None) should be visible via get_checkpoint
+        index.apply_checkpoint(7, "change-a", None).await.unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 7);
         assert_eq!(cp.source_change_id.as_ref(), "change-a");

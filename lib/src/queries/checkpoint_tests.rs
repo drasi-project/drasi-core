@@ -635,8 +635,8 @@ mod tests {
         assert_eq!(seq.sequence, 42);
         assert_eq!(seq.source_change_id.as_ref(), "src-a");
 
-        // Writing via apply_sequence should be readable via get_checkpoint
-        index.apply_sequence(99, "src-b").await.unwrap();
+        // Writing via apply_checkpoint(None) should be readable via get_checkpoint
+        index.apply_checkpoint(99, "src-b", None).await.unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 99);
         assert_eq!(cp.source_change_id.as_ref(), "src-b");

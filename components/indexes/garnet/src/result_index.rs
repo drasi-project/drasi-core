@@ -354,25 +354,6 @@ impl GarnetResultIndex {
 /// metadata:{<query_id>}:source_change_id -> {value}
 #[async_trait]
 impl ResultSequenceCounter for GarnetResultIndex {
-    async fn apply_sequence(
-        &self,
-        sequence: u64,
-        source_change_id: &str,
-    ) -> Result<(), IndexError> {
-        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
-
-        let mut guard = self.session_state.lock()?;
-        let buffer = guard.as_mut().ok_or_else(|| {
-            IndexError::other(std::io::Error::other(
-                "write operation requires an active session",
-            ))
-        })?;
-        buffer.string_set(seq_key, sequence.to_string().into_bytes());
-        buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
-        Ok(())
-    }
-
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
         let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);

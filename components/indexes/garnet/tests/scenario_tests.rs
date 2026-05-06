@@ -1095,7 +1095,10 @@ mod session {
 
         // Commit sequence 5
         session_control.begin().await.unwrap();
-        result_index.apply_sequence(5, "change-1").await.unwrap();
+        result_index
+            .apply_checkpoint(5, "change-1", None)
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
@@ -1105,7 +1108,10 @@ mod session {
         assert_eq!(seq.source_change_id.as_ref(), "change-1");
 
         // Apply sequence 10 then rollback
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        result_index
+            .apply_checkpoint(10, "change-2", None)
+            .await
+            .unwrap();
         session_control.rollback().unwrap();
 
         // Verify rollback preserved the old value
@@ -1119,7 +1125,10 @@ mod session {
         );
 
         // Now commit sequence 10
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        result_index
+            .apply_checkpoint(10, "change-2", None)
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted

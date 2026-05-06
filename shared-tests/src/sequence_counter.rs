@@ -22,9 +22,9 @@ pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
     assert_eq!(result, ResultSequence::default());
 
     subject
-        .apply_sequence(2, "foo")
+        .apply_checkpoint(2, "foo", None)
         .await
-        .expect("apply_sequence failed");
+        .expect("apply_checkpoint failed");
 
     let result = subject.get_sequence().await.expect("get_sequence failed");
     assert_eq!(
@@ -137,12 +137,11 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         Some(&pos_80)
     );
 
-    // Verify that apply_sequence and apply_checkpoint are consistent
-    // (apply_sequence is equivalent to apply_checkpoint with None position)
+    // Verify that apply_checkpoint with None position is consistent with get_sequence
     subject
-        .apply_sequence(50, "source-legacy")
+        .apply_checkpoint(50, "source-legacy", None)
         .await
-        .expect("apply_sequence failed");
+        .expect("apply_checkpoint failed");
 
     let checkpoint = subject
         .get_checkpoint()

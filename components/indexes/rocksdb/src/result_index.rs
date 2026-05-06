@@ -293,35 +293,6 @@ impl LazySortedSetStore for RocksDbResultIndex {
 
 #[async_trait]
 impl ResultSequenceCounter for RocksDbResultIndex {
-    async fn apply_sequence(
-        &self,
-        sequence: u64,
-        source_change_id: &str,
-    ) -> Result<(), IndexError> {
-        let db = self.db.clone();
-        let session_state = self.session_state.clone();
-        let source_change_id = source_change_id.to_string();
-        let task = task::spawn_blocking(move || {
-            let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
-
-            session_state.with_txn(|txn| {
-                txn.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes())
-                    .map_err(IndexError::other)?;
-                txn.put_cf(
-                    &metadata_cf,
-                    "source_change_id",
-                    source_change_id.as_bytes(),
-                )
-                .map_err(IndexError::other)
-            })
-        });
-
-        match task.await {
-            Ok(v) => v,
-            Err(e) => Err(IndexError::other(e)),
-        }
-    }
-
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
