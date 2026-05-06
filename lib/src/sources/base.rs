@@ -365,8 +365,7 @@ impl SourceBase {
     /// Reset the sequence counter, typically after recovering from a checkpoint.
     /// The next dispatched event will receive `sequence + 1`.
     pub fn set_next_sequence(&self, sequence: u64) {
-        self.next_sequence
-            .store(sequence + 1, Ordering::Relaxed);
+        self.next_sequence.store(sequence + 1, Ordering::Relaxed);
     }
 
     /// Apply subscription settings that affect the source base.
@@ -375,7 +374,10 @@ impl SourceBase {
     /// Handles:
     /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
     ///   across restarts.
-    pub fn apply_subscription_settings(&self, settings: &crate::config::SourceSubscriptionSettings) {
+    pub fn apply_subscription_settings(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+    ) {
         if let Some(last_seq) = settings.last_sequence {
             // Only advance the counter, never go backwards
             let current = self.next_sequence.load(Ordering::Relaxed);

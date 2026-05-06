@@ -22,8 +22,7 @@ use std::{
 use bytes::Bytes;
 
 use crate::interface::{
-    ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence,
-    ResultSequenceCounter,
+    ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
 };
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;
@@ -247,7 +246,10 @@ mod tests {
 
         // Apply with 8-byte position for source "src-1"
         let pos = Bytes::from_static(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        index.apply_checkpoint(5, "src-1", Some(&pos)).await.unwrap();
+        index
+            .apply_checkpoint(5, "src-1", Some(&pos))
+            .await
+            .unwrap();
 
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 5);
@@ -256,7 +258,10 @@ mod tests {
 
         // Apply with position for a second source — first source position preserved
         let pos2 = Bytes::from_static(&[9, 10, 11, 12]);
-        index.apply_checkpoint(6, "src-2", Some(&pos2)).await.unwrap();
+        index
+            .apply_checkpoint(6, "src-2", Some(&pos2))
+            .await
+            .unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 6);
         assert_eq!(cp.get_source_position("src-1"), Some(&pos));
@@ -271,7 +276,10 @@ mod tests {
 
         // Apply with large position (100 bytes)
         let big_pos = Bytes::from(vec![0xAB; 100]);
-        index.apply_checkpoint(20, "src-cosmos", Some(&big_pos)).await.unwrap();
+        index
+            .apply_checkpoint(20, "src-cosmos", Some(&big_pos))
+            .await
+            .unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 20);
         assert_eq!(cp.get_source_position("src-cosmos"), Some(&big_pos));
@@ -289,7 +297,10 @@ mod tests {
 
         // apply_checkpoint should be visible via get_sequence
         let pos = Bytes::from_static(b"position-data");
-        index.apply_checkpoint(15, "change-b", Some(&pos)).await.unwrap();
+        index
+            .apply_checkpoint(15, "change-b", Some(&pos))
+            .await
+            .unwrap();
         let seq = index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 15);
         assert_eq!(seq.source_change_id.as_ref(), "change-b");

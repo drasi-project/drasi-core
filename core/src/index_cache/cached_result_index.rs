@@ -27,8 +27,8 @@ use tokio::sync::RwLock;
 use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex,
-        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
+        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
+        ResultOwner, ResultSequence, ResultSequenceCounter,
     },
 };
 

@@ -23,8 +23,8 @@ use bytes::Bytes as BytesType;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex,
-        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
+        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
+        ResultOwner, ResultSequence, ResultSequenceCounter,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -454,9 +454,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
             BufferReadResult::NotInBuffer => redis_list,
         };
         let mut source_ids: Vec<String> = match current_list {
-            Some(ref s) if !s.is_empty() => {
-                serde_json::from_str(s).map_err(IndexError::other)?
-            }
+            Some(ref s) if !s.is_empty() => serde_json::from_str(s).map_err(IndexError::other)?,
             _ => Vec::new(),
         };
 
@@ -624,10 +622,7 @@ impl GarnetResultIndex {
 
         // Read source ID list from Redis and fetch each position
         let source_ids: Vec<String> = match con
-            .get::<String, Option<String>>(format!(
-                "metadata:{{{}}}:source_id_list",
-                self.query_id
-            ))
+            .get::<String, Option<String>>(format!("metadata:{{{}}}:source_id_list", self.query_id))
             .await
         {
             Ok(Some(s)) => serde_json::from_str(&s).map_err(IndexError::other)?,

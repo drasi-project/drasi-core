@@ -611,7 +611,8 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let (source_id, event, _timestamp, profiling, _sequence, _source_position) = wrapper.into_parts();
+        let (source_id, event, _timestamp, profiling, _sequence, _source_position) =
+            wrapper.into_parts();
 
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
@@ -632,7 +633,8 @@ mod tests {
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
-        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) = result.unwrap();
+        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) =
+            result.unwrap();
         assert_eq!(source_id, "test-source");
         assert!(matches!(event, SourceEvent::Change(_)));
     }
@@ -708,7 +710,8 @@ mod tests {
         assert_eq!(wrapper.sequence, Some(42));
         assert!(wrapper.profiling.is_none());
 
-        let (_source_id, _event, _timestamp, _profiling, sequence, _source_position) = wrapper.into_parts();
+        let (_source_id, _event, _timestamp, _profiling, sequence, _source_position) =
+            wrapper.into_parts();
         assert_eq!(sequence, Some(42));
     }
 

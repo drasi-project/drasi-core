@@ -105,7 +105,8 @@ mod tests {
 
         /// Get the current value of the position handle
         fn get_position_handle_value(&self) -> u64 {
-            self.position_handle.load(std::sync::atomic::Ordering::Acquire)
+            self.position_handle
+                .load(std::sync::atomic::Ordering::Acquire)
         }
     }
 
@@ -129,10 +130,7 @@ mod tests {
 
         async fn start(&self) -> anyhow::Result<()> {
             self.base
-                .set_status(
-                    ComponentStatus::Starting,
-                    Some("Starting".to_string()),
-                )
+                .set_status(ComponentStatus::Starting, Some("Starting".to_string()))
                 .await;
             self.base
                 .set_status(ComponentStatus::Running, Some("Running".to_string()))
@@ -142,10 +140,7 @@ mod tests {
 
         async fn stop(&self) -> anyhow::Result<()> {
             self.base
-                .set_status(
-                    ComponentStatus::Stopping,
-                    Some("Stopping".to_string()),
-                )
+                .set_status(ComponentStatus::Stopping, Some("Stopping".to_string()))
                 .await;
             self.base
                 .set_status(ComponentStatus::Stopped, Some("Stopped".to_string()))
@@ -347,24 +342,27 @@ mod tests {
         let mut receiver = sub.receiver;
 
         // Inject 3 events with different positions
-        let positions = vec![
-            Some(Bytes::from_static(b"pos-A")),
-            Some(Bytes::from_static(b"pos-B")),
-            None,
-        ];
+        let positions =
+            vec![Some(Bytes::from_static(b"pos-A")), Some(Bytes::from_static(b"pos-B")), None];
 
         for (i, pos) in positions.into_iter().enumerate() {
             let change = drasi_core::models::SourceChange::Insert {
                 element: drasi_core::models::Element::Node {
                     metadata: drasi_core::models::ElementMetadata {
-                        reference: drasi_core::models::ElementReference::new("src", &format!("n{i}")),
+                        reference: drasi_core::models::ElementReference::new(
+                            "src",
+                            &format!("n{i}"),
+                        ),
                         labels: Arc::new([Arc::from("Person")]),
                         effective_from: 1000 + i as u64,
                     },
                     properties: drasi_core::models::ElementPropertyMap::new(),
                 },
             };
-            source.inject_change_with_position(change, pos).await.unwrap();
+            source
+                .inject_change_with_position(change, pos)
+                .await
+                .unwrap();
         }
 
         // Receive events and verify monotonic sequences
@@ -496,9 +494,14 @@ mod tests {
                     effective_from: 1000,
                 },
                 properties: drasi_core::models::ElementPropertyMap::from(
-                    vec![("name".to_string(), drasi_core::evaluation::variable_value::VariableValue::String("Alice".to_string()))]
-                        .into_iter()
-                        .collect::<std::collections::BTreeMap<_, _>>(),
+                    vec![(
+                        "name".to_string(),
+                        drasi_core::evaluation::variable_value::VariableValue::String(
+                            "Alice".to_string(),
+                        ),
+                    )]
+                    .into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
                 ),
             },
         };
@@ -686,7 +689,10 @@ mod tests {
             .unwrap();
         let history = test_source.get_resume_from_history().await;
         assert!(!history.is_empty());
-        assert_eq!(history[0], None, "Initial subscribe should have no resume_from");
+        assert_eq!(
+            history[0], None,
+            "Initial subscribe should have no resume_from"
+        );
     }
 
     // ========================================================================
@@ -753,9 +759,9 @@ mod tests {
                     properties: drasi_core::models::ElementPropertyMap::from(
                         vec![(
                             "name".to_string(),
-                            drasi_core::evaluation::variable_value::VariableValue::String(
-                                format!("person{i}"),
-                            ),
+                            drasi_core::evaluation::variable_value::VariableValue::String(format!(
+                                "person{i}"
+                            )),
                         )]
                         .into_iter()
                         .collect::<std::collections::BTreeMap<_, _>>(),
@@ -830,7 +836,10 @@ mod tests {
             .get_query_instance("dedup-query")
             .await
             .unwrap();
-        let drasi_query = query_instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        let drasi_query = query_instance
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap();
         let result_index = drasi_query.get_result_index().await.unwrap();
         let checkpoint = result_index.get_checkpoint().await.unwrap();
         assert_eq!(
@@ -1026,7 +1035,9 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::from(
                     vec![(
                         "name".to_string(),
-                        drasi_core::evaluation::variable_value::VariableValue::String("AlphaUser".to_string()),
+                        drasi_core::evaluation::variable_value::VariableValue::String(
+                            "AlphaUser".to_string(),
+                        ),
                     )]
                     .into_iter()
                     .collect::<std::collections::BTreeMap<_, _>>(),
@@ -1058,7 +1069,9 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::from(
                     vec![(
                         "name".to_string(),
-                        drasi_core::evaluation::variable_value::VariableValue::String("BetaUser".to_string()),
+                        drasi_core::evaluation::variable_value::VariableValue::String(
+                            "BetaUser".to_string(),
+                        ),
                     )]
                     .into_iter()
                     .collect::<std::collections::BTreeMap<_, _>>(),
@@ -1200,7 +1213,9 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::from(
                     vec![(
                         "name".to_string(),
-                        drasi_core::evaluation::variable_value::VariableValue::String("HandleTest".to_string()),
+                        drasi_core::evaluation::variable_value::VariableValue::String(
+                            "HandleTest".to_string(),
+                        ),
                     )]
                     .into_iter()
                     .collect::<std::collections::BTreeMap<_, _>>(),
@@ -1233,7 +1248,9 @@ mod tests {
                 properties: drasi_core::models::ElementPropertyMap::from(
                     vec![(
                         "name".to_string(),
-                        drasi_core::evaluation::variable_value::VariableValue::String("HandleTest2".to_string()),
+                        drasi_core::evaluation::variable_value::VariableValue::String(
+                            "HandleTest2".to_string(),
+                        ),
                     )]
                     .into_iter()
                     .collect::<std::collections::BTreeMap<_, _>>(),
@@ -1319,9 +1336,9 @@ mod tests {
                     properties: drasi_core::models::ElementPropertyMap::from(
                         vec![(
                             "name".to_string(),
-                            drasi_core::evaluation::variable_value::VariableValue::String(
-                                format!("recov{i}"),
-                            ),
+                            drasi_core::evaluation::variable_value::VariableValue::String(format!(
+                                "recov{i}"
+                            )),
                         )]
                         .into_iter()
                         .collect::<std::collections::BTreeMap<_, _>>(),
@@ -1342,7 +1359,10 @@ mod tests {
             .get_query_instance("recov-query")
             .await
             .unwrap();
-        let drasi_query = query_instance.as_any().downcast_ref::<DrasiQuery>().unwrap();
+        let drasi_query = query_instance
+            .as_any()
+            .downcast_ref::<DrasiQuery>()
+            .unwrap();
         let result_index = drasi_query.get_result_index().await.unwrap();
         let checkpoint_before = result_index.get_checkpoint().await.unwrap();
         assert_eq!(checkpoint_before.sequence, 3);

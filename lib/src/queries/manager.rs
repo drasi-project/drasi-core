@@ -635,8 +635,10 @@ impl Query for DrasiQuery {
             }
         }
 
-        let mut position_handles: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicU64>> =
-            std::collections::HashMap::new();
+        let mut position_handles: std::collections::HashMap<
+            String,
+            Arc<std::sync::atomic::AtomicU64>,
+        > = std::collections::HashMap::new();
 
         for (source_id, source, settings) in sources_to_subscribe {
             let subscription_response = match source.subscribe(settings.clone()).await {

@@ -45,7 +45,10 @@ pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
 /// - 80+ bytes (opaque tokens like MongoDB/Cosmos DB resume tokens)
 pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
     // Initially returns default checkpoint (no positions)
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint, ResultCheckpoint::default());
     assert!(checkpoint.source_positions.is_empty());
 
@@ -56,7 +59,10 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("apply_checkpoint failed");
 
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 10);
     assert_eq!(checkpoint.source_change_id.as_ref(), "source-pg");
     assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
@@ -75,10 +81,16 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("apply_checkpoint failed");
 
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 20);
     assert_eq!(checkpoint.source_change_id.as_ref(), "source-mssql");
-    assert_eq!(checkpoint.get_source_position("source-mssql"), Some(&pos_20));
+    assert_eq!(
+        checkpoint.get_source_position("source-mssql"),
+        Some(&pos_20)
+    );
     // Previous source position should still be there
     assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
 
@@ -89,13 +101,22 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("apply_checkpoint failed");
 
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 30);
     assert_eq!(checkpoint.source_change_id.as_ref(), "source-cosmos");
-    assert_eq!(checkpoint.get_source_position("source-cosmos"), Some(&pos_80));
+    assert_eq!(
+        checkpoint.get_source_position("source-cosmos"),
+        Some(&pos_80)
+    );
     // All previous positions remain
     assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
-    assert_eq!(checkpoint.get_source_position("source-mssql"), Some(&pos_20));
+    assert_eq!(
+        checkpoint.get_source_position("source-mssql"),
+        Some(&pos_20)
+    );
 
     // Apply checkpoint with None position — removes that source's position
     subject
@@ -103,12 +124,18 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("apply_checkpoint failed");
 
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 40);
     assert_eq!(checkpoint.source_change_id.as_ref(), "source-volatile");
     assert_eq!(checkpoint.get_source_position("source-volatile"), None);
     // Other sources' positions remain
-    assert_eq!(checkpoint.get_source_position("source-cosmos"), Some(&pos_80));
+    assert_eq!(
+        checkpoint.get_source_position("source-cosmos"),
+        Some(&pos_80)
+    );
 
     // Verify that apply_sequence and apply_checkpoint are consistent
     // (apply_sequence is equivalent to apply_checkpoint with None position)
@@ -117,7 +144,10 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("apply_sequence failed");
 
-    let checkpoint = subject.get_checkpoint().await.expect("get_checkpoint failed");
+    let checkpoint = subject
+        .get_checkpoint()
+        .await
+        .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 50);
     assert_eq!(checkpoint.source_change_id.as_ref(), "source-legacy");
     let seq = subject.get_sequence().await.expect("get_sequence failed");

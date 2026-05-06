@@ -15,12 +15,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use crate::{
     evaluation::{context::QueryVariables, variable_value::VariableValue},
     models::ElementReference,
 };
 use async_trait::async_trait;
+use bytes::Bytes;
 use ordered_float::OrderedFloat;
 
 use crate::evaluation::functions::aggregation::ValueAccumulator;

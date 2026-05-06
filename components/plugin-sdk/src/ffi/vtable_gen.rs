@@ -392,7 +392,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
             None
         } else {
-            let slice = unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
+            let slice =
+                unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 
@@ -732,7 +733,8 @@ pub fn build_source_vtable_from_boxed(
         let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
             None
         } else {
-            let slice = unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
+            let slice =
+                unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
             Some(bytes::Bytes::copy_from_slice(slice))
         };
 

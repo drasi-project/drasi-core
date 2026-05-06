@@ -22,8 +22,8 @@ use bytes::Bytes as BytesType;
 use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
-        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex,
-        ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
+        AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
+        ResultOwner, ResultSequence, ResultSequenceCounter,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -447,8 +447,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                                     if !key.starts_with(prefix) {
                                         break;
                                     }
-                                    let source_id =
-                                        String::from_utf8_lossy(&key[prefix.len()..]);
+                                    let source_id = String::from_utf8_lossy(&key[prefix.len()..]);
                                     source_positions.insert(
                                         Arc::from(source_id.as_ref()),
                                         BytesType::from(value.to_vec()),
@@ -482,12 +481,10 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         let sp_key = format!("sp:{source_id}");
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
-            session_state.with_txn(|txn| {
-                match txn.get_cf(&metadata_cf, &sp_key) {
-                    Ok(Some(v)) => Ok(Some(BytesType::from(v))),
-                    Ok(None) => Ok(None),
-                    Err(e) => Err(IndexError::other(e)),
-                }
+            session_state.with_txn(|txn| match txn.get_cf(&metadata_cf, &sp_key) {
+                Ok(Some(v)) => Ok(Some(BytesType::from(v))),
+                Ok(None) => Ok(None),
+                Err(e) => Err(IndexError::other(e)),
             })
         });
 
