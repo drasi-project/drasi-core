@@ -390,7 +390,7 @@ let provider = ApplicationBootstrapProviderBuilder::default().build();
 
 ### BootstrapProvider Trait Implementation
 
-##### `bootstrap(&self, request: BootstrapRequest, context: &BootstrapContext, event_tx: BootstrapEventSender) -> Result<usize>`
+##### `bootstrap(&self, request: BootstrapRequest, context: &BootstrapContext, event_tx: BootstrapEventSender, settings: Option<&SourceSubscriptionSettings>) -> Result<BootstrapResult>`
 
 Processes a bootstrap request from a query subscription.
 
@@ -398,9 +398,13 @@ Processes a bootstrap request from a query subscription.
 - `request`: Bootstrap request containing query ID and required labels
 - `context`: Bootstrap context (currently unused by this provider)
 - `event_tx`: Channel for sending bootstrap events (currently unused - ApplicationSource handles event sending)
+- `settings`: Optional subscription settings with additional query context
 
 **Returns**:
-- `Result<usize>`: Number of matching events found, or error if bootstrap fails
+- `Result<BootstrapResult>`: A `BootstrapResult` whose `event_count` is the
+  number of matching events found. `last_sequence` is `None` and
+  `sequences_aligned` is `false` — application-source bootstrap does not share
+  a sequence namespace with the streaming path.
 
 **Behavior**:
 1. Logs the bootstrap request details

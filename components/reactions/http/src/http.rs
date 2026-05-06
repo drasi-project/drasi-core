@@ -33,7 +33,7 @@ use drasi_lib::Reaction;
 use super::HttpReactionBuilder;
 
 pub struct HttpReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: HttpReactionConfig,
 }
 
@@ -278,10 +278,7 @@ impl Reaction for HttpReaction {
                 .collect(),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -442,7 +439,7 @@ impl Reaction for HttpReaction {
                 // Process each result
                 for result in &query_result.results {
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             if let Some(spec) = query_config.added.as_ref() {
                                 if let Err(e) = Self::process_result(
                                     &client,
@@ -461,7 +458,7 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             if let Some(spec) = query_config.deleted.as_ref() {
                                 if let Err(e) = Self::process_result(
                                     &client,
@@ -480,8 +477,14 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Update { .. } => {
+                        ResultDiff::Update { .. } | ResultDiff::Aggregation { .. } => {
                             if let Some(spec) = query_config.updated.as_ref() {
+                                let operation = if matches!(result, ResultDiff::Aggregation { .. })
+                                {
+                                    "AGGREGATION"
+                                } else {
+                                    "UPDATE"
+                                };
                                 let data_to_process = serde_json::to_value(result)
                                     .expect("ResultDiff serialization should succeed");
                                 if let Err(e) = Self::process_result(
@@ -490,7 +493,7 @@ impl Reaction for HttpReaction {
                                     &base_url,
                                     &token,
                                     spec,
-                                    "UPDATE",
+                                    operation,
                                     &data_to_process,
                                     query_name,
                                     &reaction_name,
@@ -501,7 +504,7 @@ impl Reaction for HttpReaction {
                                 }
                             }
                         }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                        ResultDiff::Noop => {}
                     }
                 }
             }

@@ -1,7 +1,7 @@
 ---
 name: reaction-planner
 description: Creates detailed implementation plans for new reaction components in Drasi.
-model: claude-sonnet-4.5
+model: claude-opus-4.6
 ---
 
 # reaction-planner

@@ -1377,7 +1377,9 @@ mod default_config {
 mod source_trait {
     use crate::{DataType, MockSource, MockSourceBuilder};
     use async_trait::async_trait;
-    use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+    use drasi_lib::bootstrap::{
+        BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+    };
     use drasi_lib::channels::BootstrapEventSender;
     use drasi_lib::config::SourceSubscriptionSettings;
     use drasi_lib::Source;
@@ -1399,6 +1401,8 @@ mod source_trait {
             query_id: "test-query".to_string(),
             nodes: HashSet::new(),
             relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: false,
         };
 
         let result = source.subscribe(settings).await;
@@ -1430,9 +1434,9 @@ mod source_trait {
                 _context: &BootstrapContext,
                 _event_tx: BootstrapEventSender,
                 _settings: Option<&SourceSubscriptionSettings>,
-            ) -> anyhow::Result<usize> {
+            ) -> anyhow::Result<BootstrapResult> {
                 self.was_called.store(true, Ordering::SeqCst);
-                Ok(0)
+                Ok(BootstrapResult::default())
             }
         }
 
@@ -1460,8 +1464,8 @@ mod source_trait {
                 _context: &BootstrapContext,
                 _event_tx: BootstrapEventSender,
                 _settings: Option<&SourceSubscriptionSettings>,
-            ) -> anyhow::Result<usize> {
-                Ok(0)
+            ) -> anyhow::Result<BootstrapResult> {
+                Ok(BootstrapResult::default())
             }
         }
 

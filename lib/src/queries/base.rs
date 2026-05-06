@@ -286,6 +286,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: mode,
             storage_backend: None,
+            recovery_policy: None,
         }
     }
 
@@ -526,6 +527,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Broadcast),
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let base = QueryBase::new(config).unwrap();
@@ -537,6 +539,7 @@ mod tests {
         // Dispatch a result
         let result = QueryResult {
             query_id: "test_query".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![],
             metadata: HashMap::new(),
@@ -572,6 +575,7 @@ mod tests {
             dispatch_buffer_capacity: Some(100),
             dispatch_mode: Some(DispatchMode::Channel),
             storage_backend: None,
+            recovery_policy: None,
         };
 
         let base = QueryBase::new(config).unwrap();
@@ -583,6 +587,7 @@ mod tests {
         // Dispatch a result
         let result = QueryResult {
             query_id: "test_query".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![],
             metadata: HashMap::new(),

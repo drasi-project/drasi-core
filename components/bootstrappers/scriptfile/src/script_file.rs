@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use crate::script_reader::BootstrapScriptReader;
 use crate::script_types::{BootstrapScriptRecord, NodeRecord, RelationRecord};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::sources::manager::convert_json_to_element_properties;
 
 use drasi_lib::bootstrap::ScriptFileBootstrapConfig;
@@ -112,7 +114,7 @@ impl ScriptFileBootstrapProvider {
     fn convert_node_to_element(source_id: &str, node: &NodeRecord) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &node.properties {
-            convert_json_to_element_properties(obj)?
+            convert_json_to_element_properties(obj)
         } else if node.properties.is_null() {
             Default::default()
         } else {
@@ -146,7 +148,7 @@ impl ScriptFileBootstrapProvider {
     fn convert_relation_to_element(source_id: &str, relation: &RelationRecord) -> Result<Element> {
         // Convert properties from JSON to ElementPropertyMap
         let properties = if let serde_json::Value::Object(obj) = &relation.properties {
-            convert_json_to_element_properties(obj)?
+            convert_json_to_element_properties(obj)
         } else if relation.properties.is_null() {
             Default::default()
         } else {
@@ -305,7 +307,7 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting script file bootstrap for query {} from {} file(s)",
             request.query_id,
@@ -338,7 +340,11 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
             request.query_id, count, request.node_labels, request.relation_labels
         );
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+        })
     }
 }
 

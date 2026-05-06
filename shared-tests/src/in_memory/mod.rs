@@ -641,3 +641,26 @@ mod source_update_upsert {
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
     }
 }
+
+mod string_operators {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn starts_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::starts_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn ends_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::ends_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn contains_op() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::contains_op(&test_config).await;
+    }
+}

@@ -32,6 +32,7 @@ fn create_test_reaction_config(id: &str, queries: Vec<String>) -> ReactionConfig
 fn create_test_query_result(query_id: &str) -> QueryResult {
     QueryResult {
         query_id: query_id.to_string(),
+        sequence: 0,
         results: vec![],
         metadata: HashMap::new(),
         profiling: None,
