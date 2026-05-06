@@ -50,12 +50,16 @@ pub struct QueryOutputState {
 
 impl QueryOutputState {
     /// Create a new empty `QueryOutputState` with the given outbox capacity.
+    ///
+    /// A capacity of 0 is treated as 1 (at least one entry must be retainable
+    /// for correct dispatch semantics).
     pub fn new(outbox_capacity: usize) -> Self {
+        let effective_capacity = outbox_capacity.max(1);
         Self {
             results: im::HashMap::new(),
             as_of_sequence: 0,
-            outbox: VecDeque::with_capacity(outbox_capacity.min(1024)),
-            outbox_capacity,
+            outbox: VecDeque::with_capacity(effective_capacity.min(1024)),
+            outbox_capacity: effective_capacity,
         }
     }
 
@@ -186,6 +190,43 @@ impl std::fmt::Display for OutboxGap {
 }
 
 impl std::error::Error for OutboxGap {}
+
+/// Error returned by `fetch_snapshot` or `fetch_outbox` when the query is not
+/// in a state that can serve the request.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FetchError {
+    /// The query finished bootstrapping but ended in a non-Running state
+    /// (e.g., Error, Stopped). The snapshot/outbox may be incomplete.
+    NotRunning {
+        status: crate::channels::ComponentStatus,
+    },
+    /// The bootstrap did not complete within the allowed timeout.
+    TimedOut,
+    /// (fetch_outbox only) The requested outbox position has been evicted.
+    OutboxGap(OutboxGap),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::NotRunning { status } => {
+                write!(f, "Query is not running (status: {status:?})")
+            }
+            FetchError::TimedOut => {
+                write!(f, "Timed out waiting for query to finish bootstrapping")
+            }
+            FetchError::OutboxGap(gap) => gap.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+impl From<OutboxGap> for FetchError {
+    fn from(gap: OutboxGap) -> Self {
+        FetchError::OutboxGap(gap)
+    }
+}
 
 /// Response from `fetch_snapshot` on the Query trait.
 #[derive(Debug, Clone)]
@@ -436,5 +477,22 @@ mod tests {
             state.results.get(&1),
             Some(&serde_json::json!({"name": "Bob"}))
         );
+    }
+
+    #[test]
+    fn test_outbox_capacity_zero_clamped_to_one() {
+        let mut state = QueryOutputState::new(0);
+        // Capacity 0 is clamped to 1
+        assert_eq!(state.outbox_capacity, 1);
+
+        let result = make_query_result("q1", vec![]);
+        state.advance_sequence_and_push(result);
+        assert_eq!(state.outbox.len(), 1);
+
+        // Second push evicts the first (capacity is 1)
+        let result = make_query_result("q1", vec![]);
+        state.advance_sequence_and_push(result);
+        assert_eq!(state.outbox.len(), 1);
+        assert_eq!(state.outbox.front().unwrap().sequence, 2);
     }
 }

@@ -42,7 +42,9 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
-use crate::queries::output_state::{OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse};
+use crate::queries::output_state::{
+    FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
+};
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -137,13 +139,20 @@ pub trait Query: Send + Sync {
     ///
     /// Returns the current results (as an `im::HashMap` clone — O(1) via structural sharing)
     /// and the `as_of_sequence` reflecting the latest emission.
-    async fn fetch_snapshot(&self) -> SnapshotResponse;
+    ///
+    /// Blocks until bootstrap completes. Returns `FetchError::TimedOut` if bootstrap
+    /// does not complete within 5 minutes, or `FetchError::NotRunning` if the query
+    /// terminates in a non-Running state.
+    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError>;
 
     /// Fetch outbox entries after the given sequence number.
     ///
     /// Returns `Ok(OutboxResponse)` if the requested position is still in the ring buffer,
-    /// or `Err(OutboxGap)` if it has been evicted.
-    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, OutboxGap>;
+    /// or `Err(FetchError::OutboxGap)` if it has been evicted.
+    ///
+    /// Blocks until bootstrap completes, with the same timeout/error semantics as
+    /// `fetch_snapshot`.
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
 }
 
 /// Bootstrap phase tracking for each source
@@ -334,17 +343,29 @@ impl DrasiQuery {
 
     /// Wait until the query has finished bootstrapping (status is no longer `Starting`).
     ///
-    /// If the query is already `Running`, `Stopped`, or `Error`, returns immediately.
-    /// During bootstrap (`Starting`), polls the status handle at short intervals until
-    /// the status changes. This is only called by `fetch_snapshot`/`fetch_outbox` which
-    /// are infrequent reaction-subscription-time calls, so polling overhead is negligible.
-    async fn wait_until_running(&self) {
+    /// Returns `Ok(())` if the query reaches `Running` status.
+    /// Returns `Err(FetchError::NotRunning)` if it reaches a terminal non-Running state.
+    /// Returns `Err(FetchError::TimedOut)` if bootstrap doesn't complete within 5 minutes.
+    async fn wait_until_running(&self) -> Result<(), FetchError> {
+        const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
+
         loop {
             let status = self.base.status_handle().get_status().await;
-            if !matches!(status, ComponentStatus::Starting) {
-                return;
+            match status {
+                ComponentStatus::Running => return Ok(()),
+                ComponentStatus::Starting => {
+                    // Still bootstrapping — check timeout
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(FetchError::TimedOut);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                other => {
+                    // Terminal non-running state (Error, Stopped, etc.)
+                    return Err(FetchError::NotRunning { status: other });
+                }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 }
@@ -1263,21 +1284,21 @@ impl Query for DrasiQuery {
             .context("Failed to subscribe to query")
     }
 
-    async fn fetch_snapshot(&self) -> SnapshotResponse {
+    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
         // Block until bootstrap is complete (status transitions from Starting to Running).
         // This ensures reactions don't observe a partial result set during initialization.
-        self.wait_until_running().await;
+        self.wait_until_running().await?;
 
         let state = self.output_state.read().await;
-        SnapshotResponse {
+        Ok(SnapshotResponse {
             results: state.results.clone(),
             as_of_sequence: state.as_of_sequence,
-        }
+        })
     }
 
-    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, OutboxGap> {
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
         // Block until bootstrap is complete — outbox is only populated by live processing.
-        self.wait_until_running().await;
+        self.wait_until_running().await?;
 
         let state = self.output_state.read().await;
         let results = state.fetch_outbox_after(after_sequence)?;
