@@ -25,6 +25,15 @@ pub struct ResourceSpecDto {
     pub kind: String,
 }
 
+impl From<&ResourceSpec> for ResourceSpecDto {
+    fn from(spec: &ResourceSpec) -> Self {
+        Self {
+            api_version: spec.api_version.clone(),
+            kind: spec.kind.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
 #[schema(as = source::kubernetes::AuthMode)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +41,15 @@ pub enum AuthModeDto {
     #[default]
     Kubeconfig,
     InCluster,
+}
+
+impl From<AuthMode> for AuthModeDto {
+    fn from(mode: AuthMode) -> Self {
+        match mode {
+            AuthMode::Kubeconfig => AuthModeDto::Kubeconfig,
+            AuthMode::InCluster => AuthModeDto::InCluster,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, utoipa::ToSchema)]
@@ -42,6 +60,16 @@ pub enum StartFromDto {
     Now,
     Beginning,
     Timestamp(i64),
+}
+
+impl From<&StartFrom> for StartFromDto {
+    fn from(sf: &StartFrom) -> Self {
+        match sf {
+            StartFrom::Now => StartFromDto::Now,
+            StartFrom::Beginning => StartFromDto::Beginning,
+            StartFrom::Timestamp(ts) => StartFromDto::Timestamp(*ts),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
@@ -67,6 +95,23 @@ pub struct KubernetesSourceConfigDto {
     pub start_from: StartFromDto,
     #[serde(default)]
     pub exclude_annotations: Vec<String>,
+}
+
+impl From<&KubernetesSourceConfig> for KubernetesSourceConfigDto {
+    fn from(config: &KubernetesSourceConfig) -> Self {
+        Self {
+            resources: config.resources.iter().map(ResourceSpecDto::from).collect(),
+            namespaces: config.namespaces.clone(),
+            label_selector: config.label_selector.clone(),
+            field_selector: config.field_selector.clone(),
+            auth_mode: AuthModeDto::from(config.auth_mode),
+            kubeconfig_path: config.kubeconfig_path.clone(),
+            kubeconfig_content: config.kubeconfig_content.clone(),
+            include_owner_relations: config.include_owner_relations,
+            start_from: StartFromDto::from(&config.start_from),
+            exclude_annotations: config.exclude_annotations.clone(),
+        }
+    }
 }
 
 #[derive(OpenApi)]
@@ -151,10 +196,12 @@ impl SourcePluginDescriptor for KubernetesSourceDescriptor {
         };
         config.validate()?;
 
-        let source = KubernetesSourceBuilder::new(id)
+        let mut source = KubernetesSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

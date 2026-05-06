@@ -19,7 +19,7 @@ use drasi_kubernetes_common::mapping::build_insert_changes;
 use drasi_kubernetes_common::{
     build_client, is_cluster_scoped_kind, parse_api_version, KubernetesSourceConfig, ResourceSpec,
 };
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::core::{ApiResource, GroupVersionKind};
@@ -87,7 +87,7 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let client = build_client(&self.source_config).await?;
         let targets = build_bootstrap_targets(&self.source_config);
         let mut total_events = 0usize;
@@ -147,7 +147,10 @@ impl BootstrapProvider for KubernetesBootstrapProvider {
             "Completed Kubernetes bootstrap for query '{}': sent {} events",
             request.query_id, total_events
         );
-        Ok(total_events)
+        Ok(BootstrapResult {
+            event_count: total_events,
+            ..Default::default()
+        })
     }
 }
 

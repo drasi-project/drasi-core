@@ -166,13 +166,13 @@ async fn wait_for_subscription_data(
         if let Some(result) = subscription.recv().await {
             for diff in &result.results {
                 let value = match diff {
-                    drasi_lib::channels::ResultDiff::Add { data } if diff_type == "ADD" => data,
+                    drasi_lib::channels::ResultDiff::Add { data, .. } if diff_type == "ADD" => data,
                     drasi_lib::channels::ResultDiff::Update { data, .. }
                         if diff_type == "UPDATE" =>
                     {
                         data
                     }
-                    drasi_lib::channels::ResultDiff::Delete { data } if diff_type == "DELETE" => {
+                    drasi_lib::channels::ResultDiff::Delete { data, .. } if diff_type == "DELETE" => {
                         data
                     }
                     _ => continue,

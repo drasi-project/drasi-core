@@ -45,7 +45,7 @@ use tracing::Instrument;
 const SEEN_UIDS_KEY: &str = "seen_uids";
 
 pub struct KubernetesSource {
-    base: SourceBase,
+    pub(crate) base: SourceBase,
     config: KubernetesSourceConfig,
     state_store_override: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 }
@@ -84,48 +84,10 @@ impl Source for KubernetesSource {
     }
 
     fn properties(&self) -> HashMap<String, Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "resources".to_string(),
-            serde_json::to_value(&self.config.resources).unwrap_or_else(|_| Value::Array(vec![])),
-        );
-        props.insert(
-            "namespaces".to_string(),
-            serde_json::to_value(&self.config.namespaces).unwrap_or_else(|_| Value::Array(vec![])),
-        );
-        props.insert(
-            "authMode".to_string(),
-            serde_json::to_value(self.config.auth_mode).unwrap_or(Value::Null),
-        );
-        props.insert(
-            "includeOwnerRelations".to_string(),
-            Value::Bool(self.config.include_owner_relations),
-        );
-        props.insert(
-            "startFrom".to_string(),
-            serde_json::to_value(&self.config.start_from).unwrap_or(Value::Null),
-        );
-        props.insert(
-            "excludeAnnotations".to_string(),
-            serde_json::to_value(&self.config.exclude_annotations)
-                .unwrap_or_else(|_| Value::Array(vec![])),
-        );
-        if let Some(label_selector) = &self.config.label_selector {
-            props.insert(
-                "labelSelector".to_string(),
-                Value::String(label_selector.clone()),
-            );
-        }
-        if let Some(field_selector) = &self.config.field_selector {
-            props.insert(
-                "fieldSelector".to_string(),
-                Value::String(field_selector.clone()),
-            );
-        }
-        if let Some(path) = &self.config.kubeconfig_path {
-            props.insert("kubeconfigPath".to_string(), Value::String(path.clone()));
-        }
-        props
+        use crate::descriptor::KubernetesSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&KubernetesSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
