@@ -305,13 +305,10 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                map.remove("password");
-                map.into_iter().collect()
-            }
-            _ => HashMap::new(),
-        }
+        use crate::descriptor::PostgresSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&PostgresSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
@@ -768,7 +765,7 @@ mod tests {
         }
 
         #[test]
-        fn test_properties_does_not_expose_password() {
+        fn test_properties_includes_password() {
             let source = PostgresSourceBuilder::new("test")
                 .with_database("db")
                 .with_user("user")
@@ -777,8 +774,13 @@ mod tests {
                 .unwrap();
             let props = source.properties();
 
-            // Password should not be exposed in properties
-            assert!(!props.contains_key("password"));
+            // Password must be preserved for config persistence roundtrip
+            assert_eq!(
+                props.get("password"),
+                Some(&serde_json::Value::String(
+                    "super_secret_password".to_string()
+                ))
+            );
         }
 
         #[test]
@@ -801,6 +803,95 @@ mod tests {
     mod lifecycle {
         use super::*;
 
+        /// A test secret resolver that returns a fixed value for any secret name.
+        struct TestSecretResolver;
+
+        impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
+            fn resolve_to_string(
+                &self,
+                value: &drasi_plugin_sdk::ConfigValue<String>,
+            ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
+                match value {
+                    drasi_plugin_sdk::ConfigValue::Secret { name } => {
+                        Ok(format!("resolved-secret-{name}"))
+                    }
+                    _ => Err(drasi_plugin_sdk::resolver::ResolverError::WrongResolverType),
+                }
+            }
+        }
+
+        fn ensure_test_secret_resolver() {
+            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+                TestSecretResolver,
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_descriptor_preserves_secret_envelope() {
+            use crate::descriptor::PostgresSourceDescriptor;
+            use drasi_lib::sources::Source;
+            use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
+
+            ensure_test_secret_resolver();
+
+            let config_json = serde_json::json!({
+                "host": "db.example.com",
+                "port": 5432,
+                "database": "mydb",
+                "user": "app_user",
+                "password": {
+                    "kind": "Secret",
+                    "name": "db-password"
+                },
+                "tables": ["users"],
+                "slotName": "drasi_slot",
+                "publicationName": "drasi_pub"
+            });
+
+            let descriptor = PostgresSourceDescriptor;
+            let source = descriptor
+                .create_source("pg-secret-test", &config_json, true)
+                .await
+                .expect("descriptor should create source");
+
+            let props = source.properties();
+
+            // Password must be the Secret envelope, NOT the resolved value
+            let password = props.get("password").expect("password must be present");
+            assert!(
+                password.is_object(),
+                "password should be Secret envelope, got: {password}"
+            );
+            assert_eq!(
+                password.get("kind").and_then(|v| v.as_str()),
+                Some("Secret"),
+                "envelope kind must be Secret"
+            );
+            assert_eq!(
+                password.get("name").and_then(|v| v.as_str()),
+                Some("db-password"),
+                "secret name must be preserved"
+            );
+
+            // Resolved value must NOT leak into persisted properties
+            let props_str = serde_json::to_string(&props).unwrap();
+            assert!(
+                !props_str.contains("resolved-secret-db-password"),
+                "resolved secret must not appear in properties"
+            );
+
+            // Keys must be camelCase (from raw_config)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+        }
+
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
             let source = PostgresSourceBuilder::new("test")
@@ -809,6 +900,62 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[test]
+        fn test_builder_fallback_produces_camel_case() {
+            use drasi_lib::sources::Source;
+
+            let source = PostgresSourceBuilder::new("pg-fallback")
+                .with_host("myhost.example.com")
+                .with_port(5433)
+                .with_database("mydb")
+                .with_user("admin")
+                .with_password("secret123")
+                .with_ssl_mode(SslMode::Require)
+                .with_slot_name("custom_slot")
+                .with_publication_name("custom_pub")
+                .build()
+                .unwrap();
+
+            let props = source.properties();
+
+            // Must use camelCase keys (DTO serialization)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+            assert!(
+                props.contains_key("sslMode"),
+                "expected camelCase 'sslMode'"
+            );
+
+            // Must NOT have snake_case keys
+            assert!(
+                !props.contains_key("slot_name"),
+                "should not have snake_case 'slot_name'"
+            );
+            assert!(
+                !props.contains_key("publication_name"),
+                "should not have snake_case 'publication_name'"
+            );
+
+            // Values should be correct
+            assert_eq!(
+                props.get("host").and_then(|v| v.as_str()),
+                Some("myhost.example.com")
+            );
+            assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(5433));
+            assert_eq!(props.get("database").and_then(|v| v.as_str()), Some("mydb"));
+            assert_eq!(
+                props.get("password").and_then(|v| v.as_str()),
+                Some("secret123")
+            );
         }
     }
 

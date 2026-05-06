@@ -128,7 +128,9 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

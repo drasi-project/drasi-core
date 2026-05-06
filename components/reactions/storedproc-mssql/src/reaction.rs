@@ -38,7 +38,7 @@ use crate::parser::ParameterParser;
 /// Invokes MS SQL Server stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct MsSqlStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MsSqlExecutor>>>,
     parser: ParameterParser,
@@ -195,10 +195,10 @@ impl MsSqlStoredProcReaction {
                 for result_item in &query_result.results {
                     let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after } => {
+                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { before, after, .. } => {
                             aggregation_data = json!({
                                 "before": before,
                                 "after": after,
@@ -306,14 +306,7 @@ impl Reaction for MsSqlStoredProcReaction {
             retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {

@@ -61,8 +61,8 @@ fn matches_fields(data: &Value, fields: &[(&str, &str)]) -> bool {
 
 fn matches_change(entry: &ResultDiff, change_type: &str, fields: &[(&str, &str)]) -> bool {
     match (change_type, entry) {
-        ("ADD", ResultDiff::Add { data })
-        | ("DELETE", ResultDiff::Delete { data })
+        ("ADD", ResultDiff::Add { data, .. })
+        | ("DELETE", ResultDiff::Delete { data, .. })
         | ("UPDATE", ResultDiff::Update { data, .. }) => matches_fields(data, fields),
         _ => false,
     }
@@ -430,7 +430,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         .await
         .context("Did not observe INSERT change for types test")?;
 
-        if let ResultDiff::Add { data } = &change {
+        if let ResultDiff::Add { data, .. } = &change {
             // Integers should be JSON numbers, not strings
             assert!(
                 data.get("int_val").unwrap().is_number(),
