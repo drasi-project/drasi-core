@@ -76,6 +76,14 @@ impl MiddlewareContainer {
     pub fn get(&self, name: &str) -> Option<Arc<dyn SourceMiddleware>> {
         self.source_instances.get(name).cloned()
     }
+
+    pub fn get_or_panic(&self, name: &str) -> Arc<dyn SourceMiddleware> {
+        self.source_instances.get(name).unwrap().clone()
+    }
+
+    pub fn count(&self) -> i32 {
+        self.source_instances.len() as i32
+    }
 }
 
 pub struct SourceMiddlewarePipeline {
@@ -148,5 +156,25 @@ impl SourceMiddlewarePipelineCollection {
 
     pub fn get(&self, source_id: Arc<str>) -> Option<Arc<SourceMiddlewarePipeline>> {
         self.items.get(&source_id).cloned()
+    }
+
+    pub fn remove(&mut self, source_id: Arc<str>) -> Arc<SourceMiddlewarePipeline> {
+        self.items.remove(&source_id).unwrap()
+    }
+
+    pub fn merge(&mut self, other: SourceMiddlewarePipelineCollection) {
+        for (k, v) in other.items.into_iter() {
+            self.items.insert(k.clone(), v.clone());
+        }
+    }
+
+    pub fn find_by_prefix(&self, prefix: String) -> Vec<Arc<SourceMiddlewarePipeline>> {
+        let mut result = Vec::new();
+        for (k, v) in self.items.iter() {
+            if k.starts_with(&prefix) == true {
+                result.push(v.clone());
+            }
+        }
+        return result;
     }
 }
