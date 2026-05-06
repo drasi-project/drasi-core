@@ -12,15 +12,13 @@ on:
         description: "Full URL of the PR to review (e.g. https://github.com/drasi-project/drasi-core/pull/42)"
         required: true
         type: string
-  pull_request:
+  pull_request_target:
     types: [labeled]
 if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || github.event.label.name == 'review:prior-art'
-concurrency:
-  group: pr-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
-  cancel-in-progress: false
 permissions:
   contents: read
   pull-requests: read
+checkout: false
 network:
   allowed:
     - defaults
