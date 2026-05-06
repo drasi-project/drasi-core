@@ -21,6 +21,7 @@
 //! - A bounded ring buffer (`outbox`) of recent `QueryResult` emissions
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::channels::{QueryResult, ResultDiff};
 
@@ -41,7 +42,8 @@ pub struct QueryOutputState {
     /// Incremented only when non-empty diffs are emitted.
     pub as_of_sequence: u64,
     /// Ring buffer of recent `QueryResult` emissions (bounded by `outbox_capacity`).
-    pub outbox: VecDeque<QueryResult>,
+    /// Stored as `Arc` for zero-copy dispatch to reactions.
+    pub outbox: VecDeque<Arc<QueryResult>>,
     /// Maximum number of entries retained in the outbox.
     outbox_capacity: usize,
 }
@@ -95,20 +97,21 @@ impl QueryOutputState {
         }
     }
 
-    /// Increment the sequence counter and push a `QueryResult` to the outbox.
+    /// Increment the sequence counter, wrap the result in an `Arc`, push to the outbox,
+    /// and return the `Arc<QueryResult>` for zero-copy dispatch.
     /// Evicts the oldest entry if the outbox is at capacity.
-    ///
-    /// Returns the new sequence number assigned to this result.
-    pub fn advance_sequence_and_push(&mut self, mut result: QueryResult) -> u64 {
+    pub fn advance_sequence_and_push(&mut self, mut result: QueryResult) -> Arc<QueryResult> {
         self.as_of_sequence += 1;
         result.sequence = self.as_of_sequence;
+
+        let arc_result = Arc::new(result);
 
         if self.outbox.len() >= self.outbox_capacity {
             self.outbox.pop_front();
         }
-        self.outbox.push_back(result);
+        self.outbox.push_back(arc_result.clone());
 
-        self.as_of_sequence
+        arc_result
     }
 
     /// Return the live result set as a `Vec` for backward compatibility with `get_current_results`.
@@ -128,7 +131,7 @@ impl QueryOutputState {
     pub fn fetch_outbox_after(
         &self,
         after_sequence: u64,
-    ) -> Result<Vec<QueryResult>, OutboxGap> {
+    ) -> Result<Vec<Arc<QueryResult>>, OutboxGap> {
         if after_sequence >= self.as_of_sequence {
             // Caller is fully caught up
             return Ok(Vec::new());
@@ -149,8 +152,8 @@ impl QueryOutputState {
             });
         }
 
-        // Collect entries with sequence > after_sequence
-        let entries: Vec<QueryResult> = self
+        // Collect entries with sequence > after_sequence (cheap Arc clone)
+        let entries: Vec<Arc<QueryResult>> = self
             .outbox
             .iter()
             .filter(|r| r.sequence > after_sequence)
@@ -197,7 +200,7 @@ pub struct SnapshotResponse {
 #[derive(Debug, Clone)]
 pub struct OutboxResponse {
     /// The contiguous set of `QueryResult` entries after the requested position.
-    pub results: Vec<QueryResult>,
+    pub results: Vec<Arc<QueryResult>>,
     /// The latest sequence number in the query's output state.
     pub latest_sequence: u64,
 }
@@ -322,15 +325,15 @@ mod tests {
         let mut state = QueryOutputState::new(3);
 
         let result = make_query_result("q1", vec![]);
-        let seq = state.advance_sequence_and_push(result);
-        assert_eq!(seq, 1);
+        let arc = state.advance_sequence_and_push(result);
+        assert_eq!(arc.sequence, 1);
         assert_eq!(state.as_of_sequence, 1);
         assert_eq!(state.outbox.len(), 1);
         assert_eq!(state.outbox.back().unwrap().sequence, 1);
 
         let result = make_query_result("q1", vec![]);
-        let seq = state.advance_sequence_and_push(result);
-        assert_eq!(seq, 2);
+        let arc = state.advance_sequence_and_push(result);
+        assert_eq!(arc.sequence, 2);
         assert_eq!(state.outbox.len(), 2);
     }
 

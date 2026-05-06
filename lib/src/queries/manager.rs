@@ -216,54 +216,45 @@ async fn dispatch_query_results(
         })
         .collect();
 
-    // Build the QueryResult (sequence will be set by advance_sequence_and_push)
-    let query_result = QueryResult::with_profiling(
-        query_id.to_string(),
-        0,
-        chrono::Utc::now(),
-        converted_results.clone(),
-        {
-            let mut meta = HashMap::new();
-            meta.insert(
-                "source_id".to_string(),
-                serde_json::Value::String(source_id.to_string()),
-            );
-            meta.insert(
-                "processed_by".to_string(),
-                serde_json::Value::String("drasi-core".to_string()),
-            );
-            meta.insert(
-                "result_count".to_string(),
-                serde_json::Value::Number(results.len().into()),
-            );
-            meta
-        },
-        profiling,
-    );
-
-    // Apply diffs to the output state, increment sequence, and push to outbox
-    let sequence = {
+    // Apply diffs to the output state, build QueryResult, increment sequence,
+    // push to outbox, and get back the Arc for zero-copy dispatch — all in one
+    // write-lock acquisition.
+    let arc_result = {
         let mut state = output_state.write().await;
         state.apply_diffs(&converted_results);
+
+        let query_result = QueryResult::with_profiling(
+            query_id.to_string(),
+            0, // sequence assigned by advance_sequence_and_push
+            chrono::Utc::now(),
+            converted_results,
+            {
+                let mut meta = HashMap::new();
+                meta.insert(
+                    "source_id".to_string(),
+                    serde_json::Value::String(source_id.to_string()),
+                );
+                meta.insert(
+                    "processed_by".to_string(),
+                    serde_json::Value::String("drasi-core".to_string()),
+                );
+                meta.insert(
+                    "result_count".to_string(),
+                    serde_json::Value::Number(results.len().into()),
+                );
+                meta
+            },
+            profiling,
+        );
+
         state.advance_sequence_and_push(query_result)
     };
 
     debug!(
-        "Query '{query_id}' sending {} results to reactions (seq={sequence})",
-        results.len()
+        "Query '{query_id}' sending {} results to reactions (seq={})",
+        results.len(),
+        arc_result.sequence
     );
-
-    // Retrieve the QueryResult from the outbox with the assigned sequence
-    // to dispatch the version with the correct sequence number.
-    let arc_result = {
-        let state = output_state.read().await;
-        let result = state
-            .outbox
-            .back()
-            .expect("outbox should contain the just-pushed result");
-        debug_assert_eq!(result.sequence, sequence);
-        Arc::new(result.clone())
-    };
 
     // Dispatch query result to all subscribed reactions
     let dispatchers = dispatchers.read().await;
@@ -339,6 +330,22 @@ impl DrasiQuery {
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
         self.output_state.read().await.get_results_as_vec()
+    }
+
+    /// Wait until the query has finished bootstrapping (status is no longer `Starting`).
+    ///
+    /// If the query is already `Running`, `Stopped`, or `Error`, returns immediately.
+    /// During bootstrap (`Starting`), polls the status handle at short intervals until
+    /// the status changes. This is only called by `fetch_snapshot`/`fetch_outbox` which
+    /// are infrequent reaction-subscription-time calls, so polling overhead is negligible.
+    async fn wait_until_running(&self) {
+        loop {
+            let status = self.base.status_handle().get_status().await;
+            if !matches!(status, ComponentStatus::Starting) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -1257,6 +1264,10 @@ impl Query for DrasiQuery {
     }
 
     async fn fetch_snapshot(&self) -> SnapshotResponse {
+        // Block until bootstrap is complete (status transitions from Starting to Running).
+        // This ensures reactions don't observe a partial result set during initialization.
+        self.wait_until_running().await;
+
         let state = self.output_state.read().await;
         SnapshotResponse {
             results: state.results.clone(),
@@ -1265,6 +1276,9 @@ impl Query for DrasiQuery {
     }
 
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, OutboxGap> {
+        // Block until bootstrap is complete — outbox is only populated by live processing.
+        self.wait_until_running().await;
+
         let state = self.output_state.read().await;
         let results = state.fetch_outbox_after(after_sequence)?;
         Ok(OutboxResponse {
