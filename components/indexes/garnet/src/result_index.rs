@@ -428,12 +428,14 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_change_id);
         let list_key = format!("metadata:{{{}}}:source_id_list", self.query_id);
 
-        // Read current source ID list (buffer first, then Redis)
-        let current_list = self.read_source_id_list(&list_key).await?;
-        let mut source_ids: Vec<String> = if current_list.is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str(&current_list).unwrap_or_default()
+        // Pre-fetch source_id_list from Redis in case buffer doesn't have it yet.
+        // This is needed when the first apply_checkpoint in a session needs the
+        // base list from the prior commit.
+        let redis_list: Option<String> = {
+            let mut con = self.connection.clone();
+            con.get::<&str, Option<String>>(&list_key)
+                .await
+                .map_err(IndexError::other)?
         };
 
         let mut guard = self.session_state.lock()?;
@@ -442,6 +444,22 @@ impl ResultSequenceCounter for GarnetResultIndex {
                 "write operation requires an active session",
             ))
         })?;
+
+        // Read current source ID list from buffer; fall back to Redis value
+        let current_list = match buffer.string_get(&list_key) {
+            BufferReadResult::Found(bytes) => {
+                Some(String::from_utf8(bytes).map_err(IndexError::other)?)
+            }
+            BufferReadResult::KeyDeleted => None,
+            BufferReadResult::NotInBuffer => redis_list,
+        };
+        let mut source_ids: Vec<String> = match current_list {
+            Some(ref s) if !s.is_empty() => {
+                serde_json::from_str(s).map_err(IndexError::other)?
+            }
+            _ => Vec::new(),
+        };
+
         buffer.string_set(seq_key, sequence.to_string().into_bytes());
         buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
         match source_position {
@@ -456,7 +474,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
                 source_ids.retain(|id| id != source_change_id);
             }
         }
-        let serialized = serde_json::to_string(&source_ids).unwrap_or_default();
+        let serialized = serde_json::to_string(&source_ids).map_err(IndexError::other)?;
         buffer.string_set(list_key, serialized.into_bytes());
         Ok(())
     }
@@ -504,7 +522,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
         let source_ids: Vec<String> = match list_val {
             BufferReadResult::Found(bytes) => {
                 let s = String::from_utf8(bytes).map_err(IndexError::other)?;
-                serde_json::from_str(&s).unwrap_or_default()
+                serde_json::from_str(&s).map_err(IndexError::other)?
             }
             BufferReadResult::KeyDeleted => Vec::new(),
             BufferReadResult::NotInBuffer => Vec::new(),
@@ -554,34 +572,6 @@ impl ResultSequenceCounter for GarnetResultIndex {
 }
 
 impl GarnetResultIndex {
-    /// Read the source ID list from session buffer or Redis.
-    async fn read_source_id_list(&self, list_key: &str) -> Result<String, IndexError> {
-        let val = {
-            let guard = self.session_state.lock()?;
-            let buffer = guard.as_ref().ok_or_else(|| {
-                IndexError::other(std::io::Error::other(
-                    "read operation requires an active session",
-                ))
-            })?;
-            buffer.string_get(list_key)
-        };
-
-        match val {
-            BufferReadResult::Found(bytes) => {
-                String::from_utf8(bytes).map_err(IndexError::other)
-            }
-            BufferReadResult::KeyDeleted => Ok(String::new()),
-            BufferReadResult::NotInBuffer => {
-                let mut con = self.connection.clone();
-                match con.get::<&str, Option<String>>(list_key).await {
-                    Ok(Some(s)) => Ok(s),
-                    Ok(None) => Ok(String::new()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
-            }
-        }
-    }
-
     async fn get_sequence_from_redis(&self) -> Result<ResultSequence, IndexError> {
         let mut con = self.connection.clone();
 
@@ -640,7 +630,7 @@ impl GarnetResultIndex {
             ))
             .await
         {
-            Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
+            Ok(Some(s)) => serde_json::from_str(&s).map_err(IndexError::other)?,
             Ok(None) => Vec::new(),
             Err(e) => return Err(IndexError::other(e)),
         };

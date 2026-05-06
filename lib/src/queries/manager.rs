@@ -331,6 +331,11 @@ impl DrasiQuery {
     pub async fn subscription_task_count(&self) -> usize {
         self.subscription_tasks.read().await.len()
     }
+
+    /// Access the result index for checkpoint verification in tests
+    pub async fn get_result_index(&self) -> Option<Arc<dyn ResultIndex>> {
+        self.result_index.read().await.clone()
+    }
 }
 
 #[async_trait]
@@ -1029,6 +1034,13 @@ impl Query for DrasiQuery {
         let reporter_for_processor = self.base.status_handle();
         let fq_source_for_processor = Arc::clone(&future_queue_source);
         let position_handles_for_processor = position_handles;
+        let source_ids_for_processor: Vec<String> = self
+            .base
+            .config
+            .sources
+            .iter()
+            .map(|s| s.source_id.clone())
+            .collect();
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1093,8 +1105,19 @@ impl Query for DrasiQuery {
 
                 info!("Query '{query_id}' starting priority queue event processor");
 
-                // Track last processed sequence for dedup (skip events with seq <= last_processed)
-                let mut last_processed_sequence = last_checkpoint_sequence;
+                // Track last processed sequence per source for dedup.
+                // Sequences are assigned per-source, so dedup must also be per-source.
+                let mut last_processed_per_source: std::collections::HashMap<String, u64> =
+                    std::collections::HashMap::new();
+                // Initialize with the global checkpoint sequence for all known sources.
+                // On restart, all sources advance their counters past checkpoint.sequence,
+                // so events with seq <= that value are duplicates from any source.
+                if last_checkpoint_sequence > 0 {
+                    for sid in &source_ids_for_processor {
+                        last_processed_per_source
+                            .insert(sid.clone(), last_checkpoint_sequence);
+                    }
+                }
 
                 loop {
                     // Check if query is still running
@@ -1136,11 +1159,15 @@ impl Query for DrasiQuery {
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
 
-                            // Dedup: skip events with sequence ≤ last processed
+                            // Dedup: skip events with sequence ≤ last processed for this source
                             if let Some(seq) = sequence {
-                                if seq <= last_processed_sequence {
+                                let last_for_source = last_processed_per_source
+                                    .get(&source_id)
+                                    .copied()
+                                    .unwrap_or(0);
+                                if seq <= last_for_source {
                                     debug!(
-                                        "Query '{query_id}' skipping duplicate event (seq={seq}, last_processed={last_processed_sequence})"
+                                        "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, last_processed={last_for_source})"
                                     );
                                     continue;
                                 }
@@ -1201,12 +1228,14 @@ impl Query for DrasiQuery {
                                                         "Query '{query_id}' failed to persist checkpoint \
                                                          (seq={seq}, source='{source_id}'): {e}"
                                                     );
-                                                }
-                                                last_processed_sequence = seq;
+                                                } else {
+                                                    // Only advance dedup and notify source on successful persist
+                                                    last_processed_per_source
+                                                        .insert(source_id.clone(), seq);
 
-                                                // Update position handle for this source
-                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
-                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
+                                                    if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                        handle.store(seq, std::sync::atomic::Ordering::Release);
+                                                    }
                                                 }
                                             }
 
