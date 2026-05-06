@@ -30,19 +30,11 @@ safe-outputs:
     max: 20
     side: "RIGHT"
     target: "*"
-    allowed-repos:
-      - "drasi-project/drasi-core"
-      - "drasi-project/drasi-server"
-      - "drasi-project/drasi-platform"
-      - "drasi-project/docs"
+    target-repo: "drasi-project/drasi-core"
   submit-pull-request-review:
     max: 1
     target: "*"
-    allowed-repos:
-      - "drasi-project/drasi-core"
-      - "drasi-project/drasi-server"
-      - "drasi-project/drasi-platform"
-      - "drasi-project/docs"
+    target-repo: "drasi-project/drasi-core"
     allowed-events: [COMMENT]
     footer: "if-body"
 ---
