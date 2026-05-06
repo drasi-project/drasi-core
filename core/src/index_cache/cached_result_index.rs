@@ -28,7 +28,7 @@ use crate::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, ResultSequenceCounter,
+        ResultOwner, ResultSequence, CheckpointStore,
     },
 };
 
@@ -162,7 +162,7 @@ impl LazySortedSetStore for CachedResultIndex {
 }
 
 #[async_trait]
-impl ResultSequenceCounter for CachedResultIndex {
+impl CheckpointStore for CachedResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         self.inner.get_sequence().await
     }

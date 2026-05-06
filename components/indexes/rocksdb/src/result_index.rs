@@ -23,7 +23,7 @@ use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, ResultSequenceCounter,
+        ResultOwner, ResultSequence, CheckpointStore,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -292,7 +292,7 @@ impl LazySortedSetStore for RocksDbResultIndex {
 }
 
 #[async_trait]
-impl ResultSequenceCounter for RocksDbResultIndex {
+impl CheckpointStore for RocksDbResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();

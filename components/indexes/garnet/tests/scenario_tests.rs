@@ -442,7 +442,7 @@ mod session {
         evaluation::functions::aggregation::ValueAccumulator,
         interface::{
             AccumulatorIndex, ElementIndex, FutureQueue, LazySortedSetStore, PushType, ResultKey,
-            ResultOwner, ResultSequenceCounter, SessionControl,
+            ResultOwner, CheckpointStore, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };
@@ -1471,7 +1471,7 @@ mod source_update_upsert {
 
 mod checkpoint_tests {
     use super::*;
-    use drasi_core::interface::{AccumulatorIndex, ResultSequenceCounter, SessionControl};
+    use drasi_core::interface::{AccumulatorIndex, CheckpointStore, SessionControl};
 
     #[allow(clippy::unwrap_used)]
     #[tokio::test]

@@ -615,7 +615,7 @@ mod source_update_upsert {
 
 mod checkpoint_tests {
     use super::*;
-    use drasi_core::interface::{ResultSequenceCounter, SessionControl};
+    use drasi_core::interface::{CheckpointStore, SessionControl};
 
     #[tokio::test]
     async fn sequence_counter() {

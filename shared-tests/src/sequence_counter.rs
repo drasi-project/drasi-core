@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use drasi_core::interface::{ResultCheckpoint, ResultSequence, ResultSequenceCounter};
+use drasi_core::interface::{ResultCheckpoint, ResultSequence, CheckpointStore};
 
-pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
+pub async fn sequence_counter(subject: &dyn CheckpointStore) {
     let result = subject.get_sequence().await.expect("get_sequence failed");
     assert_eq!(result, ResultSequence::default());
 
@@ -43,7 +43,7 @@ pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
 /// - 8 bytes (Postgres WAL LSN)
 /// - 20 bytes (MSSQL change tracking version)
 /// - 80+ bytes (opaque tokens like MongoDB/Cosmos DB resume tokens)
-pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
+pub async fn checkpoint_round_trip(subject: &dyn CheckpointStore) {
     // Initially returns default checkpoint (no positions)
     let checkpoint = subject
         .get_checkpoint()

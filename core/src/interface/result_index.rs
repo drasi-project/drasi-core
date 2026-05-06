@@ -27,7 +27,7 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {}
+pub trait ResultIndex: AccumulatorIndex + CheckpointStore {}
 
 #[async_trait]
 pub trait AccumulatorIndex: LazySortedSetStore {
@@ -132,7 +132,7 @@ impl From<ResultSequence> for ResultCheckpoint {
 }
 
 #[async_trait]
-pub trait ResultSequenceCounter: Send + Sync {
+pub trait CheckpointStore: Send + Sync {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
 
     async fn apply_checkpoint(

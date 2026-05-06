@@ -22,7 +22,7 @@ use std::{
 use bytes::Bytes;
 
 use crate::interface::{
-    ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
+    ResultCheckpoint, ResultIndex, ResultKey, ResultOwner, ResultSequence, CheckpointStore,
 };
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;
@@ -179,7 +179,7 @@ impl LazySortedSetStore for InMemoryResultIndex {
 }
 
 #[async_trait]
-impl ResultSequenceCounter for InMemoryResultIndex {
+impl CheckpointStore for InMemoryResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let data = self.checkpoint.read().await;
         Ok(ResultSequence {

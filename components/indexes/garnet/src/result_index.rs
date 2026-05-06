@@ -24,7 +24,7 @@ use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultCheckpoint, ResultIndex, ResultKey,
-        ResultOwner, ResultSequence, ResultSequenceCounter,
+        ResultOwner, ResultSequence, CheckpointStore,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -353,7 +353,7 @@ impl GarnetResultIndex {
 /// metadata:{<query_id>}:sequence -> {value}
 /// metadata:{<query_id>}:source_id -> {value}
 #[async_trait]
-impl ResultSequenceCounter for GarnetResultIndex {
+impl CheckpointStore for GarnetResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
         let sid_key = format!("metadata:{{{}}}:source_id", self.query_id);
