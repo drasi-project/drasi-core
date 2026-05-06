@@ -1,0 +1,79 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Caller workflow that triggers the centralized Drasi agentic PR reviewers
+# in drasi-project/.github via workflow_dispatch (cross-repo API call).
+# The reviewer workflows execute in the centralized drasi-project/.github
+# repository context, so any secrets or tokens they use (e.g.
+# COPILOT_GITHUB_TOKEN, ISSUE_UPDATE_TOKEN) must be configured there.
+# They receive this PR URL as input and post comments back to the
+# target PR using their own configured token.
+#
+# Required org-level secret (must grant access to this repository):
+#   ORG_DISPATCH_TOKEN - PAT or GitHub App token with `actions: write`
+#                        (or classic `workflow` scope) on
+#                        drasi-project/.github.
+
+name: Trigger PR Reviewers
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+env:
+  REVIEWER_REPO: drasi-project/.github
+  REVIEWER_REF: main
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.label.name, 'review:')
+    steps:
+      - name: Determine reviewers
+        id: reviewers
+        env:
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          label="$LABEL"
+          case "$label" in
+            review:correctness) workflows="pr-correctness-reviewer.lock.yml" ;;
+            review:security)    workflows="pr-security-reviewer.lock.yml" ;;
+            review:design)      workflows="pr-design-reviewer.lock.yml" ;;
+            review:docs)        workflows="pr-docs-reviewer.lock.yml" ;;
+            review:testing)     workflows="pr-testing-reviewer.lock.yml" ;;
+            review:prior-art)   workflows="pr-prior-art-reviewer.lock.yml" ;;
+            review:all)         workflows="pr-correctness-reviewer.lock.yml pr-security-reviewer.lock.yml pr-design-reviewer.lock.yml pr-docs-reviewer.lock.yml pr-testing-reviewer.lock.yml pr-prior-art-reviewer.lock.yml" ;;
+            *)                  workflows="" ;;
+          esac
+          echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch reviewers
+        if: steps.reviewers.outputs.workflows != ''
+        env:
+          GH_TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::ORG_DISPATCH_TOKEN is not set or not accessible to this repository."
+            exit 1
+          fi
+          for wf in ${{ steps.reviewers.outputs.workflows }}; do
+            echo "Dispatching $wf for $PR_URL"
+            gh workflow run "$wf" \
+              --repo "$REVIEWER_REPO" \
+              --ref "$REVIEWER_REF" \
+              -f pr_url="$PR_URL"
+          done

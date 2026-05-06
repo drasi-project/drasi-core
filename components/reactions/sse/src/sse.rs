@@ -350,17 +350,17 @@ impl Reaction for SseReaction {
                             let mut context = Map::new();
 
                             match result {
-                                ResultDiff::Add { data } => {
+                                ResultDiff::Add { data, .. } => {
                                     context.insert("after".to_string(), data.clone());
                                 }
                                 ResultDiff::Update { before, after, .. } => {
                                     context.insert("before".to_string(), before.clone());
                                     context.insert("after".to_string(), after.clone());
                                 }
-                                ResultDiff::Delete { data } => {
+                                ResultDiff::Delete { data, .. } => {
                                     context.insert("before".to_string(), data.clone());
                                 }
-                                ResultDiff::Aggregation { before, after } => {
+                                ResultDiff::Aggregation { before, after, .. } => {
                                     if let Some(before) = before {
                                         context.insert("before".to_string(), before.clone());
                                     }
