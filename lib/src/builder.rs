@@ -64,7 +64,8 @@ use std::sync::Arc;
 
 use crate::channels::DispatchMode;
 use crate::config::{
-    DrasiLibConfig, QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
+    default_auto_start, default_bootstrap_buffer_size, default_enable_bootstrap, DrasiLibConfig,
+    QueryConfig, QueryJoinConfig, QueryLanguage, SourceSubscriptionConfig,
 };
 use crate::error::{DrasiError, Result};
 use crate::identity::IdentityProvider;
@@ -552,18 +553,17 @@ pub struct Query {
 }
 
 impl Query {
-    /// Create a new Cypher query builder.
-    pub fn cypher(id: impl Into<String>) -> Self {
+    fn new_with_language(id: impl Into<String>, query_language: QueryLanguage) -> Self {
         Self {
             id: id.into(),
             query: String::new(),
-            query_language: QueryLanguage::Cypher,
+            query_language,
             sources: Vec::new(),
             middleware: Vec::new(),
-            auto_start: true,
+            auto_start: default_auto_start(),
             joins: None,
-            enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
+            enable_bootstrap: default_enable_bootstrap(),
+            bootstrap_buffer_size: default_bootstrap_buffer_size(),
             priority_queue_capacity: None,
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
@@ -572,24 +572,18 @@ impl Query {
         }
     }
 
-    /// Create a new GQL (ISO 9074:2024) query builder.
+    /// Create a new Cypher query builder.
+    pub fn cypher(id: impl Into<String>) -> Self {
+        Self::new_with_language(id, QueryLanguage::Cypher)
+    }
+
+    /// Create a new GQL query builder.
     pub fn gql(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            query: String::new(),
-            query_language: QueryLanguage::GQL,
-            sources: Vec::new(),
-            middleware: Vec::new(),
-            auto_start: true,
-            joins: None,
-            enable_bootstrap: true,
-            bootstrap_buffer_size: 10000,
-            priority_queue_capacity: None,
-            dispatch_buffer_capacity: None,
-            dispatch_mode: None,
-            storage_backend: None,
-            recovery_policy: None,
-        }
+        Self::new_with_language(id, QueryLanguage::GQL)
+    }
+
+    pub fn default(id: impl Into<String>) -> Self {
+        Self::new_with_language(id, QueryLanguage::GQL)
     }
 
     /// Set the query string.
