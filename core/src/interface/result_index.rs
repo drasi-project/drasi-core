@@ -68,14 +68,14 @@ pub trait LazySortedSetStore: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultSequence {
     pub sequence: u64,
-    pub source_change_id: Arc<str>,
+    pub source_id: Arc<str>,
 }
 
 impl Default for ResultSequence {
     fn default() -> Self {
         ResultSequence {
             sequence: 0,
-            source_change_id: Arc::from(""),
+            source_id: Arc::from(""),
         }
     }
 }
@@ -90,7 +90,7 @@ impl Default for ResultSequence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultCheckpoint {
     pub sequence: u64,
-    pub source_change_id: Arc<str>,
+    pub source_id: Arc<str>,
     /// Per-source resume positions. Keyed by source_id.
     pub source_positions: HashMap<Arc<str>, Bytes>,
 }
@@ -99,7 +99,7 @@ impl Default for ResultCheckpoint {
     fn default() -> Self {
         ResultCheckpoint {
             sequence: 0,
-            source_change_id: Arc::from(""),
+            source_id: Arc::from(""),
             source_positions: HashMap::new(),
         }
     }
@@ -116,7 +116,7 @@ impl From<ResultCheckpoint> for ResultSequence {
     fn from(checkpoint: ResultCheckpoint) -> Self {
         ResultSequence {
             sequence: checkpoint.sequence,
-            source_change_id: checkpoint.source_change_id,
+            source_id: checkpoint.source_id,
         }
     }
 }
@@ -125,7 +125,7 @@ impl From<ResultSequence> for ResultCheckpoint {
     fn from(seq: ResultSequence) -> Self {
         ResultCheckpoint {
             sequence: seq.sequence,
-            source_change_id: seq.source_change_id,
+            source_id: seq.source_id,
             source_positions: HashMap::new(),
         }
     }
@@ -138,7 +138,7 @@ pub trait ResultSequenceCounter: Send + Sync {
     async fn apply_checkpoint(
         &self,
         sequence: u64,
-        source_change_id: &str,
+        source_id: &str,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError>;
 

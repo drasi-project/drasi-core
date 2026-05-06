@@ -170,11 +170,11 @@ impl ResultSequenceCounter for CachedResultIndex {
     async fn apply_checkpoint(
         &self,
         sequence: u64,
-        source_change_id: &str,
+        source_id: &str,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         self.inner
-            .apply_checkpoint(sequence, source_change_id, source_position)
+            .apply_checkpoint(sequence, source_id, source_position)
             .await
     }
 

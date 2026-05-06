@@ -633,13 +633,13 @@ mod tests {
 
         let seq = index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 42);
-        assert_eq!(seq.source_change_id.as_ref(), "src-a");
+        assert_eq!(seq.source_id.as_ref(), "src-a");
 
         // Writing via apply_checkpoint(None) should be readable via get_checkpoint
         index.apply_checkpoint(99, "src-b", None).await.unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 99);
-        assert_eq!(cp.source_change_id.as_ref(), "src-b");
+        assert_eq!(cp.source_id.as_ref(), "src-b");
     }
 
     /// Test that resume_from is correctly passed to source on initial subscribe

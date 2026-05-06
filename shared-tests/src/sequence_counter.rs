@@ -31,7 +31,7 @@ pub async fn sequence_counter(subject: &dyn ResultSequenceCounter) {
         result,
         ResultSequence {
             sequence: 2,
-            source_change_id: Arc::from("foo"),
+            source_id: Arc::from("foo"),
         }
     );
 }
@@ -64,7 +64,7 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 10);
-    assert_eq!(checkpoint.source_change_id.as_ref(), "source-pg");
+    assert_eq!(checkpoint.source_id.as_ref(), "source-pg");
     assert_eq!(checkpoint.get_source_position("source-pg"), Some(&pos_8));
 
     // Also verify via the trait's get_source_position method
@@ -86,7 +86,7 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 20);
-    assert_eq!(checkpoint.source_change_id.as_ref(), "source-mssql");
+    assert_eq!(checkpoint.source_id.as_ref(), "source-mssql");
     assert_eq!(
         checkpoint.get_source_position("source-mssql"),
         Some(&pos_20)
@@ -106,7 +106,7 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 30);
-    assert_eq!(checkpoint.source_change_id.as_ref(), "source-cosmos");
+    assert_eq!(checkpoint.source_id.as_ref(), "source-cosmos");
     assert_eq!(
         checkpoint.get_source_position("source-cosmos"),
         Some(&pos_80)
@@ -129,7 +129,7 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 40);
-    assert_eq!(checkpoint.source_change_id.as_ref(), "source-volatile");
+    assert_eq!(checkpoint.source_id.as_ref(), "source-volatile");
     assert_eq!(checkpoint.get_source_position("source-volatile"), None);
     // Other sources' positions remain
     assert_eq!(
@@ -148,8 +148,8 @@ pub async fn checkpoint_round_trip(subject: &dyn ResultSequenceCounter) {
         .await
         .expect("get_checkpoint failed");
     assert_eq!(checkpoint.sequence, 50);
-    assert_eq!(checkpoint.source_change_id.as_ref(), "source-legacy");
+    assert_eq!(checkpoint.source_id.as_ref(), "source-legacy");
     let seq = subject.get_sequence().await.expect("get_sequence failed");
     assert_eq!(seq.sequence, 50);
-    assert_eq!(seq.source_change_id.as_ref(), "source-legacy");
+    assert_eq!(seq.source_id.as_ref(), "source-legacy");
 }

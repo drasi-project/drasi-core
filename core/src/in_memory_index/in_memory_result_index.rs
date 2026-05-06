@@ -184,25 +184,25 @@ impl ResultSequenceCounter for InMemoryResultIndex {
         let data = self.checkpoint.read().await;
         Ok(ResultSequence {
             sequence: data.sequence,
-            source_change_id: data.source_change_id.clone(),
+            source_id: data.source_id.clone(),
         })
     }
 
     async fn apply_checkpoint(
         &self,
         sequence: u64,
-        source_change_id: &str,
+        source_id: &str,
         source_position: Option<&Bytes>,
     ) -> Result<(), IndexError> {
         let mut data = self.checkpoint.write().await;
         data.sequence = sequence;
-        data.source_change_id = Arc::from(source_change_id);
+        data.source_id = Arc::from(source_id);
         // Upsert into per-source position map
         if let Some(pos) = source_position {
             data.source_positions
-                .insert(Arc::from(source_change_id), pos.clone());
+                .insert(Arc::from(source_id), pos.clone());
         } else {
-            data.source_positions.remove(source_change_id);
+            data.source_positions.remove(source_id);
         }
         Ok(())
     }
@@ -242,7 +242,7 @@ mod tests {
 
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 5);
-        assert_eq!(cp.source_change_id.as_ref(), "src-1");
+        assert_eq!(cp.source_id.as_ref(), "src-1");
         assert_eq!(cp.get_source_position("src-1"), Some(&pos));
 
         // Apply with position for a second source — first source position preserved
@@ -282,7 +282,7 @@ mod tests {
         index.apply_checkpoint(7, "change-a", None).await.unwrap();
         let cp = index.get_checkpoint().await.unwrap();
         assert_eq!(cp.sequence, 7);
-        assert_eq!(cp.source_change_id.as_ref(), "change-a");
+        assert_eq!(cp.source_id.as_ref(), "change-a");
 
         // apply_checkpoint should be visible via get_sequence
         let pos = Bytes::from_static(b"position-data");
@@ -292,6 +292,6 @@ mod tests {
             .unwrap();
         let seq = index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 15);
-        assert_eq!(seq.source_change_id.as_ref(), "change-b");
+        assert_eq!(seq.source_id.as_ref(), "change-b");
     }
 }

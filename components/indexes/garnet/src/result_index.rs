@@ -351,15 +351,15 @@ impl GarnetResultIndex {
 
 /// Redis key structure (hash-tagged for cluster compatibility):
 /// metadata:{<query_id>}:sequence -> {value}
-/// metadata:{<query_id>}:source_change_id -> {value}
+/// metadata:{<query_id>}:source_id -> {value}
 #[async_trait]
 impl ResultSequenceCounter for GarnetResultIndex {
     async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let sid_key = format!("metadata:{{{}}}:source_id", self.query_id);
 
         // Extract buffer reads into a sync block so MutexGuard is dropped before any await
-        let (seq_val, scid_val) = {
+        let (seq_val, sid_val) = {
             let guard = self.session_state.lock()?;
             let buffer = guard.as_ref().ok_or_else(|| {
                 IndexError::other(std::io::Error::other(
@@ -367,8 +367,8 @@ impl ResultSequenceCounter for GarnetResultIndex {
                 ))
             })?;
             let seq_val = buffer.string_get(&seq_key);
-            let scid_val = buffer.string_get(&scid_key);
-            (seq_val, scid_val)
+            let sid_val = buffer.string_get(&sid_key);
+            (seq_val, sid_val)
         }; // guard dropped here
 
         let sequence = match seq_val {
@@ -382,7 +382,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
             }
         };
 
-        let source_change_id = match scid_val {
+        let source_id = match sid_val {
             BufferReadResult::Found(bytes) => {
                 String::from_utf8(bytes).map_err(IndexError::other)?
             }
@@ -394,19 +394,19 @@ impl ResultSequenceCounter for GarnetResultIndex {
 
         Ok(ResultSequence {
             sequence,
-            source_change_id: Arc::from(source_change_id),
+            source_id: Arc::from(source_id),
         })
     }
 
     async fn apply_checkpoint(
         &self,
         sequence: u64,
-        source_change_id: &str,
+        source_id: &str,
         source_position: Option<&BytesType>,
     ) -> Result<(), IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
-        let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_change_id);
+        let sid_key = format!("metadata:{{{}}}:source_id", self.query_id);
+        let sp_key = format!("metadata:{{{}}}:sp:{}", self.query_id, source_id);
         let list_key = format!("metadata:{{{}}}:source_id_list", self.query_id);
 
         // Pre-fetch source_id_list from Redis in case buffer doesn't have it yet.
@@ -440,17 +440,17 @@ impl ResultSequenceCounter for GarnetResultIndex {
         };
 
         buffer.string_set(seq_key, sequence.to_string().into_bytes());
-        buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
+        buffer.string_set(sid_key, source_id.as_bytes().to_vec());
         match source_position {
             Some(pos) => {
                 buffer.string_set(sp_key, pos.to_vec());
-                if !source_ids.contains(&source_change_id.to_string()) {
-                    source_ids.push(source_change_id.to_string());
+                if !source_ids.contains(&source_id.to_string()) {
+                    source_ids.push(source_id.to_string());
                 }
             }
             None => {
                 buffer.del(sp_key);
-                source_ids.retain(|id| id != source_change_id);
+                source_ids.retain(|id| id != source_id);
             }
         }
         let serialized = serde_json::to_string(&source_ids).map_err(IndexError::other)?;
@@ -460,10 +460,10 @@ impl ResultSequenceCounter for GarnetResultIndex {
 
     async fn get_checkpoint(&self) -> Result<ResultCheckpoint, IndexError> {
         let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
-        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+        let sid_key = format!("metadata:{{{}}}:source_id", self.query_id);
         let list_key = format!("metadata:{{{}}}:source_id_list", self.query_id);
 
-        let (seq_val, scid_val, list_val) = {
+        let (seq_val, sid_val, list_val) = {
             let guard = self.session_state.lock()?;
             let buffer = guard.as_ref().ok_or_else(|| {
                 IndexError::other(std::io::Error::other(
@@ -471,9 +471,9 @@ impl ResultSequenceCounter for GarnetResultIndex {
                 ))
             })?;
             let seq_val = buffer.string_get(&seq_key);
-            let scid_val = buffer.string_get(&scid_key);
+            let sid_val = buffer.string_get(&sid_key);
             let list_val = buffer.string_get(&list_key);
-            (seq_val, scid_val, list_val)
+            (seq_val, sid_val, list_val)
         };
 
         let sequence = match seq_val {
@@ -487,7 +487,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
             }
         };
 
-        let source_change_id = match scid_val {
+        let source_id = match sid_val {
             BufferReadResult::Found(bytes) => {
                 String::from_utf8(bytes).map_err(IndexError::other)?
             }
@@ -516,7 +516,7 @@ impl ResultSequenceCounter for GarnetResultIndex {
 
         Ok(ResultCheckpoint {
             sequence,
-            source_change_id: Arc::from(source_change_id),
+            source_id: Arc::from(source_id),
             source_positions,
         })
     }
@@ -562,9 +562,9 @@ impl GarnetResultIndex {
             Err(e) => return Err(IndexError::other(e)),
         };
 
-        let source_change_id = match con
+        let source_id = match con
             .get::<String, Option<String>>(format!(
-                "metadata:{{{}}}:source_change_id",
+                "metadata:{{{}}}:source_id",
                 self.query_id
             ))
             .await
@@ -575,7 +575,7 @@ impl GarnetResultIndex {
 
         Ok(ResultSequence {
             sequence,
-            source_change_id: Arc::from(source_change_id),
+            source_id: Arc::from(source_id),
         })
     }
 
@@ -590,9 +590,9 @@ impl GarnetResultIndex {
             Err(e) => return Err(IndexError::other(e)),
         };
 
-        let source_change_id = match con
+        let source_id = match con
             .get::<String, Option<String>>(format!(
-                "metadata:{{{}}}:source_change_id",
+                "metadata:{{{}}}:source_id",
                 self.query_id
             ))
             .await
@@ -625,7 +625,7 @@ impl GarnetResultIndex {
 
         Ok(ResultCheckpoint {
             sequence,
-            source_change_id: Arc::from(source_change_id),
+            source_id: Arc::from(source_id),
             source_positions,
         })
     }

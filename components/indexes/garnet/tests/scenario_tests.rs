@@ -1105,7 +1105,7 @@ mod session {
         session_control.begin().await.unwrap();
         let seq = result_index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 5);
-        assert_eq!(seq.source_change_id.as_ref(), "change-1");
+        assert_eq!(seq.source_id.as_ref(), "change-1");
 
         // Apply sequence 10 then rollback
         result_index
@@ -1119,9 +1119,9 @@ mod session {
         let seq = result_index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 5, "sequence should not change after rollback");
         assert_eq!(
-            seq.source_change_id.as_ref(),
+            seq.source_id.as_ref(),
             "change-1",
-            "source_change_id should not change after rollback"
+            "source_id should not change after rollback"
         );
 
         // Now commit sequence 10
@@ -1135,7 +1135,7 @@ mod session {
         session_control.begin().await.unwrap();
         let seq = result_index.get_sequence().await.unwrap();
         assert_eq!(seq.sequence, 10);
-        assert_eq!(seq.source_change_id.as_ref(), "change-2");
+        assert_eq!(seq.source_id.as_ref(), "change-2");
         session_control.rollback().unwrap();
     }
 

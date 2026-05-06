@@ -528,8 +528,8 @@ impl Query for DrasiQuery {
                 if checkpoint.sequence > 0 {
                     last_checkpoint_sequence = checkpoint.sequence;
                     debug!(
-                        "Query '{}' resuming from checkpoint: seq={}, source_change_id='{}'",
-                        self.base.config.id, checkpoint.sequence, checkpoint.source_change_id
+                        "Query '{}' resuming from checkpoint: seq={}, source_id='{}'",
+                        self.base.config.id, checkpoint.sequence, checkpoint.source_id
                     );
                     // Look up per-source positions individually
                     for settings in &mut subscription_settings {

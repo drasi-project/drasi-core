@@ -309,9 +309,9 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                         };
                         let sequence: u64 = u64::from_be_bytes(seq_bytes);
 
-                        let source_change_id_data = txn.get_cf(&metadata_cf, "source_change_id");
+                        let source_id_data = txn.get_cf(&metadata_cf, "source_id");
 
-                        let source_change_id: Arc<str> = match source_change_id_data {
+                        let source_id: Arc<str> = match source_id_data {
                             Ok(Some(v)) => match String::from_utf8(v) {
                                 Ok(v) => Arc::from(v),
                                 Err(e) => return Err(IndexError::other(e)),
@@ -321,7 +321,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                         };
                         Ok(ResultSequence {
                             sequence,
-                            source_change_id,
+                            source_id,
                         })
                     }
                     Ok(None) => Ok(ResultSequence::default()),
@@ -339,12 +339,12 @@ impl ResultSequenceCounter for RocksDbResultIndex {
     async fn apply_checkpoint(
         &self,
         sequence: u64,
-        source_change_id: &str,
+        source_id: &str,
         source_position: Option<&BytesType>,
     ) -> Result<(), IndexError> {
         let db = self.db.clone();
         let session_state = self.session_state.clone();
-        let source_change_id = source_change_id.to_string();
+        let source_id = source_id.to_string();
         let source_position_owned = source_position.map(|b| b.to_vec());
         let task = task::spawn_blocking(move || {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
@@ -354,13 +354,13 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                     .map_err(IndexError::other)?;
                 txn.put_cf(
                     &metadata_cf,
-                    "source_change_id",
-                    source_change_id.as_bytes(),
+                    "source_id",
+                    source_id.as_bytes(),
                 )
                 .map_err(IndexError::other)?;
 
                 // Store per-source position keyed by "sp:{source_id}"
-                let sp_key = format!("sp:{source_change_id}");
+                let sp_key = format!("sp:{source_id}");
                 match &source_position_owned {
                     Some(pos) => {
                         txn.put_cf(&metadata_cf, &sp_key, pos)
@@ -398,8 +398,8 @@ impl ResultSequenceCounter for RocksDbResultIndex {
                         };
                         let sequence: u64 = u64::from_be_bytes(seq_bytes);
 
-                        let source_change_id_data = txn.get_cf(&metadata_cf, "source_change_id");
-                        let source_change_id: Arc<str> = match source_change_id_data {
+                        let source_id_data = txn.get_cf(&metadata_cf, "source_id");
+                        let source_id: Arc<str> = match source_id_data {
                             Ok(Some(v)) => match String::from_utf8(v) {
                                 Ok(v) => Arc::from(v),
                                 Err(e) => return Err(IndexError::other(e)),
@@ -430,7 +430,7 @@ impl ResultSequenceCounter for RocksDbResultIndex {
 
                         Ok(ResultCheckpoint {
                             sequence,
-                            source_change_id,
+                            source_id,
                             source_positions,
                         })
                     }
