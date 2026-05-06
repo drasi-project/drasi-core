@@ -404,12 +404,8 @@ mod tests {
     #[test]
     fn test_get_results_as_vec() {
         let mut state = QueryOutputState::new(10);
-        state
-            .results
-            .insert(1, serde_json::json!({"a": 1}));
-        state
-            .results
-            .insert(2, serde_json::json!({"b": 2}));
+        state.results.insert(1, serde_json::json!({"a": 1}));
+        state.results.insert(2, serde_json::json!({"b": 2}));
 
         let vec = state.get_results_as_vec();
         assert_eq!(vec.len(), 2);

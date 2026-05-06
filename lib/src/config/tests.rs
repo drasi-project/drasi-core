@@ -571,7 +571,7 @@ mod runtime_tests {
                 dispatch_mode: None,
                 storage_backend: None,
                 recovery_policy: None,
-            outbox_capacity: 1000,
+                outbox_capacity: 1000,
             }],
         };
 
@@ -613,7 +613,7 @@ mod runtime_tests {
                     dispatch_mode: None,
                     storage_backend: None,
                     recovery_policy: None,
-            outbox_capacity: 1000,
+                    outbox_capacity: 1000,
                 },
                 QueryConfig {
                     id: "q2".to_string(),
@@ -630,7 +630,7 @@ mod runtime_tests {
                     dispatch_mode: None,
                     storage_backend: None,
                     recovery_policy: None,
-            outbox_capacity: 1000,
+                    outbox_capacity: 1000,
                 },
             ],
         };
