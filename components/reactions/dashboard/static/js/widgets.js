@@ -2,7 +2,7 @@ const chartInstances = new Map();
 
 // ─── Vibrant dark color palette for charts ──────────────────
 const CHART_COLORS = [
-  "#818cf8", "#34d399", "#fbbf24", "#f87171", "#60a5fa",
+  "#4ade80", "#34d399", "#fbbf24", "#f87171", "#60a5fa",
   "#c084fc", "#2dd4bf", "#fb923c", "#a78bfa", "#38bdf8",
 ];
 
@@ -110,7 +110,7 @@ export const WIDGET_TYPE_META = {
     name: "Line Chart",
     description: "Track trends over time",
     icon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`,
-    color: "#818cf8",
+    color: "#4ade80",
   },
   bar_chart: {
     name: "Bar Chart",
@@ -425,7 +425,7 @@ function renderPieChart(widget, runtime, container) {
     series: [{
       type: "pie",
       radius: ["35%", "65%"],
-      itemStyle: { borderRadius: 6, borderColor: "#1a1a28", borderWidth: 2 },
+      itemStyle: { borderRadius: 6, borderColor: "#1a2820", borderWidth: 2 },
       label: { color: "#9d9db5", fontSize: 11 },
       data: rows.map((r) => ({ name: r?.[nameF] ?? "item", value: asNumber(r?.[valF]) })),
     }],
@@ -445,13 +445,13 @@ function renderGauge(widget, runtime, container) {
       type: "gauge",
       min,
       max,
-      progress: { show: true, width: 12, itemStyle: { color: "#818cf8" } },
+      progress: { show: true, width: 12, itemStyle: { color: "#4ade80" } },
       axisLine: { lineStyle: { width: 12, color: [[1, "rgba(255,255,255,0.06)"]] } },
       axisTick: { show: false },
       splitLine: { length: 8, lineStyle: { width: 1.5, color: "rgba(255,255,255,0.12)" } },
       axisLabel: { distance: 16, color: "#6b6b80", fontSize: 10 },
-      pointer: { length: "55%", width: 4, itemStyle: { color: "#818cf8" } },
-      anchor: { show: true, size: 10, itemStyle: { color: "#818cf8", borderColor: "#1a1a28", borderWidth: 3 } },
+      pointer: { length: "55%", width: 4, itemStyle: { color: "#4ade80" } },
+      anchor: { show: true, size: 10, itemStyle: { color: "#4ade80", borderColor: "#1a2820", borderWidth: 3 } },
       detail: { valueAnimation: true, fontSize: 20, fontWeight: 700, color: "#f0f0f5", offsetCenter: [0, "70%"], formatter: (v) => formatNumber(v) },
       data: [{ value }],
     }],

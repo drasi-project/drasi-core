@@ -4,11 +4,11 @@
 
 /* ─── Design Tokens ──────────────────────────────────────── */
 :root {
-  --bg-base: #0a0a0f;
-  --bg-surface: #12121a;
-  --bg-elevated: #1a1a28;
-  --bg-overlay: #222233;
-  --bg-hover: #262640;
+  --bg-base: #0a0f0a;
+  --bg-surface: #121a14;
+  --bg-elevated: #1a2820;
+  --bg-overlay: #22332a;
+  --bg-hover: #264032;
 
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-default: rgba(255, 255, 255, 0.1);
@@ -19,10 +19,10 @@
   --text-muted: #6b6b80;
   --text-inverse: #0a0a0f;
 
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-muted: rgba(129, 140, 248, 0.15);
-  --accent-glow: rgba(129, 140, 248, 0.25);
+  --accent: #4ade80;
+  --accent-hover: #86efac;
+  --accent-muted: rgba(74, 222, 128, 0.15);
+  --accent-glow: rgba(74, 222, 128, 0.25);
 
   --success: #34d399;
   --success-muted: rgba(52, 211, 153, 0.15);
@@ -41,7 +41,7 @@
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
   --shadow-accent: 0 0 20px var(--accent-glow);
-  --shadow-glow: 0 0 30px rgba(129, 140, 248, 0.12);
+  --shadow-glow: 0 0 30px rgba(74, 222, 128, 0.12);
 
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -413,7 +413,7 @@ p { margin: 0.5em 0; }
   inset: 0;
   border-radius: var(--radius-lg);
   padding: 1px;
-  background: linear-gradient(135deg, rgba(129, 140, 248, 0.1), transparent 50%);
+  background: linear-gradient(135deg, rgba(74, 222, 128, 0.1), transparent 50%);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
@@ -626,7 +626,7 @@ p { margin: 0.5em 0; }
   margin-right: 8px;
   flex-shrink: 0;
 }
-.widget-type-indicator.type-line_chart { background: #818cf8; }
+.widget-type-indicator.type-line_chart { background: #4ade80; }
 .widget-type-indicator.type-bar_chart { background: #34d399; }
 .widget-type-indicator.type-pie_chart { background: #fbbf24; }
 .widget-type-indicator.type-table { background: #60a5fa; }
