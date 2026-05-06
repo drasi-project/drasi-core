@@ -63,6 +63,7 @@ impl QueryOutputState {
         Self {
             results: im::HashMap::new(),
             as_of_sequence: 0,
+            // Pre-allocate up to 1024 slots; the deque grows automatically for larger capacities.
             outbox: VecDeque::with_capacity(effective_capacity.min(1024)),
             outbox_capacity: effective_capacity,
         }

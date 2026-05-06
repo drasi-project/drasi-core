@@ -237,6 +237,7 @@ async fn dispatch_query_results(
         let mut state = output_state.write().await;
         state.apply_diffs(&converted_results);
 
+        let result_count = converted_results.len();
         let query_result = QueryResult::with_profiling(
             query_id.to_string(),
             0, // sequence assigned by advance_sequence_and_push
@@ -254,7 +255,7 @@ async fn dispatch_query_results(
                 );
                 meta.insert(
                     "result_count".to_string(),
-                    serde_json::Value::Number(results.len().into()),
+                    serde_json::Value::Number(result_count.into()),
                 );
                 meta
             },
@@ -266,7 +267,7 @@ async fn dispatch_query_results(
 
     debug!(
         "Query '{query_id}' sending {} results to reactions (seq={})",
-        results.len(),
+        arc_result.results.len(),
         arc_result.sequence
     );
 
