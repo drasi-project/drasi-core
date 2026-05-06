@@ -50,7 +50,7 @@ struct BufferedStream {
 }
 
 pub struct LokiReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: LokiReactionConfig,
 }
 
@@ -207,10 +207,10 @@ impl LokiReaction {
         );
 
         match result {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 context.insert("after".to_string(), data.clone());
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 context.insert("before".to_string(), data.clone());
             }
             ResultDiff::Update {
@@ -223,7 +223,7 @@ impl LokiReaction {
                 context.insert("after".to_string(), after.clone());
                 context.insert("data".to_string(), data.clone());
             }
-            ResultDiff::Aggregation { after, before } => {
+            ResultDiff::Aggregation { after, before, .. } => {
                 context.insert("after".to_string(), after.clone());
                 if let Some(before) = before {
                     context.insert("before".to_string(), before.clone());
@@ -306,8 +306,8 @@ impl LokiReaction {
 
     fn default_log_line(result: &ResultDiff) -> Option<String> {
         let value = match result {
-            ResultDiff::Add { data } => data,
-            ResultDiff::Delete { data } => data,
+            ResultDiff::Add { data, .. } => data,
+            ResultDiff::Delete { data, .. } => data,
             ResultDiff::Update { data, .. } => data,
             ResultDiff::Aggregation { after, .. } => after,
             ResultDiff::Noop => return None,
@@ -381,20 +381,10 @@ impl Reaction for LokiReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "endpoint".to_string(),
-            serde_json::Value::String(self.config.endpoint.clone()),
-        );
-        props.insert(
-            "timeout_ms".to_string(),
-            serde_json::Value::Number(self.config.timeout_ms.into()),
-        );
-        props.insert(
-            "labels".to_string(),
-            serde_json::to_value(&self.config.labels).unwrap_or(serde_json::Value::Null),
-        );
-        props
+        use crate::descriptor::LokiReactionConfigDto;
+
+        self.base
+            .properties_or_serialize(&LokiReactionConfigDto::from(&self.config))
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -693,6 +683,7 @@ mod tests {
 
         let result = ResultDiff::Add {
             data: serde_json::json!({"id": "sensor-1", "temperature": 42.1}),
+            row_signature: 0,
         };
         let context = LokiReaction::build_context("q1", "ADD", &result, Utc::now());
         let query_config = QueryConfig {

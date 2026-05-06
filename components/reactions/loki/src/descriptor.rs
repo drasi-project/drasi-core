@@ -20,7 +20,7 @@ use log::{debug, info};
 use std::collections::HashMap;
 use utoipa::OpenApi;
 
-use crate::LokiReactionBuilder;
+use crate::{BasicAuth, LokiReactionBuilder, LokiReactionConfig, QueryConfig, TemplateSpec};
 
 /// DTO for a log line template specification.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -122,6 +122,52 @@ fn map_query_config(dto: &QueryConfigDto) -> crate::QueryConfig {
     }
 }
 
+impl From<&TemplateSpec> for TemplateSpecDto {
+    fn from(spec: &TemplateSpec) -> Self {
+        Self {
+            template: spec.template.clone(),
+        }
+    }
+}
+
+impl From<&QueryConfig> for QueryConfigDto {
+    fn from(config: &QueryConfig) -> Self {
+        Self {
+            added: config.added.as_ref().map(TemplateSpecDto::from),
+            updated: config.updated.as_ref().map(TemplateSpecDto::from),
+            deleted: config.deleted.as_ref().map(TemplateSpecDto::from),
+        }
+    }
+}
+
+impl From<&BasicAuth> for BasicAuthDto {
+    fn from(auth: &BasicAuth) -> Self {
+        Self {
+            username: ConfigValue::Static(auth.username.clone()),
+            password: ConfigValue::Static(auth.password.clone()),
+        }
+    }
+}
+
+impl From<&LokiReactionConfig> for LokiReactionConfigDto {
+    fn from(config: &LokiReactionConfig) -> Self {
+        Self {
+            endpoint: ConfigValue::Static(config.endpoint.clone()),
+            labels: config.labels.clone(),
+            tenant_id: config.tenant_id.clone().map(ConfigValue::Static),
+            token: config.token.clone().map(ConfigValue::Static),
+            basic_auth: config.basic_auth.as_ref().map(BasicAuthDto::from),
+            timeout_ms: Some(ConfigValue::Static(config.timeout_ms)),
+            routes: config
+                .routes
+                .iter()
+                .map(|(key, value)| (key.clone(), QueryConfigDto::from(value)))
+                .collect(),
+            default_template: config.default_template.as_ref().map(QueryConfigDto::from),
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     LokiReactionConfigDto,
@@ -216,7 +262,8 @@ impl ReactionPluginDescriptor for LokiReactionDescriptor {
             dto.token.is_some() || dto.basic_auth.is_some()
         );
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
         info!("[{id}] Loki reaction created successfully");
         Ok(Box::new(reaction))
     }

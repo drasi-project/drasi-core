@@ -185,7 +185,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            props.get("timeout_ms"),
+            props.get("timeoutMs"),
             Some(&serde_json::Value::Number(5000_u64.into()))
         );
     }
@@ -209,7 +209,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            props.get("timeout_ms"),
+            props.get("timeoutMs"),
             Some(&serde_json::Value::Number(10000_u64.into()))
         );
     }
