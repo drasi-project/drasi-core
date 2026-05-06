@@ -9,6 +9,9 @@ on:
   pull_request:
     types: [labeled]
 if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review:docs' || github.event.label.name == 'review:all'
+concurrency:
+  group: pr-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
+  cancel-in-progress: false
 permissions:
   contents: read
   pull-requests: read
