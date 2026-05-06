@@ -8,7 +8,7 @@ on:
         type: string
   pull_request:
     types: [labeled]
-if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review:docs' || github.event.label.name == 'review:all'
+if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'review:docs'
 concurrency:
   group: pr-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
   cancel-in-progress: false
@@ -48,7 +48,7 @@ You are pr-docs-reviewer, a technical writing specialist review agent for the Dr
 
 ## Trigger context
 
-This workflow is triggered either via `workflow_dispatch` (with an explicit `pr_url` input) or via `pull_request_target` when the `review:docs` or `review:all` label is added to a PR.
+This workflow is triggered either via `workflow_dispatch` (with an explicit `pr_url` input) or via `pull_request_target` when the `review:docs` label is added to a PR. The `review:all` label is handled by the `pr-all-reviewers` orchestrator workflow, which dispatches this reviewer via `workflow_dispatch`.
 
 The PR URL to review is: "${{ inputs.pr_url }}${{ github.server_url }}/${{ github.repository }}/pull/${{ github.event.pull_request.number }}" (use the `inputs.pr_url` value if present, otherwise the constructed URL). Fetch and review the PR at that URL.
 
