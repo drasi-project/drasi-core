@@ -125,6 +125,15 @@ Submit your review as a GitHub PR review with inline comments on specific lines.
 
 **You MUST anchor every finding to a specific changed line in the diff whenever possible.** Only put a finding in the summary (Step 2) if it genuinely cannot be tied to any line in the diff (e.g. a missing security control across the whole module). For each finding, pick the most representative changed line — the unsafe call, the input read, the auth check site, the dependency bump.
 
+**Pre-flight: validate each line against the diff.** Before calling `create_pull_request_review_comment`:
+1. Use the PR diff (already fetched in pre-review setup) to enumerate the hunks for each changed file.
+2. A comment is valid **only** if `(path, line, side)` falls inside a hunk:
+   - `side: "RIGHT"` → `line` must be an added (`+`) or unchanged context line in the new file's hunk range.
+   - `side: "LEFT"` → `line` must be a removed (`-`) or unchanged context line in the old file's hunk range.
+   - For multi-line ranges, both `start_line` and `line` must be in the **same hunk** on the **same side**, with `start_line < line`.
+3. If a finding cannot be anchored to a valid in-diff line, do NOT create an inline comment — include it as a bullet in the top-level summary body in Step 2 instead.
+4. Never post duplicate comments on the same `(path, line, side)`.
+
 For every finding, call `create_pull_request_review_comment` with:
 - `repo`: `"<owner>/<repo>"` parsed from the PR URL
 - `pull_request_number`: PR number parsed from the PR URL
