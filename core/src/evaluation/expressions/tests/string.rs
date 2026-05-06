@@ -626,3 +626,152 @@ async fn test_random_uuid() {
         assert_eq!(uuid.len(), 36);
     }
 }
+
+#[tokio::test]
+async fn evaluate_starts_with() {
+    let function_registry = create_string_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    // true case
+    let expr = drasi_query_cypher::parse_expression("'drasi' STARTS WITH 'dra'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(true)
+    );
+
+    // false case
+    let expr = drasi_query_cypher::parse_expression("'drasi' STARTS WITH 'xyz'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(false)
+    );
+
+    // null propagation
+    let expr = drasi_query_cypher::parse_expression("NULL STARTS WITH 'a'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Null
+    );
+
+    let expr = drasi_query_cypher::parse_expression("'a' STARTS WITH NULL").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Null
+    );
+
+    // empty string
+    let expr = drasi_query_cypher::parse_expression("'drasi' STARTS WITH ''").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(true)
+    );
+}
+
+#[tokio::test]
+async fn evaluate_ends_with() {
+    let function_registry = create_string_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    // true case
+    let expr = drasi_query_cypher::parse_expression("'drasi' ENDS WITH 'si'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(true)
+    );
+
+    // false case
+    let expr = drasi_query_cypher::parse_expression("'drasi' ENDS WITH 'xy'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(false)
+    );
+
+    // null propagation
+    let expr = drasi_query_cypher::parse_expression("NULL ENDS WITH 'a'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Null
+    );
+}
+
+#[tokio::test]
+async fn evaluate_contains_operator() {
+    let function_registry = create_string_expression_test_function_registry();
+    let ari = Arc::new(InMemoryResultIndex::new());
+    let evaluator = ExpressionEvaluator::new(function_registry.clone(), ari.clone());
+    let variables = QueryVariables::new();
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+
+    // true case
+    let expr = drasi_query_cypher::parse_expression("'drasi' CONTAINS 'ras'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(true)
+    );
+
+    // false case
+    let expr = drasi_query_cypher::parse_expression("'drasi' CONTAINS 'xyz'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(false)
+    );
+
+    // null propagation
+    let expr = drasi_query_cypher::parse_expression("NULL CONTAINS 'a'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Null
+    );
+
+    // case-sensitive
+    let expr = drasi_query_cypher::parse_expression("'Drasi' CONTAINS 'dra'").unwrap();
+    assert_eq!(
+        evaluator
+            .evaluate_expression(&context, &expr)
+            .await
+            .unwrap(),
+        VariableValue::Bool(false)
+    );
+}

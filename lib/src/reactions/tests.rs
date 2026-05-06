@@ -308,9 +308,9 @@ pub(crate) mod manager_tests {
         let reactions = manager.list_reactions().await;
         assert_eq!(reactions.len(), 2);
 
-        // Both should be stopped initially
+        // Both should be in Added state initially
         for (_, status) in reactions {
-            assert!(matches!(status, ComponentStatus::Stopped));
+            assert!(matches!(status, ComponentStatus::Added));
         }
     }
 
@@ -325,7 +325,7 @@ pub(crate) mod manager_tests {
             .get_reaction_status("test-reaction".to_string())
             .await;
         assert!(status.is_ok());
-        assert!(matches!(status.unwrap(), ComponentStatus::Stopped));
+        assert!(matches!(status.unwrap(), ComponentStatus::Added));
     }
 
     #[tokio::test]
@@ -457,8 +457,8 @@ pub(crate) mod manager_tests {
             "Reaction with auto_start=true should be running"
         );
         assert!(
-            matches!(status2, ComponentStatus::Stopped),
-            "Reaction with auto_start=false should still be stopped"
+            matches!(status2, ComponentStatus::Added),
+            "Reaction with auto_start=false should still be in Added state"
         );
     }
 
@@ -522,7 +522,7 @@ pub(crate) mod manager_tests {
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
+            matches!(status, ComponentStatus::Added),
             "Reaction with auto_start=false should not be started by start_all"
         );
 

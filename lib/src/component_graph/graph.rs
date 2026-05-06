@@ -97,7 +97,7 @@ pub struct ComponentGraph {
     /// component in the graph. Events are recorded by [`apply_update()`] and
     /// [`remove_component()`]. Managers delegate event queries here rather than
     /// maintaining their own per-manager histories.
-    event_history: ComponentEventHistory,
+    pub(super) event_history: ComponentEventHistory,
 }
 
 /// Default broadcast channel capacity for component events.
@@ -364,7 +364,8 @@ impl ComponentGraph {
     pub fn add_component(&mut self, node: ComponentNode) -> anyhow::Result<NodeIndex> {
         let (node_idx, event, _, _) = self.add_component_internal(node)?;
         if let Some(event) = event {
-            let _ = self.event_tx.send(event);
+            let _ = self.event_tx.send(event.clone());
+            self.event_history.record_event(event);
         }
         Ok(node_idx)
     }
@@ -413,7 +414,7 @@ impl ComponentGraph {
 
     /// Remove a component node and all its edges from the graph.
     ///
-    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Stopped`] to all
+    /// Emits a [`ComponentEvent`] with status [`ComponentStatus::Removed`] to all
     /// subscribers. Returns the removed node data, or an error if the component
     /// doesn't exist. The instance root node cannot be removed.
     pub fn remove_component(&mut self, id: &str) -> anyhow::Result<ComponentNode> {
@@ -444,7 +445,7 @@ impl ComponentGraph {
         self.emit_event(
             id,
             &kind,
-            ComponentStatus::Stopped,
+            ComponentStatus::Removed,
             Some(format!("{kind} removed")),
         );
 
@@ -889,7 +890,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Source,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -927,7 +928,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Query,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -968,7 +969,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Reaction,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1043,7 +1044,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::BootstrapProvider,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1089,7 +1090,7 @@ impl ComponentGraph {
         let node = ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::IdentityProvider,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata,
         };
         let mut txn = self.begin();
@@ -1163,13 +1164,13 @@ impl ComponentGraph {
 
     /// Subscribe to live lifecycle events for a component.
     ///
-    /// Returns the current history and a broadcast receiver for new events.
-    /// Creates the component's event channel if it doesn't exist.
+    /// Returns the current history and a broadcast receiver for new events,
+    /// or `None` if the component has no event channel yet.
     pub fn subscribe_events(
-        &mut self,
+        &self,
         component_id: &str,
-    ) -> (Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>) {
-        self.event_history.subscribe(component_id)
+    ) -> Option<(Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>)> {
+        self.event_history.try_subscribe(component_id)
     }
 }
 
@@ -1212,25 +1213,30 @@ pub(super) fn is_valid_relationship(
 /// Check if a status transition is valid according to the component lifecycle state machine.
 ///
 /// ```text
-/// Stopped ──→ Starting ──→ Running ──→ Stopping ──→ Stopped
-///    │            │            │            │
-///    │            ↓            ↓            ↓
-///    │          Error        Error        Error
-///    │            │
-///    │            ↓
-///    │         Stopped (aborted start)
-///    │
-///    ↓
+/// Added ──→ Starting ──→ Running ──→ Stopping ──→ Stopped
+///   │           │            │            │
+///   │           ↓            ↓            ↓
+///   │         Error        Error        Error
+///   │           │
+///   │           ↓
+///   │        Stopped (aborted start)
+///   │
+///   ↓
 /// Reconfiguring ──→ Stopped | Starting | Error
 ///
 /// Error ──→ Starting (retry) | Stopped (reset)
+///
+/// Note: Added and Removed are set by the graph on add/remove_component()
+/// and are NOT valid targets for validate_and_transition().
 /// ```
 pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) -> bool {
     use ComponentStatus::*;
     matches!(
         (from, to),
         // Normal lifecycle
-        (Stopped, Starting)
+        (Added, Starting)
+            | (Added, Stopped) // immediate deactivation without starting
+            | (Stopped, Starting)
             | (Starting, Running)
             | (Starting, Error)
             | (Starting, Stopped) // aborted start
@@ -1243,6 +1249,7 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Error, Starting) // retry
             | (Error, Stopped) // reset
             // Reconfiguration (from any stable state)
+            | (Added, Reconfiguring)
             | (Stopped, Reconfiguring)
             | (Running, Reconfiguring)
             | (Error, Reconfiguring)

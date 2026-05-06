@@ -83,9 +83,8 @@ mod query_joins_tests {
 
         let mut property_map = ElementPropertyMap::new();
         for (key, value) in properties {
-            if let Ok(element_value) = convert_json_to_element_value(&value) {
-                property_map.insert(key, element_value);
-            }
+            let element_value = convert_json_to_element_value(&value);
+            property_map.insert(key, element_value);
         }
 
         let metadata = ElementMetadata {

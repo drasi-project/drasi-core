@@ -52,10 +52,6 @@ pub enum PluginStatus {
     Loaded,
     /// Has running component instances.
     Active,
-    /// Being replaced: instances migrating to new version.
-    Draining,
-    /// No active instances, descriptors deregistered, library remains mapped.
-    Retired,
     /// Load or initialization failed.
     Failed,
 }
@@ -65,8 +61,6 @@ impl std::fmt::Display for PluginStatus {
         match self {
             PluginStatus::Loaded => write!(f, "Loaded"),
             PluginStatus::Active => write!(f, "Active"),
-            PluginStatus::Draining => write!(f, "Draining"),
-            PluginStatus::Retired => write!(f, "Retired"),
             PluginStatus::Failed => write!(f, "Failed"),
         }
     }
@@ -75,50 +69,15 @@ impl std::fmt::Display for PluginStatus {
 /// Events emitted by the plugin lifecycle layer.
 ///
 /// These are broadcast through a `tokio::sync::broadcast` channel and can be
-/// consumed by server-level SSE, UI updates, or logging.
+/// consumed by server-level logging or UI updates.
 #[derive(Debug, Clone)]
 pub enum PluginEvent {
-    /// A new plugin was loaded (no prior version existed).
+    /// A new plugin was loaded.
     Loaded {
         plugin_id: String,
         version: String,
         kinds: Vec<PluginKindEntry>,
     },
-    /// A new version was loaded side-by-side with an existing version.
-    LoadedSideBySide {
-        plugin_id: String,
-        version: String,
-        incumbent_plugin_id: String,
-        versioned_kinds: Vec<String>,
-    },
-    /// An upgrade (drain-then-replace) completed successfully.
-    Upgraded {
-        plugin_id: String,
-        old_version: String,
-        new_version: String,
-        migrated_components: Vec<String>,
-    },
-    /// An upgrade completed but some components failed to migrate.
-    UpgradePartialFailure {
-        plugin_id: String,
-        old_version: String,
-        new_version: String,
-        migrated: Vec<String>,
-        failed: Vec<(String, String)>,
-    },
-    /// A plugin is being drained (upgrade in progress).
-    Draining {
-        plugin_id: String,
-        affected_components: Vec<String>,
-    },
-    /// A side-by-side version was promoted to incumbent.
-    Promoted {
-        plugin_id: String,
-        promoted_kinds: Vec<String>,
-        previous_incumbent: String,
-    },
-    /// A plugin was retired.
-    Retired { plugin_id: String },
     /// A plugin failed to load.
     LoadFailed { path: PathBuf, error: String },
 }
@@ -126,8 +85,8 @@ pub enum PluginEvent {
 /// Raw filesystem events emitted by the `PluginWatcher`.
 ///
 /// These are policy-neutral: the watcher does not decide whether a file change
-/// means load, upgrade, side-by-side, or retire. That decision belongs to the
-/// host application's orchestrator layer.
+/// means load or reload. That decision belongs to the host application's
+/// orchestrator layer.
 #[derive(Debug, Clone)]
 pub enum PluginFileEvent {
     Added(PathBuf),
@@ -150,8 +109,6 @@ mod tests {
     fn plugin_status_display() {
         assert_eq!(PluginStatus::Loaded.to_string(), "Loaded");
         assert_eq!(PluginStatus::Active.to_string(), "Active");
-        assert_eq!(PluginStatus::Draining.to_string(), "Draining");
-        assert_eq!(PluginStatus::Retired.to_string(), "Retired");
         assert_eq!(PluginStatus::Failed.to_string(), "Failed");
     }
 
