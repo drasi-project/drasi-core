@@ -45,6 +45,8 @@ chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
 sui-rpc = "0.1"
 sui-sdk-types = "0.1"
+# Pin roaring below 0.11.4 which requires rustc 1.90.0
+roaring = { workspace = true }
 tonic = { version = "0.14", default-features = false }
 hex = "0.4"
 bcs = "0.1"

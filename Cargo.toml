@@ -127,6 +127,8 @@ drasi-host-sdk = { version = "0.8.1", path = "components/host-sdk" }
 
 # Common dependencies
 im = "15"
+# Pin roaring below 0.11.4 which requires rustc 1.90.0 (transitive via sui-sdk-types)
+roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.5.1", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.3.0", path = "components/indexes/garnet" }
