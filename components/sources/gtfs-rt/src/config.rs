@@ -118,6 +118,25 @@ impl GtfsRtSourceConfig {
             ));
         }
 
+        for (label, url_opt) in [
+            ("trip_updates_url", &self.trip_updates_url),
+            ("vehicle_positions_url", &self.vehicle_positions_url),
+            ("alerts_url", &self.alerts_url),
+        ] {
+            if let Some(raw) = url_opt {
+                let parsed = url::Url::parse(raw)
+                    .map_err(|e| anyhow::anyhow!("Validation error: {label} is not a valid URL: {e}"))?;
+                match parsed.scheme() {
+                    "https" | "http" => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Validation error: {label} scheme must be http or https, got: {other}"
+                        ));
+                    }
+                }
+            }
+        }
+
         if self.poll_interval_secs == 0 {
             return Err(anyhow::anyhow!(
                 "Validation error: poll_interval_secs must be greater than 0"
@@ -178,8 +197,8 @@ mod tests {
     #[test]
     fn test_configured_feeds_contains_only_configured() {
         let config = GtfsRtSourceConfig {
-            trip_updates_url: Some("a".to_string()),
-            alerts_url: Some("b".to_string()),
+            trip_updates_url: Some("https://example.com/tu".to_string()),
+            alerts_url: Some("https://example.com/alerts".to_string()),
             ..Default::default()
         };
 
