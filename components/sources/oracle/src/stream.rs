@@ -602,21 +602,20 @@ fn poll_logminer(
         let table_name: String = row.get(4)?;
         let sql_undo: Option<String> = row.get(5)?;
         let row_id: Option<String> = row.get(6)?;
-        let timestamp: Option<oracle::sql_type::Timestamp> = row.get(7)?;
-        let timestamp = timestamp.and_then(|timestamp| {
-            let date = chrono::NaiveDate::from_ymd_opt(
-                timestamp.year(),
-                timestamp.month(),
-                timestamp.day(),
-            )?;
-            let time = chrono::NaiveTime::from_hms_nano_opt(
-                timestamp.hour(),
-                timestamp.minute(),
-                timestamp.second(),
-                timestamp.nanosecond(),
-            )?;
-            Some(chrono::NaiveDateTime::new(date, time).and_utc())
-        });
+        let timestamp: Option<chrono::DateTime<chrono::Utc>> = row
+            .get::<_, Option<oracle::sql_type::Timestamp>>(7)
+            .ok()
+            .flatten()
+            .and_then(|ts| {
+                let date = chrono::NaiveDate::from_ymd_opt(ts.year(), ts.month(), ts.day())?;
+                let time = chrono::NaiveTime::from_hms_nano_opt(
+                    ts.hour(),
+                    ts.minute(),
+                    ts.second(),
+                    ts.nanosecond(),
+                )?;
+                Some(chrono::NaiveDateTime::new(date, time).and_utc())
+            });
 
         let commit_scn = Scn(commit_scn as u64);
         if commit_scn > max_commit_scn {

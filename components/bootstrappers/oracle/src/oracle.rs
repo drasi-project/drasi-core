@@ -55,7 +55,7 @@ impl BootstrapProvider for OracleBootstrapProvider {
         let snapshot_scn = context
             .get_typed_property::<u64>(ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY)?
             .map(Scn);
-        let (tx, rx) = std::sync::mpsc::sync_channel::<SourceChangeEvent>(256);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<SourceChangeEvent>(256);
 
         let worker = tokio::task::spawn_blocking(move || {
             let mut handler = OracleBootstrapHandler::new(config, source_id, snapshot_scn);
@@ -63,7 +63,7 @@ impl BootstrapProvider for OracleBootstrapProvider {
         });
 
         let mut count = 0usize;
-        while let Ok(event) = tokio::task::block_in_place(|| rx.recv()) {
+        while let Some(event) = rx.recv().await {
             count += 1;
             event_tx
                 .send(BootstrapEvent {
@@ -180,7 +180,7 @@ impl OracleBootstrapHandler {
     fn stream_rows(
         &mut self,
         request: &BootstrapRequest,
-        tx: std::sync::mpsc::SyncSender<SourceChangeEvent>,
+        tx: tokio::sync::mpsc::Sender<SourceChangeEvent>,
     ) -> Result<()> {
         let connection = OracleConnection::connect(&self.config)?;
         let conn = connection.inner();
@@ -216,7 +216,7 @@ impl OracleBootstrapHandler {
                     properties,
                 };
                 if tx
-                    .send(SourceChangeEvent {
+                    .blocking_send(SourceChangeEvent {
                         source_id: self.source_id.clone(),
                         change: SourceChange::Insert { element },
                         timestamp,
