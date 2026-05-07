@@ -66,7 +66,7 @@ Every node carries **two labels**:
 The full event payload is stored as a nested `payload` object. Use Cypher dot-notation to access individual fields:
 
 ```cypher
--- Access nested payload fields directly
+// Access nested payload fields directly
 RETURN e.payload.price, e.payload.size, e.payload.is_bid
 ```
 

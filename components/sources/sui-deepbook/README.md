@@ -85,8 +85,7 @@ Each DeepBook event becomes a `Node` element in the Drasi graph with:
 | `order_id` | Extracted when present | `42` |
 | `pool_id` | Pool address (full, when present) | `0xabc123…` |
 | `pool_id_short` | Truncated pool address for display | `0xabc1…2345` |
-| `payload` | Full `parsedJson` as nested object | `{size: "1000", …}` |
-| `payload` | Nested object with all event fields | `e.payload.size`, `e.payload.price` |
+| `payload` | Full `parsedJson` as nested object — access fields via dot notation (e.g. `e.payload.size`, `e.payload.price`) | `{size: "1000", …}` |
 
 Every node receives two labels:
 - `DeepBookEvent` (constant, useful for broad queries)

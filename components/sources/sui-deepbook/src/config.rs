@@ -32,12 +32,16 @@ pub enum Transport {
     JsonRpc,
 }
 
+/// Where to start consuming events from the Sui blockchain.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "mode", content = "value", rename_all = "snake_case")]
 pub enum StartPosition {
+    /// Start from the earliest available event on chain.
     Beginning,
+    /// Start from the current chain tip; only process new events going forward.
     #[default]
     Now,
+    /// Start from the beginning but skip events with `timestamp_ms` earlier than the given value (milliseconds since epoch).
     Timestamp(i64),
 }
 
@@ -47,27 +51,37 @@ pub struct SuiDeepBookSourceConfig {
     /// Transport to use for event streaming. Default: gRPC.
     #[serde(default)]
     pub transport: Transport,
+    /// Sui JSON-RPC endpoint URL. Used for JSON-RPC transport and pool-metadata lookups.
     #[serde(default = "default_rpc_endpoint")]
     pub rpc_endpoint: String,
-    /// gRPC endpoint. Defaults to the same as rpc_endpoint.
+    /// gRPC endpoint for checkpoint streaming. Defaults to Sui mainnet gRPC.
     /// Only used when transport is Grpc.
     pub grpc_endpoint: Option<String>,
+    /// The DeepBook V3 package address on-chain (must start with `0x`).
     #[serde(default = "default_deepbook_package_id")]
     pub deepbook_package_id: String,
+    /// Polling interval in milliseconds for JSON-RPC transport.
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Maximum number of events to request per JSON-RPC page (1–1000).
     #[serde(default = "default_request_limit")]
     pub request_limit: u16,
+    /// Event type filters. When non-empty, only events whose type suffix or substring matches are included.
     #[serde(default)]
     pub event_filters: Vec<String>,
+    /// Pool address filters. When non-empty, only events from these pools are included.
     #[serde(default)]
     pub pools: Vec<String>,
+    /// Where to start consuming events from the Sui blockchain.
     #[serde(default)]
     pub start_position: StartPosition,
+    /// Whether to emit enrichment nodes for pools (pool metadata lookup).
     #[serde(default = "default_true")]
     pub enable_pool_nodes: bool,
+    /// Whether to emit enrichment nodes for traders (sender address).
     #[serde(default = "default_true")]
     pub enable_trader_nodes: bool,
+    /// Whether to emit enrichment nodes for orders (order_id extraction).
     #[serde(default = "default_true")]
     pub enable_order_nodes: bool,
     /// Number of recent historical events to fetch on startup (descending).
@@ -167,4 +181,99 @@ fn default_request_limit() -> u16 {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> SuiDeepBookSourceConfig {
+        SuiDeepBookSourceConfig::default()
+    }
+
+    #[test]
+    fn test_validate_default_config_passes() {
+        assert!(valid_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_rpc_endpoint() {
+        let mut config = valid_config();
+        config.rpc_endpoint = "".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("rpc_endpoint cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_invalid_rpc_endpoint_url() {
+        let mut config = valid_config();
+        config.rpc_endpoint = "not a url".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid rpc_endpoint"));
+    }
+
+    #[test]
+    fn test_validate_empty_package_id() {
+        let mut config = valid_config();
+        config.deepbook_package_id = "".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("deepbook_package_id cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_package_id_missing_0x() {
+        let mut config = valid_config();
+        config.deepbook_package_id = "abc123".to_string();
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("must start with 0x"));
+    }
+
+    #[test]
+    fn test_validate_json_rpc_zero_poll_interval() {
+        let mut config = valid_config();
+        config.transport = Transport::JsonRpc;
+        config.poll_interval_ms = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("poll_interval_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_json_rpc_zero_request_limit() {
+        let mut config = valid_config();
+        config.transport = Transport::JsonRpc;
+        config.request_limit = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("request_limit must be greater than 0"));
+    }
+
+    #[test]
+    fn test_validate_json_rpc_request_limit_too_high() {
+        let mut config = valid_config();
+        config.transport = Transport::JsonRpc;
+        config.request_limit = 1001;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("request_limit must be <= 1000"));
+    }
+
+    #[test]
+    fn test_validate_grpc_skips_json_rpc_checks() {
+        let mut config = valid_config();
+        config.transport = Transport::Grpc;
+        config.poll_interval_ms = 0; // would fail for JsonRpc
+        config.request_limit = 5000; // would fail for JsonRpc
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_effective_grpc_endpoint_default() {
+        let config = valid_config();
+        assert_eq!(config.effective_grpc_endpoint(), DEFAULT_SUI_MAINNET_GRPC);
+    }
+
+    #[test]
+    fn test_effective_grpc_endpoint_custom() {
+        let mut config = valid_config();
+        config.grpc_endpoint = Some("https://custom.node.io".to_string());
+        assert_eq!(config.effective_grpc_endpoint(), "https://custom.node.io");
+    }
 }

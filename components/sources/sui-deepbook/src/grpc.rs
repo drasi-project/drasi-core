@@ -106,7 +106,7 @@ pub fn extract_deepbook_events(
         let timestamp_ms = tx
             .timestamp
             .as_ref()
-            .map(|t| (t.seconds as u64) * 1000 + (t.nanos as u64) / 1_000_000);
+            .map(|t| (t.seconds.max(0) as u64) * 1000 + (t.nanos.max(0) as u64) / 1_000_000);
 
         if let Some(ref events_container) = tx.events {
             for (event_seq, event) in events_container.events.iter().enumerate() {

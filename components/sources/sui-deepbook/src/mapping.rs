@@ -764,4 +764,109 @@ mod tests {
         assert_eq!(strip_type_params("0x1::mod::Foo"), "0x1::mod::Foo");
         assert_eq!(strip_type_params("Foo<A, B>"), "Foo");
     }
+
+    #[test]
+    fn test_classifies_update_events() {
+        assert_eq!(
+            classify_operation("0x1::events::OrderFilled"),
+            EventOperation::Update
+        );
+        assert_eq!(
+            classify_operation("0x1::events::OrderModify"),
+            EventOperation::Update
+        );
+        assert_eq!(
+            classify_operation("0x1::events::PositionUpdate"),
+            EventOperation::Update
+        );
+        assert_eq!(
+            classify_operation("0x1::events::OrderAmend"),
+            EventOperation::Update
+        );
+    }
+
+    #[test]
+    fn test_classifies_delete_keywords() {
+        assert_eq!(
+            classify_operation("0x1::events::OrderCancelled"),
+            EventOperation::Delete
+        );
+        assert_eq!(
+            classify_operation("0x1::events::PositionDeleted"),
+            EventOperation::Delete
+        );
+        assert_eq!(
+            classify_operation("0x1::events::TradeRemoved"),
+            EventOperation::Delete
+        );
+    }
+
+    #[test]
+    fn test_classifies_insert_by_default() {
+        assert_eq!(
+            classify_operation("0x1::events::OrderPlaced"),
+            EventOperation::Insert
+        );
+        assert_eq!(
+            classify_operation("0x1::events::BalanceEvent"),
+            EventOperation::Insert
+        );
+        assert_eq!(
+            classify_operation("0x1::events::Unknown"),
+            EventOperation::Insert
+        );
+    }
+
+    #[test]
+    fn test_classify_operation_case_insensitive() {
+        assert_eq!(
+            classify_operation("0x1::events::ORDERCANCELLED"),
+            EventOperation::Delete
+        );
+        assert_eq!(
+            classify_operation("0x1::events::OrderFILLED"),
+            EventOperation::Update
+        );
+    }
+
+    #[test]
+    fn test_should_include_event_empty_filters_pass_all() {
+        let event = event_with_type(
+            "0x1::events::OrderPlaced",
+            serde_json::json!({"order_id": "42"}),
+        );
+        assert!(should_include_event(&event, &[], &[]));
+    }
+
+    #[test]
+    fn test_should_include_event_no_pool_id_excluded_by_pool_filter() {
+        let event = event_with_type(
+            "0x1::events::OrderPlaced",
+            serde_json::json!({"order_id": "42"}), // no pool_id
+        );
+        assert!(!should_include_event(
+            &event,
+            &[],
+            &[String::from("pool-a")]
+        ));
+    }
+
+    #[test]
+    fn test_should_include_event_substring_match() {
+        let event = event_with_type(
+            "0x1::events::OrderPlaced",
+            serde_json::json!({"order_id": "42"}),
+        );
+        // "Order" is a substring of "OrderPlaced"
+        assert!(should_include_event(&event, &[String::from("Order")], &[]));
+    }
+
+    #[test]
+    fn test_should_include_event_no_match() {
+        let event = event_with_type(
+            "0x1::events::OrderPlaced",
+            serde_json::json!({"order_id": "42"}),
+        );
+        assert!(!should_include_event(&event, &[String::from("Trade")], &[]));
+    }
 }
