@@ -8,7 +8,7 @@ name: pr-all-reviewers
 # no extra GitHub App permissions, native pass/fail propagation.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [labeled]
   workflow_dispatch:
     inputs:
@@ -16,10 +16,6 @@ on:
         description: "Full URL of the PR to review (e.g. https://github.com/drasi-project/drasi-core/pull/42)"
         required: true
         type: string
-
-concurrency:
-  group: pr-all-reviewers-${{ github.event.pull_request.number || github.event.inputs.pr_url }}
-  cancel-in-progress: false
 
 permissions:
   actions: read
