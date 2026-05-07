@@ -41,7 +41,11 @@ impl SqsReaction {
         SqsReactionBuilder::new(id)
     }
 
-    pub(crate) fn new(id: impl Into<String>, queries: Vec<String>, config: SqsReactionConfig) -> Self {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        queries: Vec<String>,
+        config: SqsReactionConfig,
+    ) -> Self {
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries);
         Self {
@@ -378,8 +382,7 @@ impl Reaction for SqsReaction {
         }
         if let Some(key_id) = &self.config.access_key_id {
             if let Some(secret) = &self.config.secret_access_key {
-                let creds =
-                    Credentials::new(key_id, secret, None, None, "drasi-sqs-reaction");
+                let creds = Credentials::new(key_id, secret, None, None, "drasi-sqs-reaction");
                 loader = loader.credentials_provider(creds);
             }
         }
@@ -572,10 +575,7 @@ mod tests {
         });
         let result = SqsReaction::resolve_query_config("unknown", &routes, &default);
         assert!(result.is_some());
-        assert_eq!(
-            result.unwrap().added.as_ref().unwrap().body,
-            "default-body"
-        );
+        assert_eq!(result.unwrap().added.as_ref().unwrap().body, "default-body");
     }
 
     #[test]
@@ -592,10 +592,7 @@ mod tests {
         SqsReaction::register_json_helper(&mut handlebars);
         let spec = TemplateSpec::new("Hello {{after.name}}");
         let mut context = Map::new();
-        context.insert(
-            "after".to_string(),
-            serde_json::json!({"name": "world"}),
-        );
+        context.insert("after".to_string(), serde_json::json!({"name": "world"}));
         let result = ResultDiff::Add {
             data: serde_json::json!({"name": "world"}),
             row_signature: 0,
