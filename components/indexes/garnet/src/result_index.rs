@@ -23,6 +23,7 @@ use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
+        ResultSequence, ResultSequenceCounter,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -348,6 +349,102 @@ impl GarnetResultIndex {
 }
 
 impl ResultIndex for GarnetResultIndex {}
+
+#[async_trait]
+impl ResultSequenceCounter for GarnetResultIndex {
+    async fn apply_sequence(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+    ) -> Result<(), IndexError> {
+        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+
+        let mut guard = self.session_state.lock()?;
+        let buffer = guard.as_mut().ok_or_else(|| {
+            IndexError::other(std::io::Error::other(
+                "write operation requires an active session",
+            ))
+        })?;
+        buffer.string_set(seq_key, sequence.to_string().into_bytes());
+        buffer.string_set(scid_key, source_change_id.as_bytes().to_vec());
+        Ok(())
+    }
+
+    async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
+        let seq_key = format!("metadata:{{{}}}:sequence", self.query_id);
+        let scid_key = format!("metadata:{{{}}}:source_change_id", self.query_id);
+
+        // Extract buffer reads into a sync block so MutexGuard is dropped before any await
+        let (seq_val, scid_val) = {
+            let guard = self.session_state.lock()?;
+            let buffer = guard.as_ref().ok_or_else(|| {
+                IndexError::other(std::io::Error::other(
+                    "read operation requires an active session",
+                ))
+            })?;
+            let seq_val = buffer.string_get(&seq_key);
+            let scid_val = buffer.string_get(&scid_key);
+            (seq_val, scid_val)
+        }; // guard dropped here
+
+        let sequence = match seq_val {
+            BufferReadResult::Found(bytes) => {
+                let s = String::from_utf8(bytes).map_err(IndexError::other)?;
+                s.parse::<u64>().map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => 0,
+            BufferReadResult::NotInBuffer => {
+                return self.get_sequence_from_redis().await;
+            }
+        };
+
+        let source_change_id = match scid_val {
+            BufferReadResult::Found(bytes) => {
+                String::from_utf8(bytes).map_err(IndexError::other)?
+            }
+            BufferReadResult::KeyDeleted => String::new(),
+            BufferReadResult::NotInBuffer => {
+                return self.get_sequence_from_redis().await;
+            }
+        };
+
+        Ok(ResultSequence {
+            sequence,
+            source_change_id: Arc::from(source_change_id),
+        })
+    }
+}
+
+impl GarnetResultIndex {
+    async fn get_sequence_from_redis(&self) -> Result<ResultSequence, IndexError> {
+        let mut con = self.connection.clone();
+
+        let sequence = match con
+            .get::<String, Option<u64>>(format!("metadata:{{{}}}:sequence", self.query_id))
+            .await
+        {
+            Ok(v) => v.unwrap_or(0),
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        let source_change_id = match con
+            .get::<String, Option<String>>(format!(
+                "metadata:{{{}}}:source_change_id",
+                self.query_id
+            ))
+            .await
+        {
+            Ok(v) => v.unwrap_or_default(),
+            Err(e) => return Err(IndexError::other(e)),
+        };
+
+        Ok(ResultSequence {
+            sequence,
+            source_change_id: Arc::from(source_change_id),
+        })
+    }
+}
 
 fn get_hash_key(owner: &ResultOwner, key: &ResultKey) -> u64 {
     let mut hasher = SpookyHasher::default();

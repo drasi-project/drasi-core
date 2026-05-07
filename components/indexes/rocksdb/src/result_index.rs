@@ -22,6 +22,7 @@ use drasi_core::{
     evaluation::functions::aggregation::ValueAccumulator,
     interface::{
         AccumulatorIndex, IndexError, LazySortedSetStore, ResultIndex, ResultKey, ResultOwner,
+        ResultSequence, ResultSequenceCounter,
     },
 };
 use hashers::jenkins::spooky_hash::SpookyHasher;
@@ -290,6 +291,78 @@ impl LazySortedSetStore for RocksDbResultIndex {
 }
 
 impl ResultIndex for RocksDbResultIndex {}
+
+#[async_trait]
+impl ResultSequenceCounter for RocksDbResultIndex {
+    async fn apply_sequence(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+    ) -> Result<(), IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let source_change_id = source_change_id.to_string();
+        let task = task::spawn_blocking(move || {
+            let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
+
+            session_state.with_txn(|txn| {
+                txn.put_cf(&metadata_cf, "sequence", sequence.to_be_bytes())
+                    .map_err(IndexError::other)?;
+                txn.put_cf(
+                    &metadata_cf,
+                    "source_change_id",
+                    source_change_id.as_bytes(),
+                )
+                .map_err(IndexError::other)
+            })
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+
+    async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
+        let db = self.db.clone();
+        let session_state = self.session_state.clone();
+        let task = task::spawn_blocking(move || {
+            let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
+
+            session_state.with_txn(|txn| {
+                let sequence = match txn
+                    .get_cf(&metadata_cf, "sequence")
+                    .map_err(IndexError::other)?
+                {
+                    Some(v) => {
+                        let mut buf = [0u8; 8];
+                        buf.copy_from_slice(&v);
+                        u64::from_be_bytes(buf)
+                    }
+                    None => 0,
+                };
+
+                let source_change_id = match txn
+                    .get_cf(&metadata_cf, "source_change_id")
+                    .map_err(IndexError::other)?
+                {
+                    Some(v) => Arc::from(String::from_utf8(v).map_err(IndexError::other)?.as_str()),
+                    None => Arc::from(""),
+                };
+
+                Ok(ResultSequence {
+                    sequence,
+                    source_change_id,
+                })
+            })
+        });
+
+        match task.await {
+            Ok(v) => v,
+            Err(e) => Err(IndexError::other(e)),
+        }
+    }
+}
 
 pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();

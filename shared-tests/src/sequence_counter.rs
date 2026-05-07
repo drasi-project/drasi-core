@@ -12,8 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
-use drasi_core::interface::{CheckpointStore, SourceCheckpoint};
+use drasi_core::interface::{
+    CheckpointStore, ResultSequence, ResultSequenceCounter, SourceCheckpoint,
+};
+
+/// Basic result sequence counter test for ResultSequenceCounter implementations.
+///
+/// Validates apply_sequence / get_sequence round-trip.
+pub async fn result_sequence_counter(subject: &dyn ResultSequenceCounter) {
+    let result = subject.get_sequence().await.expect("get_sequence failed");
+    assert_eq!(result, ResultSequence::default());
+
+    subject
+        .apply_sequence(2, "foo")
+        .await
+        .expect("apply_sequence failed");
+
+    let result = subject.get_sequence().await.expect("get_sequence failed");
+    assert_eq!(
+        result,
+        ResultSequence {
+            sequence: 2,
+            source_change_id: Arc::from("foo"),
+        }
+    );
+}
 
 /// Basic sequence counter test for CheckpointStore implementations.
 ///

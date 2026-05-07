@@ -320,6 +320,7 @@ mod exceeds_one_standard_deviation {
 mod unit_tests {
     use crate::sequence_counter;
     use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
+    use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
     #[tokio::test]
     pub async fn sequence_counter() {
@@ -331,6 +332,12 @@ mod unit_tests {
     pub async fn checkpoint_round_trip() {
         let subject = InMemoryCheckpointStore::new();
         sequence_counter::checkpoint_round_trip(&subject).await;
+    }
+
+    #[tokio::test]
+    pub async fn result_sequence_counter() {
+        let subject = InMemoryResultIndex::new();
+        sequence_counter::result_sequence_counter(&subject).await;
     }
 }
 

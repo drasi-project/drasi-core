@@ -19,7 +19,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::interface::{ResultIndex, ResultKey, ResultOwner};
+use crate::interface::{
+    ResultIndex, ResultKey, ResultOwner, ResultSequence, ResultSequenceCounter,
+};
 use async_trait::async_trait;
 use hashers::builtin::DefaultHasher;
 use ordered_float::OrderedFloat;
@@ -33,6 +35,7 @@ use crate::{
 pub struct InMemoryResultIndex {
     values: Arc<RwLock<HashMap<u64, ValueAccumulator>>>,
     sorted_sets: Arc<RwLock<HashMap<u64, BTreeMap<OrderedFloat<f64>, isize>>>>,
+    sequence: Arc<RwLock<ResultSequence>>,
 }
 
 impl Default for InMemoryResultIndex {
@@ -46,6 +49,7 @@ impl InMemoryResultIndex {
         InMemoryResultIndex {
             values: Arc::new(RwLock::new(HashMap::new())),
             sorted_sets: Arc::new(RwLock::new(HashMap::new())),
+            sequence: Arc::new(RwLock::new(ResultSequence::default())),
         }
     }
 }
@@ -173,3 +177,22 @@ impl LazySortedSetStore for InMemoryResultIndex {
 }
 
 impl ResultIndex for InMemoryResultIndex {}
+
+#[async_trait]
+impl ResultSequenceCounter for InMemoryResultIndex {
+    async fn apply_sequence(
+        &self,
+        sequence: u64,
+        source_change_id: &str,
+    ) -> Result<(), IndexError> {
+        let mut data = self.sequence.write().await;
+        data.sequence = sequence;
+        data.source_change_id = Arc::from(source_change_id);
+        Ok(())
+    }
+
+    async fn get_sequence(&self) -> Result<ResultSequence, IndexError> {
+        let data = self.sequence.read().await;
+        Ok(data.clone())
+    }
+}

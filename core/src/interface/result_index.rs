@@ -25,7 +25,7 @@ use crate::evaluation::functions::aggregation::ValueAccumulator;
 
 use super::IndexError;
 
-pub trait ResultIndex: AccumulatorIndex {}
+pub trait ResultIndex: AccumulatorIndex + ResultSequenceCounter {}
 
 #[async_trait]
 pub trait AccumulatorIndex: LazySortedSetStore {
@@ -61,6 +61,34 @@ pub trait LazySortedSetStore: Send + Sync {
         value: OrderedFloat<f64>,
         delta: isize,
     ) -> Result<(), IndexError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultSequence {
+    pub sequence: u64,
+    pub source_change_id: Arc<str>,
+}
+
+impl Default for ResultSequence {
+    fn default() -> Self {
+        ResultSequence {
+            sequence: 0,
+            source_change_id: Arc::from(""),
+        }
+    }
+}
+
+/// Tracks the monotonic output sequence number for a query's result stream.
+///
+/// Each time a query emits a result batch, the sequence is incremented and
+/// persisted so that downstream consumers (reactions) can detect ordering
+/// and gaps. This is separate from the source checkpoint tracking in
+/// [`CheckpointStore`](super::CheckpointStore).
+#[async_trait]
+pub trait ResultSequenceCounter: Send + Sync {
+    async fn apply_sequence(&self, sequence: u64, source_change_id: &str)
+        -> Result<(), IndexError>;
+    async fn get_sequence(&self) -> Result<ResultSequence, IndexError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Hash)]
