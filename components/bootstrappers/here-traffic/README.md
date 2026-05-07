@@ -20,11 +20,11 @@ let provider = HereTrafficBootstrapProvider::builder()
 
 | Field | Type | Default | Description |
 |------|------|---------|-------------|
-| `api_key` | string | **required** | HERE API key |
-| `bounding_box` | string | **required** | `lat1,lon1,lat2,lon2` |
+| `apiKey` | string | **required** | HERE API key |
+| `boundingBox` | string | **required** | `lat1,lon1,lat2,lon2` |
 | `endpoints` | array | `[flow, incidents]` | Endpoints to poll |
-| `incident_match_distance_meters` | f64 | 500.0 | Distance threshold for `AFFECTS` |
-| `base_url` | string | HERE API URL | Override for testing |
+| `incidentMatchDistanceMeters` | f64 | 500.0 | Distance threshold for `AFFECTS` |
+| `baseUrl` | string | HERE API URL | Override for testing |
 
 ## Notes
 
