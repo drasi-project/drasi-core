@@ -34,8 +34,6 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::{OperationType, TemplateRouting};
 use drasi_lib::Reaction;
 
-
-
 pub struct FileReaction {
     base: ReactionBase,
     config: FileReactionConfig,
