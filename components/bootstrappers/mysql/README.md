@@ -16,6 +16,25 @@ let bootstrap = MySqlBootstrapProvider::builder()
     .build()?;
 ```
 
+## Configuration Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `host` | `String` | `"localhost"` | MySQL server hostname or IP address |
+| `port` | `u16` | `3306` | MySQL server port number |
+| `database` | `String` | **(Required)** | Database name to connect to |
+| `user` | `String` | **(Required)** | Database user with replication privileges |
+| `password` | `String` | `""` | Database password |
+| `tables` | `Vec<String>` | `[]` | Table allow-list (required for security) |
+| `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration |
+
+### TableKeyConfig
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `table` | `String` | Table name |
+| `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
 ## Testing
 
 ```bash

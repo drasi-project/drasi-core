@@ -26,6 +26,29 @@ let source = MySqlReplicationSource::builder("mysql-source")
     .build()?;
 ```
 
+## Configuration Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `host` | `String` | `"localhost"` | MySQL server hostname or IP address |
+| `port` | `u16` | `3306` | MySQL server port number |
+| `database` | `String` | **(Required)** | Database name to connect to |
+| `user` | `String` | **(Required)** | Database user with replication privileges |
+| `password` | `String` | `""` | Database password |
+| `tables` | `Vec<String>` | `[]` | List of tables to monitor |
+| `sslMode` | `SslMode` | `disabled` | SSL mode: `disabled`, `if_available`, `require`, `require_verify_ca`, `require_verify_full` |
+| `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration (see below) |
+| `startPosition` | `StartPosition` | `from_end` | Where to start replication: `from_start`, `from_end`, `from_position`, or `from_gtid` |
+| `serverId` | `u32` | `1` | MySQL server ID for the replication connection |
+| `heartbeatIntervalSeconds` | `u64` | `30` | Heartbeat interval in seconds |
+
+### TableKeyConfig
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `table` | `String` | Table name |
+| `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
 ## Limitations
 
 - `mysql_cdc` runtime does not support SSL (ssl_mode must be Disabled). This means connections from this source to MySQL are **not encrypted**.
