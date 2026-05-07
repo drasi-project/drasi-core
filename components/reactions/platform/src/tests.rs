@@ -54,6 +54,7 @@ fn create_test_config() -> ReactionConfig {
 fn create_test_query_result(query_id: &str, results: Vec<ResultDiff>) -> QueryResult {
     QueryResult {
         query_id: query_id.to_string(),
+        sequence: 0,
         timestamp: chrono::Utc::now(),
         results,
         metadata: HashMap::new(),
@@ -71,6 +72,7 @@ mod transformer_integration_tests {
             "test-query",
             vec![ResultDiff::Add {
                 data: json!({"id": "1", "value": "test"}),
+                row_signature: 0,
             }],
         );
 
@@ -102,15 +104,18 @@ mod transformer_integration_tests {
             vec![
                 ResultDiff::Add {
                     data: json!({"id": "1"}),
+                    row_signature: 0,
                 },
                 ResultDiff::Update {
                     data: json!({"id": "2", "value": 20}),
                     before: json!({"id": "2", "value": 10}),
                     after: json!({"id": "2", "value": 20}),
                     grouping_keys: None,
+                    row_signature: 0,
                 },
                 ResultDiff::Delete {
                     data: json!({"id": "3"}),
+                    row_signature: 0,
                 },
             ],
         );
@@ -134,9 +139,11 @@ mod transformer_integration_tests {
 
         let query_result = QueryResult {
             query_id: "metadata-query".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata,
             profiling: None,
@@ -488,9 +495,11 @@ mod profiling_metadata_tests {
 
         let query_result = QueryResult {
             query_id: "profiling-test".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: Some(profiling),
@@ -528,9 +537,11 @@ mod profiling_metadata_tests {
     fn test_no_profiling_metadata_when_not_available() {
         let query_result = QueryResult {
             query_id: "no-profiling-test".to_string(),
+            sequence: 0,
             timestamp: chrono::Utc::now(),
             results: vec![ResultDiff::Add {
                 data: json!({"id": "1"}),
+                row_signature: 0,
             }],
             metadata: HashMap::new(),
             profiling: None, // No profiling data
