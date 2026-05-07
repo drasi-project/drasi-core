@@ -53,7 +53,6 @@ use crate::mapping::area_node_id;
 use crate::models::Open511Event;
 
 const KEY_EVENTS: &str = "open511.events";
-const KEY_SNAPSHOT: &str = "open511.snapshot";
 const KEY_KNOWN_AREAS: &str = "open511.known_areas";
 const KEY_LAST_POLL: &str = "open511.last_poll";
 const KEY_POLL_COUNT: &str = "open511.poll_count";
@@ -478,19 +477,6 @@ async fn save_poll_state(
     store
         .set(source_id, KEY_KNOWN_AREAS, known_areas_bytes)
         .await?;
-
-    let snapshot: HashMap<String, String> = state
-        .events_by_id
-        .iter()
-        .map(|(id, event)| {
-            (
-                id.clone(),
-                event.updated_or_created().unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
-    let snapshot_bytes = serde_json::to_vec(&snapshot)?;
-    store.set(source_id, KEY_SNAPSHOT, snapshot_bytes).await?;
 
     let last_poll = state.last_poll_time.clone().unwrap_or_default();
     store

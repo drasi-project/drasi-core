@@ -172,7 +172,7 @@ let query = Query::cypher("construction-events")
                r.to AS to_loc,
                r.direction AS direction,
                r.state AS road_state,
-               e.schedule_intervals AS schedule,
+               e.schedule AS schedule,
                e.created AS started,
                e.updated AS last_update
     "#)

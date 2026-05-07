@@ -38,7 +38,7 @@ and `IN_AREA` relationship per affected area.
 | `status` | String | ✅ | Event status: `ACTIVE`, `ARCHIVED` |
 | `url` | String | | Link to the event on the jurisdiction's website |
 | `jurisdiction_url` | String | | Jurisdiction identifier URL |
-| `headline` | String | | Short headline (e.g. `"INCIDENT"`, `"CONSTRUCTION"`) |
+| `headline` | String | | Short headline (e.g. `"Accident on Highway 1"`, `"Lane closure for road work"`) |
 | `description` | String | | Full text description of the event |
 | `event_type` | String | | Type: `INCIDENT`, `CONSTRUCTION`, `SPECIAL_EVENT`, `WEATHER_CONDITION` |
 | `event_subtypes` | List | | List of subtype strings (e.g. `["VEHICLE_ACCIDENT", "HAZMAT"]`) |
