@@ -172,7 +172,9 @@ async fn wait_for_subscription_data(
                     {
                         data
                     }
-                    drasi_lib::channels::ResultDiff::Delete { data, .. } if diff_type == "DELETE" => {
+                    drasi_lib::channels::ResultDiff::Delete { data, .. }
+                        if diff_type == "DELETE" =>
+                    {
                         data
                     }
                     _ => continue,
