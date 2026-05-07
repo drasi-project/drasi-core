@@ -150,11 +150,17 @@ impl RisSubscribeMessage {
 }
 
 /// Convert message timestamp in seconds to milliseconds.
+///
+/// Returns `None` for missing, NaN, or infinite timestamps.
 pub fn message_timestamp_millis(message: &RisMessageData) -> Option<i64> {
-    message
-        .timestamp
-        .map(|seconds| (seconds * 1000.0).round())
-        .and_then(|ms| i64::try_from(ms as i128).ok())
+    message.timestamp.and_then(|seconds| {
+        let ms = (seconds * 1000.0).round();
+        if ms.is_finite() {
+            i64::try_from(ms as i128).ok()
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]

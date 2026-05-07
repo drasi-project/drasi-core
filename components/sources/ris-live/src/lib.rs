@@ -49,9 +49,9 @@ pub use config::{RisLiveSourceConfig, StartFrom};
 pub struct RisLiveSource {
     base: SourceBase,
     config: RisLiveSourceConfig,
-    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-    task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
+    state_store: RwLock<Option<Arc<dyn StateStoreProvider>>>,
+    task_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    shutdown_tx: RwLock<Option<watch::Sender<bool>>>,
 }
 
 impl RisLiveSource {
@@ -62,9 +62,9 @@ impl RisLiveSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
-            state_store: Arc::new(RwLock::new(None)),
-            task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
+            state_store: RwLock::new(None),
+            task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
         })
     }
 
@@ -490,8 +490,6 @@ impl RisLiveSourceBuilder {
     }
 
     pub fn build(self) -> Result<RisLiveSource> {
-        let _ = url::Url::parse(&self.websocket_url)?;
-
         let config = RisLiveSourceConfig {
             websocket_url: self.websocket_url,
             client_name: self.client_name,
@@ -508,6 +506,7 @@ impl RisLiveSourceBuilder {
             clear_state_on_start: self.clear_state_on_start,
             start_from: self.start_from,
         };
+        config.validate()?;
 
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
         if let Some(mode) = self.dispatch_mode {
@@ -523,9 +522,9 @@ impl RisLiveSourceBuilder {
         Ok(RisLiveSource {
             base: SourceBase::new(params)?,
             config,
-            state_store: Arc::new(RwLock::new(self.state_store)),
-            task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx: Arc::new(RwLock::new(None)),
+            state_store: RwLock::new(self.state_store),
+            task_handle: RwLock::new(None),
+            shutdown_tx: RwLock::new(None),
         })
     }
 }

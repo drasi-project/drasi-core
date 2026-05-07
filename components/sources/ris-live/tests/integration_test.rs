@@ -34,12 +34,10 @@ enum HarnessAction {
     PeerState { state: String, msg_id: String },
 }
 
-async fn find_available_port() -> u16 {
+async fn find_available_port() -> (tokio::net::TcpListener, u16) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    port
+    (listener, port)
 }
 
 fn routes_contains_value(value: &serde_json::Value, next_hop: &str) -> bool {
@@ -48,30 +46,34 @@ fn routes_contains_value(value: &serde_json::Value, next_hop: &str) -> bool {
 
 async fn wait_for_result<F>(
     subscription: &mut Subscription,
-    timeout: Duration,
+    timeout_duration: Duration,
     mut predicate: F,
 ) -> bool
 where
     F: FnMut(&drasi_lib::channels::QueryResult) -> bool,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
-    while tokio::time::Instant::now() < deadline {
-        if let Some(result) = subscription.recv().await {
-            if predicate(&result) {
-                return true;
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(remaining, subscription.recv()).await {
+            Ok(Some(result)) => {
+                if predicate(&result) {
+                    return true;
+                }
             }
+            Ok(None) => return false,
+            Err(_) => return false,
         }
     }
-    false
 }
 
-async fn start_mock_ris_server(port: u16) -> mpsc::Sender<HarnessAction> {
+async fn start_mock_ris_server(listener: tokio::net::TcpListener) -> mpsc::Sender<HarnessAction> {
     let (tx, mut rx) = mpsc::channel::<HarnessAction>(32);
 
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .expect("bind mock server");
         let (stream, _) = listener.accept().await.expect("accept");
         let mut ws_stream = accept_async(stream).await.expect("websocket accept");
 
@@ -166,8 +168,8 @@ async fn start_mock_ris_server(port: u16) -> mpsc::Sender<HarnessAction> {
 #[tokio::test]
 #[ignore]
 async fn test_change_detection_with_websocket_harness() {
-    let port = find_available_port().await;
-    let harness_tx = start_mock_ris_server(port).await;
+    let (listener, port) = find_available_port().await;
+    let harness_tx = start_mock_ris_server(listener).await;
 
     let source = RisLiveSource::builder("ris-source")
         .with_websocket_url(format!("ws://127.0.0.1:{port}/v1/ws/"))

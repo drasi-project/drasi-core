@@ -39,9 +39,11 @@ fn default_clear_state_on_start() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum StartFrom {
-    /// Process incoming stream events immediately.
+    /// Process all stream events from the moment the connection is established,
+    /// including any buffered events the server delivers on connect.
     Beginning,
-    /// Process incoming stream events immediately.
+    /// Start processing from the current stream position, ignoring any
+    /// buffered history the server may deliver.
     #[default]
     Now,
     /// Ignore events whose `timestamp` is older than this Unix timestamp in milliseconds.

@@ -175,8 +175,10 @@ async fn process_text_frame(
     last_persisted: &mut Instant,
     text: &str,
 ) -> Result<()> {
-    let incoming: RisIncomingMessage = serde_json::from_str(text)
-        .with_context(|| format!("failed to parse RIS message wrapper: {text}"))?;
+    let incoming: RisIncomingMessage = serde_json::from_str(text).with_context(|| {
+        let truncated: String = text.chars().take(512).collect();
+        format!("failed to parse RIS message wrapper: {truncated}")
+    })?;
 
     match incoming.msg_type.as_str() {
         "ris_subscribe_ok" => {
@@ -263,6 +265,15 @@ fn ensure_crypto_provider() {
 fn build_url(config: &RisLiveSourceConfig) -> Result<Url> {
     let mut url = Url::parse(&config.websocket_url)
         .with_context(|| format!("invalid websocket_url '{}'", config.websocket_url))?;
+
+    match url.scheme() {
+        "ws" | "wss" => {}
+        other => {
+            return Err(anyhow!(
+                "websocket_url scheme must be ws or wss, got: {other}"
+            ));
+        }
+    }
 
     if let Some(client_name) = &config.client_name {
         // Remove any existing `client` parameter before appending ours

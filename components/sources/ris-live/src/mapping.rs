@@ -33,7 +33,7 @@ pub struct StreamState {
     pub known_peers: HashSet<String>,
     /// Known prefix node IDs (`{prefix}`).
     pub known_prefixes: HashSet<String>,
-    /// Active ROUTES relationship IDs (`{peer_ip}|{prefix}`).
+    /// Active ROUTES relationship IDs (`{host}|{peer_ip}|{prefix}`).
     pub active_routes: HashSet<String>,
 }
 
@@ -144,7 +144,7 @@ impl GraphMapper {
     /// Process withdrawals from an UPDATE message.
     pub fn process_withdrawals(&mut self, message: &RisMessageData) -> Vec<SourceChange> {
         let effective_from = effective_from(message);
-        if message.peer.is_none() {
+        if message.peer.is_none() || message.host.is_none() {
             return Vec::new();
         }
 
