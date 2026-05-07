@@ -106,11 +106,7 @@ fn serve_asset(path: &str) -> Response {
     match DashboardAssets::get(effective_path) {
         Some(content) => {
             let mime = content.metadata.mimetype();
-            (
-                [(header::CONTENT_TYPE, mime)],
-                content.data.into_owned(),
-            )
-                .into_response()
+            ([(header::CONTENT_TYPE, mime)], content.data.into_owned()).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }

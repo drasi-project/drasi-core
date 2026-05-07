@@ -95,7 +95,9 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
             }
         }
         if tokio::time::Instant::now() > deadline {
-            return Err(anyhow::anyhow!("server did not become ready within 10 seconds"));
+            return Err(anyhow::anyhow!(
+                "server did not become ready within 10 seconds"
+            ));
         }
         sleep(Duration::from_millis(50)).await;
     }
