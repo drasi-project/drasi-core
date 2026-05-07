@@ -14,7 +14,7 @@ on:
         type: string
   pull_request_target:
     types: [labeled]
-if: github.event_name == 'workflow_call' || github.event.label.name == 'review:security'
+if: inputs.pr_url != '' || github.event.label.name == 'review:security'
 permissions:
   contents: read
   pull-requests: read
