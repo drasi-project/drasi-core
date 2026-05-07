@@ -14,18 +14,21 @@
 
 //! Binlog replication stream for MySQL sources.
 
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use log::{debug, error, info, warn};
-use mysql_cdc::binlog_client::BinlogClient;
-use mysql_cdc::binlog_options::BinlogOptions;
-use mysql_cdc::events::binlog_event::BinlogEvent;
-use mysql_cdc::events::event_header::EventHeader;
-use mysql_cdc::replica_options::ReplicaOptions;
-use mysql_cdc::ssl_mode::SslMode as MySqlCdcSslMode;
+use mysql_async::prelude::{Query, Queryable};
+use mysql_async::{BinlogStream, BinlogStreamRequest, Conn, OptsBuilder, Row, SslOpts};
+use mysql_common::binlog::events::{
+    BinlogEventHeader, Event, EventData, RowsEventData, TableMapEvent,
+};
+use mysql_common::packets::Sid;
+use mysql_common::uuid::Uuid;
 
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
@@ -33,7 +36,7 @@ use drasi_lib::sources::base::SourceBase;
 
 use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
 use crate::decoder::MySqlDecoder;
-use crate::types::{ReplicationState, TableMapping};
+use crate::types::ReplicationState;
 
 const STATE_KEY: &str = "replication_position";
 
@@ -42,7 +45,6 @@ pub struct ReplicationStream {
     source_id: String,
     base: SourceBase,
     decoder: MySqlDecoder,
-    table_mapping: TableMapping,
     pending_changes: Option<Vec<SourceChange>>,
     current_binlog_file: String,
     current_binlog_position: u32,
@@ -53,6 +55,14 @@ pub struct ReplicationStream {
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 const INITIAL_RECONNECT_DELAY_SECS: u64 = 5;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
+
+struct ResolvedStartPosition {
+    filename: String,
+    request_position: u64,
+    state_position: u32,
+    use_gtid: bool,
+    gtid_set: Vec<Sid<'static>>,
+}
 
 impl ReplicationStream {
     pub fn new(
@@ -67,7 +77,6 @@ impl ReplicationStream {
             source_id,
             base,
             decoder,
-            table_mapping: TableMapping::default(),
             pending_changes: None,
             current_binlog_file: String::new(),
             current_binlog_position: 0,
@@ -79,6 +88,14 @@ impl ReplicationStream {
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting MySQL replication for source {}", self.source_id);
 
+        if self.config.tables.is_empty() {
+            warn!(
+                "Source '{}': no tables configured — ALL tables in the database will be replicated. \
+                 Configure the 'tables' field to restrict which tables are monitored.",
+                self.source_id
+            );
+        }
+
         let state_store = self.base.state_store().await;
         let mut attempts = 0u32;
 
@@ -89,16 +106,12 @@ impl ReplicationStream {
             }
 
             let start_position = self.load_start_position(state_store.as_deref()).await?;
-            let options = self.build_replica_options(start_position)?;
 
             match self
-                .run_replication_loop(options, state_store.as_deref())
+                .run_replication_loop(start_position, state_store.as_deref())
                 .await
             {
-                Ok(()) => {
-                    // Graceful shutdown
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(e) => {
                     if self.shutdown.load(Ordering::Relaxed) {
                         info!("Shutdown during replication for source {}", self.source_id);
@@ -134,151 +147,290 @@ impl ReplicationStream {
 
     async fn run_replication_loop(
         &mut self,
-        options: ReplicaOptions,
+        start_position: StartPosition,
         state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
     ) -> Result<()> {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1000);
-        let source_id = self.source_id.clone();
-        let shutdown = self.shutdown.clone();
+        self.pending_changes = None;
+        self.current_gtid = match &start_position {
+            StartPosition::FromGtid(gtid) => Some(gtid.clone()),
+            _ => None,
+        };
 
-        tokio::task::spawn_blocking(move || {
-            let mut client = BinlogClient::new(options);
-            let events = match client.replicate() {
-                Ok(events) => events,
-                Err(e) => {
-                    error!("Failed to start binlog replication for {source_id}: {e:?}");
-                    return;
-                }
-            };
+        let mut stream = self.connect_binlog_stream(&start_position).await?;
 
-            for result in events {
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                match result {
-                    Ok((header, event)) => {
-                        client.commit(&header, &event);
-                        if event_tx.blocking_send((header, event)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Error reading binlog event: {e:?}");
-                        break;
-                    }
-                }
+        loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                info!("Shutdown requested for source {}", self.source_id);
+                Self::close_stream(stream).await;
+                return Ok(());
             }
-        });
 
-        while let Some((header, event)) = event_rx.recv().await {
-            if let Err(e) = self.process_event(&header, &event, state_store).await {
-                error!("Error processing binlog event: {e:?}");
+            match stream.next().await {
+                Some(Ok(event)) => {
+                    self.process_event(&stream, &event, state_store).await?;
+                }
+                Some(Err(err)) => {
+                    Self::close_stream(stream).await;
+                    return Err(anyhow!("Error reading binlog event: {err}"));
+                }
+                None => {
+                    Self::close_stream(stream).await;
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    return Err(anyhow!("Binlog replication stream ended unexpectedly"));
+                }
             }
         }
+    }
 
-        if self.shutdown.load(Ordering::Relaxed) {
-            Ok(())
-        } else {
-            Err(anyhow!("Binlog replication channel closed unexpectedly"))
+    async fn connect_binlog_stream(
+        &mut self,
+        start_position: &StartPosition,
+    ) -> Result<BinlogStream> {
+        match self.config.ssl_mode {
+            SslMode::IfAvailable => match self
+                .connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
+                .await
+            {
+                Ok(stream) => Ok(stream),
+                Err(ssl_error) => {
+                    warn!(
+                        "SSL connection attempt failed for source {}, retrying without SSL: {ssl_error}",
+                        self.source_id
+                    );
+                    self.connect_binlog_stream_with_ssl(start_position, None)
+                        .await
+                        .context("Failed to connect without SSL after SSL fallback")
+                }
+            },
+            SslMode::Disabled => {
+                self.connect_binlog_stream_with_ssl(start_position, None)
+                    .await
+            }
+            SslMode::Require => {
+                self.connect_binlog_stream_with_ssl(start_position, Some(self.relaxed_ssl_opts()))
+                    .await
+            }
+            SslMode::RequireVerifyCa => {
+                self.connect_binlog_stream_with_ssl(start_position, Some(self.verify_ca_ssl_opts()))
+                    .await
+            }
+            SslMode::RequireVerifyFull => {
+                self.connect_binlog_stream_with_ssl(start_position, Some(SslOpts::default()))
+                    .await
+            }
+        }
+    }
+
+    async fn connect_binlog_stream_with_ssl(
+        &mut self,
+        start_position: &StartPosition,
+        ssl_opts: Option<SslOpts>,
+    ) -> Result<BinlogStream> {
+        let opts = OptsBuilder::default()
+            .ip_or_hostname(&self.config.host)
+            .tcp_port(self.config.port)
+            .user(Some(&self.config.user))
+            .pass(Some(&self.config.password))
+            .db_name(Some(&self.config.database))
+            .prefer_socket(Some(false))
+            .ssl_opts(ssl_opts);
+
+        let mut conn = Conn::new(opts).await?;
+        self.configure_heartbeat(&mut conn).await?;
+
+        let resolved = self
+            .resolve_start_position(&mut conn, start_position)
+            .await?;
+        self.current_binlog_file = resolved.filename.clone();
+        self.current_binlog_position = resolved.state_position;
+
+        let mut request = BinlogStreamRequest::new(self.config.server_id)
+            .with_hostname(self.config.host.as_bytes())
+            .with_user(self.config.user.as_bytes())
+            .with_password(self.config.password.as_bytes())
+            .with_port(self.config.port)
+            .with_pos(resolved.request_position);
+
+        if !resolved.filename.is_empty() {
+            request = request.with_filename(resolved.filename.as_bytes());
+        }
+
+        if resolved.use_gtid {
+            request = request.with_gtid().with_gtid_set(resolved.gtid_set);
+        }
+
+        conn.get_binlog_stream(request).await.map_err(Into::into)
+    }
+
+    async fn configure_heartbeat(&self, conn: &mut Conn) -> Result<()> {
+        let nanoseconds = u128::from(self.config.heartbeat_interval_seconds) * 1_000_000_000;
+        conn.query_drop(format!("SET @master_heartbeat_period={nanoseconds}"))
+            .await?;
+        Ok(())
+    }
+
+    async fn resolve_start_position(
+        &self,
+        conn: &mut Conn,
+        start_position: &StartPosition,
+    ) -> Result<ResolvedStartPosition> {
+        match start_position {
+            StartPosition::FromStart => {
+                let row: Row = "SHOW BINARY LOGS"
+                    .first(conn)
+                    .await?
+                    .ok_or_else(|| anyhow!("SHOW BINARY LOGS returned no rows"))?;
+                let filename = row
+                    .get::<String, _>(0)
+                    .context("SHOW BINARY LOGS did not return a filename")?;
+                Ok(ResolvedStartPosition {
+                    filename,
+                    request_position: 4,
+                    state_position: 4,
+                    use_gtid: false,
+                    gtid_set: Vec::new(),
+                })
+            }
+            StartPosition::FromEnd => {
+                let row: Row = "SHOW MASTER STATUS"
+                    .first(conn)
+                    .await?
+                    .ok_or_else(|| anyhow!("SHOW MASTER STATUS returned no rows"))?;
+                let filename = row
+                    .get::<String, _>(0)
+                    .context("SHOW MASTER STATUS did not return a filename")?;
+                let position = row
+                    .get::<u64, _>(1)
+                    .context("SHOW MASTER STATUS did not return a binlog position")?;
+                Ok(ResolvedStartPosition {
+                    filename,
+                    request_position: position,
+                    state_position: u32::try_from(position)
+                        .context("Binlog position exceeds supported range")?,
+                    use_gtid: false,
+                    gtid_set: Vec::new(),
+                })
+            }
+            StartPosition::FromPosition { file, position } => Ok(ResolvedStartPosition {
+                filename: file.clone(),
+                request_position: u64::from(*position),
+                state_position: *position,
+                use_gtid: false,
+                gtid_set: Vec::new(),
+            }),
+            StartPosition::FromGtid(gtid) => Ok(ResolvedStartPosition {
+                filename: String::new(),
+                request_position: 4,
+                state_position: 4,
+                use_gtid: true,
+                gtid_set: parse_gtid_set(gtid)?,
+            }),
         }
     }
 
     async fn process_event(
         &mut self,
-        header: &EventHeader,
-        event: &BinlogEvent,
+        stream: &BinlogStream,
+        event: &Event,
         state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
     ) -> Result<()> {
-        match event {
-            BinlogEvent::TableMapEvent(table_event) => {
-                self.table_mapping.update(table_event.clone());
+        let header = event.header();
+
+        match event.read_data()? {
+            Some(EventData::TableMapEvent(_)) => {}
+            Some(EventData::RotateEvent(rotate_event)) => {
+                self.current_binlog_file = rotate_event.name().into_owned();
+                self.current_binlog_position = rotate_event.position() as u32;
             }
-            BinlogEvent::RotateEvent(rotate_event) => {
-                self.current_binlog_file = rotate_event.binlog_filename.clone();
-                self.current_binlog_position = rotate_event.binlog_position as u32;
+            Some(EventData::GtidEvent(gtid_event)) => {
+                let sid = Uuid::from_bytes(gtid_event.sid());
+                self.current_gtid = Some(format!("{sid}:{}", gtid_event.gno()));
             }
-            BinlogEvent::MySqlGtidEvent(gtid_event) => {
-                self.current_gtid = Some(gtid_event.gtid.to_string());
+            Some(EventData::RowsEvent(rows_event)) => {
+                self.process_rows_event(stream, rows_event).await?;
             }
-            BinlogEvent::WriteRowsEvent(write_event) => {
-                let table = self
-                    .table_mapping
-                    .get(write_event.table_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Missing TableMapEvent for table_id {}",
-                            write_event.table_id
-                        )
-                    })?;
-                if !self.should_process_table(&table) {
-                    return Ok(());
-                }
-                self.ensure_transaction_buffer();
-                for row in &write_event.rows {
-                    let change = self.decoder.decode_insert(&table, row)?;
-                    self.push_change(change).await?;
+            Some(EventData::XidEvent(_)) => {
+                self.flush_transaction(state_store, &header).await?;
+            }
+            Some(EventData::QueryEvent(query_event)) => {
+                let query = query_event.query();
+                if query.eq_ignore_ascii_case("COMMIT") || query.eq_ignore_ascii_case("ROLLBACK") {
+                    self.flush_transaction(state_store, &header).await?;
                 }
             }
-            BinlogEvent::UpdateRowsEvent(update_event) => {
-                let table = self
-                    .table_mapping
-                    .get(update_event.table_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Missing TableMapEvent for table_id {}",
-                            update_event.table_id
-                        )
-                    })?;
-                if !self.should_process_table(&table) {
-                    return Ok(());
-                }
-                self.ensure_transaction_buffer();
-                for row in &update_event.rows {
-                    let change = self.decoder.decode_update(&table, row)?;
-                    self.push_change(change).await?;
-                }
+            Some(other) => {
+                debug!("Ignoring binlog event: {other:?}");
             }
-            BinlogEvent::DeleteRowsEvent(delete_event) => {
-                let table = self
-                    .table_mapping
-                    .get(delete_event.table_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Missing TableMapEvent for table_id {}",
-                            delete_event.table_id
-                        )
-                    })?;
-                if !self.should_process_table(&table) {
-                    return Ok(());
-                }
-                self.ensure_transaction_buffer();
-                for row in &delete_event.rows {
-                    let change = self.decoder.decode_delete(&table, row)?;
-                    self.push_change(change).await?;
-                }
-            }
-            BinlogEvent::XidEvent(_) => {
-                self.flush_transaction(state_store, header).await?;
-            }
-            BinlogEvent::QueryEvent(query_event) => {
-                if query_event.sql_statement.eq_ignore_ascii_case("COMMIT")
-                    || query_event.sql_statement.eq_ignore_ascii_case("ROLLBACK")
-                {
-                    self.flush_transaction(state_store, header).await?;
-                }
-            }
-            _ => {
-                debug!("Ignoring binlog event type: {event:?}");
+            None => {
+                debug!(
+                    "Ignoring unknown binlog event type {}",
+                    header.event_type_raw()
+                );
             }
         }
 
         debug!(
             "Processed event: type={} position={}",
-            header.event_type, header.next_event_position
+            header.event_type_raw(),
+            header.log_pos()
         );
+
+        Ok(())
+    }
+
+    async fn process_rows_event(
+        &mut self,
+        stream: &BinlogStream,
+        rows_event: RowsEventData<'_>,
+    ) -> Result<()> {
+        let table = stream.get_tme(rows_event.table_id()).ok_or_else(|| {
+            anyhow!(
+                "Missing TableMapEvent for table_id {}",
+                rows_event.table_id()
+            )
+        })?;
+
+        if !self.should_process_table(table) {
+            return Ok(());
+        }
+
+        self.ensure_transaction_buffer();
+
+        match &rows_event {
+            RowsEventData::WriteRowsEvent(_) | RowsEventData::WriteRowsEventV1(_) => {
+                for row in rows_event.rows(table) {
+                    let (_, after) = row.context("Failed to decode write rows event")?;
+                    let after =
+                        after.ok_or_else(|| anyhow!("Write rows event missing after image"))?;
+                    let change = self.decoder.decode_insert(table, &after)?;
+                    self.push_change(change).await?;
+                }
+            }
+            RowsEventData::UpdateRowsEvent(_)
+            | RowsEventData::UpdateRowsEventV1(_)
+            | RowsEventData::PartialUpdateRowsEvent(_) => {
+                for row in rows_event.rows(table) {
+                    let (before, after) = row.context("Failed to decode update rows event")?;
+                    let before =
+                        before.ok_or_else(|| anyhow!("Update rows event missing before image"))?;
+                    let after =
+                        after.ok_or_else(|| anyhow!("Update rows event missing after image"))?;
+                    let change = self.decoder.decode_update(table, &before, &after)?;
+                    self.push_change(change).await?;
+                }
+            }
+            RowsEventData::DeleteRowsEvent(_) | RowsEventData::DeleteRowsEventV1(_) => {
+                for row in rows_event.rows(table) {
+                    let (before, _) = row.context("Failed to decode delete rows event")?;
+                    let before =
+                        before.ok_or_else(|| anyhow!("Delete rows event missing before image"))?;
+                    let change = self.decoder.decode_delete(table, &before)?;
+                    self.push_change(change).await?;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -302,7 +454,7 @@ impl ReplicationStream {
     async fn flush_transaction(
         &mut self,
         state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
-        header: &EventHeader,
+        header: &BinlogEventHeader,
     ) -> Result<()> {
         if let Some(changes) = self.pending_changes.take() {
             for change in changes {
@@ -335,19 +487,20 @@ impl ReplicationStream {
         }
     }
 
-    fn should_process_table(
-        &self,
-        table: &mysql_cdc::events::table_map_event::TableMapEvent,
-    ) -> bool {
+    fn should_process_table(&self, table: &TableMapEvent<'_>) -> bool {
         if self.config.tables.is_empty() {
             return true;
         }
-        let table_name = if table.database_name.is_empty() {
-            table.table_name.clone()
+
+        let database_name = table.database_name().into_owned();
+        let table_name = table.table_name().into_owned();
+        let qualified_name = if database_name.is_empty() {
+            table_name.clone()
         } else {
-            format!("{}.{}", table.database_name, table.table_name)
+            format!("{database_name}.{table_name}")
         };
-        self.config.tables.contains(&table_name) || self.config.tables.contains(&table.table_name)
+
+        self.config.tables.contains(&qualified_name) || self.config.tables.contains(&table_name)
     }
 
     async fn load_start_position(
@@ -373,60 +526,58 @@ impl ReplicationStream {
         Ok(self.config.start_position.clone())
     }
 
-    fn build_replica_options(&self, start_position: StartPosition) -> Result<ReplicaOptions> {
-        let ssl_mode = match self.config.ssl_mode {
-            SslMode::Disabled => MySqlCdcSslMode::Disabled,
-            SslMode::IfAvailable => MySqlCdcSslMode::IfAvailable,
-            SslMode::Require => MySqlCdcSslMode::Require,
-            SslMode::RequireVerifyCa => MySqlCdcSslMode::RequireVerifyCa,
-            SslMode::RequireVerifyFull => MySqlCdcSslMode::RequireVerifyFull,
-        };
-
-        let binlog = match start_position {
-            StartPosition::FromStart => BinlogOptions::from_start(),
-            StartPosition::FromEnd => BinlogOptions::from_end(),
-            StartPosition::FromPosition { file, position } => {
-                BinlogOptions::from_position(file, position)
-            }
-            StartPosition::FromGtid(gtid) => {
-                let gtid_set = mysql_cdc::providers::mysql::gtid::gtid_set::GtidSet::parse(&gtid)
-                    .map_err(|e| anyhow!("Invalid GTID set: {e:?}"))?;
-                BinlogOptions::from_mysql_gtid(gtid_set)
-            }
-        };
-
-        Ok(ReplicaOptions {
-            hostname: self.config.host.clone(),
-            port: self.config.port,
-            username: self.config.user.clone(),
-            password: self.config.password.clone(),
-            database: Some(self.config.database.clone()),
-            server_id: self.config.server_id,
-            blocking: true,
-            heartbeat_interval: Duration::from_secs(self.config.heartbeat_interval_seconds),
-            ssl_mode,
-            binlog,
-        })
-    }
-
     async fn persist_state(
         &self,
         store: &dyn drasi_lib::state_store::StateStoreProvider,
-        header: &EventHeader,
+        header: &BinlogEventHeader,
     ) -> Result<()> {
         let state = ReplicationState {
             binlog_file: self.current_binlog_file.clone(),
-            binlog_position: if self.current_binlog_position == 0 {
-                header.next_event_position
-            } else {
-                self.current_binlog_position
+            binlog_position: match header.log_pos() {
+                0 => self.current_binlog_position,
+                position => position,
             },
             gtid_set: self.current_gtid.clone(),
-            last_processed_timestamp: header.timestamp as u64,
+            last_processed_timestamp: header.timestamp() as u64,
         };
 
         let bytes = serde_json::to_vec(&state)?;
         store.set(&self.source_id, STATE_KEY, bytes).await?;
         Ok(())
     }
+
+    fn relaxed_ssl_opts(&self) -> SslOpts {
+        SslOpts::default()
+            .with_danger_accept_invalid_certs(true)
+            .with_danger_skip_domain_validation(true)
+    }
+
+    fn verify_ca_ssl_opts(&self) -> SslOpts {
+        SslOpts::default().with_danger_skip_domain_validation(true)
+    }
+
+    async fn close_stream(stream: BinlogStream) {
+        if let Err(err) = stream.close().await {
+            debug!("Failed to close MySQL binlog stream cleanly: {err}");
+        }
+    }
+}
+
+fn parse_gtid_set(gtid: &str) -> Result<Vec<Sid<'static>>> {
+    let mut sids = Vec::new();
+    for part in gtid
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let sid: Sid<'static> =
+            Sid::from_str(part).map_err(|e| anyhow!("Invalid GTID set entry '{part}': {e}"))?;
+        sids.push(sid);
+    }
+
+    if sids.is_empty() {
+        anyhow::bail!("Invalid GTID set: no GTID intervals were provided");
+    }
+
+    Ok(sids)
 }

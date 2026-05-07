@@ -58,6 +58,6 @@ mod tests {
 
     #[test]
     fn test_quote_identifier_escapes_backticks() {
-        assert_eq!(crate::mysql::quote_identifier("evil`name"), "`evil``name`");
+        assert_eq!(drasi_mysql_common::quote_identifier("evil`name"), "`evil``name`");
     }
 }

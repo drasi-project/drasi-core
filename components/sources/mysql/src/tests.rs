@@ -49,4 +49,40 @@ mod tests {
         };
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn test_config_validation_missing_host() {
+        let config = MySqlSourceConfig {
+            host: String::new(),
+            port: 3306,
+            database: "test".to_string(),
+            user: "user".to_string(),
+            password: String::new(),
+            tables: vec![],
+            ssl_mode: SslMode::Disabled,
+            table_keys: vec![],
+            start_position: StartPosition::FromEnd,
+            server_id: 65535,
+            heartbeat_interval_seconds: 30,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_rejects_zero_server_id() {
+        let config = MySqlSourceConfig {
+            host: "localhost".to_string(),
+            port: 3306,
+            database: "test".to_string(),
+            user: "user".to_string(),
+            password: String::new(),
+            tables: vec![],
+            ssl_mode: SslMode::Disabled,
+            table_keys: vec![],
+            start_position: StartPosition::FromEnd,
+            server_id: 0,
+            heartbeat_interval_seconds: 30,
+        };
+        assert!(config.validate().is_err());
+    }
 }

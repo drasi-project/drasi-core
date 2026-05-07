@@ -25,7 +25,7 @@ let bootstrap = MySqlBootstrapProvider::builder()
 | `database` | `String` | **(Required)** | Database name to connect to |
 | `user` | `String` | **(Required)** | Database user with replication privileges |
 | `password` | `String` | `""` | Database password |
-| `tables` | `Vec<String>` | `[]` | Table allow-list (required for security) |
+| `tables` | `Vec<String>` | **(Required)** | Table allow-list; must contain at least one table |
 | `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration |
 
 ### TableKeyConfig
@@ -45,4 +45,4 @@ cargo test -p drasi-bootstrap-mysql
 
 - Configure tables explicitly with `with_tables`; this allowlist is required.
 - Table names must use only letters, numbers, and underscores.
-- Requested labels not in the allowlist are ignored.
+- Requested tables not in the allowlist are ignored.

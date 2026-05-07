@@ -15,22 +15,20 @@
 //! Decodes MySQL binlog row events into Drasi SourceChange events.
 
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::sync::Arc;
 
-use anyhow::Result;
-use base64::Engine;
+use anyhow::{Context, Result};
 use chrono::Utc;
-use log::warn;
-use mysql_cdc::events::row_events::mysql_value::MySqlValue;
-use mysql_cdc::events::row_events::row_data::{RowData, UpdateRowData};
-use mysql_cdc::events::table_map_event::TableMapEvent;
+use mysql_async::Value;
+use mysql_common::binlog::{events::TableMapEvent, row::BinlogRow, value::BinlogValue};
 use ordered_float::OrderedFloat;
 
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 
-use crate::config::TableKeyConfig;
+use drasi_mysql_common::{format_value_for_key, TableKeyConfig};
 
 pub struct MySqlDecoder {
     source_id: String,
@@ -49,38 +47,47 @@ impl MySqlDecoder {
         }
     }
 
-    pub fn decode_insert(&self, table: &TableMapEvent, row: &RowData) -> Result<SourceChange> {
-        let (element, _) = self.row_to_element(table, &row.cells)?;
+    pub fn decode_insert(
+        &self,
+        table: &TableMapEvent<'_>,
+        row: &BinlogRow,
+    ) -> Result<SourceChange> {
+        let (element, _) = self.row_to_element(table, row, None)?;
         Ok(SourceChange::Insert { element })
     }
 
     pub fn decode_update(
         &self,
-        table: &TableMapEvent,
-        row: &UpdateRowData,
+        table: &TableMapEvent<'_>,
+        before: &BinlogRow,
+        after: &BinlogRow,
     ) -> Result<SourceChange> {
-        let (element, _) = self.row_to_element(table, &row.after_update.cells)?;
+        let (element, _) = self.row_to_element(table, after, Some(before))?;
         Ok(SourceChange::Update { element })
     }
 
-    pub fn decode_delete(&self, table: &TableMapEvent, row: &RowData) -> Result<SourceChange> {
-        let (_, metadata) = self.row_to_element(table, &row.cells)?;
+    pub fn decode_delete(
+        &self,
+        table: &TableMapEvent<'_>,
+        row: &BinlogRow,
+    ) -> Result<SourceChange> {
+        let (_, metadata) = self.row_to_element(table, row, None)?;
         Ok(SourceChange::Delete { metadata })
     }
 
     fn row_to_element(
         &self,
-        table: &TableMapEvent,
-        cells: &[Option<MySqlValue>],
+        table: &TableMapEvent<'_>,
+        row: &BinlogRow,
+        fallback_row: Option<&BinlogRow>,
     ) -> Result<(Element, ElementMetadata)> {
-        // Use bare table name for element IDs (no database prefix) to match bootstrap.
-        let table_name = &table.table_name;
-        let label = table.table_name.clone();
+        let table_name = table.table_name().into_owned();
+        let label = table_name.clone();
 
         let mut properties = ElementPropertyMap::new();
         let mut key_parts: Vec<String> = Vec::new();
         let configured_keys = self.table_keys.get(table_name.as_str());
-        let column_names = self.extract_column_names(table);
+        let column_names = self.extract_column_names(row);
 
         let fallback_key = if configured_keys.is_none() && !column_names.is_empty() {
             column_names
@@ -91,15 +98,12 @@ impl MySqlDecoder {
             None
         };
 
-        for (idx, value_opt) in cells.iter().enumerate() {
+        for idx in 0..row.len() {
             let column_key = column_names
                 .get(idx)
                 .cloned()
                 .unwrap_or_else(|| format!("col_{idx}"));
-            let value = match value_opt {
-                None => ElementValue::Null,
-                Some(mysql_value) => mysql_value_to_element_value(mysql_value),
-            };
+            let value = self.value_at(row, fallback_row, idx)?;
 
             if let Some(keys) = configured_keys {
                 if keys.contains(&column_key) {
@@ -116,14 +120,14 @@ impl MySqlDecoder {
         }
 
         if key_parts.is_empty() {
-            warn!("No primary key mapping for table '{table_name}', falling back to UUID");
+            anyhow::bail!(
+                "Cannot construct a deterministic element ID for table '{table_name}': \
+                 no key columns configured and no 'id' column found. \
+                 Configure key_columns for this table."
+            );
         }
 
-        let element_id = if !key_parts.is_empty() {
-            format!("{}:{}", table_name, key_parts.join("_"))
-        } else {
-            format!("{}:{}", table_name, uuid::Uuid::new_v4())
-        };
+        let element_id = format!("{}:{}", table_name, key_parts.join("_"));
 
         let metadata = ElementMetadata {
             reference: ElementReference::new(&self.source_id, &element_id),
@@ -139,228 +143,134 @@ impl MySqlDecoder {
         Ok((element, metadata))
     }
 
-    fn extract_column_names(&self, table: &TableMapEvent) -> Vec<String> {
-        if let Some(metadata) = &table.table_metadata {
-            if let Some(names) = &metadata.column_names {
-                return names.clone();
-            }
-        }
-        Vec::new()
-    }
-}
+    fn value_at(
+        &self,
+        row: &BinlogRow,
+        fallback_row: Option<&BinlogRow>,
+        idx: usize,
+    ) -> Result<ElementValue> {
+        let value = row
+            .as_ref(idx)
+            .or_else(|| fallback_row.and_then(|fallback| fallback.as_ref(idx)));
 
-fn mysql_value_to_element_value(value: &MySqlValue) -> ElementValue {
-    match value {
-        MySqlValue::TinyInt(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::SmallInt(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::MediumInt(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::Int(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::BigInt(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::Float(v) => ElementValue::Float(OrderedFloat(*v as f64)),
-        MySqlValue::Double(v) => ElementValue::Float(OrderedFloat(*v)),
-        MySqlValue::Decimal(v) => v
-            .parse::<f64>()
-            .map(OrderedFloat)
-            .map(ElementValue::Float)
-            .unwrap_or_else(|_| ElementValue::String(Arc::from(v.as_str()))),
-        MySqlValue::String(v) => ElementValue::String(Arc::from(v.as_str())),
-        MySqlValue::Bit(v) => {
-            ElementValue::List(v.iter().map(|b| ElementValue::Bool(*b)).collect::<Vec<_>>())
-        }
-        MySqlValue::Enum(v) => ElementValue::String(Arc::from(v.to_string())),
-        MySqlValue::Set(v) => ElementValue::String(Arc::from(v.to_string())),
-        MySqlValue::Blob(v) => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(v);
-            ElementValue::String(Arc::from(encoded.as_str()))
-        }
-        MySqlValue::Year(v) => ElementValue::Integer(*v as i64),
-        MySqlValue::Date(d) => ElementValue::String(Arc::from(format!(
-            "{:04}-{:02}-{:02}",
-            d.year, d.month, d.day
-        ))),
-        MySqlValue::Time(t) => ElementValue::String(Arc::from(format!(
-            "{:03}:{:02}:{:02}.{:03}",
-            t.hour, t.minute, t.second, t.millis
-        ))),
-        MySqlValue::DateTime(dt) => ElementValue::String(Arc::from(format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-            dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.millis
-        ))),
-        MySqlValue::Timestamp(ts) => {
-            let secs = *ts as i64;
-            match chrono::DateTime::from_timestamp(secs, 0) {
-                Some(dt) => {
-                    ElementValue::String(Arc::from(dt.format("%Y-%m-%d %H:%M:%S.000").to_string()))
-                }
-                None => ElementValue::Integer(secs),
-            }
+        match value {
+            None => Ok(ElementValue::Null),
+            Some(value) => binlog_value_to_element_value(value),
         }
     }
-}
 
-fn format_value_for_key(value: &ElementValue) -> String {
-    match value {
-        ElementValue::Null => "null".to_string(),
-        ElementValue::Bool(b) => b.to_string(),
-        ElementValue::Float(f) => f.to_string(),
-        ElementValue::Integer(i) => i.to_string(),
-        ElementValue::String(s) => s.to_string(),
-        ElementValue::List(l) => l
+    fn extract_column_names(&self, row: &BinlogRow) -> Vec<String> {
+        row.columns_ref()
             .iter()
-            .map(format_value_for_key)
-            .collect::<Vec<_>>()
-            .join("-"),
-        ElementValue::Object(_) => "object".to_string(),
+            .enumerate()
+            .map(|(idx, column)| {
+                let name = column.name_str().to_string();
+                if name.is_empty() {
+                    format!("col_{idx}")
+                } else {
+                    name
+                }
+            })
+            .collect()
+    }
+}
+
+fn binlog_value_to_element_value(value: &BinlogValue<'_>) -> Result<ElementValue> {
+    match value {
+        BinlogValue::Value(value) => Ok(mysql_value_to_element_value(value)),
+        BinlogValue::Jsonb(value) => {
+            let json = serde_json::Value::try_from(value.clone())
+                .context("Failed to convert MySQL JSONB value to JSON")?;
+            Ok(ElementValue::String(Arc::from(serde_json::to_string(
+                &json,
+            )?)))
+        }
+        BinlogValue::JsonDiff(diff) => Ok(ElementValue::String(Arc::from(format!("{diff:?}")))),
+    }
+}
+
+fn mysql_value_to_element_value(value: &Value) -> ElementValue {
+    match value {
+        Value::NULL => ElementValue::Null,
+        Value::Bytes(bytes) => {
+            ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).into_owned()))
+        }
+        Value::Int(val) => ElementValue::Integer(*val),
+        Value::UInt(val) => {
+            if *val <= i64::MAX as u64 {
+                ElementValue::Integer(*val as i64)
+            } else {
+                ElementValue::String(Arc::from(val.to_string()))
+            }
+        }
+        Value::Float(val) => ElementValue::Float(OrderedFloat(*val as f64)),
+        Value::Double(val) => ElementValue::Float(OrderedFloat(*val)),
+        Value::Date(y, m, d, h, min, s, _) => ElementValue::String(Arc::from(format!(
+            "{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}"
+        ))),
+        Value::Time(_, days, hours, minutes, seconds, micros) => {
+            let total_hours = days * 24 + u32::from(*hours);
+            ElementValue::String(Arc::from(format!(
+                "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
+            )))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mysql_cdc::events::row_events::mysql_value::MySqlValue;
+    use mysql_async::Value;
     use ordered_float::OrderedFloat;
 
     #[test]
-    fn test_tiny_int() {
-        let v = mysql_value_to_element_value(&MySqlValue::TinyInt(42));
-        assert_eq!(v, ElementValue::Integer(42));
-    }
-
-    #[test]
-    fn test_small_int() {
-        let v = mysql_value_to_element_value(&MySqlValue::SmallInt(1000));
-        assert_eq!(v, ElementValue::Integer(1000));
-    }
-
-    #[test]
-    fn test_medium_int() {
-        let v = mysql_value_to_element_value(&MySqlValue::MediumInt(100_000));
-        assert_eq!(v, ElementValue::Integer(100_000));
+    fn test_null() {
+        let v = mysql_value_to_element_value(&Value::NULL);
+        assert_eq!(v, ElementValue::Null);
     }
 
     #[test]
     fn test_int() {
-        let v = mysql_value_to_element_value(&MySqlValue::Int(123_456));
+        let v = mysql_value_to_element_value(&Value::Int(123_456));
         assert_eq!(v, ElementValue::Integer(123_456));
     }
 
     #[test]
-    fn test_big_int() {
-        let v = mysql_value_to_element_value(&MySqlValue::BigInt(9_999_999_999));
-        assert_eq!(v, ElementValue::Integer(9_999_999_999));
+    fn test_uint_overflow() {
+        let v = mysql_value_to_element_value(&Value::UInt((i64::MAX as u64) + 1));
+        assert_eq!(
+            v,
+            ElementValue::String(Arc::from(((i64::MAX as u64) + 1).to_string()))
+        );
     }
 
     #[test]
     fn test_float() {
-        let v = mysql_value_to_element_value(&MySqlValue::Float(3.14));
-        assert!(matches!(v, ElementValue::Float(_)));
+        let v = mysql_value_to_element_value(&Value::Float(3.14));
+        assert_eq!(v, ElementValue::Float(OrderedFloat(f64::from(3.14_f32))));
     }
 
     #[test]
     fn test_double() {
-        let v = mysql_value_to_element_value(&MySqlValue::Double(2.718281828));
+        let v = mysql_value_to_element_value(&Value::Double(2.718281828));
         assert_eq!(v, ElementValue::Float(OrderedFloat(2.718281828)));
     }
 
     #[test]
-    fn test_decimal_valid() {
-        let v = mysql_value_to_element_value(&MySqlValue::Decimal("12.34".to_string()));
-        assert_eq!(v, ElementValue::Float(OrderedFloat(12.34)));
-    }
-
-    #[test]
-    fn test_decimal_invalid() {
-        let v = mysql_value_to_element_value(&MySqlValue::Decimal("not_a_number".to_string()));
-        assert_eq!(v, ElementValue::String(Arc::from("not_a_number")));
-    }
-
-    #[test]
-    fn test_string() {
-        let v = mysql_value_to_element_value(&MySqlValue::String("hello".to_string()));
+    fn test_bytes() {
+        let v = mysql_value_to_element_value(&Value::Bytes(b"hello".to_vec()));
         assert_eq!(v, ElementValue::String(Arc::from("hello")));
     }
 
     #[test]
-    fn test_bit() {
-        let v = mysql_value_to_element_value(&MySqlValue::Bit(vec![true, false, true]));
-        assert_eq!(
-            v,
-            ElementValue::List(vec![
-                ElementValue::Bool(true),
-                ElementValue::Bool(false),
-                ElementValue::Bool(true),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_enum() {
-        let v = mysql_value_to_element_value(&MySqlValue::Enum(2));
-        assert_eq!(v, ElementValue::String(Arc::from("2")));
-    }
-
-    #[test]
-    fn test_set() {
-        let v = mysql_value_to_element_value(&MySqlValue::Set(7));
-        assert_eq!(v, ElementValue::String(Arc::from("7")));
-    }
-
-    #[test]
-    fn test_blob() {
-        let v = mysql_value_to_element_value(&MySqlValue::Blob(vec![0xDE, 0xAD]));
-        assert_eq!(v, ElementValue::String(Arc::from("3q0=")));
-    }
-
-    #[test]
-    fn test_year() {
-        let v = mysql_value_to_element_value(&MySqlValue::Year(2024));
-        assert_eq!(v, ElementValue::Integer(2024));
-    }
-
-    #[test]
     fn test_date() {
-        use mysql_cdc::events::row_events::mysql_value::Date;
-        let v = mysql_value_to_element_value(&MySqlValue::Date(Date {
-            year: 2024,
-            month: 6,
-            day: 15,
-        }));
-        assert_eq!(v, ElementValue::String(Arc::from("2024-06-15")));
+        let v = mysql_value_to_element_value(&Value::Date(2024, 6, 15, 13, 45, 30, 0));
+        assert_eq!(v, ElementValue::String(Arc::from("2024-06-15 13:45:30")));
     }
 
     #[test]
     fn test_time() {
-        use mysql_cdc::events::row_events::mysql_value::Time;
-        let v = mysql_value_to_element_value(&MySqlValue::Time(Time {
-            hour: 13,
-            minute: 45,
-            second: 30,
-            millis: 500,
-        }));
-        assert_eq!(v, ElementValue::String(Arc::from("013:45:30.500")));
-    }
-
-    #[test]
-    fn test_datetime() {
-        use mysql_cdc::events::row_events::mysql_value::DateTime;
-        let v = mysql_value_to_element_value(&MySqlValue::DateTime(DateTime {
-            year: 2024,
-            month: 1,
-            day: 2,
-            hour: 3,
-            minute: 4,
-            second: 5,
-            millis: 6,
-        }));
-        assert_eq!(
-            v,
-            ElementValue::String(Arc::from("2024-01-02 03:04:05.006"))
-        );
-    }
-
-    #[test]
-    fn test_timestamp_valid() {
-        let v = mysql_value_to_element_value(&MySqlValue::Timestamp(1700000000));
-        assert!(matches!(v, ElementValue::String(_)));
+        let v = mysql_value_to_element_value(&Value::Time(false, 1, 13, 45, 30, 500));
+        assert_eq!(v, ElementValue::String(Arc::from("037:45:30.000500")));
     }
 }

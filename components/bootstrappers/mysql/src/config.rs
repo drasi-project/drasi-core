@@ -14,18 +14,12 @@
 
 //! Configuration types for the MySQL bootstrap provider.
 //!
-//! These types are defined locally to keep this component independent
-//! and self-contained, without dependencies on other components.
+//! Shared types (TableKeyConfig, is_valid_identifier) come from drasi-mysql-common.
 
-/// Table key configuration for MySQL bootstrap
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableKeyConfig {
-    pub table: String,
-    pub key_columns: Vec<String>,
-}
+pub use drasi_mysql_common::{is_valid_identifier, TableKeyConfig};
 
 /// MySQL bootstrap provider configuration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MySqlBootstrapConfig {
     /// MySQL host
     pub host: String,
@@ -49,11 +43,18 @@ pub struct MySqlBootstrapConfig {
     pub table_keys: Vec<TableKeyConfig>,
 }
 
-pub(crate) fn is_valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+impl std::fmt::Debug for MySqlBootstrapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MySqlBootstrapConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("tables", &self.tables)
+            .field("table_keys", &self.table_keys)
+            .finish()
+    }
 }
 
 impl MySqlBootstrapConfig {

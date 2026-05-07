@@ -30,7 +30,10 @@ use drasi_core::models::{
 use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 
-use crate::config::{is_valid_identifier, MySqlBootstrapConfig};
+use crate::config::MySqlBootstrapConfig;
+use drasi_mysql_common::{
+    escape_identifier, format_value_for_key, is_valid_identifier, quote_identifier,
+};
 
 pub struct MySqlBootstrapHandler {
     config: MySqlBootstrapConfig,
@@ -176,7 +179,13 @@ impl MySqlBootstrapHandler {
                     ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).as_ref()))
                 }
                 Some(mysql_async::Value::Int(val)) => ElementValue::Integer(*val),
-                Some(mysql_async::Value::UInt(val)) => ElementValue::Integer(*val as i64),
+                Some(mysql_async::Value::UInt(val)) => {
+                    if *val <= i64::MAX as u64 {
+                        ElementValue::Integer(*val as i64)
+                    } else {
+                        ElementValue::String(Arc::from(val.to_string()))
+                    }
+                }
                 Some(mysql_async::Value::Float(val)) => {
                     ElementValue::Float(OrderedFloat(*val as f64))
                 }
@@ -205,14 +214,14 @@ impl MySqlBootstrapHandler {
         }
 
         if key_parts.is_empty() {
-            warn!("No primary key mapping for table '{table_name}', falling back to UUID");
+            anyhow::bail!(
+                "Cannot construct a deterministic element ID for table '{table_name}': \
+                 no key columns configured and no 'id' column found. \
+                 Configure key_columns for this table."
+            );
         }
 
-        let element_id = if !key_parts.is_empty() {
-            format!("{}:{}", table_name, key_parts.join("_"))
-        } else {
-            format!("{}:{}", table_name, uuid::Uuid::new_v4())
-        };
+        let element_id = format!("{}:{}", table_name, key_parts.join("_"));
 
         let metadata = ElementMetadata {
             reference: ElementReference::new(&context.source_id, &element_id),
@@ -226,29 +235,5 @@ impl MySqlBootstrapHandler {
         };
 
         Ok(SourceChange::Insert { element })
-    }
-}
-
-pub(crate) fn escape_identifier(value: &str) -> String {
-    value.replace('`', "``")
-}
-
-pub(crate) fn quote_identifier(value: &str) -> String {
-    format!("`{}`", escape_identifier(value))
-}
-
-fn format_value_for_key(value: &ElementValue) -> String {
-    match value {
-        ElementValue::Null => "null".to_string(),
-        ElementValue::Bool(b) => b.to_string(),
-        ElementValue::Float(f) => f.to_string(),
-        ElementValue::Integer(i) => i.to_string(),
-        ElementValue::String(s) => s.to_string(),
-        ElementValue::List(l) => l
-            .iter()
-            .map(format_value_for_key)
-            .collect::<Vec<_>>()
-            .join("-"),
-        ElementValue::Object(_) => "object".to_string(),
     }
 }

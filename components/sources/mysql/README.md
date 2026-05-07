@@ -1,6 +1,6 @@
 # MySQL Source Plugin
 
-Streams MySQL binlog changes into Drasi `SourceChange` events. Uses `mysql_cdc` for row-based replication.
+Streams MySQL binlog changes into Drasi `SourceChange` events. Uses `mysql_async`'s native `BinlogStream` API for row-based replication.
 
 ## Requirements
 
@@ -39,7 +39,7 @@ let source = MySqlReplicationSource::builder("mysql-source")
 | `sslMode` | `SslMode` | `disabled` | SSL mode: `disabled`, `if_available`, `require`, `require_verify_ca`, `require_verify_full` |
 | `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration (see below) |
 | `startPosition` | `StartPosition` | `from_end` | Where to start replication: `from_start`, `from_end`, `from_position`, or `from_gtid` |
-| `serverId` | `u32` | `1` | MySQL server ID for the replication connection |
+| `serverId` | `u32` | Auto-generated | MySQL server ID for the replication connection. Auto-generated from source instance ID if not specified. |
 | `heartbeatIntervalSeconds` | `u64` | `30` | Heartbeat interval in seconds |
 
 ### TableKeyConfig
@@ -51,10 +51,7 @@ let source = MySqlReplicationSource::builder("mysql-source")
 
 ## Limitations
 
-- `mysql_cdc` runtime does not support SSL (ssl_mode must be Disabled). This means connections from this source to MySQL are **not encrypted**.
-  - **Do not** use this source over untrusted networks or the public internet.
-  - In production, run it only on trusted, isolated networks and ensure encryption in transit via infrastructure such as a VPN, service mesh, or a TLS-terminating proxy (for example, stunnel, HAProxy, or a cloud load balancer that terminates MySQL TLS and forwards plain traffic on a private network).
-- Packets >16MB are not supported
+- Packets > 16 MB are not supported.
 
 ## Testing
 

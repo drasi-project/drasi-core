@@ -227,7 +227,8 @@ fn default_mysql_password() -> ConfigValue<String> {
 }
 
 fn default_server_id() -> ConfigValue<u32> {
-    ConfigValue::Static(65535)
+    // 0 is a sentinel meaning "auto-generate from source instance ID"
+    ConfigValue::Static(0)
 }
 
 fn default_heartbeat_interval() -> ConfigValue<u64> {
@@ -286,7 +287,16 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
         let user: String = mapper.resolve_string(&dto.user)?;
         let password: String = mapper.resolve_string(&dto.password)?;
         let ssl_mode: SslMode = mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode)?.into();
-        let server_id: u32 = mapper.resolve_typed(&dto.server_id)?;
+        let mut server_id: u32 = mapper.resolve_typed(&dto.server_id)?;
+        if server_id == 0 {
+            // Auto-generate a deterministic server_id from the source instance ID.
+            // Use lower 31 bits of hash to stay in valid range (1..2^31).
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            let hash = hasher.finish();
+            server_id = ((hash & 0x7FFF_FFFE) as u32) + 1; // range [1, 2^31-1]
+        }
         let heartbeat_interval_seconds: u64 =
             mapper.resolve_typed(&dto.heartbeat_interval_seconds)?;
         let start_position: StartPosition = mapper

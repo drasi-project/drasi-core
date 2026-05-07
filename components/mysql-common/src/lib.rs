@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,12 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MySQL source internal types
+//! Shared types for MySQL source and bootstrap plugins
+//!
+//! This crate contains configuration, key formatting, and identifier
+//! validation types used by both `drasi-source-mysql` and `drasi-bootstrap-mysql`.
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ReplicationState {
-    pub binlog_file: String,
-    pub binlog_position: u32,
-    pub gtid_set: Option<String>,
-    pub last_processed_timestamp: u64,
-}
+pub mod config;
+pub mod keys;
+
+// Re-export main types
+pub use config::{is_valid_identifier, TableKeyConfig};
+pub use keys::{escape_identifier, format_value_for_key, quote_identifier};

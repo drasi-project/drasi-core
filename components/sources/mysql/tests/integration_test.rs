@@ -55,7 +55,14 @@ async fn test_mysql_source_change_detection() {
         .db_name(Some("test"));
 
     let mut conn = Conn::new(root_opts).await.unwrap();
-    sleep(Duration::from_secs(2)).await;
+
+    // Wait for MySQL to be fully ready
+    for _ in 0..20 {
+        if conn.query_drop("SELECT 1").await.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
 
     conn.query_drop(
         "CREATE TABLE users (\n            id INT AUTO_INCREMENT PRIMARY KEY,\n            name VARCHAR(255) NOT NULL,\n            email VARCHAR(255) NOT NULL\n        )",
@@ -129,6 +136,7 @@ async fn test_mysql_source_change_detection() {
         .subscribe_with_options(Default::default())
         .await
         .unwrap();
+    // Allow the replication stream to connect and register
     sleep(Duration::from_secs(2)).await;
 
     conn.query_drop("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')")
@@ -243,7 +251,14 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         .db_name(Some("test"));
 
     let mut conn = Conn::new(root_opts).await.unwrap();
-    sleep(Duration::from_secs(2)).await;
+
+    // Wait for MySQL to be fully ready
+    for _ in 0..20 {
+        if conn.query_drop("SELECT 1").await.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
 
     conn.query_drop(
         "CREATE TABLE type_test (

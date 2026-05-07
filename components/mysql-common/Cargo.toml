@@ -13,48 +13,22 @@
 # limitations under the License.
 
 [package]
-name = "drasi-source-mysql"
+name = "drasi-mysql-common"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "MySQL source plugin for Drasi"
+description = "Shared types for MySQL source and bootstrap plugins"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "mysql"]
+keywords = ["drasi", "mysql", "common"]
 categories = ["database"]
-
-[lib]
-crate-type = ["lib", "cdylib"]
 
 [lints]
 workspace = true
 
 [dependencies]
-drasi-lib.workspace = true
 drasi-core.workspace = true
-drasi-plugin-sdk = { workspace = true }
-drasi-mysql-common = { workspace = true }
-utoipa = { workspace = true }
 anyhow = "1.0"
-async-trait = "0.1"
 log = "0.4"
-tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tracing = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
-mysql_async = "0.34"
-mysql_common = "0.32"
-futures-util = "0.3"
-bytes = "1.0"
-
-[features]
-dynamic-plugin = []
-
-[dev-dependencies]
-tokio-test = "0.4"
-testcontainers = "0.26.3"
-testcontainers-modules = { version = "0.14", features = ["mysql"] }
-drasi-reaction-application = { path = "../../reactions/application" }
-drasi-bootstrap-mysql = { path = "../../bootstrappers/mysql" }
