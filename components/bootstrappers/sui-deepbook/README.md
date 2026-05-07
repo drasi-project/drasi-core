@@ -40,13 +40,13 @@ let bootstrap = SuiDeepBookBootstrapProvider::builder()
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `rpc_endpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui JSON-RPC endpoint URL |
-| `deepbook_package_id` | `String` | Mainnet DeepBook V3 address | Package ID to filter events by |
-| `request_limit` | `u16` | `100` | Max events per RPC page (1–1000) |
-| `max_pages` | `u32` | `10` | Maximum number of RPC pages to fetch |
-| `event_filters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
+| `rpcEndpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui JSON-RPC endpoint URL |
+| `deepbookPackageId` | `String` | Mainnet DeepBook V3 address | Package ID to filter events by |
+| `requestLimit` | `u16` | `100` | Max events per RPC page (1–1000) |
+| `maxPages` | `u32` | `10` | Maximum number of RPC pages to fetch |
+| `eventFilters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
 | `pools` | `Vec<String>` | `[]` | Pool IDs to include (empty = all) |
-| `start_position` | `StartPosition` | `Beginning` | Where to begin loading historical events |
+| `startPosition` | `StartPosition` | `Beginning` | Where to begin loading historical events |
 
 ### Start Position
 

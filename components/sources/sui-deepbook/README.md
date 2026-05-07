@@ -136,18 +136,18 @@ let source = SuiDeepBookSource::builder("deepbook-source")
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `transport` | `Transport` | `Grpc` | Transport mode: `Grpc` (recommended) or `JsonRpc` (legacy) |
-| `rpc_endpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui endpoint URL (used for both gRPC and JSON-RPC) |
-| `grpc_endpoint` | `Option<String>` | `None` | Override gRPC endpoint (falls back to `rpc_endpoint`) |
-| `deepbook_package_id` | `String` | Mainnet DeepBook V3 address | Package ID to filter events by |
-| `poll_interval_ms` | `u64` | `2000` | Milliseconds between poll cycles (JSON-RPC only) |
-| `request_limit` | `u16` | `100` | Max events per RPC page, 1–1000 (JSON-RPC only) |
-| `event_filters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
+| `rpcEndpoint` | `String` | `https://fullnode.mainnet.sui.io:443` | Sui endpoint URL (used for both gRPC and JSON-RPC) |
+| `grpcEndpoint` | `Option<String>` | `None` | Override gRPC endpoint (falls back to `rpcEndpoint`) |
+| `deepbookPackageId` | `String` | Mainnet DeepBook V3 address | Package ID to filter events by |
+| `pollIntervalMs` | `u64` | `2000` | Milliseconds between poll cycles (JSON-RPC only) |
+| `requestLimit` | `u16` | `100` | Max events per RPC page, 1–1000 (JSON-RPC only) |
+| `eventFilters` | `Vec<String>` | `[]` | Event type substrings to include (empty = all) |
 | `pools` | `Vec<String>` | `[]` | Pool IDs to include (empty = all) |
-| `start_position` | `StartPosition` | `Now` | Where to begin consuming events |
-| `enable_pool_nodes` | `bool` | `true` | Emit `:Pool` nodes with metadata from `sui_getObject` |
-| `enable_trader_nodes` | `bool` | `true` | Emit `:Trader` nodes from event senders |
-| `enable_order_nodes` | `bool` | `true` | Emit `:Order` nodes from event order_ids |
-| `lookback_events` | `u16` | `0` | Recent historical events to fetch on startup (JSON-RPC only) |
+| `startPosition` | `StartPosition` | `Now` | Where to begin consuming events |
+| `enablePoolNodes` | `bool` | `true` | Emit `:Pool` nodes with metadata from `sui_getObject` |
+| `enableTraderNodes` | `bool` | `true` | Emit `:Trader` nodes from event senders |
+| `enableOrderNodes` | `bool` | `true` | Emit `:Order` nodes from event order_ids |
+| `lookbackEvents` | `u16` | `0` | Recent historical events to fetch on startup (JSON-RPC only) |
 
 ### Start Position
 
