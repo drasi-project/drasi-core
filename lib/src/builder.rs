@@ -488,7 +488,7 @@ impl DrasiLibBuilder {
         // This enables snapshot_configuration() to persist and reconstruct
         // bootstrap provider configurations.
         for (source_id, kind, properties) in self.bootstrap_metadata {
-            let bp_id = format!("{}-bootstrap", source_id);
+            let bp_id = format!("{source_id}-bootstrap");
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("kind".to_string(), kind);
             for (key, value) in properties {
@@ -499,8 +499,7 @@ impl DrasiLibBuilder {
                 graph.register_bootstrap_provider(&bp_id, metadata, &[source_id.clone()])
             {
                 log::warn!(
-                    "Failed to register bootstrap provider metadata for source '{}': {e}",
-                    source_id
+                    "Failed to register bootstrap provider metadata for source '{source_id}': {e}"
                 );
             }
         }
