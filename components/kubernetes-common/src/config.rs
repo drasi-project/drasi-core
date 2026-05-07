@@ -14,10 +14,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Specifies a Kubernetes resource to watch, identified by API version and kind.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSpec {
+    /// Kubernetes API version (e.g. `"v1"` for core resources, `"apps/v1"` for grouped resources).
     pub api_version: String,
+    /// Kubernetes resource kind (e.g. `"Pod"`, `"Deployment"`, `"ConfigMap"`).
     pub kind: String,
 }
 
@@ -35,6 +38,7 @@ pub enum StartFrom {
     #[default]
     Now,
     Beginning,
+    /// Resume from a specific point in time. The value is a Unix timestamp in seconds.
     Timestamp(i64),
 }
 
@@ -45,6 +49,10 @@ pub fn default_annotation_excludes() -> Vec<String> {
     ]
 }
 
+/// Configuration for the Kubernetes source plugin.
+///
+/// This struct is shared between the source and bootstrap plugins via the
+/// `drasi-kubernetes-common` crate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KubernetesSourceConfig {
@@ -130,6 +138,10 @@ impl KubernetesSourceConfig {
     }
 }
 
+/// Returns true if the given kind is supported by the Kubernetes source plugin.
+///
+/// The initial implementation supports core and apps API group resources only.
+/// CRD support is planned for a future iteration.
 pub fn is_supported_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -177,13 +189,7 @@ mod tests {
 
     #[test]
     fn namespaced_kinds_are_not_cluster_scoped() {
-        for kind in &[
-            "Pod",
-            "Deployment",
-            "ReplicaSet",
-            "Service",
-            "ConfigMap",
-        ] {
+        for kind in &["Pod", "Deployment", "ReplicaSet", "Service", "ConfigMap"] {
             assert!(
                 !is_cluster_scoped_kind(kind),
                 "{kind} should not be cluster-scoped"
