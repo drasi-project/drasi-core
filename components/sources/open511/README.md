@@ -57,19 +57,19 @@ let source = Open511Source::builder("road-events")
 
 | Parameter | Default | Description |
 |---|---|---|
-| `base_url` | *(required)* | Open511 API base URL |
-| `poll_interval_secs` | `60` | Seconds between poll cycles |
-| `full_sweep_interval` | `10` | Run a full sweep every N polls |
-| `request_timeout_secs` | `15` | HTTP request timeout |
-| `page_size` | `500` | Results per API page (max 500) |
-| `status_filter` | `ACTIVE` | Filter by event status |
-| `severity_filter` | — | Filter by severity (`MINOR`, `MODERATE`, `MAJOR`) |
-| `event_type_filter` | — | Filter by type (`INCIDENT`, `CONSTRUCTION`, etc.) |
-| `area_id_filter` | — | Filter by area ID |
-| `road_name_filter` | — | Filter by road name |
-| `jurisdiction_filter` | — | Filter by jurisdiction URL |
-| `bbox_filter` | — | Bounding box `xmin,ymin,xmax,ymax` |
-| `initial_cursor_behavior` | `StartFromBeginning` | How to initialize when no state exists |
+| `baseUrl` | *(required)* | Open511 API base URL |
+| `pollIntervalSecs` | `60` | Seconds between poll cycles |
+| `fullSweepInterval` | `10` | Run a full sweep every N polls |
+| `requestTimeoutSecs` | `15` | HTTP request timeout |
+| `pageSize` | `500` | Results per API page (max 500) |
+| `statusFilter` | `ACTIVE` | Filter by event status |
+| `severityFilter` | — | Filter by severity (`MINOR`, `MODERATE`, `MAJOR`) |
+| `eventTypeFilter` | — | Filter by type (`INCIDENT`, `CONSTRUCTION`, etc.) |
+| `areaIdFilter` | — | Filter by area ID |
+| `roadNameFilter` | — | Filter by road name |
+| `jurisdictionFilter` | — | Filter by jurisdiction URL |
+| `bboxFilter` | — | Bounding box `xmin,ymin,xmax,ymax` |
+| `initialCursorBehavior` | `StartFromBeginning` | How to initialize when no state exists |
 
 ### Initial Cursor Behavior
 
