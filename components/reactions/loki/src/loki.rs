@@ -503,11 +503,11 @@ impl Reaction for LokiReaction {
 
                 let query_name = &query_result.query_id;
                 let query_template = Self::query_template(query_name, &routes, &default_template);
-                let timestamp_ns = query_result
+                let base_timestamp_ns: i64 = query_result
                     .timestamp
                     .timestamp_nanos_opt()
-                    .unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0))
-                    .to_string();
+                    .unwrap_or_else(|| Utc::now().timestamp_nanos_opt().unwrap_or(0));
+                let mut ts_offset: i64 = 0;
 
                 let mut streams: HashMap<String, BufferedStream> = HashMap::new();
 
@@ -560,7 +560,8 @@ impl Reaction for LokiReaction {
                         labels: rendered_labels.clone(),
                         values: Vec::new(),
                     });
-                    stream.values.push((timestamp_ns.clone(), log_line));
+                    stream.values.push(((base_timestamp_ns + ts_offset).to_string(), log_line));
+                    ts_offset += 1;
                     debug!(
                         "[{reaction_name}] streams buffered so far: {}",
                         streams.len()

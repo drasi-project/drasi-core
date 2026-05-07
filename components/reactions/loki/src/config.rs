@@ -57,3 +57,22 @@ impl Default for LokiReactionConfig {
         }
     }
 }
+
+impl LokiReactionConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.endpoint.trim().is_empty() {
+            return Err(anyhow::anyhow!("Loki endpoint is required"));
+        }
+        let parsed = url::Url::parse(self.endpoint.trim())
+            .map_err(|e| anyhow::anyhow!("endpoint is not a valid URL: {e}"))?;
+        match parsed.scheme() {
+            "https" | "http" => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "endpoint scheme must be http or https, got: {other}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
