@@ -176,14 +176,18 @@ async fn introspect_mssql_schema(config: &MsSqlSourceConfig) -> Result<Option<So
 
         let properties = rows
             .into_iter()
-            .map(|row| {
-                let name: &str = row.get(0).unwrap_or_default();
+            .filter_map(|row| {
+                let name: Option<&str> = row.get(0);
+                let name = match name {
+                    Some(n) if !n.is_empty() => n,
+                    _ => return None,
+                };
                 let data_type: &str = row.get(1).unwrap_or_default();
-                PropertySchema {
+                Some(PropertySchema {
                     name: name.to_string(),
                     data_type: mssql_type_to_property_type(data_type),
                     description: None,
-                }
+                })
             })
             .collect();
 
@@ -689,6 +693,113 @@ mod tests {
         assert_eq!(schema.nodes.len(), 2);
         assert!(schema.nodes.iter().any(|node| node.label == "orders"));
         assert!(schema.nodes.iter().any(|node| node.label == "customers"));
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_integer() {
+        assert_eq!(
+            mssql_type_to_property_type("int"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("bigint"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("smallint"),
+            Some(PropertyType::Integer)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("tinyint"),
+            Some(PropertyType::Integer)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_float() {
+        assert_eq!(
+            mssql_type_to_property_type("float"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("real"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("decimal"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("numeric"),
+            Some(PropertyType::Float)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("money"),
+            Some(PropertyType::Float)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_boolean() {
+        assert_eq!(
+            mssql_type_to_property_type("bit"),
+            Some(PropertyType::Boolean)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_timestamp() {
+        assert_eq!(
+            mssql_type_to_property_type("datetime"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("datetime2"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("datetimeoffset"),
+            Some(PropertyType::Timestamp)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("date"),
+            Some(PropertyType::Timestamp)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_json() {
+        assert_eq!(
+            mssql_type_to_property_type("json"),
+            Some(PropertyType::Json)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_string() {
+        assert_eq!(
+            mssql_type_to_property_type("nvarchar"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("varchar"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("text"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("uniqueidentifier"),
+            Some(PropertyType::String)
+        );
+    }
+
+    #[test]
+    fn test_mssql_type_to_property_type_unknown_returns_none() {
+        assert_eq!(mssql_type_to_property_type("geography"), None);
+        assert_eq!(mssql_type_to_property_type("geometry"), None);
+        assert_eq!(mssql_type_to_property_type("xml"), None);
     }
 }
 

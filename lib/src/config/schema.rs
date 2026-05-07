@@ -196,9 +196,19 @@ impl GraphSchema {
 
             if entry.from.is_none() {
                 entry.from = relation.from.clone();
+            } else if entry.from != relation.from && relation.from.is_some() {
+                log::debug!(
+                    "Relation '{}': source '{}' reports from={:?}, but existing entry has from={:?}; keeping existing",
+                    relation.label, source_id, relation.from, entry.from
+                );
             }
             if entry.to.is_none() {
                 entry.to = relation.to.clone();
+            } else if entry.to != relation.to && relation.to.is_some() {
+                log::debug!(
+                    "Relation '{}': source '{}' reports to={:?}, but existing entry has to={:?}; keeping existing",
+                    relation.label, source_id, relation.to, entry.to
+                );
             }
 
             merge_properties(&mut entry.properties, &relation.properties);

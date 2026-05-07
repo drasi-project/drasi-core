@@ -135,6 +135,8 @@ impl Source for SourceProxy {
     }
 
     fn describe_schema(&self) -> Option<SourceSchema> {
+        // Safety: both the raw function-pointer call and `into_string()` (which calls
+        // `String::from_raw_parts`) require unsafe.
         let json = unsafe {
             (self.vtable.describe_schema_fn)(self.vtable.state as *const c_void).into_string()
         };

@@ -984,6 +984,101 @@ mod tests {
             assert!(schema.nodes.iter().any(|node| node.label == "users"));
             assert!(schema.nodes.iter().any(|node| node.label == "orders"));
         }
+
+        #[test]
+        fn test_postgres_type_to_property_type_integer() {
+            assert_eq!(
+                postgres_type_to_property_type("integer"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("bigint"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("smallint"),
+                Some(PropertyType::Integer)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_float() {
+            assert_eq!(
+                postgres_type_to_property_type("double precision"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("real"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("numeric"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("decimal"),
+                Some(PropertyType::Float)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_boolean() {
+            assert_eq!(
+                postgres_type_to_property_type("boolean"),
+                Some(PropertyType::Boolean)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_timestamp() {
+            assert_eq!(
+                postgres_type_to_property_type("timestamp with time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("timestamp without time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("date"),
+                Some(PropertyType::Timestamp)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_json() {
+            assert_eq!(
+                postgres_type_to_property_type("json"),
+                Some(PropertyType::Json)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("jsonb"),
+                Some(PropertyType::Json)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_string() {
+            assert_eq!(
+                postgres_type_to_property_type("character varying"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("text"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("uuid"),
+                Some(PropertyType::String)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_unknown_returns_none() {
+            assert_eq!(postgres_type_to_property_type("point"), None);
+            assert_eq!(postgres_type_to_property_type("polygon"), None);
+            assert_eq!(postgres_type_to_property_type("cidr"), None);
+        }
     }
 
     mod lifecycle {

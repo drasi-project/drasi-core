@@ -1813,6 +1813,56 @@ mod tests {
                 .iter()
                 .any(|property| property.name == "status"));
         }
+
+        #[test]
+        fn test_describe_schema_includes_relation_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Relation,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["PLACED_BY".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "placed_at": "{{payload.timestamp}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema for relations");
+
+            assert_eq!(schema.relations.len(), 1);
+            let relation = &schema.relations[0];
+            assert_eq!(relation.label, "PLACED_BY");
+            assert!(relation
+                .properties
+                .iter()
+                .any(|property| property.name == "placed_at"));
+            // Static derivation cannot infer endpoints
+            assert_eq!(relation.from, None);
+            assert_eq!(relation.to, None);
+        }
     }
 
     mod lifecycle {
