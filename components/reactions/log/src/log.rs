@@ -26,7 +26,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
 pub struct LogReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: LogReactionConfig,
 }
 
@@ -354,10 +354,7 @@ impl Reaction for LogReaction {
             default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {

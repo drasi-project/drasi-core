@@ -48,7 +48,7 @@ use tracing::Instrument;
 /// Internal state is protected by `RwLock`.
 pub struct MockSource {
     /// Base source implementation providing dispatchers, status tracking, and lifecycle management.
-    base: SourceBase,
+    pub(crate) base: SourceBase,
 
     /// Configuration specifying data type and generation interval.
     config: MockSourceConfig,
@@ -172,10 +172,7 @@ impl Source for MockSource {
             interval_ms: ConfigValue::Static(self.config.interval_ms),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {
