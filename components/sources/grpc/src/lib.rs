@@ -260,10 +260,7 @@ impl Source for GrpcSource {
             timeout_ms: ConfigValue::Static(self.config.timeout_ms),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {

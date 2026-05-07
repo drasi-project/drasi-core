@@ -233,14 +233,7 @@ impl Source for MsSqlSource {
             start_position: ConfigValue::Static(start_position_dto),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
-            _ => std::collections::HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {

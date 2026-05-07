@@ -37,7 +37,7 @@ use crate::proto::{
 
 /// gRPC reaction that sends query results to an external gRPC service
 pub struct GrpcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: GrpcReactionConfig,
 }
 
@@ -374,10 +374,7 @@ impl Reaction for GrpcReaction {
             metadata: self.config.metadata.clone(),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -604,8 +601,8 @@ impl Reaction for GrpcReaction {
 
                 for result in &query_result.results {
                     let (result_type, data, before, after) = match result {
-                        ResultDiff::Add { data } => ("ADD", data.clone(), None, None),
-                        ResultDiff::Delete { data } => ("DELETE", data.clone(), None, None),
+                        ResultDiff::Add { data, .. } => ("ADD", data.clone(), None, None),
+                        ResultDiff::Delete { data, .. } => ("DELETE", data.clone(), None, None),
                         ResultDiff::Update {
                             data,
                             before,
@@ -617,7 +614,7 @@ impl Reaction for GrpcReaction {
                             Some(before.clone()),
                             Some(after.clone()),
                         ),
-                        ResultDiff::Aggregation { before, after } => (
+                        ResultDiff::Aggregation { before, after, .. } => (
                             "aggregation",
                             serde_json::to_value(result)
                                 .expect("ResultDiff serialization should succeed"),
