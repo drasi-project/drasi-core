@@ -51,8 +51,11 @@ pub struct QueryConfigDto {
 #[schema(as = reaction::file::WriteMode)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteModeDto {
+    /// Appends each rendered record to the destination file.
     Append,
+    /// Replaces destination file content with the latest rendered record.
     Overwrite,
+    /// Writes each rendered record to a unique file.
     PerChange,
 }
 
@@ -65,7 +68,7 @@ pub struct FileReactionConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
     pub output_path: Option<ConfigValue<String>>,
-    /// File write mode.
+    /// File write mode. Defaults to `append`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_mode: Option<WriteModeDto>,
     /// Handlebars filename template.
@@ -80,15 +83,19 @@ pub struct FileReactionConfigDto {
     pub default_template: Option<QueryConfigDto>,
 }
 
-fn map_template_spec(dto: &TemplateSpecDto) -> crate::TemplateSpec {
-    crate::TemplateSpec::new(&dto.template)
+impl From<&TemplateSpecDto> for crate::TemplateSpec {
+    fn from(dto: &TemplateSpecDto) -> Self {
+        crate::TemplateSpec::new(&dto.template)
+    }
 }
 
-fn map_query_config(dto: &QueryConfigDto) -> crate::QueryConfig {
-    crate::QueryConfig {
-        added: dto.added.as_ref().map(map_template_spec),
-        updated: dto.updated.as_ref().map(map_template_spec),
-        deleted: dto.deleted.as_ref().map(map_template_spec),
+impl From<&QueryConfigDto> for crate::QueryConfig {
+    fn from(dto: &QueryConfigDto) -> Self {
+        crate::QueryConfig {
+            added: dto.added.as_ref().map(|s| s.into()),
+            updated: dto.updated.as_ref().map(|s| s.into()),
+            deleted: dto.deleted.as_ref().map(|s| s.into()),
+        }
     }
 }
 
@@ -164,14 +171,107 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
         }
 
         if let Some(default_template) = &dto.default_template {
-            builder = builder.with_default_template(map_query_config(default_template));
+            builder = builder.with_default_template(default_template.into());
         }
 
         for (query_id, config) in &dto.routes {
-            builder = builder.with_route(query_id, map_query_config(config));
+            builder = builder.with_route(query_id, crate::QueryConfig::from(config));
         }
 
         let reaction = builder.build()?;
         Ok(Box::new(reaction))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_mode_dto_roundtrip() {
+        assert!(matches!(
+            map_write_mode(WriteModeDto::Append),
+            WriteMode::Append
+        ));
+        assert!(matches!(
+            map_write_mode(WriteModeDto::Overwrite),
+            WriteMode::Overwrite
+        ));
+        assert!(matches!(
+            map_write_mode(WriteModeDto::PerChange),
+            WriteMode::PerChange
+        ));
+    }
+
+    #[test]
+    fn test_template_spec_dto_to_domain() {
+        let dto = TemplateSpecDto {
+            template: "{{after.id}}".to_string(),
+        };
+        let spec: crate::TemplateSpec = (&dto).into();
+        assert_eq!(spec.template, "{{after.id}}");
+    }
+
+    #[test]
+    fn test_query_config_dto_to_domain() {
+        let dto = QueryConfigDto {
+            added: Some(TemplateSpecDto {
+                template: "add-{{after.id}}".to_string(),
+            }),
+            updated: None,
+            deleted: Some(TemplateSpecDto {
+                template: "del-{{before.id}}".to_string(),
+            }),
+        };
+        let config: crate::QueryConfig = (&dto).into();
+        assert_eq!(config.added.unwrap().template, "add-{{after.id}}");
+        assert!(config.updated.is_none());
+        assert_eq!(config.deleted.unwrap().template, "del-{{before.id}}");
+    }
+
+    #[test]
+    fn test_full_config_dto_roundtrip() {
+        let json = serde_json::json!({
+            "outputPath": "/tmp/out",
+            "writeMode": "per_change",
+            "filenameTemplate": "{{query_name}}_{{uuid}}.json",
+            "routes": {
+                "orders": {
+                    "added": { "template": "order-add" },
+                    "updated": { "template": "order-update" }
+                }
+            },
+            "defaultTemplate": {
+                "deleted": { "template": "default-del" }
+            }
+        });
+
+        let dto: FileReactionConfigDto = serde_json::from_value(json).expect("parse dto");
+        assert!(matches!(dto.write_mode, Some(WriteModeDto::PerChange)));
+        assert_eq!(dto.routes.len(), 1);
+        assert!(dto.routes.contains_key("orders"));
+        assert!(dto.default_template.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_reaction_from_config_json() {
+        let json = serde_json::json!({
+            "outputPath": "/tmp/test-out",
+            "writeMode": "append",
+            "routes": {
+                "my-query": {
+                    "added": { "template": "added-{{after.id}}" }
+                }
+            }
+        });
+
+        let descriptor = FileReactionDescriptor;
+        let result = descriptor
+            .create_reaction("test-id", vec!["my-query".to_string()], &json, true)
+            .await;
+        assert!(result.is_ok(), "create_reaction failed: {:?}", result.err());
+        let reaction = result.unwrap();
+        assert_eq!(reaction.id(), "test-id");
+        assert_eq!(reaction.query_ids(), vec!["my-query".to_string()]);
     }
 }

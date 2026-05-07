@@ -34,6 +34,10 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::{OperationType, TemplateRouting};
 use drasi_lib::Reaction;
 
+/// A Drasi reaction that writes query result diffs to the filesystem.
+///
+/// Use [`FileReaction::builder`] to construct an instance with the desired
+/// output path, write mode, and Handlebars templates.
 pub struct FileReaction {
     base: ReactionBase,
     config: FileReactionConfig,
@@ -51,46 +55,6 @@ impl FileReaction {
     /// Create a builder for FileReaction.
     pub fn builder(id: impl Into<String>) -> FileReactionBuilder {
         FileReactionBuilder::new(id)
-    }
-
-    /// Create a new file reaction.
-    pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
-        config: FileReactionConfig,
-    ) -> anyhow::Result<Self> {
-        let id = id.into();
-        Self::validate_config(&queries, &config)?;
-
-        let params = ReactionBaseParams::new(id, queries);
-        Ok(Self {
-            base: ReactionBase::new(params),
-            config,
-            handlebars: Arc::new(Self::build_handlebars()),
-            file_locks: Self::new_file_locks(),
-            repaired_files: Arc::new(Mutex::new(HashSet::new())),
-        })
-    }
-
-    /// Create a new file reaction with custom priority queue capacity.
-    pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
-        config: FileReactionConfig,
-        priority_queue_capacity: usize,
-    ) -> anyhow::Result<Self> {
-        let id = id.into();
-        Self::validate_config(&queries, &config)?;
-
-        let params = ReactionBaseParams::new(id, queries)
-            .with_priority_queue_capacity(priority_queue_capacity);
-        Ok(Self {
-            base: ReactionBase::new(params),
-            config,
-            handlebars: Arc::new(Self::build_handlebars()),
-            file_locks: Self::new_file_locks(),
-            repaired_files: Arc::new(Mutex::new(HashSet::new())),
-        })
     }
 
     pub(crate) fn from_builder(
@@ -289,7 +253,7 @@ impl FileReaction {
             }
         }
 
-        if path.exists() {
+        if tokio::fs::try_exists(path).await.unwrap_or(false) {
             Self::repair_partial_line(path).await?;
         }
 
@@ -529,7 +493,10 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Builder for `FileReaction`.
+/// Builder for [`FileReaction`].
+///
+/// Construct via [`FileReaction::builder`], chain configuration methods,
+/// then call [`build`](Self::build) to create the reaction.
 pub struct FileReactionBuilder {
     id: String,
     queries: Vec<String>,
@@ -539,6 +506,7 @@ pub struct FileReactionBuilder {
 }
 
 impl FileReactionBuilder {
+    /// Creates a new builder with the given reaction ID.
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -549,36 +517,43 @@ impl FileReactionBuilder {
         }
     }
 
+    /// Sets all query subscriptions at once.
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
     }
 
+    /// Adds a single query subscription.
     pub fn with_query(mut self, query_id: impl Into<String>) -> Self {
         self.queries.push(query_id.into());
         self
     }
 
+    /// Sets the base output directory for generated files.
     pub fn with_output_path(mut self, output_path: impl Into<String>) -> Self {
         self.config.output_path = output_path.into();
         self
     }
 
+    /// Sets the file write mode (`Append`, `Overwrite`, or `PerChange`).
     pub fn with_write_mode(mut self, mode: WriteMode) -> Self {
         self.config.write_mode = mode;
         self
     }
 
+    /// Sets a custom Handlebars filename template.
     pub fn with_filename_template(mut self, filename_template: impl Into<String>) -> Self {
         self.config.filename_template = Some(filename_template.into());
         self
     }
 
+    /// Sets the default template used when no query-specific route matches.
     pub fn with_default_template(mut self, template: crate::config::QueryConfig) -> Self {
         self.config.default_template = Some(template);
         self
     }
 
+    /// Adds a query-specific template route.
     pub fn with_route(
         mut self,
         query_id: impl Into<String>,
@@ -588,21 +563,25 @@ impl FileReactionBuilder {
         self
     }
 
+    /// Sets the internal priority queue capacity.
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
         self
     }
 
+    /// Sets whether the reaction starts automatically after initialization.
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
     }
 
+    /// Replaces the entire configuration. Overwrites any previously set fields.
     pub fn with_config(mut self, config: FileReactionConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Validates configuration and builds the [`FileReaction`].
     pub fn build(self) -> anyhow::Result<FileReaction> {
         FileReaction::from_builder(
             self.id,
@@ -1048,5 +1027,252 @@ mod tests {
             .unwrap();
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "{\"id\":1}\nnew partial");
+    }
+
+    #[test]
+    fn test_empty_output_path_fails_build() {
+        let result = FileReaction::builder("test")
+            .with_query("query1")
+            .with_output_path("   ")
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_label_template_fails_build() {
+        let result = FileReaction::builder("test")
+            .with_query("query1")
+            .with_filename_template("{{unclosed")
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_render_output_update() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                updated: Some(TemplateSpec::new(
+                    r#"{"op":"update","before":{{json before}},"after":{{json after}}}"#,
+                )),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        let result = QueryResult::new(
+            "orders".to_string(),
+            0,
+            chrono::Utc::now(),
+            vec![ResultDiff::Update {
+                before: serde_json::json!({"id": 1, "status": "pending"}),
+                after: serde_json::json!({"id": 1, "status": "shipped"}),
+                data: serde_json::json!({"id": 1, "status": "shipped"}),
+                grouping_keys: None,
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let output_file = temp_dir.path().join("orders.log");
+        let content = tokio::fs::read_to_string(output_file)
+            .await
+            .expect("read file");
+        assert!(
+            content.contains(r#""op":"update""#),
+            "expected update template, got: {content}"
+        );
+        assert!(
+            content.contains(r#""status":"pending""#),
+            "expected before data, got: {content}"
+        );
+        assert!(
+            content.contains(r#""status":"shipped""#),
+            "expected after data, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_output_delete() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                deleted: Some(TemplateSpec::new(r#"{"op":"delete","data":{{json data}}}"#)),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        let result = QueryResult::new(
+            "orders".to_string(),
+            0,
+            chrono::Utc::now(),
+            vec![ResultDiff::Delete {
+                data: serde_json::json!({"id": 42}),
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let output_file = temp_dir.path().join("orders.log");
+        let content = tokio::fs::read_to_string(output_file)
+            .await
+            .expect("read file");
+        assert!(
+            content.contains(r#""op":"delete""#),
+            "expected delete template, got: {content}"
+        );
+        assert!(
+            content.contains(r#""id":42"#),
+            "expected deleted data, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_output_aggregation() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes: HashMap::new(),
+            default_template: Some(QueryConfig {
+                updated: Some(TemplateSpec::new(
+                    r#"{"op":"{{operation}}","before":{{json before}},"after":{{json after}}}"#,
+                )),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        let result = QueryResult::new(
+            "stats".to_string(),
+            0,
+            chrono::Utc::now(),
+            vec![ResultDiff::Aggregation {
+                before: Some(serde_json::json!({"count": 5})),
+                after: serde_json::json!({"count": 6}),
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let output_file = temp_dir.path().join("stats.log");
+        let content = tokio::fs::read_to_string(output_file)
+            .await
+            .expect("read file");
+        assert!(
+            content.contains(r#""op":"AGGREGATION""#),
+            "expected AGGREGATION operation, got: {content}"
+        );
+        assert!(
+            content.contains(r#""count":5"#),
+            "expected before data, got: {content}"
+        );
+        assert!(
+            content.contains(r#""count":6"#),
+            "expected after data, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_route_no_match_falls_to_default() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut routes = HashMap::new();
+        routes.insert(
+            "orders".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("matched-{{after.id}}")),
+                ..Default::default()
+            },
+        );
+
+        let config = FileReactionConfig {
+            output_path: temp_dir.path().to_string_lossy().to_string(),
+            write_mode: WriteMode::Append,
+            filename_template: Some("{{query_name}}.log".to_string()),
+            routes,
+            default_template: Some(QueryConfig {
+                added: Some(TemplateSpec::new("default-{{after.id}}")),
+                ..Default::default()
+            }),
+        };
+
+        let handlebars = FileReaction::build_handlebars();
+        let file_locks = FileReaction::new_file_locks();
+        // Query with dotted prefix does not match the "orders" route key exactly,
+        // so it falls through to default_template.
+        let result = QueryResult::new(
+            "ns.orders".to_string(),
+            0,
+            chrono::Utc::now(),
+            vec![ResultDiff::Add {
+                data: serde_json::json!({"id": 5}),
+                row_signature: 0,
+            }],
+            HashMap::new(),
+        );
+
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
+
+        let output_file = temp_dir.path().join("ns.orders.log");
+        let content = tokio::fs::read_to_string(output_file)
+            .await
+            .expect("read file");
+        assert!(
+            content.contains("default-5"),
+            "expected default template fallback, got: {content}"
+        );
     }
 }

@@ -17,6 +17,7 @@ and `DELETE` result diffs in timestamp order.
 - Handlebars templates per operation (`added`, `updated`, `deleted`)
 - Filename templating including payload fields such as `{{after.id}}`
 - Filename sanitization for filesystem safety
+- Raw JSON fallback when no templates are configured: each diff is serialized as a JSON object containing `operation`, `query_name`, `timestamp`, and the relevant data fields
 
 ## Configuration
 
