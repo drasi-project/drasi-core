@@ -125,11 +125,26 @@ pub trait Source: Send + Sync {
     /// Get the source type name (e.g., "postgres", "http", "mock")
     fn type_name(&self) -> &str;
 
-    /// Get the source's configuration properties for inspection
+    /// Return **all** configuration properties for this source, including secrets.
     ///
-    /// This returns a HashMap representation of the source's configuration
-    /// for use in APIs and inspection. The actual typed configuration is
-    /// owned by the plugin - this is just for external visibility.
+    /// # Persistence contract
+    ///
+    /// This method is the **serialization hook** used by the host to persist
+    /// configuration to disk. When the server saves its config file it calls
+    /// `snapshot_configuration()`, which in turn calls `properties()` on every
+    /// source. The returned map is written to the YAML config so the component
+    /// can be recreated on the next startup.
+    ///
+    /// Because there is no separate config cache — the live component is the
+    /// single source of truth — any key/value omitted here will be **lost** on
+    /// the next save and the component will fail to start after a restart.
+    ///
+    /// # ⚠ Do not filter secrets
+    ///
+    /// Implementations **must** include sensitive values (passwords, tokens,
+    /// connection strings, etc.). Removing them makes the persistence round-trip
+    /// lossy and breaks restart. The host is responsible for protecting the
+    /// config file on disk; this method is not an external-facing API.
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value>;
 
     /// Get the dispatch mode for this source (Channel or Broadcast)
