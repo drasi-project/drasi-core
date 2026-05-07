@@ -1328,10 +1328,7 @@ impl QueryManager {
                     .insert(config.id.clone(), labels);
             }
             Err(e) => {
-                warn!(
-                    "Failed to extract labels for query '{}': {e}",
-                    config.id
-                );
+                warn!("Failed to extract labels for query '{}': {e}", config.id);
             }
         }
 

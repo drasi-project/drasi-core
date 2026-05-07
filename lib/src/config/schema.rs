@@ -81,7 +81,6 @@ pub enum QueryLanguage {
     GQL,
 }
 
-
 /// Source subscription configuration for queries
 ///
 /// `SourceSubscriptionConfig` defines how a query subscribes to a specific source,

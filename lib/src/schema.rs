@@ -331,10 +331,7 @@ mod tests {
         assert_eq!(node.properties.len(), 1);
         // Second merge promotes type
         assert_eq!(node.properties[0].data_type, Some(PropertyType::Integer));
-        assert_eq!(
-            node.properties[0].description,
-            Some("User age".to_string())
-        );
+        assert_eq!(node.properties[0].description, Some("User age".to_string()));
     }
 
     #[test]
