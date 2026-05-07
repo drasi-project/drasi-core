@@ -107,10 +107,8 @@ impl FieldUiBuilder {
 
     /// Set help text displayed below the field.
     pub fn help(mut self, help: &str) -> Self {
-        self.annotations.insert(
-            "x-ui:help".to_string(),
-            Value::String(help.to_string()),
-        );
+        self.annotations
+            .insert("x-ui:help".to_string(), Value::String(help.to_string()));
         self
     }
 
