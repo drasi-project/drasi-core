@@ -32,7 +32,9 @@ pub fn build_insert_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config, true));
+        changes.extend(build_owner_relation_upserts(
+            source_id, kind, obj, config, true,
+        ));
     }
 
     Ok(changes)
@@ -49,7 +51,9 @@ pub fn build_update_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config, false));
+        changes.extend(build_owner_relation_upserts(
+            source_id, kind, obj, config, false,
+        ));
     }
 
     Ok(changes)
