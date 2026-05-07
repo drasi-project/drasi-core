@@ -1,3 +1,4 @@
+use drasi_lib::reactions::common::TemplateRouting;
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,24 +36,18 @@ pub fn default_kill_on_drop() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ShellCommand {
   pub executable: String,
+  #[serde(skip_serializing_if = "Vec::is_empty", default)]
   pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ShellExtension {
-    pub envs: Option<HashMap<String, String>>,
-    pub enable_stdin: Option<bool>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub envs: HashMap<String, String>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ShellQueryConfig {
-    pub command: ShellCommand,
-    pub query_config: QueryConfig,
-}
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ShellReactionConfig {
@@ -61,7 +56,22 @@ pub struct ShellReactionConfig {
     pub capture_limit: usize,
     pub timeout_s: u64,
     pub kill_on_drop: bool,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub env: HashMap<String, String>,
-    pub routes: HashMap<String, ShellQueryConfig>,
-    pub default_template: Option<ShellQueryConfig>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub routes: HashMap<String, QueryConfig<ShellExtension>>,
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub commands: HashMap<String, ShellCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_template: Option<QueryConfig<ShellExtension>>,
+}
+
+impl TemplateRouting<ShellExtension> for ShellReactionConfig {
+    fn routes(&self) -> &HashMap<String, QueryConfig<ShellExtension>> {
+        &self.routes
+    }
+
+    fn default_template(&self) -> Option<&QueryConfig<ShellExtension>> {
+        self.default_template.as_ref()
+    }
 }

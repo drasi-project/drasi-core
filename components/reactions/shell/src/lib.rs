@@ -21,8 +21,7 @@ mod metric;
 use std::collections::HashMap;
 use config::QueryConfig;
 
-use crate::config::ShellQueryConfig;
-use crate::config::ShellReactionConfig;
+use crate::config::{ ShellReactionConfig, ShellCommand, ShellExtension };
 use crate::shell::ShellReaction;
 use crate::config::{default_capture_limit, default_kill_on_drop, default_max_concurrent, default_max_stdin_bytes, default_timeout_s};
 
@@ -30,10 +29,11 @@ use crate::config::{default_capture_limit, default_kill_on_drop, default_max_con
 pub struct ShellReactionBuilder {
     id: String,
     queries: Vec<String>,
-    routes: HashMap<String, ShellQueryConfig>,
+    routes: HashMap<String, QueryConfig<ShellExtension>>,
+    commands: HashMap<String, ShellCommand>,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
-    default_template: Option<ShellQueryConfig>,
+    default_template: Option<QueryConfig<ShellExtension>>,
 
     max_concurrent: usize,
     max_stdin_bytes: usize,
@@ -50,6 +50,7 @@ impl ShellReactionBuilder {
             id: id.into(),
             queries: Vec::new(),
             routes: HashMap::new(),
+            commands: HashMap::new(),
             priority_queue_capacity: None,
             auto_start: true,
             default_template: None,
@@ -76,8 +77,26 @@ impl ShellReactionBuilder {
     }
 
     /// Add a route configuration for a specific query
-    pub fn with_route(mut self, query_id: impl Into<String>, config: ShellQueryConfig) -> Self {
+    pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig<ShellExtension>) -> Self {
         self.routes.insert(query_id.into(), config);
+        self
+    }
+
+    /// Set the query configs
+    pub fn with_routes(mut self, routes: HashMap<String, QueryConfig<ShellExtension>>) -> Self {
+        self.routes = routes;
+        self
+    }
+
+    /// Add a shell command configuration
+    pub fn with_command(mut self, command_name: impl Into<String>, command: ShellCommand) -> Self {
+        self.commands.insert(command_name.into(), command);
+        self
+    }
+
+    /// Set the shell command configurations
+    pub fn with_commands(mut self, commands: HashMap<String, ShellCommand>) -> Self {
+        self.commands = commands;
         self
     }
 
@@ -87,6 +106,7 @@ impl ShellReactionBuilder {
         self
     }
 
+
     /// Set whether to auto start the reaction
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
@@ -94,7 +114,7 @@ impl ShellReactionBuilder {
     }
 
     /// Set the default template to use when a query doesn't have a specific route config
-    pub fn with_default_template(mut self, template: ShellQueryConfig) -> Self {
+    pub fn with_default_template(mut self, template: QueryConfig<ShellExtension>) -> Self {
         self.default_template = Some(template);
         self
     }
@@ -143,14 +163,15 @@ impl ShellReactionBuilder {
 
     /// Set the full configuration at once
     pub fn with_config(mut self, config: ShellReactionConfig) -> Self {
-        self.max_concurrent = self.max_concurrent;
-        self.max_stdin_bytes = self.max_stdin_bytes;
-        self.capture_limit = self.capture_limit;
-        self.timeout_s = self.timeout_s;
-        self.kill_on_drop = self.kill_on_drop;
+        self.max_concurrent = config.max_concurrent;
+        self.max_stdin_bytes = config.max_stdin_bytes;
+        self.capture_limit = config.capture_limit;
+        self.timeout_s = config.timeout_s;
+        self.kill_on_drop = config.kill_on_drop;
         self.env = config.env;
         self.routes = config.routes;
         self.default_template = config.default_template;
+        self.commands = config.commands;
         self
     }
 
@@ -165,6 +186,7 @@ impl ShellReactionBuilder {
             env: self.env,
             routes: self.routes,
             default_template: self.default_template,
+            commands: self.commands,
         };
 
         ShellReaction::from_builder(
