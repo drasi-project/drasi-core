@@ -2263,10 +2263,7 @@ mod tests {
                     }
                 }]),
             );
-            bootstrap_props.insert(
-                "timeoutSeconds".to_string(),
-                serde_json::json!(60),
-            );
+            bootstrap_props.insert("timeoutSeconds".to_string(), serde_json::json!(60));
 
             let core = DrasiLib::builder()
                 .with_id("builder-bp-test")
@@ -2351,11 +2348,7 @@ mod tests {
             let restored: ConfigurationSnapshot =
                 serde_json::from_str(&json).expect("Should deserialize");
 
-            let src = restored
-                .sources
-                .iter()
-                .find(|s| s.id == "rt-src")
-                .unwrap();
+            let src = restored.sources.iter().find(|s| s.id == "rt-src").unwrap();
             let bp = src.bootstrap_provider.as_ref().unwrap();
 
             assert_eq!(bp.kind, "http");

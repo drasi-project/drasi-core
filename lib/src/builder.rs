@@ -132,7 +132,11 @@ pub struct DrasiLibBuilder {
     )>,
     /// Bootstrap provider metadata to register in the component graph.
     /// Each entry: (source_id, kind, properties).
-    bootstrap_metadata: Vec<(String, String, std::collections::HashMap<String, serde_json::Value>)>,
+    bootstrap_metadata: Vec<(
+        String,
+        String,
+        std::collections::HashMap<String, serde_json::Value>,
+    )>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
@@ -488,10 +492,7 @@ impl DrasiLibBuilder {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("kind".to_string(), kind);
             for (key, value) in properties {
-                metadata.insert(
-                    key,
-                    serde_json::to_string(&value).unwrap_or_default(),
-                );
+                metadata.insert(key, serde_json::to_string(&value).unwrap_or_default());
             }
             let mut graph = core.component_graph.write().await;
             if let Err(e) =

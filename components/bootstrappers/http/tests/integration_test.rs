@@ -1117,11 +1117,16 @@ async fn test_retries_exhausted_returns_error() {
     let (tx, _rx) = mpsc::channel(100);
     let result = provider.bootstrap(request, &context, tx, None).await;
 
-    assert!(result.is_err(), "Should return error when all retries exhausted");
+    assert!(
+        result.is_err(),
+        "Should return error when all retries exhausted"
+    );
     let err = result.unwrap_err();
     let err_chain = format!("{err:?}"); // Debug format shows full chain
     assert!(
-        err_chain.contains("500") || err_chain.contains("error status") || err_chain.contains("Failed to fetch"),
+        err_chain.contains("500")
+            || err_chain.contains("error status")
+            || err_chain.contains("Failed to fetch"),
         "Error should mention HTTP failure: {err_chain}"
     );
     // Should have made 3 total attempts (1 initial + 2 retries)

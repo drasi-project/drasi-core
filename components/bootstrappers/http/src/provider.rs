@@ -116,8 +116,7 @@ impl HttpBootstrapProvider {
             .map(ContentType::from_override);
 
         // Set up pagination with SSRF protection (origin host validation)
-        let origin_host = pagination::extract_origin_host(&endpoint.url)
-            .unwrap_or_default();
+        let origin_host = pagination::extract_origin_host(&endpoint.url).unwrap_or_default();
         let mut paginator: Option<Box<dyn Paginator>> = endpoint
             .pagination
             .as_ref()
@@ -423,7 +422,13 @@ impl BootstrapProvider for HttpBootstrapProvider {
 
         for resolved in &self.endpoints {
             match self
-                .fetch_endpoint(&resolved.config, &resolved.auth, context, &request, &event_tx)
+                .fetch_endpoint(
+                    &resolved.config,
+                    &resolved.auth,
+                    context,
+                    &request,
+                    &event_tx,
+                )
                 .await
             {
                 Ok(count) => {

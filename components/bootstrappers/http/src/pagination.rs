@@ -77,7 +77,9 @@ fn validate_pagination_url(next_url: &str, origin_host: &str) -> Result<String> 
 
 /// Extract the host from a URL string for SSRF origin validation.
 pub fn extract_origin_host(url: &str) -> Option<String> {
-    Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string()))
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
 /// Create a paginator from configuration.
@@ -695,7 +697,10 @@ mod tests {
         let result = paginator.next_page(&body, &headers, 10);
         assert!(result.is_err(), "Should reject URL to different host");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("SSRF protection"), "Error should mention SSRF: {err_msg}");
+        assert!(
+            err_msg.contains("SSRF protection"),
+            "Error should mention SSRF: {err_msg}"
+        );
     }
 
     #[test]

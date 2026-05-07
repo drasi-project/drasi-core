@@ -339,8 +339,7 @@ mod tests {
                 axum::routing::post(move || {
                     let request_count = request_count.clone();
                     async move {
-                        let count =
-                            request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let count = request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         axum::Json(serde_json::json!({
                             "access_token": format!("token-{}", count + 1),
                             "expires_in": 1,
