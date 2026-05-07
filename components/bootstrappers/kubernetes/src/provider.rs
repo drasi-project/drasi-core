@@ -222,3 +222,156 @@ fn matches_labels(request: &BootstrapRequest, change: &SourceChange) -> bool {
         SourceChange::Future { .. } => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+    use std::sync::Arc;
+
+    fn make_request(node_labels: &[&str], relation_labels: &[&str]) -> BootstrapRequest {
+        BootstrapRequest {
+            query_id: "test-query".to_string(),
+            node_labels: node_labels.iter().map(|s| s.to_string()).collect(),
+            relation_labels: relation_labels.iter().map(|s| s.to_string()).collect(),
+            request_id: "req-1".to_string(),
+        }
+    }
+
+    fn make_node_insert(label: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("src", "node1"),
+                    labels: Arc::from([Arc::<str>::from(label)]),
+                    effective_from: 1000,
+                },
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    fn make_relation_insert(label: &str) -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Relation {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("src", "rel1"),
+                    labels: Arc::from([Arc::<str>::from(label)]),
+                    effective_from: 1000,
+                },
+                in_node: ElementReference::new("src", "a"),
+                out_node: ElementReference::new("src", "b"),
+                properties: ElementPropertyMap::new(),
+            },
+        }
+    }
+
+    // --- build_bootstrap_targets tests ---
+
+    #[test]
+    fn targets_cluster_scoped_ignores_namespaces() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Node".to_string(),
+            }],
+            namespaces: vec!["default".to_string(), "kube-system".to_string()],
+            ..Default::default()
+        };
+        let targets = build_bootstrap_targets(&config);
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].namespace.is_none());
+    }
+
+    #[test]
+    fn targets_namespaced_with_no_namespaces_uses_all() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+            }],
+            namespaces: vec![],
+            ..Default::default()
+        };
+        let targets = build_bootstrap_targets(&config);
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].namespace.is_none());
+    }
+
+    #[test]
+    fn targets_namespaced_with_namespaces_expands() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+            }],
+            namespaces: vec!["default".to_string(), "staging".to_string()],
+            ..Default::default()
+        };
+        let targets = build_bootstrap_targets(&config);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].namespace, Some("default".to_string()));
+        assert_eq!(targets[1].namespace, Some("staging".to_string()));
+    }
+
+    #[test]
+    fn targets_mixed_resources() {
+        let config = KubernetesSourceConfig {
+            resources: vec![
+                ResourceSpec {
+                    api_version: "v1".to_string(),
+                    kind: "Node".to_string(),
+                },
+                ResourceSpec {
+                    api_version: "v1".to_string(),
+                    kind: "Pod".to_string(),
+                },
+            ],
+            namespaces: vec!["default".to_string()],
+            ..Default::default()
+        };
+        let targets = build_bootstrap_targets(&config);
+        // Node is cluster-scoped → 1 target (no namespace)
+        // Pod is namespaced → 1 target (default)
+        assert_eq!(targets.len(), 2);
+        assert!(targets[0].namespace.is_none()); // Node
+        assert_eq!(targets[1].namespace, Some("default".to_string())); // Pod
+    }
+
+    // --- matches_labels tests ---
+
+    #[test]
+    fn matches_empty_labels_matches_all() {
+        let request = make_request(&[], &[]);
+        let change = make_node_insert("Pod");
+        assert!(matches_labels(&request, &change));
+    }
+
+    #[test]
+    fn matches_node_label_match() {
+        let request = make_request(&["Pod", "Service"], &[]);
+        let change = make_node_insert("Pod");
+        assert!(matches_labels(&request, &change));
+    }
+
+    #[test]
+    fn matches_node_label_no_match() {
+        let request = make_request(&["Service"], &[]);
+        let change = make_node_insert("Pod");
+        assert!(!matches_labels(&request, &change));
+    }
+
+    #[test]
+    fn matches_relation_label_match() {
+        let request = make_request(&[], &["OWNS"]);
+        let change = make_relation_insert("OWNS");
+        assert!(matches_labels(&request, &change));
+    }
+
+    #[test]
+    fn matches_relation_label_no_match() {
+        let request = make_request(&[], &["DEPENDS_ON"]);
+        let change = make_relation_insert("OWNS");
+        assert!(!matches_labels(&request, &change));
+    }
+}

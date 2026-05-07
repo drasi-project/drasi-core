@@ -35,6 +35,10 @@ pub async fn build_client(config: &KubernetesSourceConfig) -> Result<Client> {
     Ok(Client::try_from(kube_config)?)
 }
 
+/// Splits a Kubernetes `apiVersion` string into `(group, version)`.
+///
+/// Core API resources use a bare version (e.g. `"v1"`) which returns `("", "v1")`.
+/// Grouped resources use `"group/version"` (e.g. `"apps/v1"`) returning `("apps", "v1")`.
 pub fn parse_api_version(api_version: &str) -> Result<(String, String)> {
     if let Some((group, version)) = api_version.split_once('/') {
         if group.is_empty() || version.is_empty() {
@@ -46,4 +50,50 @@ pub fn parse_api_version(api_version: &str) -> Result<(String, String)> {
         return Err(anyhow!("Invalid empty apiVersion"));
     }
     Ok(("".to_string(), api_version.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_core_api_version() {
+        let (group, version) = parse_api_version("v1").unwrap();
+        assert_eq!(group, "");
+        assert_eq!(version, "v1");
+    }
+
+    #[test]
+    fn parse_grouped_api_version() {
+        let (group, version) = parse_api_version("apps/v1").unwrap();
+        assert_eq!(group, "apps");
+        assert_eq!(version, "v1");
+    }
+
+    #[test]
+    fn parse_custom_group_api_version() {
+        let (group, version) = parse_api_version("networking.k8s.io/v1").unwrap();
+        assert_eq!(group, "networking.k8s.io");
+        assert_eq!(version, "v1");
+    }
+
+    #[test]
+    fn parse_empty_api_version_returns_error() {
+        assert!(parse_api_version("").is_err());
+    }
+
+    #[test]
+    fn parse_missing_version_returns_error() {
+        assert!(parse_api_version("apps/").is_err());
+    }
+
+    #[test]
+    fn parse_missing_group_returns_error() {
+        assert!(parse_api_version("/v1").is_err());
+    }
+
+    #[test]
+    fn parse_bare_slash_returns_error() {
+        assert!(parse_api_version("/").is_err());
+    }
 }

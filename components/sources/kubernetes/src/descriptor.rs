@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::{AuthMode, KubernetesSourceBuilder, KubernetesSourceConfig, ResourceSpec, StartFrom};
-use drasi_kubernetes_common::default_annotation_excludes;
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
@@ -93,7 +92,7 @@ pub struct KubernetesSourceConfigDto {
     pub include_owner_relations: bool,
     #[serde(default)]
     pub start_from: StartFromDto,
-    #[serde(default)]
+    #[serde(default = "drasi_kubernetes_common::default_annotation_excludes")]
     pub exclude_annotations: Vec<String>,
 }
 
@@ -188,11 +187,7 @@ impl SourcePluginDescriptor for KubernetesSourceDescriptor {
             kubeconfig_content: dto.kubeconfig_content,
             include_owner_relations: dto.include_owner_relations,
             start_from,
-            exclude_annotations: if dto.exclude_annotations.is_empty() {
-                default_annotation_excludes()
-            } else {
-                dto.exclude_annotations
-            },
+            exclude_annotations: dto.exclude_annotations,
         };
         config.validate()?;
 

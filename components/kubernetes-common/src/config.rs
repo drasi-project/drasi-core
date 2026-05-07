@@ -137,6 +137,137 @@ pub fn is_supported_kind(kind: &str) -> bool {
     )
 }
 
+/// Returns true if the given kind is cluster-scoped (not namespaced).
+/// This list is exhaustive for all currently supported kinds returned by `is_supported_kind`.
 pub fn is_cluster_scoped_kind(kind: &str) -> bool {
     matches!(kind, "Node" | "Namespace")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_kinds_accepted() {
+        for kind in &[
+            "Pod",
+            "Deployment",
+            "ReplicaSet",
+            "Node",
+            "Service",
+            "ConfigMap",
+            "Namespace",
+        ] {
+            assert!(is_supported_kind(kind), "{kind} should be supported");
+        }
+    }
+
+    #[test]
+    fn unsupported_kinds_rejected() {
+        for kind in &["DaemonSet", "StatefulSet", "Job", "CronJob", "Ingress", ""] {
+            assert!(!is_supported_kind(kind), "{kind} should not be supported");
+        }
+    }
+
+    #[test]
+    fn cluster_scoped_kinds() {
+        assert!(is_cluster_scoped_kind("Node"));
+        assert!(is_cluster_scoped_kind("Namespace"));
+    }
+
+    #[test]
+    fn namespaced_kinds_are_not_cluster_scoped() {
+        for kind in &[
+            "Pod",
+            "Deployment",
+            "ReplicaSet",
+            "Service",
+            "ConfigMap",
+        ] {
+            assert!(
+                !is_cluster_scoped_kind(kind),
+                "{kind} should not be cluster-scoped"
+            );
+        }
+    }
+
+    #[test]
+    fn default_annotation_excludes_non_empty() {
+        let defaults = default_annotation_excludes();
+        assert!(!defaults.is_empty());
+        assert!(defaults.contains(&"kubectl.kubernetes.io/last-applied-configuration".to_string()));
+    }
+
+    #[test]
+    fn validate_empty_resources_fails() {
+        let config = KubernetesSourceConfig::default();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_valid_config() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_unsupported_kind_fails() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "apps/v1".to_string(),
+                kind: "DaemonSet".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_mutual_exclusive_kubeconfig_options() {
+        let config = KubernetesSourceConfig {
+            resources: vec![ResourceSpec {
+                api_version: "v1".to_string(),
+                kind: "Pod".to_string(),
+            }],
+            kubeconfig_path: Some("/path".to_string()),
+            kubeconfig_content: Some("content".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn serde_exclude_annotations_absent_uses_defaults() {
+        let json = serde_json::json!({
+            "resources": [{"apiVersion": "v1", "kind": "Pod"}]
+        });
+        let config: KubernetesSourceConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.exclude_annotations, default_annotation_excludes());
+    }
+
+    #[test]
+    fn serde_exclude_annotations_explicit_empty_preserves_empty() {
+        let json = serde_json::json!({
+            "resources": [{"apiVersion": "v1", "kind": "Pod"}],
+            "excludeAnnotations": []
+        });
+        let config: KubernetesSourceConfig = serde_json::from_value(json).unwrap();
+        assert!(config.exclude_annotations.is_empty());
+    }
+
+    #[test]
+    fn serde_exclude_annotations_custom_list() {
+        let json = serde_json::json!({
+            "resources": [{"apiVersion": "v1", "kind": "Pod"}],
+            "excludeAnnotations": ["my.custom/annotation"]
+        });
+        let config: KubernetesSourceConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.exclude_annotations, vec!["my.custom/annotation"]);
+    }
 }
