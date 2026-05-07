@@ -117,6 +117,21 @@ impl Default for RisLiveSourceConfig {
 }
 
 impl RisLiveSourceConfig {
+    /// Validate configuration fields.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let parsed = url::Url::parse(self.websocket_url.trim())
+            .map_err(|e| anyhow::anyhow!("websocket_url is not a valid URL: {e}"))?;
+        match parsed.scheme() {
+            "wss" | "ws" => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "websocket_url scheme must be ws or wss, got: {other}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Returns whether a message with the given timestamp should be processed.
     pub fn should_process_timestamp(&self, message_timestamp_ms: Option<i64>) -> bool {
         match self.start_from {
