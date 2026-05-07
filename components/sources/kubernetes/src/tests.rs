@@ -279,7 +279,7 @@ fn test_owner_relation_construction() {
     let changes = build_insert_changes("src1", "Pod", &pod_obj(), &cfg).unwrap();
     assert!(changes.iter().any(|c| matches!(
         c,
-        SourceChange::Update {
+        SourceChange::Insert {
             element: Element::Relation { .. }
         }
     )));
@@ -301,7 +301,7 @@ fn test_owner_relation_skipped_when_owner_kind_not_configured() {
     let changes = build_insert_changes("src1", "Pod", &pod_obj(), &cfg).unwrap();
     assert!(!changes.iter().any(|c| matches!(
         c,
-        SourceChange::Update {
+        SourceChange::Insert {
             element: Element::Relation { .. }
         }
     )));

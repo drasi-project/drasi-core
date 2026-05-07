@@ -32,7 +32,7 @@ pub fn build_insert_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config));
+        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config, true));
     }
 
     Ok(changes)
@@ -49,7 +49,7 @@ pub fn build_update_changes(
     }];
 
     if config.include_owner_relations {
-        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config));
+        changes.extend(build_owner_relation_upserts(source_id, kind, obj, config, false));
     }
 
     Ok(changes)
@@ -138,6 +138,7 @@ fn build_owner_relation_upserts(
     child_kind: &str,
     obj: &DynamicObject,
     config: &KubernetesSourceConfig,
+    is_insert: bool,
 ) -> Vec<SourceChange> {
     let child_uid = match obj.metadata.uid.clone() {
         Some(uid) => uid,
@@ -161,9 +162,15 @@ fn build_owner_relation_upserts(
             child_kind,
             owner.api_version.as_str(),
         );
-        out.push(SourceChange::Update {
-            element: rel_element,
-        });
+        if is_insert {
+            out.push(SourceChange::Insert {
+                element: rel_element,
+            });
+        } else {
+            out.push(SourceChange::Update {
+                element: rel_element,
+            });
+        }
     }
 
     out
