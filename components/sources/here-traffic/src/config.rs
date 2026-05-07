@@ -200,11 +200,19 @@ impl HereTrafficConfig {
                         "Validation error: access_key_secret cannot be empty"
                     ));
                 }
-                let _ = reqwest::Url::parse(token_url).map_err(|e| {
+                let parsed_token = reqwest::Url::parse(token_url).map_err(|e| {
                     anyhow::anyhow!(
                         "Validation error: token_url is not a valid URL ({token_url}): {e}"
                     )
                 })?;
+                match parsed_token.scheme() {
+                    "https" | "http" => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Validation error: token_url scheme must be http or https, got: {other}"
+                        ));
+                    }
+                }
             }
         }
 
@@ -240,12 +248,20 @@ impl HereTrafficConfig {
             ));
         }
 
-        let _ = reqwest::Url::parse(&self.base_url).map_err(|e| {
+        let parsed_base = reqwest::Url::parse(&self.base_url).map_err(|e| {
             anyhow::anyhow!(
                 "Validation error: base_url is not a valid URL ({base_url}): {e}",
                 base_url = self.base_url
             )
         })?;
+        match parsed_base.scheme() {
+            "https" | "http" => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Validation error: base_url scheme must be http or https, got: {other}"
+                ));
+            }
+        }
 
         Ok(())
     }
