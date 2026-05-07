@@ -47,7 +47,7 @@ impl Default for RestApiConfig {
 }
 
 fn default_rest_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 fn default_rest_port() -> u16 {
