@@ -37,6 +37,7 @@ pub enum GtfsRtFeedType {
 }
 
 impl GtfsRtFeedType {
+    /// Returns all three feed type variants.
     pub fn all() -> [Self; 3] {
         [
             GtfsRtFeedType::TripUpdates,
@@ -45,6 +46,7 @@ impl GtfsRtFeedType {
         ]
     }
 
+    /// Returns the stable string key used to identify this feed type in state storage.
     pub fn key(&self) -> &'static str {
         match self {
             GtfsRtFeedType::TripUpdates => "trip_updates",
@@ -124,8 +126,9 @@ impl GtfsRtSourceConfig {
             ("alerts_url", &self.alerts_url),
         ] {
             if let Some(raw) = url_opt {
-                let parsed = url::Url::parse(raw)
-                    .map_err(|e| anyhow::anyhow!("Validation error: {label} is not a valid URL: {e}"))?;
+                let parsed = url::Url::parse(raw).map_err(|e| {
+                    anyhow::anyhow!("Validation error: {label} is not a valid URL: {e}")
+                })?;
                 match parsed.scheme() {
                     "https" | "http" => {}
                     other => {

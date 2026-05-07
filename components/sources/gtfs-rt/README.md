@@ -85,9 +85,9 @@ let bootstrap = GtfsRtBootstrapProvider::new(GtfsRtBootstrapConfig {
     trip_updates_url: Some("https://www.rtd-denver.com/files/gtfs-rt/TripUpdate.pb".into()),
     vehicle_positions_url: Some("https://www.rtd-denver.com/files/gtfs-rt/VehiclePosition.pb".into()),
     alerts_url: Some("https://www.rtd-denver.com/files/gtfs-rt/Alerts.pb".into()),
-    headers: None,
-    timeout_secs: Some(15),
-    language: None,
+    headers: Default::default(),
+    timeout_secs: 15,
+    language: "en".into(),
 });
 
 // Build the source
