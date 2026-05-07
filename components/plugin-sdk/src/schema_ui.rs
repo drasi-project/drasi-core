@@ -52,8 +52,7 @@ impl fmt::Display for SchemaUiError {
             SchemaUiError::RootSchemaNotFound { name } => {
                 write!(
                     f,
-                    "SchemaUiAnnotator: root schema '{}' not found in schemas map",
-                    name
+                    "SchemaUiAnnotator: root schema '{name}' not found in schemas map",
                 )
             }
         }
