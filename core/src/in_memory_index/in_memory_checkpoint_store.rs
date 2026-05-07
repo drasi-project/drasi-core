@@ -60,6 +60,10 @@ impl InMemoryCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for InMemoryCheckpointStore {
+    fn is_persistent(&self) -> bool {
+        false
+    }
+
     async fn stage_checkpoint(
         &self,
         source_id: &str,

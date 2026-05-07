@@ -172,11 +172,19 @@ pub trait Source: Send + Sync {
     /// Get the current status of the source
     async fn status(&self) -> ComponentStatus;
 
-    /// Subscribe to this source for change events
+    /// Subscribe to this source for change events.
     ///
     /// This is called by queries to receive data changes from this source.
     /// The source should return a receiver for streaming events and optionally
     /// a bootstrap receiver for initial data.
+    ///
+    /// # Important
+    /// Implementations **must** call
+    /// [`SourceBase::apply_subscription_settings(&settings)`](crate::sources::base::SourceBase::apply_subscription_settings)
+    /// at the start of their implementation (or delegate to
+    /// [`SourceBase::subscribe_with_bootstrap()`](crate::sources::base::SourceBase::subscribe_with_bootstrap)
+    /// which does it automatically). Failing to do so will break sequence
+    /// monotonicity after restarts.
     ///
     /// # Arguments
     /// * `settings` - Subscription settings including query ID, text, and labels of interest

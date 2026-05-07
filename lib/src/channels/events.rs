@@ -236,6 +236,20 @@ pub struct SourceEventWrapper {
     pub source_position: Option<Bytes>,
 }
 
+/// Decomposed parts of a [`SourceEventWrapper`], returned by [`SourceEventWrapper::into_parts()`].
+///
+/// Using a named struct instead of a tuple makes call sites resilient to
+/// field reordering and easier to evolve with new fields.
+#[derive(Debug)]
+pub struct SourceEventParts {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub profiling: Option<ProfilingMetadata>,
+    pub sequence: Option<u64>,
+    pub source_position: Option<Bytes>,
+}
+
 impl SourceEventWrapper {
     /// Create a new SourceEventWrapper without profiling
     pub fn new(
@@ -294,26 +308,17 @@ impl SourceEventWrapper {
         self.source_position = Some(position);
     }
 
-    /// Consume this wrapper and return its components.
+    /// Consume this wrapper and return its components as a named struct.
     /// This enables zero-copy extraction when the wrapper has sole ownership.
-    pub fn into_parts(
-        self,
-    ) -> (
-        String,
-        SourceEvent,
-        chrono::DateTime<chrono::Utc>,
-        Option<ProfilingMetadata>,
-        Option<u64>,
-        Option<Bytes>,
-    ) {
-        (
-            self.source_id,
-            self.event,
-            self.timestamp,
-            self.profiling,
-            self.sequence,
-            self.source_position,
-        )
+    pub fn into_parts(self) -> SourceEventParts {
+        SourceEventParts {
+            source_id: self.source_id,
+            event: self.event,
+            timestamp: self.timestamp,
+            profiling: self.profiling,
+            sequence: self.sequence,
+            source_position: self.source_position,
+        }
     }
 
     /// Try to extract components from an Arc<SourceEventWrapper>.
@@ -322,19 +327,7 @@ impl SourceEventWrapper {
     ///
     /// This enables zero-copy in Channel dispatch mode (single consumer per event)
     /// while still working correctly in Broadcast mode (cloning required).
-    pub fn try_unwrap_arc(
-        arc_self: Arc<Self>,
-    ) -> Result<
-        (
-            String,
-            SourceEvent,
-            chrono::DateTime<chrono::Utc>,
-            Option<ProfilingMetadata>,
-            Option<u64>,
-            Option<Bytes>,
-        ),
-        Arc<Self>,
-    > {
+    pub fn try_unwrap_arc(arc_self: Arc<Self>) -> Result<SourceEventParts, Arc<Self>> {
         Arc::try_unwrap(arc_self).map(|wrapper| wrapper.into_parts())
     }
 }
@@ -637,12 +630,11 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let (source_id, event, _timestamp, profiling, _sequence, _source_position) =
-            wrapper.into_parts();
+        let parts = wrapper.into_parts();
 
-        assert_eq!(source_id, "test-source");
-        assert!(matches!(event, SourceEvent::Change(_)));
-        assert!(profiling.is_none());
+        assert_eq!(parts.source_id, "test-source");
+        assert!(matches!(parts.event, SourceEvent::Change(_)));
+        assert!(parts.profiling.is_none());
     }
 
     #[test]
@@ -659,10 +651,9 @@ mod tests {
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
-        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) =
-            result.unwrap();
-        assert_eq!(source_id, "test-source");
-        assert!(matches!(event, SourceEvent::Change(_)));
+        let parts = result.unwrap();
+        assert_eq!(parts.source_id, "test-source");
+        assert!(matches!(parts.event, SourceEvent::Change(_)));
     }
 
     #[test]
@@ -697,29 +688,28 @@ mod tests {
         let arc = Arc::new(wrapper);
 
         // This is the zero-copy path - when we have sole ownership
-        let (source_id, event, _timestamp, _profiling, _sequence, _source_position) =
-            match SourceEventWrapper::try_unwrap_arc(arc) {
-                Ok(parts) => parts,
-                Err(arc) => {
-                    // Fallback to cloning (would be needed in broadcast mode)
-                    (
-                        arc.source_id.clone(),
-                        arc.event.clone(),
-                        arc.timestamp,
-                        arc.profiling.clone(),
-                        arc.sequence,
-                        arc.source_position.clone(),
-                    )
+        let parts = match SourceEventWrapper::try_unwrap_arc(arc) {
+            Ok(parts) => parts,
+            Err(arc) => {
+                // Fallback to cloning (would be needed in broadcast mode)
+                SourceEventParts {
+                    source_id: arc.source_id.clone(),
+                    event: arc.event.clone(),
+                    timestamp: arc.timestamp,
+                    profiling: arc.profiling.clone(),
+                    sequence: arc.sequence,
+                    source_position: arc.source_position.clone(),
                 }
-            };
+            }
+        };
 
         // Extract SourceChange from owned event (no clone!)
-        let source_change = match event {
+        let source_change = match parts.event {
             SourceEvent::Change(change) => Some(change),
             _ => None,
         };
 
-        assert_eq!(source_id, "test-source");
+        assert_eq!(parts.source_id, "test-source");
         assert!(source_change.is_some());
     }
 
@@ -736,9 +726,8 @@ mod tests {
         assert_eq!(wrapper.sequence, Some(42));
         assert!(wrapper.profiling.is_none());
 
-        let (_source_id, _event, _timestamp, _profiling, sequence, _source_position) =
-            wrapper.into_parts();
-        assert_eq!(sequence, Some(42));
+        let parts = wrapper.into_parts();
+        assert_eq!(parts.sequence, Some(42));
     }
 
     #[test]

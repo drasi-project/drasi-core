@@ -74,6 +74,14 @@ impl SourceCheckpoint {
 /// query reads each source's position and passes it via `resume_from`.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
+    /// Whether this store persists checkpoints across process restarts.
+    ///
+    /// The orchestration layer uses this to decide whether to propagate
+    /// `resume_from` and `last_sequence` to sources on restart. Volatile
+    /// (in-memory) stores return `false`; persistent stores (RocksDB, Garnet)
+    /// return `true`.
+    fn is_persistent(&self) -> bool;
+
     /// Stage a source checkpoint into the active session transaction.
     ///
     /// For persistent backends, must be called inside an open session (between

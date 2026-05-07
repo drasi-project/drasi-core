@@ -423,13 +423,12 @@ impl SourceBase {
         if let Some(last_seq) = settings.last_sequence {
             // Atomically advance to last_seq+1, never go backwards.
             // fetch_max is safe under concurrent subscriptions.
-            let prev = self.next_sequence.fetch_max(last_seq + 1, Ordering::Relaxed);
-            if last_seq + 1 > prev {
+            let next = last_seq.saturating_add(1);
+            let prev = self.next_sequence.fetch_max(next, Ordering::Relaxed);
+            if next > prev {
                 info!(
                     "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
-                    self.id,
-                    last_seq + 1,
-                    last_seq
+                    self.id, next, last_seq
                 );
             }
         }
@@ -703,16 +702,17 @@ impl SourceBase {
         self.dispatch_event(wrapper).await
     }
 
-    /// Dispatch a SourceEventWrapper to all subscribers
+    /// Maximum allowed size for source position bytes (64KB).
+    /// Positions exceeding this limit are skipped at checkpoint time
+    /// to prevent memory issues, preserving the last good position.
+    pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
+
+    /// Dispatch a SourceEventWrapper to all subscribers.
     ///
     /// This is a generic method for dispatching any SourceEvent.
     /// It handles Arc-wrapping for zero-copy sharing and logs
     /// when there are no subscribers.
     /// The framework stamps every event with a monotonic sequence number.
-    /// Maximum allowed size for source position bytes (64KB).
-    /// Positions exceeding this limit are stripped with a warning to prevent memory issues.
-    const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
-
     pub async fn dispatch_event(&self, mut wrapper: SourceEventWrapper) -> Result<()> {
         // Warn about oversized source positions; the checkpoint layer will
         // enforce the limit and preserve the last good position.

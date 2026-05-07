@@ -359,7 +359,8 @@ impl DrasiQuery {
         self.subscription_tasks.read().await.len()
     }
 
-    /// Access the checkpoint store for verification in tests
+    /// Access the checkpoint store (for internal/test use only).
+    #[doc(hidden)]
     pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
         self.checkpoint_store.read().await.clone()
     }
@@ -557,19 +558,13 @@ impl Query for DrasiQuery {
         // Read the last checkpoints and propagate source_position to subscription settings
         // so sources can resume from where they left off.
         //
-        // Only propagate checkpoint recovery for persistent (non-volatile) backends.
-        // Volatile backends (in-memory, or StorageBackendSpec::Memory) rebuild the
-        // element index fresh on each start, so bootstrap must run to populate the
+        // Only propagate checkpoint recovery when the checkpoint store is persistent.
+        // Volatile (in-memory) stores don't survive restarts, and their paired element
+        // indexes rebuild fresh on each start — bootstrap must run to populate the
         // graph state. Skipping bootstrap against an empty graph would produce
         // incorrect results.
         let mut subscription_settings = subscription_settings;
-        let has_persistent_backend = self
-            .base
-            .config
-            .storage_backend
-            .as_ref()
-            .map(|backend| !self.index_factory.is_volatile(backend))
-            .unwrap_or(false);
+        let has_persistent_backend = checkpoint_store.is_persistent();
         let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
         if has_persistent_backend {
@@ -1180,20 +1175,25 @@ impl Query for DrasiQuery {
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
-                            let (source_id, event, _timestamp, profiling_opt, sequence, source_position) =
+                            let parts =
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
-                                        (
-                                            arc.source_id.clone(),
-                                            arc.event.clone(),
-                                            arc.timestamp,
-                                            arc.profiling.clone(),
-                                            arc.sequence,
-                                            arc.source_position.clone(),
-                                        )
+                                        crate::channels::events::SourceEventParts {
+                                            source_id: arc.source_id.clone(),
+                                            event: arc.event.clone(),
+                                            timestamp: arc.timestamp,
+                                            profiling: arc.profiling.clone(),
+                                            sequence: arc.sequence,
+                                            source_position: arc.source_position.clone(),
+                                        }
                                     }
                                 };
+                            let source_id = parts.source_id;
+                            let event = parts.event;
+                            let profiling_opt = parts.profiling;
+                            let sequence = parts.sequence;
+                            let source_position = parts.source_position;
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
 
@@ -1251,14 +1251,13 @@ impl Query for DrasiQuery {
                                     let cp_source_id = source_id.clone();
                                     let cp_position = source_position.clone();
                                     let hook = move || {
-                                        const MAX_POS_BYTES: usize = 65_536;
                                         async move {
                                             if let Some(seq) = sequence {
                                                 // Enforce position size limit at checkpoint time:
                                                 // oversized positions are skipped to preserve the
                                                 // last known good position in the store.
                                                 let pos_ref = match &cp_position {
-                                                    Some(p) if p.len() <= MAX_POS_BYTES => Some(p),
+                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
                                                     _ => None,
                                                 };
                                                 cp_store

@@ -393,6 +393,12 @@ pub fn build_source_vtable<T: Source + 'static>(
 
         let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
             None
+        } else if resume_from_len as usize > 65_536 {
+            tracing::warn!(
+                "resume_from_len {} exceeds 64 KB limit; ignoring position",
+                resume_from_len
+            );
+            None
         } else {
             let slice =
                 unsafe { std::slice::from_raw_parts(resume_from_ptr, resume_from_len as usize) };
@@ -739,6 +745,12 @@ pub fn build_source_vtable_from_boxed(
         let relations: HashSet<String> = serde_json::from_str(&rels_str).unwrap_or_default();
 
         let resume_from = if resume_from_ptr.is_null() || resume_from_len == 0 {
+            None
+        } else if resume_from_len as usize > 65_536 {
+            tracing::warn!(
+                "resume_from_len {} exceeds 64 KB limit; ignoring position",
+                resume_from_len
+            );
             None
         } else {
             let slice =

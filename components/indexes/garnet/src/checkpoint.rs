@@ -79,6 +79,10 @@ impl GarnetCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for GarnetCheckpointStore {
+    fn is_persistent(&self) -> bool {
+        true
+    }
+
     async fn stage_checkpoint(
         &self,
         source_id: &str,
@@ -129,16 +133,7 @@ impl CheckpointStore for GarnetCheckpointStore {
             _ => Vec::new(),
         };
 
-        if source_position.is_some() {
-            if !source_ids.contains(&source_id.to_string()) {
-                source_ids.push(source_id.to_string());
-            }
-        } else {
-            source_ids.retain(|id| id != source_id);
-        }
-
-        // Always keep source in the list for sequence tracking even without position
-        // Actually, sources_key tracks which sources have checkpoints
+        // Always keep source in the sources list for checkpoint tracking
         if !source_ids.contains(&source_id.to_string()) {
             source_ids.push(source_id.to_string());
         }
