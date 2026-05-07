@@ -28,6 +28,21 @@ let bootstrap = SqliteBootstrapProvider::builder()
 
 Attach the provider in `SqliteSource::builder(...).with_bootstrap_provider(bootstrap)`.
 
+## Configuration Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `path` | `String?` | `null` | SQLite file path. Omit for in-memory (bootstrap will be skipped) |
+| `tables` | `Vec<String>?` | `null` | Optional table allow-list. `null` means all user tables |
+| `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration |
+
+### TableKeyConfig
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `table` | `String` | Table name |
+| `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
 ## Behavior
 
 - For file-backed databases, the provider opens a read-only connection and streams table rows.

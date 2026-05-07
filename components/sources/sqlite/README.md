@@ -60,11 +60,30 @@ When `with_rest_api()` is configured:
 - `DELETE /api/tables/{table}/{id}`
 - `POST /api/batch` (single SQLite transaction for all operations)
 
-## Configuration Notes
+## Configuration Options
 
-- `tables: Option<Vec<String>>` filters monitored tables. `None` means all user tables.
-- `table_keys` defines element ID columns per table; if omitted, table PKs are detected from `PRAGMA table_info`.
-- If no configured/detected keys exist, rowid is used as fallback for streaming events.
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `path` | `String?` | `null` | SQLite file path. Omit for in-memory database |
+| `tables` | `Vec<String>?` | `null` | Optional table allow-list. `null` means all user tables |
+| `tableKeys` | `Vec<TableKeyConfig>` | `[]` | Manual primary key configuration (see below) |
+| `restApi` | `RestApiConfig?` | `null` | Optional REST API configuration |
+
+### TableKeyConfig
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `table` | `String` | Table name |
+| `keyColumns` | `Vec<String>` | Column names to use as primary key |
+
+Configured table keys override automatically detected primary keys from `PRAGMA table_info`. If no configured or detected keys exist, `rowid` is used as the fallback for streaming events.
+
+### RestApiConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | `String` | `"0.0.0.0"` | Address to bind |
+| `port` | `u16` | `8080` | Port to bind |
 
 ## Testing
 
