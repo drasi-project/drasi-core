@@ -17,10 +17,10 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
 use log::{debug, error, warn};
-use lru::LruCache;
+
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
@@ -34,22 +34,20 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::reactions::common::{OperationType, TemplateRouting};
 use drasi_lib::Reaction;
 
-const FILE_LOCK_CACHE_SIZE: usize = 1024;
+
 
 pub struct FileReaction {
     base: ReactionBase,
     config: FileReactionConfig,
     handlebars: Arc<Handlebars<'static>>,
-    file_locks: Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+    file_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Tracks files that have been checked for partial trailing lines on first open.
     repaired_files: Arc<Mutex<HashSet<String>>>,
 }
 
 impl FileReaction {
-    fn new_file_locks() -> Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>> {
-        Arc::new(Mutex::new(LruCache::new(
-            NonZeroUsize::new(FILE_LOCK_CACHE_SIZE).expect("FILE_LOCK_CACHE_SIZE must be > 0"),
-        )))
+    fn new_file_locks() -> Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> {
+        Arc::new(Mutex::new(HashMap::new()))
     }
 
     /// Create a builder for FileReaction.
@@ -214,18 +212,19 @@ impl FileReaction {
     }
 
     async fn get_file_lock(
-        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         path: &Path,
     ) -> Arc<Mutex<()>> {
         let key = path.to_string_lossy().to_string();
         let mut locks = file_locks.lock().await;
         locks
-            .get_or_insert(key, || Arc::new(Mutex::new(())))
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
     async fn write_to_file(
-        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         repaired_files: &Arc<Mutex<HashSet<String>>>,
         mode: &WriteMode,
         output_file: &Path,
@@ -443,7 +442,7 @@ impl FileReaction {
     async fn process_result(
         config: &FileReactionConfig,
         handlebars: &Handlebars<'static>,
-        file_locks: &Arc<Mutex<LruCache<String, Arc<Mutex<()>>>>>,
+        file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         repaired_files: &Arc<Mutex<HashSet<String>>>,
         query_result: &QueryResult,
         reaction_name: &str,
