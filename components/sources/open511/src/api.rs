@@ -115,7 +115,11 @@ fn truncate_for_log(body: &str) -> String {
     if body.len() <= MAX_LEN {
         body.to_string()
     } else {
-        format!("{}...", &body[..MAX_LEN])
+        let truncated = match body.char_indices().nth(MAX_LEN) {
+            Some((idx, _)) => &body[..idx],
+            None => body,
+        };
+        format!("{truncated}...")
     }
 }
 

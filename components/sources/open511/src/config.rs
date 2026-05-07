@@ -122,6 +122,17 @@ impl Open511SourceConfig {
             return Err(anyhow::anyhow!("Open511 base_url is required"));
         }
 
+        let parsed = url::Url::parse(self.base_url.trim())
+            .map_err(|e| anyhow::anyhow!("base_url is not a valid URL: {e}"))?;
+        match parsed.scheme() {
+            "https" | "http" => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "base_url scheme must be http or https, got: {other}"
+                ));
+            }
+        }
+
         if self.poll_interval_secs == 0 {
             return Err(anyhow::anyhow!("poll_interval_secs must be > 0"));
         }
