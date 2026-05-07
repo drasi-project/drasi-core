@@ -579,7 +579,7 @@ fn poll_logminer(
     let mut guard = LogMinerGuard::new(conn, start_scn, end_scn)?;
 
     let query = format!(
-        "SELECT SCN, COMMIT_SCN, OPERATION_CODE, SEG_OWNER, SEG_NAME, SQL_UNDO, ROW_ID, TIMESTAMP
+        "SELECT SCN, COMMIT_SCN, OPERATION_CODE, SEG_OWNER, SEG_NAME, SQL_UNDO, ROW_ID
          FROM V$LOGMNR_CONTENTS
          WHERE OPERATION_CODE IN (1, 2, 3)
            AND COMMIT_SCN > {}
@@ -602,20 +602,7 @@ fn poll_logminer(
         let table_name: String = row.get(4)?;
         let sql_undo: Option<String> = row.get(5)?;
         let row_id: Option<String> = row.get(6)?;
-        let timestamp: Option<chrono::DateTime<chrono::Utc>> = row
-            .get::<_, Option<oracle::sql_type::Timestamp>>(7)
-            .ok()
-            .flatten()
-            .and_then(|ts| {
-                let date = chrono::NaiveDate::from_ymd_opt(ts.year(), ts.month(), ts.day())?;
-                let time = chrono::NaiveTime::from_hms_nano_opt(
-                    ts.hour(),
-                    ts.minute(),
-                    ts.second(),
-                    ts.nanosecond(),
-                )?;
-                Some(chrono::NaiveDateTime::new(date, time).and_utc())
-            });
+        let timestamp = Some(chrono::Utc::now());
 
         let commit_scn = Scn(commit_scn as u64);
         if commit_scn > max_commit_scn {

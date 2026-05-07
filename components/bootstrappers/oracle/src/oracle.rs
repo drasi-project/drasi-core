@@ -55,16 +55,15 @@ impl BootstrapProvider for OracleBootstrapProvider {
         let snapshot_scn = context
             .get_typed_property::<u64>(ORACLE_BOOTSTRAP_SCN_CONTEXT_PROPERTY)?
             .map(Scn);
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<SourceChangeEvent>(256);
 
-        let worker = tokio::task::spawn_blocking(move || {
+        let events = tokio::task::spawn_blocking(move || {
             let mut handler = OracleBootstrapHandler::new(config, source_id, snapshot_scn);
-            handler.stream_rows(&request, tx)
-        });
+            handler.execute(&request)
+        })
+        .await??;
 
-        let mut count = 0usize;
-        while let Some(event) = rx.recv().await {
-            count += 1;
+        let count = events.len();
+        for event in events {
             event_tx
                 .send(BootstrapEvent {
                     source_id: event.source_id,
@@ -74,8 +73,6 @@ impl BootstrapProvider for OracleBootstrapProvider {
                 })
                 .await?;
         }
-
-        worker.await??;
 
         Ok(BootstrapResult {
             event_count: count,
@@ -177,16 +174,13 @@ impl OracleBootstrapHandler {
         }
     }
 
-    fn stream_rows(
-        &mut self,
-        request: &BootstrapRequest,
-        tx: tokio::sync::mpsc::Sender<SourceChangeEvent>,
-    ) -> Result<()> {
+    fn execute(&mut self, request: &BootstrapRequest) -> Result<Vec<SourceChangeEvent>> {
         let connection = OracleConnection::connect(&self.config)?;
         let conn = connection.inner();
         self.pk_cache.discover_keys(conn, &self.config)?;
 
         let tables = self.tables_for_request(request);
+        let mut events = Vec::new();
 
         for table in tables {
             let (schema, table_name) = split_table_name(&table, &self.config.user)?;
@@ -215,20 +209,15 @@ impl OracleBootstrapHandler {
                     },
                     properties,
                 };
-                if tx
-                    .blocking_send(SourceChangeEvent {
-                        source_id: self.source_id.clone(),
-                        change: SourceChange::Insert { element },
-                        timestamp,
-                    })
-                    .is_err()
-                {
-                    return Ok(());
-                }
+                events.push(SourceChangeEvent {
+                    source_id: self.source_id.clone(),
+                    change: SourceChange::Insert { element },
+                    timestamp,
+                });
             }
         }
 
-        Ok(())
+        Ok(events)
     }
 
     fn tables_for_request(&self, request: &BootstrapRequest) -> Vec<String> {

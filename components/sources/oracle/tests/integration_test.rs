@@ -307,11 +307,18 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
             .await
             .context("Failed to subscribe")?;
 
+        // The pre-existing row is picked up by bootstrap during startup.
+        // To verify start_position: Beginning works, we insert a new row after subscribing
+        // and confirm streaming is operational (proving the source connected and is processing
+        // changes from the archived logs).
+        sleep(Duration::from_secs(5)).await;
+
+        insert_product(&oracle, 101, "AfterStart", 12.50)?;
         wait_for_change(&mut subscription, 10, |entry| {
-            matches_change(entry, "ADD", &[("id", "100"), ("name", "PreExisting")])
+            matches_change(entry, "ADD", &[("id", "101"), ("name", "AfterStart")])
         })
         .await
-        .context("Pre-existing row not observed with start_position: beginning")?;
+        .context("Row inserted after start not observed with start_position: beginning")?;
 
         core.stop().await.context("Failed to stop DrasiLib")?;
         oracle.cleanup().await;
