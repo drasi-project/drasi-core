@@ -2,7 +2,7 @@
 //!
 //! Since utoipa doesn't support property-level OpenAPI extensions, this module
 //! provides a post-processing builder that injects `x-ui:*` extension properties
-//! into serialized schema JSON. These hints are consumed by the Drasi UI to render
+//! into schema JSON. These hints are consumed by the Drasi UI to render
 //! rich, schema-driven configuration forms instead of flat YAML editors.
 //!
 //! # Supported Extensions
@@ -11,8 +11,9 @@
 //! - `x-ui:group` — Group name for section grouping (e.g., `"Connection"`, `"Authentication"`)
 //! - `x-ui:order` — Display order within a group (lower = first)
 //! - `x-ui:placeholder` — Placeholder text for input fields
+//! - `x-ui:help` — Help text displayed below the field
 //! - `x-ui:condition` — Conditional visibility: `{"field": "fieldName", "value": "expectedValue"}` or `{"field": "fieldName", "notEmpty": true}`
-//! - `x-ui:collapsed` — Whether a group section starts collapsed
+//! - `x-ui:collapsed` — Whether the group containing this field starts collapsed
 //!
 //! # Example
 //!
@@ -21,9 +22,11 @@
 //!
 //! fn config_schema_json(&self) -> String {
 //!     let api = MySchemas::openapi();
-//!     let raw = serde_json::to_string(&api.components.as_ref().unwrap().schemas).unwrap();
-//!     
-//!     SchemaUiAnnotator::new(&raw, "source.postgres.PostgresSourceConfig")
+//!     let schemas = api.components.as_ref().unwrap().schemas.clone();
+//!     let schemas_value = serde_json::to_value(&schemas).unwrap();
+//!
+//!     SchemaUiAnnotator::new(schemas_value, "source.postgres.PostgresSourceConfig")
+//!         .expect("root schema not found")
 //!         .field("host", |f| f.group("Connection").order(1).placeholder("localhost"))
 //!         .field("password", |f| f.group("Authentication").widget("password"))
 //!         .annotate()
@@ -31,8 +34,36 @@
 //! ```
 
 use serde_json::{Map, Value};
+use std::fmt;
+
+/// Errors that can occur when building or applying UI annotations.
+#[derive(Debug)]
+pub enum SchemaUiError {
+    /// The `root_schema_name` was not found in the schemas map.
+    RootSchemaNotFound {
+        /// The schema name that was looked up.
+        name: String,
+    },
+}
+
+impl fmt::Display for SchemaUiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SchemaUiError::RootSchemaNotFound { name } => {
+                write!(
+                    f,
+                    "SchemaUiAnnotator: root schema '{}' not found in schemas map",
+                    name
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchemaUiError {}
 
 /// Builder for a single field's UI annotations.
+#[derive(Debug)]
 pub struct FieldUiBuilder {
     annotations: Map<String, Value>,
 }
@@ -74,6 +105,15 @@ impl FieldUiBuilder {
         self
     }
 
+    /// Set help text displayed below the field.
+    pub fn help(mut self, help: &str) -> Self {
+        self.annotations.insert(
+            "x-ui:help".to_string(),
+            Value::String(help.to_string()),
+        );
+        self
+    }
+
     /// Set conditional visibility based on a field matching a specific value.
     pub fn condition_value(mut self, field: &str, value: &str) -> Self {
         let mut condition = Map::new();
@@ -94,7 +134,12 @@ impl FieldUiBuilder {
         self
     }
 
-    /// Set whether the group section starts collapsed.
+    /// Sets `x-ui:collapsed` on this field, signalling that the group
+    /// containing this field starts collapsed by default.
+    ///
+    /// This is a group-level concept expressed on the field builder for
+    /// convenience. If multiple fields in the same group set conflicting
+    /// values, the last one written wins.
     pub fn collapsed(mut self, collapsed: bool) -> Self {
         self.annotations
             .insert("x-ui:collapsed".to_string(), Value::Bool(collapsed));
@@ -103,6 +148,7 @@ impl FieldUiBuilder {
 }
 
 /// Annotates an OpenAPI schema map with `x-ui:*` UI hint extensions.
+#[derive(Debug)]
 pub struct SchemaUiAnnotator {
     schemas: Value,
     root_schema_name: String,
@@ -110,18 +156,24 @@ pub struct SchemaUiAnnotator {
 }
 
 impl SchemaUiAnnotator {
-    /// Create a new annotator from a serialized schemas map JSON string.
+    /// Create a new annotator from a `serde_json::Value` representing the schemas map.
+    ///
+    /// Returns `Err(SchemaUiError::RootSchemaNotFound)` if `root_schema_name` does not
+    /// exist as a key in the schemas map.
     ///
     /// `root_schema_name` is the key in the map that identifies the root config schema
     /// (e.g., `"source.postgres.PostgresSourceConfig"`).
-    pub fn new(schemas_json: &str, root_schema_name: &str) -> Self {
-        let schemas: Value =
-            serde_json::from_str(schemas_json).expect("SchemaUiAnnotator: invalid JSON input");
-        Self {
+    pub fn new(schemas: Value, root_schema_name: &str) -> Result<Self, SchemaUiError> {
+        if schemas.get(root_schema_name).is_none() {
+            return Err(SchemaUiError::RootSchemaNotFound {
+                name: root_schema_name.to_string(),
+            });
+        }
+        Ok(Self {
             schemas,
             root_schema_name: root_schema_name.to_string(),
             field_annotations: Vec::new(),
-        }
+        })
     }
 
     /// Add UI annotations for a field.
@@ -136,6 +188,9 @@ impl SchemaUiAnnotator {
     }
 
     /// Apply all annotations and return the modified JSON string.
+    ///
+    /// Fields named in `.field()` calls that do not exist in the root schema's
+    /// `properties` are silently skipped (a `debug_assert!` fires in debug builds).
     pub fn annotate(mut self) -> String {
         if let Some(root) = self.schemas.get_mut(&self.root_schema_name) {
             if let Some(properties) = root.get_mut("properties") {
@@ -146,10 +201,194 @@ impl SchemaUiAnnotator {
                                 obj.insert(key.clone(), value.clone());
                             }
                         }
+                    } else {
+                        debug_assert!(
+                            false,
+                            "SchemaUiAnnotator: field '{}' not found in properties of '{}'",
+                            field_name, self.root_schema_name
+                        );
                     }
                 }
             }
         }
         serde_json::to_string(&self.schemas).expect("SchemaUiAnnotator: failed to serialize")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_schema() -> Value {
+        json!({
+            "my.Config": {
+                "type": "object",
+                "properties": {
+                    "host": { "type": "string" },
+                    "port": { "type": "integer" },
+                    "password": { "type": "string" },
+                    "authMode": { "type": "string" },
+                    "token": { "type": "string" }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn happy_path_annotations_applied() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("localhost")
+            })
+            .field("password", |f| f.group("Auth").widget("password"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let host = &parsed["my.Config"]["properties"]["host"];
+        assert_eq!(host["x-ui:group"], "Connection");
+        assert_eq!(host["x-ui:order"], 1);
+        assert_eq!(host["x-ui:placeholder"], "localhost");
+
+        let pw = &parsed["my.Config"]["properties"]["password"];
+        assert_eq!(pw["x-ui:group"], "Auth");
+        assert_eq!(pw["x-ui:widget"], "password");
+    }
+
+    #[test]
+    fn unknown_field_silently_skipped_in_release() {
+        // In debug builds, unknown fields trigger a debug_assert.
+        // This test verifies that known fields are still annotated even
+        // when an unknown field is also specified.
+        // The debug_assert is tested separately below.
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| f.group("Connection"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["my.Config"]["properties"]["host"]["x-ui:group"],
+            "Connection"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not found in properties")]
+    fn unknown_field_debug_asserts_in_debug_builds() {
+        SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("nonexistent", |f| f.group("Oops"))
+            .annotate();
+    }
+
+    #[test]
+    fn missing_root_schema_returns_error() {
+        let err = SchemaUiAnnotator::new(test_schema(), "wrong.Name").unwrap_err();
+        match err {
+            SchemaUiError::RootSchemaNotFound { name } => {
+                assert_eq!(name, "wrong.Name");
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_annotations_on_same_field() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| {
+                f.group("Connection")
+                    .order(1)
+                    .placeholder("localhost")
+                    .widget("textarea")
+                    .help("Enter the hostname")
+            })
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let host = &parsed["my.Config"]["properties"]["host"];
+        assert_eq!(host["x-ui:group"], "Connection");
+        assert_eq!(host["x-ui:order"], 1);
+        assert_eq!(host["x-ui:placeholder"], "localhost");
+        assert_eq!(host["x-ui:widget"], "textarea");
+        assert_eq!(host["x-ui:help"], "Enter the hostname");
+    }
+
+    #[test]
+    fn condition_value_produces_correct_json() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("token", |f| f.condition_value("authMode", "token"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let cond = &parsed["my.Config"]["properties"]["token"]["x-ui:condition"];
+        assert_eq!(cond["field"], "authMode");
+        assert_eq!(cond["value"], "token");
+    }
+
+    #[test]
+    fn condition_not_empty_produces_correct_json() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("token", |f| f.condition_not_empty("authMode"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let cond = &parsed["my.Config"]["properties"]["token"]["x-ui:condition"];
+        assert_eq!(cond["field"], "authMode");
+        assert_eq!(cond["notEmpty"], true);
+    }
+
+    #[test]
+    fn collapsed_annotation_works() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| f.group("Connection").collapsed(true))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["my.Config"]["properties"]["host"]["x-ui:collapsed"],
+            true
+        );
+    }
+
+    #[test]
+    fn help_annotation_works() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| f.help("The server hostname or IP"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["my.Config"]["properties"]["host"]["x-ui:help"],
+            "The server hostname or IP"
+        );
+    }
+
+    #[test]
+    fn unannotated_fields_unchanged() {
+        let result = SchemaUiAnnotator::new(test_schema(), "my.Config")
+            .unwrap()
+            .field("host", |f| f.group("Connection"))
+            .annotate();
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        // port was not annotated — should have no x-ui keys
+        let port = &parsed["my.Config"]["properties"]["port"];
+        assert_eq!(port["type"], "integer");
+        assert!(port.get("x-ui:group").is_none());
+    }
+
+    #[test]
+    fn error_display_message() {
+        let err = SchemaUiError::RootSchemaNotFound {
+            name: "bad.Name".to_string(),
+        };
+        assert!(err.to_string().contains("bad.Name"));
+        assert!(err.to_string().contains("not found"));
     }
 }

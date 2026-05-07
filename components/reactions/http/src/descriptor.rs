@@ -124,7 +124,7 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
     fn config_schema_json(&self) -> String {
         use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = HttpReactionSchemas::openapi();
-        let raw = serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
@@ -132,7 +132,8 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
         )
         .expect("Failed to serialize config schema");
 
-        SchemaUiAnnotator::new(&raw, "reaction.http.HttpReactionConfig")
+        SchemaUiAnnotator::new(schemas, "reaction.http.HttpReactionConfig")
+            .expect("root schema not found")
             .field("baseUrl", |f| {
                 f.group("Connection")
                     .order(1)

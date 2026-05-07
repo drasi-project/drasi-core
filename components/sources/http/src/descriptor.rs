@@ -567,7 +567,7 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
     fn config_schema_json(&self) -> String {
         use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = HttpSourceSchemas::openapi();
-        let raw = serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
@@ -575,7 +575,8 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
         )
         .expect("Failed to serialize config schema");
 
-        SchemaUiAnnotator::new(&raw, "source.http.HttpSourceConfig")
+        SchemaUiAnnotator::new(schemas, "source.http.HttpSourceConfig")
+            .expect("root schema not found")
             .field("host", |f| {
                 f.group("Connection").order(1).placeholder("0.0.0.0")
             })
