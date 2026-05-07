@@ -264,7 +264,7 @@ async fn run_grpc_stream(
         seen_orders: HashSet::new(),
     };
 
-    let last_checkpoint_seq = load_grpc_cursor(source_id, &state_store).await?;
+    let mut last_checkpoint_seq = load_grpc_cursor(source_id, &state_store).await?;
     if let Some(seq) = last_checkpoint_seq {
         info!("Resuming gRPC stream from checkpoint sequence {seq}");
     }
@@ -398,6 +398,7 @@ async fn run_grpc_stream(
                     }
 
                     save_grpc_cursor(source_id, seq, &state_store).await?;
+                    last_checkpoint_seq = Some(seq);
                 }
                 Ok(None) => {
                     warn!("gRPC checkpoint stream ended for '{source_id}', reconnecting...");
