@@ -68,7 +68,6 @@
 //!     .build()?;
 //! ```
 
-pub mod auth;
 pub mod client;
 pub mod config;
 pub mod descriptor;
@@ -91,7 +90,6 @@ use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
 
-use crate::auth::TokenManager;
 use crate::client::DataverseClient;
 use crate::types::{parse_delta_changes, DataverseChange};
 
@@ -142,6 +140,22 @@ impl DataverseSource {
     /// * `id` - Unique identifier for this source instance
     pub fn builder(id: impl Into<String>) -> DataverseSourceBuilder {
         DataverseSourceBuilder::new(id)
+    }
+
+    /// Compute the OAuth2 scope for a Dataverse environment URL.
+    ///
+    /// Dataverse expects scopes of the form `<scheme>://<host>/.default`,
+    /// derived strictly from the environment URL's origin (any path or
+    /// trailing slash is dropped). When the URL fails to parse we fall back
+    /// to `<env>/.default`, mirroring the previous behaviour.
+    pub(crate) fn dataverse_scope(environment_url: &str) -> String {
+        match url::Url::parse(environment_url) {
+            Ok(url) => match url.host_str() {
+                Some(host) => format!("{}://{}/.default", url.scheme(), host),
+                None => format!("{}/.default", environment_url.trim_end_matches('/')),
+            },
+            Err(_) => format!("{}/.default", environment_url.trim_end_matches('/')),
+        }
     }
 
     /// Compute the next polling interval given the current interval and whether
@@ -492,8 +506,8 @@ impl DataverseSource {
                     .get("modifiedon")
                     .and_then(|v| v.as_str())
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.timestamp_millis() as u64)
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64);
+                    .map(|dt| dt.timestamp_millis().max(0) as u64)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
 
                 let element_id = format!("{entity_name}:{id}");
                 let metadata = ElementMetadata {
@@ -515,7 +529,7 @@ impl DataverseSource {
                     reference: ElementReference::new(source_id, &element_id),
                     labels: Arc::from(vec![Arc::from(entity_name.as_str())]),
                     // Deleted records don't carry attributes, so use current time.
-                    effective_from: chrono::Utc::now().timestamp_millis() as u64,
+                    effective_from: chrono::Utc::now().timestamp_millis().max(0) as u64,
                 };
 
                 SourceChange::Delete { metadata }
@@ -641,27 +655,31 @@ impl Source for DataverseSource {
         let base_url = self.config.environment_url.clone();
 
         // Build the identity provider for token acquisition.
-        // Priority: explicit identity_provider > Azure CLI > client credentials
+        // Priority: explicit identity_provider > Azure CLI / Developer Tools > client credentials.
+        //
+        // Both internal paths delegate to `AzureIdentityProvider` (which wraps
+        // `azure_identity` from the Azure SDK for Rust) so token acquisition,
+        // caching, and refresh stay in one well-maintained place.
         let provider: Arc<dyn IdentityProvider> = if let Some(ref ip) = self.identity_provider {
             Arc::from(ip.clone_box())
         } else if self.config.use_azure_cli {
             log::info!(
-                "[{}] Using Azure CLI authentication (TokenManager)",
+                "[{}] Using Azure developer tools (CLI / azd / VS) for authentication",
                 self.base.id
             );
-            Arc::new(TokenManager::azure_cli(&base_url)?)
+            let azure_provider =
+                drasi_identity_azure::AzureIdentityProvider::with_default_credentials("dataverse")?
+                    .with_scope(Self::dataverse_scope(&base_url));
+            Arc::new(azure_provider)
         } else {
-            let token_url = format!(
-                "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-                self.config.tenant_id
-            );
-            Arc::new(TokenManager::with_token_url(
+            let azure_provider = drasi_identity_azure::AzureIdentityProvider::with_client_secret(
+                "dataverse",
                 &self.config.tenant_id,
                 &self.config.client_id,
                 &self.config.client_secret,
-                &base_url,
-                &token_url,
-            )?)
+            )?
+            .with_scope(Self::dataverse_scope(&base_url));
+            Arc::new(azure_provider)
         };
 
         let client = Arc::new(DataverseClient::new(
@@ -1546,7 +1564,10 @@ mod tests {
                     next > current || next == max,
                     "interval should grow or hit the cap (was {current}, became {next})"
                 );
-                assert!(next <= max, "interval must never exceed max ({next} > {max})");
+                assert!(
+                    next <= max,
+                    "interval must never exceed max ({next} > {max})"
+                );
                 current = next;
                 steps += 1;
                 assert!(steps < 100, "backoff failed to converge");
@@ -1590,7 +1611,10 @@ mod tests {
         async fn load_returns_none_on_empty_store() {
             let s = store();
             let result = DataverseSource::load_delta_token(&s, "src-1", "account").await;
-            assert!(result.is_none(), "no checkpoint should be present initially");
+            assert!(
+                result.is_none(),
+                "no checkpoint should be present initially"
+            );
         }
 
         #[tokio::test]
@@ -1609,11 +1633,15 @@ mod tests {
             DataverseSource::save_delta_token(&s, "src-1", "contact", "token-B").await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                DataverseSource::load_delta_token(&s, "src-1", "account")
+                    .await
+                    .as_deref(),
                 Some("token-A")
             );
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "contact").await.as_deref(),
+                DataverseSource::load_delta_token(&s, "src-1", "contact")
+                    .await
+                    .as_deref(),
                 Some("token-B")
             );
         }
@@ -1625,11 +1653,15 @@ mod tests {
             DataverseSource::save_delta_token(&s, "src-2", "account", "token-B").await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                DataverseSource::load_delta_token(&s, "src-1", "account")
+                    .await
+                    .as_deref(),
                 Some("token-A")
             );
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-2", "account").await.as_deref(),
+                DataverseSource::load_delta_token(&s, "src-2", "account")
+                    .await
+                    .as_deref(),
                 Some("token-B")
             );
         }
@@ -1641,7 +1673,9 @@ mod tests {
             DataverseSource::save_delta_token(&s, "src-1", "account", "token-new").await;
 
             assert_eq!(
-                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                DataverseSource::load_delta_token(&s, "src-1", "account")
+                    .await
+                    .as_deref(),
                 Some("token-new")
             );
         }

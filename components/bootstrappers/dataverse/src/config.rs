@@ -60,6 +60,7 @@ pub struct DataverseBootstrapConfig {
 
     /// Use Azure CLI (`az account get-access-token`) for authentication.
     /// When true, `tenant_id`, `client_id`, and `client_secret` are not required.
+    /// Requires `az login` to have been run beforehand.
     pub use_azure_cli: bool,
 
     /// Entity logical names to bootstrap (e.g., ["account", "contact"])

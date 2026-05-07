@@ -66,7 +66,6 @@ use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use log::{debug, info, warn};
-use url::Url;
 
 use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
@@ -105,136 +104,45 @@ impl DataverseBootstrapProvider {
     ///
     /// Priority:
     /// 1. Identity provider (if set) — delegates to `get_credentials()`
-    /// 2. Azure CLI (`az account get-access-token`) when `use_azure_cli` is true
-    /// 3. OAuth2 client credentials flow
-    async fn get_token(&self, http_client: &reqwest::Client) -> Result<String> {
+    /// 2. Azure developer tools (CLI / azd / VS) when `use_azure_cli` is true
+    /// 3. OAuth2 client credentials (service principal)
+    ///
+    /// The internal paths delegate to `drasi-identity-azure`'s
+    /// `AzureIdentityProvider`, which wraps `azure_identity` from the Azure
+    /// SDK for Rust. This keeps OAuth2 flow handling, token caching, and
+    /// developer-tool integration in one well-maintained place rather than
+    /// reimplementing them here.
+    async fn get_token(&self) -> Result<String> {
         if let Some(ref provider) = self.identity_provider {
-            // Derive scope from environment URL so the identity provider
-            // can acquire a Dataverse-specific token automatically.
-            let scope = url::Url::parse(&self.config.environment_url)
-                .map(|u| {
-                    let host = u.host_str().unwrap_or_default();
-                    format!("{}://{}/.default", u.scheme(), host)
-                })
-                .unwrap_or_else(|_| format!("{}/.default", self.config.environment_url));
-            let context =
-                drasi_lib::identity::CredentialContext::new().with_property("scope", &scope);
-            let creds = provider.get_credentials(&context).await?;
-            return match creds {
-                Credentials::Token { token, .. } => Ok(token),
-                _ => Err(anyhow::anyhow!(
-                    "Dataverse bootstrap requires Token credentials from identity provider"
-                )),
-            };
+            return self.get_token_from_provider(provider.as_ref()).await;
         }
-        if self.config.use_azure_cli {
-            self.get_token_azure_cli().await
+
+        let azure_provider = if self.config.use_azure_cli {
+            drasi_identity_azure::AzureIdentityProvider::with_default_credentials("dataverse")?
+                .with_scope(dataverse_scope(&self.config.environment_url))
         } else {
-            self.get_token_client_credentials(http_client).await
-        }
-    }
-
-    /// Obtain a token via Azure CLI.
-    async fn get_token_azure_cli(&self) -> Result<String> {
-        // Normalize environment_url to scheme://host for the Azure AD resource.
-        // A trailing slash or path components would cause `az` to return a token
-        // for the wrong audience.
-        let resource = match url::Url::parse(&self.config.environment_url) {
-            Ok(url) => match (url.scheme(), url.host_str()) {
-                (scheme, Some(host)) if !scheme.is_empty() && !host.is_empty() => {
-                    format!("{scheme}://{host}")
-                }
-                _ => {
-                    warn!(
-                        "Dataverse environment_url '{}' could not be normalized; using as-is",
-                        self.config.environment_url
-                    );
-                    self.config.environment_url.clone()
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to parse environment_url '{}' ({}); using as-is",
-                    self.config.environment_url, e
-                );
-                self.config.environment_url.clone()
-            }
+            drasi_identity_azure::AzureIdentityProvider::with_client_secret(
+                "dataverse",
+                &self.config.tenant_id,
+                &self.config.client_id,
+                &self.config.client_secret,
+            )?
+            .with_scope(dataverse_scope(&self.config.environment_url))
         };
-
-        let output = tokio::process::Command::new("az")
-            .args([
-                "account",
-                "get-access-token",
-                "--resource",
-                &resource,
-                "--output",
-                "json",
-            ])
-            .output()
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to run 'az account get-access-token'. Is Azure CLI installed and are you logged in? Error: {e}"
-                )
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Azure CLI token request failed: {stderr}"));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let json: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Azure CLI token response: {e}"))?;
-
-        json.get("accessToken")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("No accessToken in Azure CLI response"))
+        self.get_token_from_provider(&azure_provider).await
     }
 
-    /// Fetch an OAuth2 token using client credentials.
-    async fn get_token_client_credentials(&self, http_client: &reqwest::Client) -> Result<String> {
-        let token_url = format!(
-            "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-            self.config.tenant_id
-        );
-
-        // Derive the resource as scheme://host (e.g., https://org.crm.dynamics.com)
-        // to avoid issues with trailing slashes or paths when building the scope.
-        let resource = Url::parse(&self.config.environment_url)
-            .map(|u| {
-                let host = u.host_str().unwrap_or_default();
-                format!("{}://{}", u.scheme(), host)
-            })
-            .unwrap_or_else(|_| {
-                self.config
-                    .environment_url
-                    .trim_end_matches('/')
-                    .to_string()
-            });
-
-        let scope = format!("{resource}/.default");
-
-        let params = [
-            ("grant_type", "client_credentials"),
-            ("client_id", &self.config.client_id),
-            ("client_secret", &self.config.client_secret),
-            ("scope", &scope),
-        ];
-
-        let resp = http_client
-            .post(&token_url)
-            .form(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let body: serde_json::Value = resp.json().await?;
-        body.get("access_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("No access_token in token response"))
+    /// Acquire a Dataverse-scoped token from any `IdentityProvider`.
+    async fn get_token_from_provider(&self, provider: &dyn IdentityProvider) -> Result<String> {
+        let scope = dataverse_scope(&self.config.environment_url);
+        let context = drasi_lib::identity::CredentialContext::new().with_property("scope", &scope);
+        let creds = provider.get_credentials(&context).await?;
+        match creds {
+            Credentials::Token { token, .. } => Ok(token),
+            _ => Err(anyhow::anyhow!(
+                "Dataverse bootstrap requires Token credentials from identity provider"
+            )),
+        }
     }
 
     /// Fetch all records from an entity set, with pagination.
@@ -354,7 +262,7 @@ impl DataverseBootstrapProvider {
         let metadata = ElementMetadata {
             reference: ElementReference::new(source_id, &element_id),
             labels: Arc::from(vec![Arc::from(entity_name)]),
-            effective_from: chrono::Utc::now().timestamp_millis() as u64,
+            effective_from: chrono::Utc::now().timestamp_millis().max(0) as u64,
         };
 
         Some(SourceChange::Insert {
@@ -384,7 +292,7 @@ impl BootstrapProvider for DataverseBootstrapProvider {
         let http_client = reqwest::Client::new();
 
         // Get authentication token
-        let token = self.get_token(&http_client).await?;
+        let token = self.get_token().await?;
 
         // Determine which entities to bootstrap
         // Filter based on requested labels - if the query wants 'account', only bootstrap 'account'
@@ -457,6 +365,22 @@ impl BootstrapProvider for DataverseBootstrapProvider {
             event_count: total_count,
             ..Default::default()
         })
+    }
+}
+
+/// Compute the OAuth2 scope for a Dataverse environment URL.
+///
+/// Dataverse expects scopes of the form `<scheme>://<host>/.default`,
+/// derived strictly from the environment URL's origin (any path or trailing
+/// slash is dropped). When the URL fails to parse we fall back to
+/// `<env>/.default`, mirroring previous behaviour.
+fn dataverse_scope(environment_url: &str) -> String {
+    match url::Url::parse(environment_url) {
+        Ok(url) => match url.host_str() {
+            Some(host) => format!("{}://{}/.default", url.scheme(), host),
+            None => format!("{}/.default", environment_url.trim_end_matches('/')),
+        },
+        Err(_) => format!("{}/.default", environment_url.trim_end_matches('/')),
     }
 }
 
@@ -918,7 +842,7 @@ mod tests {
     mod bootstrap_e2e {
         use super::*;
         use async_trait::async_trait;
-        use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapProvider};
+        use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
         use drasi_lib::channels::BootstrapEvent;
         use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
         use serde_json::json;
@@ -1000,10 +924,8 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(16);
-            let ctx = BootstrapContext::new_minimal(
-                "test-server".to_string(),
-                "test-source".to_string(),
-            );
+            let ctx =
+                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
             let request = make_request("q-1", Vec::new());
 
             let result = provider
@@ -1023,9 +945,7 @@ mod tests {
                 .iter()
                 .map(|e| match &e.change {
                     SourceChange::Insert { element } => match element {
-                        Element::Node { metadata, .. } => {
-                            metadata.reference.element_id.to_string()
-                        }
+                        Element::Node { metadata, .. } => metadata.reference.element_id.to_string(),
                         _ => panic!("expected Node element"),
                     },
                     other => panic!("expected Insert, got {other:?}"),
@@ -1072,10 +992,8 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(8);
-            let ctx = BootstrapContext::new_minimal(
-                "test-server".to_string(),
-                "test-source".to_string(),
-            );
+            let ctx =
+                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
             // Only request `account` — `contact` should be skipped entirely.
             let request = make_request("q-1", vec!["account".to_string()]);
 
@@ -1090,10 +1008,7 @@ mod tests {
             match &events[0].change {
                 SourceChange::Insert { element } => match element {
                     Element::Node { metadata, .. } => {
-                        assert_eq!(
-                            metadata.reference.element_id.as_ref(),
-                            "account:id-1"
-                        );
+                        assert_eq!(metadata.reference.element_id.as_ref(), "account:id-1");
                     }
                     _ => panic!("expected Node"),
                 },
@@ -1114,10 +1029,8 @@ mod tests {
                 .expect("provider should build");
 
             let (tx, rx) = mpsc::channel(8);
-            let ctx = BootstrapContext::new_minimal(
-                "test-server".to_string(),
-                "test-source".to_string(),
-            );
+            let ctx =
+                BootstrapContext::new_minimal("test-server".to_string(), "test-source".to_string());
             // Request a label that the provider isn't configured for.
             let request = make_request("q-1", vec!["unrelated".to_string()]);
 

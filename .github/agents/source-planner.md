@@ -79,7 +79,7 @@ Before designing custom authentication logic, review the shared identity abstrac
 4. Fall back to config-based credentials (client_id/secret, connection string, etc.) when no identity provider is set.
 5. Only implement custom auth logic if no existing provider fits.
 
-**Reference implementations:** See how `storedproc-postgres` and `storedproc-mssql` reactions use `with_identity_provider()`, and how the Dataverse source (`components/sources/dataverse/src/auth.rs`) implements `IdentityProvider` on its `TokenManager` for backward compatibility.
+**Reference implementations:** See how `storedproc-postgres` and `storedproc-mssql` reactions use `with_identity_provider()`, and how the Dataverse source (`components/sources/dataverse/src/lib.rs`) constructs an `AzureIdentityProvider` (via `with_default_credentials` or `with_client_secret`) and passes it to the HTTP client — extend `AzureIdentityProvider` rather than reimplementing OAuth2/CLI flows.
 
 ### 4. Determine Data Mapping Strategies
 

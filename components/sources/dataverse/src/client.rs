@@ -54,12 +54,7 @@ impl DataverseClient {
     ) -> Self {
         let base_url = environment_url.trim_end_matches('/').to_string();
         // Derive scope from the environment URL: https://myorg.crm.dynamics.com -> https://myorg.crm.dynamics.com/.default
-        let scope = if let Ok(url) = url::Url::parse(&base_url) {
-            let host = url.host_str().unwrap_or_default();
-            format!("{}://{}/.default", url.scheme(), host)
-        } else {
-            format!("{base_url}/.default")
-        };
+        let scope = crate::DataverseSource::dataverse_scope(&base_url);
         Self {
             base_url,
             api_version: api_version.to_string(),
@@ -283,8 +278,8 @@ impl DataverseClient {
     /// to an arbitrary host — e.g., the cloud metadata service at
     /// `169.254.169.254` (SSRF).
     fn ensure_same_origin(&self, link: &str, kind: &str) -> Result<()> {
-        let parsed = url::Url::parse(link)
-            .with_context(|| format!("{kind} is not a valid URL: {link}"))?;
+        let parsed =
+            url::Url::parse(link).with_context(|| format!("{kind} is not a valid URL: {link}"))?;
         let base = url::Url::parse(&self.base_url)
             .with_context(|| format!("client base_url is not a valid URL: {}", self.base_url))?;
 
@@ -298,10 +293,7 @@ impl DataverseClient {
                 "{kind} origin '{}://{}{}' does not match configured Dataverse environment '{}'",
                 parsed.scheme(),
                 parsed.host_str().unwrap_or(""),
-                parsed
-                    .port()
-                    .map(|p| format!(":{p}"))
-                    .unwrap_or_default(),
+                parsed.port().map(|p| format!(":{p}")).unwrap_or_default(),
                 self.base_url,
             );
         }

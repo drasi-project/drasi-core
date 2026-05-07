@@ -32,6 +32,7 @@ use std::collections::HashMap;
 /// - `environment_url`: The Dataverse environment URL (e.g., `https://myorg.crm.dynamics.com`)
 /// - `entities`: List of entity logical names to monitor (e.g., `["account", "contact"]`)
 /// - Authentication (one of):
+///   - Identity provider via [`DataverseSource::builder`] `.with_identity_provider()` (recommended)
 ///   - `tenant_id` + `client_id` + `client_secret` for client credentials flow
 ///   - `use_azure_cli = true` for Azure CLI authentication (local dev)
 ///

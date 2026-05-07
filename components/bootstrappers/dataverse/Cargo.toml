@@ -31,6 +31,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 drasi-lib = { workspace = true }
 drasi-core = { workspace = true }
+drasi-identity-azure = { workspace = true }
 
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
