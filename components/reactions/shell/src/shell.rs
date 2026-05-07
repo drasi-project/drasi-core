@@ -59,7 +59,7 @@ impl ShellReaction {
         // validate the config
         Self::validate_config(&config, &queries)?;
 
-        let mut params = ReactionBaseParams::new(id, queries);
+        let mut params = ReactionBaseParams::new(id.clone(), queries);
         if let Some(cap) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(cap);
         }
@@ -68,8 +68,10 @@ impl ShellReaction {
             params = params.with_auto_start(auto);
         }
 
+        let executor = ShellExecutor::new(id, config.clone());
+
         Ok(
-            Self { base: ReactionBase::new(params), executor: ShellExecutor::new(config.clone()) }
+            Self { base: ReactionBase::new(params), executor }
         )
     }
 
@@ -115,10 +117,14 @@ impl Reaction for ShellReaction {
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
         // Start the processing task
-        let executor_clone = self.executor.clone();
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
 
+        // Start executor processing loop in a separate task
+        let processing_task_handle = self.executor.start_processing_loop(priority_queue, shutdown_rx)?;
+
+        // Set the processing task handle
+        self.base.set_processing_task(processing_task_handle).await;
 
         // Transition to running
         self.base.set_status(ComponentStatus::Running, Some("Shell Reaction is running".to_string())).await;
