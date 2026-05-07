@@ -42,6 +42,7 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
+use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -1246,6 +1247,9 @@ pub struct QueryManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Cached query labels extracted at registration time to avoid re-parsing
+    /// queries on every `get_graph_schema()` call.
+    label_cache: RwLock<HashMap<String, QueryLabels>>,
 }
 
 impl QueryManager {
@@ -1266,6 +1270,7 @@ impl QueryManager {
             log_registry,
             graph,
             update_tx,
+            label_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1285,6 +1290,20 @@ impl QueryManager {
     pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
         let query_id = query.get_config().id.clone();
 
+        // Cache labels from the query config
+        let config = query.get_config();
+        match LabelExtractor::extract_labels(&config.query, &config.query_language) {
+            Ok(labels) => {
+                self.label_cache
+                    .write()
+                    .await
+                    .insert(query_id.clone(), labels);
+            }
+            Err(e) => {
+                warn!("Failed to extract labels for test query '{query_id}': {e}");
+            }
+        }
+
         let mut graph = self.graph.write().await;
         if graph.has_runtime(&query_id) {
             return Err(anyhow::anyhow!("Query with id '{query_id}' already exists"));
@@ -1300,6 +1319,22 @@ impl QueryManager {
     /// Graph registration (node creation, dependency edges) must be done by the caller
     /// beforehand via `ComponentGraph::register_query()`.
     pub async fn provision_query(&self, config: QueryConfig) -> Result<()> {
+        // Cache labels at registration time to avoid re-parsing on every get_graph_schema() call
+        match LabelExtractor::extract_labels(&config.query, &config.query_language) {
+            Ok(labels) => {
+                self.label_cache
+                    .write()
+                    .await
+                    .insert(config.id.clone(), labels);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to extract labels for query '{}': {e}",
+                    config.id
+                );
+            }
+        }
+
         // Create the query instance
         let query = DrasiQuery::new(
             &self.instance_id,
@@ -1468,6 +1503,7 @@ impl QueryManager {
     ///
     /// The caller should validate dependencies via `graph.can_remove()` before calling this.
     pub async fn teardown_query(&self, id: String) -> Result<()> {
+        self.label_cache.write().await.remove(&id);
         crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Query>, _, _>(
             &self.graph,
             &id,
@@ -1492,6 +1528,19 @@ impl QueryManager {
         graph
             .get_runtime::<Arc<dyn Query>>(id)
             .map(|q| q.get_config().clone())
+    }
+
+    /// Return all cached query labels as (query_id, labels) pairs.
+    ///
+    /// Labels are extracted at query registration time and cached to avoid
+    /// re-parsing the query string on every `get_graph_schema()` call.
+    pub async fn get_all_query_labels(&self) -> Vec<(String, QueryLabels)> {
+        self.label_cache
+            .read()
+            .await
+            .iter()
+            .map(|(id, labels)| (id.clone(), labels.clone()))
+            .collect()
     }
 
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {

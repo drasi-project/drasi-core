@@ -178,27 +178,15 @@ impl InspectionAPI {
             }
         }
 
-        for (query_id, _) in self.query_manager.list_queries().await {
-            if let Some(config) = self.query_manager.get_query_config(&query_id).await {
-                match crate::queries::label_extractor::LabelExtractor::extract_labels(
-                    &config.query,
-                    &config.query_language,
-                ) {
-                    Ok(labels) => {
-                        schema.mark_queried_nodes(
-                            labels.node_labels.iter().map(|label| label.as_str()),
-                            &query_id,
-                        );
-                        schema.mark_queried_relations(
-                            labels.relation_labels.iter().map(|label| label.as_str()),
-                            &query_id,
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to extract labels for query '{query_id}': {e}");
-                    }
-                }
-            }
+        for (query_id, labels) in self.query_manager.get_all_query_labels().await {
+            schema.mark_queried_nodes(
+                labels.node_labels.iter().map(|label| label.as_str()),
+                &query_id,
+            );
+            schema.mark_queried_relations(
+                labels.relation_labels.iter().map(|label| label.as_str()),
+                &query_id,
+            );
         }
 
         Ok(schema)
