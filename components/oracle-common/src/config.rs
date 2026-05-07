@@ -50,6 +50,7 @@ pub fn validate_sql_identifier(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Authentication mode for Oracle connections.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMode {
@@ -65,6 +66,10 @@ impl std::fmt::Display for AuthMode {
     }
 }
 
+/// Determines where the Oracle source begins reading changes.
+///
+/// - `Beginning`: Starts from the earliest available archived log SCN.
+/// - `Current`: Starts from the current database SCN (default).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StartPosition {
@@ -73,6 +78,10 @@ pub enum StartPosition {
     Current,
 }
 
+/// SSL/TLS mode for Oracle connections.
+///
+/// - `Disable`: Plain TCP connection (default).
+/// - `Require`: Uses `tcps://` protocol in the connect string.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SslMode {
@@ -90,33 +99,54 @@ impl std::fmt::Display for SslMode {
     }
 }
 
+/// Explicit primary key override for a table.
+///
+/// Use this when a table lacks a primary key constraint or when the
+/// auto-discovered key columns are not appropriate for element ID generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableKeyConfig {
+    /// Fully qualified table name, optionally including the schema.
     pub table: String,
+    /// Columns that should be used as the table's primary key.
     pub key_columns: Vec<String>,
 }
 
+/// Configuration for Oracle source and bootstrap providers.
+///
+/// The `database` field (aliased as `service`) specifies the Oracle service name
+/// used in the connection string.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OracleSourceConfig {
+    /// Oracle server hostname.
     #[serde(default = "default_host")]
     pub host: String,
+    /// Oracle listener port.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Oracle service name used in the connection string.
     #[serde(default = "default_database", alias = "service")]
     pub database: String,
+    /// Database username for authentication.
     pub user: String,
+    /// Database password for authentication.
     #[serde(default)]
     pub password: String,
+    /// Authentication mode for the connection.
     #[serde(default)]
     pub auth_mode: AuthMode,
+    /// Tables to monitor or bootstrap.
     #[serde(default)]
     pub tables: Vec<String>,
+    /// Polling interval for LogMiner in milliseconds.
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Optional primary key overrides for configured tables.
     #[serde(default)]
     pub table_keys: Vec<TableKeyConfig>,
+    /// Initial LogMiner position for the source.
     #[serde(default)]
     pub start_position: StartPosition,
+    /// SSL/TLS mode for Oracle connections.
     #[serde(default)]
     pub ssl_mode: SslMode,
 }

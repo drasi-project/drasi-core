@@ -51,6 +51,10 @@ properties:
     - HR.EMPLOYEES
   poll_interval_ms: 1000
   start_position: current
+  ssl_mode: disable          # disable | require
+  table_keys:                # optional: override primary-key discovery
+    - table: HR.EMPLOYEES
+      key_columns: [EMPLOYEE_ID]
 ```
 
 ## Behavior

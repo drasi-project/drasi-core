@@ -18,7 +18,8 @@ You also need **Docker** to run the Oracle container used by `setup.sh`.
 
 ```bash
 ./setup.sh
-export DYLD_LIBRARY_PATH=$HOME/oracle/instantclient_23_3:$DYLD_LIBRARY_PATH  # adjust path as needed
+export DYLD_LIBRARY_PATH=$HOME/oracle/instantclient_23_3:$DYLD_LIBRARY_PATH  # macOS — adjust path as needed
+# Linux: export LD_LIBRARY_PATH=/opt/oracle/instantclient_23_3:$LD_LIBRARY_PATH
 export ORACLE_PORT=1522
 cargo run --manifest-path ./Cargo.toml
 ```

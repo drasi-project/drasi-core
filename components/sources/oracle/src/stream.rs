@@ -51,6 +51,7 @@ enum OracleOperation {
 struct OracleChangeEvent {
     commit_scn: Scn,
     scn: Scn,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
     operation: OracleOperation,
     schema_name: String,
     table_name: String,
@@ -143,7 +144,11 @@ async fn run_stream_session(
     });
 
     while let Some(batch) = rx.recv().await {
-        dispatch_batch(&source_id, &dispatchers, batch).await?;
+        if let Err(error) = dispatch_batch(&source_id, &dispatchers, batch).await {
+            drop(rx);
+            let _ = worker.await;
+            return Err(error);
+        }
     }
 
     worker
@@ -396,11 +401,16 @@ fn make_insert_or_update_change(
     let label = event.table_name.to_lowercase();
     let element_id =
         pk_cache.make_element_id(&event.schema_name, &event.table_name, &properties)?;
+    let effective_from = event
+        .timestamp
+        .as_ref()
+        .map(|timestamp| timestamp.timestamp_millis() as u64)
+        .unwrap_or(0);
     let element = Element::Node {
         metadata: ElementMetadata {
             reference: ElementReference::new(source_id, &element_id),
             labels: Arc::from([Arc::from(label.as_str())]),
-            effective_from: 0,
+            effective_from,
         },
         properties,
     };
@@ -420,11 +430,16 @@ fn make_delete_change(
 ) -> Result<SourceChange> {
     let label = event.table_name.to_lowercase();
     let element_id = pk_cache.make_element_id(&event.schema_name, &event.table_name, properties)?;
+    let effective_from = event
+        .timestamp
+        .as_ref()
+        .map(|timestamp| timestamp.timestamp_millis() as u64)
+        .unwrap_or(0);
     Ok(SourceChange::Delete {
         metadata: ElementMetadata {
             reference: ElementReference::new(source_id, &element_id),
             labels: Arc::from([Arc::from(label.as_str())]),
-            effective_from: 0,
+            effective_from,
         },
     })
 }
@@ -513,9 +528,9 @@ fn resolve_initial_scn(conn: &Connection, start_position: StartPosition) -> Resu
 fn get_current_scn(conn: &Connection) -> Result<Scn> {
     let row = conn.query_row("SELECT CURRENT_SCN FROM V$DATABASE", &[])?;
     let scn: i64 = row.get(0)?;
-    if scn < 0 {
+    if scn <= 0 {
         return Err(anyhow::anyhow!(
-            "V$DATABASE returned negative SCN ({scn}); cannot proceed"
+            "V$DATABASE returned non-positive CURRENT_SCN ({scn}); cannot proceed"
         ));
     }
     Ok(Scn(scn as u64))
@@ -564,7 +579,7 @@ fn poll_logminer(
     let mut guard = LogMinerGuard::new(conn, start_scn, end_scn)?;
 
     let query = format!(
-        "SELECT SCN, COMMIT_SCN, OPERATION_CODE, SEG_OWNER, SEG_NAME, SQL_UNDO, ROW_ID
+        "SELECT SCN, COMMIT_SCN, OPERATION_CODE, SEG_OWNER, SEG_NAME, SQL_UNDO, ROW_ID, TIMESTAMP
          FROM V$LOGMNR_CONTENTS
          WHERE OPERATION_CODE IN (1, 2, 3)
            AND COMMIT_SCN > {}
@@ -587,6 +602,21 @@ fn poll_logminer(
         let table_name: String = row.get(4)?;
         let sql_undo: Option<String> = row.get(5)?;
         let row_id: Option<String> = row.get(6)?;
+        let timestamp: Option<oracle::sql_type::Timestamp> = row.get(7)?;
+        let timestamp = timestamp.and_then(|timestamp| {
+            let date = chrono::NaiveDate::from_ymd_opt(
+                timestamp.year(),
+                timestamp.month(),
+                timestamp.day(),
+            )?;
+            let time = chrono::NaiveTime::from_hms_nano_opt(
+                timestamp.hour(),
+                timestamp.minute(),
+                timestamp.second(),
+                timestamp.nanosecond(),
+            )?;
+            Some(chrono::NaiveDateTime::new(date, time).and_utc())
+        });
 
         let commit_scn = Scn(commit_scn as u64);
         if commit_scn > max_commit_scn {
@@ -596,6 +626,7 @@ fn poll_logminer(
         events.push(OracleChangeEvent {
             commit_scn,
             scn: Scn(scn as u64),
+            timestamp,
             operation: match operation_code {
                 1 => OracleOperation::Insert,
                 2 => OracleOperation::Delete,
@@ -728,6 +759,7 @@ mod tests {
         let event = OracleChangeEvent {
             commit_scn: Scn(2),
             scn: Scn(2),
+            timestamp: None,
             operation: OracleOperation::Update,
             schema_name: "HR".to_string(),
             table_name: "EMPLOYEES".to_string(),

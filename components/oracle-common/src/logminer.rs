@@ -17,6 +17,11 @@
 use crate::scn::Scn;
 use anyhow::{anyhow, Result};
 use oracle::Connection;
+use sqlparser::{
+    ast::{AssignmentTarget, Expr, SetExpr, Statement},
+    dialect::GenericDialect,
+    parser::Parser,
+};
 use std::collections::HashMap;
 
 pub struct LogMinerGuard<'a> {
@@ -54,37 +59,46 @@ impl Drop for LogMinerGuard<'_> {
 }
 
 pub fn parse_sql_undo_insert(sql_undo: &str) -> Result<HashMap<String, String>> {
-    let col_start = sql_undo
-        .find('(')
-        .ok_or_else(|| anyhow!("No '(' found in SQL_UNDO: {sql_undo}"))?;
-    let col_end = sql_undo[col_start..]
-        .find(')')
-        .ok_or_else(|| anyhow!("No ')' found in SQL_UNDO column list: {sql_undo}"))?
-        + col_start;
-    let columns = &sql_undo[col_start + 1..col_end];
+    let statement = parse_sql_undo_statement(sql_undo, "INSERT")?;
 
-    let values_index = sql_undo
-        .to_uppercase()
-        .find("VALUES")
-        .ok_or_else(|| anyhow!("No VALUES clause found in SQL_UNDO: {sql_undo}"))?;
-    let value_start = sql_undo[values_index..]
-        .find('(')
-        .ok_or_else(|| anyhow!("No '(' found after VALUES in SQL_UNDO: {sql_undo}"))?
-        + values_index;
-    let value_end = sql_undo
-        .rfind(')')
-        .ok_or_else(|| anyhow!("No closing ')' found in SQL_UNDO: {sql_undo}"))?;
-    let values = &sql_undo[value_start + 1..value_end];
+    let (column_names, parsed_values) = match statement {
+        Statement::Insert(insert) => {
+            let column_names = insert
+                .columns
+                .iter()
+                .map(|column| normalize_sql_name(&column.to_string()))
+                .collect::<Vec<_>>();
 
-    let column_names = columns
-        .split(',')
-        .map(|column| column.trim().trim_matches('"').to_lowercase())
-        .collect::<Vec<_>>();
-    let parsed_values = split_sql_values(values);
+            let rows = match insert.source.as_ref().map(|query| query.body.as_ref()) {
+                Some(SetExpr::Values(values)) => &values.rows,
+                _ => {
+                    return Err(anyhow!(
+                        "SQL_UNDO INSERT has no VALUES clause (len={})",
+                        sql_undo.len()
+                    ))
+                }
+            };
+
+            let row = rows.first().ok_or_else(|| {
+                anyhow!("SQL_UNDO INSERT VALUES is empty (len={})", sql_undo.len())
+            })?;
+
+            (
+                column_names,
+                row.iter().map(expr_to_sql_string).collect::<Vec<_>>(),
+            )
+        }
+        _ => {
+            return Err(anyhow!(
+                "SQL_UNDO is not an INSERT statement (len={})",
+                sql_undo.len()
+            ))
+        }
+    };
 
     if column_names.len() != parsed_values.len() {
         return Err(anyhow!(
-            "SQL_UNDO column count {} does not match value count {}: {sql_undo}",
+            "SQL_UNDO INSERT column count {} does not match value count {}",
             column_names.len(),
             parsed_values.len()
         ));
@@ -94,28 +108,53 @@ pub fn parse_sql_undo_insert(sql_undo: &str) -> Result<HashMap<String, String>> 
 }
 
 pub fn parse_sql_undo_update(sql_undo: &str) -> Result<HashMap<String, String>> {
-    let upper = sql_undo.to_uppercase();
-    let set_index = upper
-        .find(" SET ")
-        .ok_or_else(|| anyhow!("No SET clause found in SQL_UNDO: {sql_undo}"))?;
-    let where_index = upper[set_index + 5..]
-        .find(" WHERE ")
-        .map(|index| index + set_index + 5)
-        .unwrap_or(sql_undo.len());
-    let assignments = &sql_undo[set_index + 5..where_index];
+    let statement = parse_sql_undo_statement(sql_undo, "UPDATE")?;
+
+    let assignments = match statement {
+        Statement::Update { assignments, .. } => assignments,
+        _ => {
+            return Err(anyhow!(
+                "SQL_UNDO is not an UPDATE statement (len={})",
+                sql_undo.len()
+            ))
+        }
+    };
 
     let mut parsed = HashMap::new();
-    for assignment in split_sql_values(assignments) {
-        let (column, value) = assignment
-            .split_once('=')
-            .ok_or_else(|| anyhow!("Invalid assignment in SQL_UNDO: {assignment}"))?;
-        parsed.insert(
-            column.trim().trim_matches('"').to_lowercase(),
-            value.trim().to_string(),
-        );
+    for assignment in assignments {
+        let column = match assignment.target {
+            AssignmentTarget::ColumnName(column) => normalize_sql_name(&column.to_string()),
+            _ => continue,
+        };
+        parsed.insert(column, expr_to_sql_string(&assignment.value));
     }
 
     Ok(parsed)
+}
+
+fn parse_sql_undo_statement(sql_undo: &str, statement_kind: &str) -> Result<Statement> {
+    let dialect = GenericDialect {};
+    let statements = Parser::parse_sql(&dialect, sql_undo).map_err(|_| {
+        anyhow!(
+            "Failed to parse SQL_UNDO {statement_kind} (len={})",
+            sql_undo.len()
+        )
+    })?;
+
+    statements.into_iter().next().ok_or_else(|| {
+        anyhow!(
+            "Empty SQL_UNDO {statement_kind} statement (len={})",
+            sql_undo.len()
+        )
+    })
+}
+
+fn normalize_sql_name(name: &str) -> String {
+    name.trim().trim_matches('"').to_lowercase()
+}
+
+fn expr_to_sql_string(expr: &Expr) -> String {
+    expr.to_string()
 }
 
 pub fn split_sql_values(values: &str) -> Vec<String> {

@@ -16,6 +16,10 @@ bootstrap_provider:
   password: secret
   tables:
     - HR.EMPLOYEES
+  ssl_mode: disable          # disable | require
+  table_keys:                # optional: override primary-key discovery
+    - table: HR.EMPLOYEES
+      key_columns: [EMPLOYEE_ID]
 ```
 
 ## Notes

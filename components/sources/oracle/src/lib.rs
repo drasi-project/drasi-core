@@ -18,13 +18,6 @@
 pub mod descriptor;
 pub mod stream;
 
-pub use drasi_oracle_common::config;
-pub use drasi_oracle_common::connection;
-pub use drasi_oracle_common::error;
-pub use drasi_oracle_common::keys;
-pub use drasi_oracle_common::logminer;
-pub use drasi_oracle_common::scn;
-pub use drasi_oracle_common::types;
 pub use drasi_oracle_common::{
     validate_sql_identifier, AuthMode, OracleConnection, OracleError, OracleErrorKind,
     OracleSourceConfig, PrimaryKeyCache, Scn, SslMode, StartPosition, TableKeyConfig,

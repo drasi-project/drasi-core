@@ -34,6 +34,7 @@ log = "0.4"
 oracle = "0.6.3"
 ordered-float = "3.7.0"
 serde = { version = "1.0", features = ["derive"] }
+sqlparser = "0.55"
 thiserror = "1.0"
 
 [dev-dependencies]

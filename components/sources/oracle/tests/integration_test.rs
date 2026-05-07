@@ -183,7 +183,8 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
             .await
             .context("Failed to subscribe to ApplicationReaction")?;
 
-        sleep(Duration::from_secs(3)).await;
+        // Allow source time to establish connection and begin first LogMiner poll cycle.
+        sleep(Duration::from_secs(5)).await;
 
         log::info!("inserting product");
         insert_product(&oracle, 1, "Widget", 19.99)?;
@@ -225,6 +226,273 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Oracle integration test timed out after 300 seconds"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+#[serial]
+async fn test_oracle_start_position_beginning() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let oracle = setup_oracle()
+            .await
+            .context("Failed to start Oracle container")?;
+        prepare_oracle_database(&oracle)
+            .await
+            .context("Failed to prepare Oracle database")?;
+
+        insert_product(&oracle, 100, "PreExisting", 9.99)?;
+
+        let config = oracle.config().clone();
+        let bootstrap_provider = OracleBootstrapProvider::builder()
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .build()
+            .context("Failed to build Oracle bootstrap provider")?;
+
+        let source = OracleSource::builder(SOURCE_ID)
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .with_poll_interval_ms(1_000)
+            .with_start_position(StartPosition::Beginning)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build Oracle source")?;
+
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:drasi_products)
+                RETURN p.id AS id, p.name AS name, p.price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("oracle-beginning-reaction")
+            .with_query(QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("oracle-beginning-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut subscription = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to subscribe")?;
+
+        wait_for_change(&mut subscription, 10, |entry| {
+            matches_change(entry, "ADD", &[("id", "100"), ("name", "PreExisting")])
+        })
+        .await
+        .context("Pre-existing row not observed with start_position: beginning")?;
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        oracle.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("Oracle beginning test timed out after 300 seconds"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+#[serial]
+async fn test_oracle_checkpoint_resume() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let oracle = setup_oracle()
+            .await
+            .context("Failed to start Oracle container")?;
+        prepare_oracle_database(&oracle)
+            .await
+            .context("Failed to prepare Oracle database")?;
+
+        let config = oracle.config().clone();
+
+        {
+            let bootstrap_provider = OracleBootstrapProvider::builder()
+                .with_host(&config.host)
+                .with_port(config.port)
+                .with_service(&config.service)
+                .with_user(&config.user)
+                .with_password(&config.password)
+                .with_table(TABLE_NAME)
+                .build()
+                .context("Failed to build bootstrap provider (session 1)")?;
+
+            let source = OracleSource::builder(SOURCE_ID)
+                .with_host(&config.host)
+                .with_port(config.port)
+                .with_service(&config.service)
+                .with_user(&config.user)
+                .with_password(&config.password)
+                .with_table(TABLE_NAME)
+                .with_poll_interval_ms(1_000)
+                .with_start_position(StartPosition::Current)
+                .with_bootstrap_provider(bootstrap_provider)
+                .build()
+                .context("Failed to build source (session 1)")?;
+
+            let query = Query::cypher(QUERY_ID)
+                .query(
+                    r#"
+                    MATCH (p:drasi_products)
+                    RETURN p.id AS id, p.name AS name, p.price AS price
+                "#,
+                )
+                .from_source(SOURCE_ID)
+                .auto_start(true)
+                .enable_bootstrap(true)
+                .build();
+
+            let (reaction, handle) = ApplicationReaction::builder("oracle-resume-reaction-1")
+                .with_query(QUERY_ID)
+                .build();
+
+            let core = DrasiLib::builder()
+                .with_id("oracle-resume-test")
+                .with_source(source)
+                .with_query(query)
+                .with_reaction(reaction)
+                .build()
+                .await
+                .context("Failed to build DrasiLib (session 1)")?;
+
+            core.start().await.context("Failed to start (session 1)")?;
+
+            let mut subscription = handle
+                .subscribe_with_options(
+                    SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+                )
+                .await
+                .context("Failed to subscribe (session 1)")?;
+
+            sleep(Duration::from_secs(5)).await;
+
+            insert_product(&oracle, 50, "FirstRow", 10.0)?;
+            wait_for_change(&mut subscription, 6, |entry| {
+                matches_change(entry, "ADD", &[("id", "50"), ("name", "FirstRow")])
+            })
+            .await
+            .context("Did not observe first insert (session 1)")?;
+
+            core.stop().await.context("Failed to stop (session 1)")?;
+        }
+
+        {
+            let bootstrap_provider = OracleBootstrapProvider::builder()
+                .with_host(&config.host)
+                .with_port(config.port)
+                .with_service(&config.service)
+                .with_user(&config.user)
+                .with_password(&config.password)
+                .with_table(TABLE_NAME)
+                .build()
+                .context("Failed to build bootstrap provider (session 2)")?;
+
+            let source = OracleSource::builder(SOURCE_ID)
+                .with_host(&config.host)
+                .with_port(config.port)
+                .with_service(&config.service)
+                .with_user(&config.user)
+                .with_password(&config.password)
+                .with_table(TABLE_NAME)
+                .with_poll_interval_ms(1_000)
+                .with_start_position(StartPosition::Current)
+                .with_bootstrap_provider(bootstrap_provider)
+                .build()
+                .context("Failed to build source (session 2)")?;
+
+            let query = Query::cypher(QUERY_ID)
+                .query(
+                    r#"
+                    MATCH (p:drasi_products)
+                    RETURN p.id AS id, p.name AS name, p.price AS price
+                "#,
+                )
+                .from_source(SOURCE_ID)
+                .auto_start(true)
+                .enable_bootstrap(true)
+                .build();
+
+            let (reaction, handle) = ApplicationReaction::builder("oracle-resume-reaction-2")
+                .with_query(QUERY_ID)
+                .build();
+
+            let core = DrasiLib::builder()
+                .with_id("oracle-resume-test")
+                .with_source(source)
+                .with_query(query)
+                .with_reaction(reaction)
+                .build()
+                .await
+                .context("Failed to build DrasiLib (session 2)")?;
+
+            core.start().await.context("Failed to start (session 2)")?;
+
+            let mut subscription = handle
+                .subscribe_with_options(
+                    SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+                )
+                .await
+                .context("Failed to subscribe (session 2)")?;
+
+            sleep(Duration::from_secs(5)).await;
+
+            insert_product(&oracle, 51, "SecondRow", 20.0)?;
+            wait_for_change(&mut subscription, 6, |entry| {
+                matches_change(entry, "ADD", &[("id", "51"), ("name", "SecondRow")])
+            })
+            .await
+            .context("Did not observe second insert after resume (session 2)")?;
+
+            core.stop().await.context("Failed to stop (session 2)")?;
+        }
+
+        oracle.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("Oracle checkpoint resume test timed out after 300 seconds"),
     }
 
     Ok(())

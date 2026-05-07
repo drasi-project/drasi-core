@@ -19,11 +19,16 @@ use anyhow::Result;
 use log::{debug, info};
 use oracle::Connection;
 
+/// Wrapper around the Oracle OCI connection.
 pub struct OracleConnection {
     connection: Connection,
 }
 
 impl OracleConnection {
+    /// Establish a connection to Oracle using the provided configuration.
+    ///
+    /// Uses the `user`, `password`, and connection string derived from
+    /// `host`, `port`, `database`, and `ssl_mode` fields.
     pub fn connect(config: &OracleSourceConfig) -> Result<Self> {
         info!(
             "Connecting to Oracle at {}:{} service '{}'",
@@ -37,10 +42,12 @@ impl OracleConnection {
         Ok(Self { connection })
     }
 
+    /// Returns a reference to the underlying `oracle::Connection`.
     pub fn inner(&self) -> &Connection {
         &self.connection
     }
 
+    /// Verify the connection is alive by executing `SELECT 1 FROM DUAL`.
     pub fn test_connection(&self) -> Result<()> {
         let row = self.connection.query_row("SELECT 1 FROM DUAL", &[])?;
         let value: i64 = row.get(0)?;

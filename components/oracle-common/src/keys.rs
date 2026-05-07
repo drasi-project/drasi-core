@@ -242,6 +242,22 @@ mod tests {
     }
 
     #[test]
+    fn test_make_element_id_no_pk_returns_error() {
+        let cache = PrimaryKeyCache::new();
+
+        let mut props = ElementPropertyMap::new();
+        props.insert("id", ElementValue::Integer(1));
+
+        let result = cache.make_element_id("HR", "UNKNOWN_TABLE", &props);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No primary key configured"),
+            "Expected 'No primary key configured' error, got: {err_msg}"
+        );
+    }
+
+    #[test]
     fn test_split_table_name_uses_default_owner() {
         let (schema, table) = split_table_name("employees", "hr").unwrap();
         assert_eq!(schema, "HR");

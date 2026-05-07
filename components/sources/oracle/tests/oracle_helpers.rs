@@ -215,11 +215,8 @@ async fn wait_for_oracle_ready(container_id: &str, password: &str) -> Result<()>
 }
 
 fn exec_sqlplus(container_id: &str, password: &str, sql: &str) -> Result<String> {
-    exec_in_container(
-        container_id,
-        &format!("sqlplus -s system/{password}@//localhost:1521/FREEPDB1"),
-        sql,
-    )
+    let connect_sql = format!("CONNECT system/{password}@//localhost:1521/FREEPDB1\n{sql}");
+    exec_in_container(container_id, "sqlplus -s /nolog", &connect_sql)
 }
 
 fn exec_sqlplus_as_sysdba(container_id: &str, sql: &str) -> Result<String> {
