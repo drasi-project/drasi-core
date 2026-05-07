@@ -122,8 +122,7 @@ async fn hook_failure_rolls_back_session() {
     };
 
     let failing_hook = || async {
-        Err(IndexError::other(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(IndexError::other(std::io::Error::other(
             "simulated checkpoint failure",
         )))
     };
