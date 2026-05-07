@@ -513,6 +513,11 @@ fn resolve_initial_scn(conn: &Connection, start_position: StartPosition) -> Resu
 fn get_current_scn(conn: &Connection) -> Result<Scn> {
     let row = conn.query_row("SELECT CURRENT_SCN FROM V$DATABASE", &[])?;
     let scn: i64 = row.get(0)?;
+    if scn < 0 {
+        return Err(anyhow::anyhow!(
+            "V$DATABASE returned negative SCN ({scn}); cannot proceed"
+        ));
+    }
     Ok(Scn(scn as u64))
 }
 
