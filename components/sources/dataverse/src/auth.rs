@@ -443,4 +443,70 @@ mod tests {
         let result = TokenManager::parse_az_cli_expires_on("not-a-timestamp");
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_parse_az_cli_expires_on_datetime_string() {
+        // Older `az` CLI versions return local-time strings like
+        // `"2030-01-15 12:30:00.000000"`. Verify we accept that format and
+        // produce a non-zero remaining duration for a clearly future date.
+        let result = TokenManager::parse_az_cli_expires_on("2099-01-01 00:00:00.000000");
+        assert!(result.is_some(), "future datetime string should parse");
+        let remaining = result.unwrap().duration_since(Instant::now());
+        assert!(remaining.as_secs() > 0);
+    }
+
+    #[test]
+    fn test_parse_az_cli_expires_on_past_datetime_yields_zero() {
+        // A past datetime should clamp to zero remaining (not panic / underflow).
+        let result = TokenManager::parse_az_cli_expires_on("2000-01-01 00:00:00.000000");
+        assert!(result.is_some());
+        let remaining = result.unwrap().saturating_duration_since(Instant::now());
+        assert_eq!(remaining.as_secs(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_azure_cli_token_acquisition_fails_when_az_missing() {
+        // Force the CLI lookup to a path that doesn't exist by overriding PATH.
+        // This exercises the error branch of `refresh_token_azure_cli` without
+        // requiring `az` to be absent on the developer's machine.
+        use std::sync::Mutex;
+        // A process-wide lock to keep the env mutation from racing other tests.
+        static LOCK: Mutex<()> = Mutex::new(());
+        // Snapshot/restore PATH inside a synchronous scope so the lock guard is
+        // never held across an `.await` point (clippy::await_holding_lock).
+        let original = {
+            let _guard = LOCK.lock().unwrap();
+            let original = std::env::var_os("PATH");
+            // SAFETY: tests serialize env mutations via the LOCK above.
+            unsafe {
+                std::env::set_var("PATH", "/nonexistent-path-for-tests");
+            }
+            original
+        };
+
+        let tm = TokenManager::azure_cli("https://myorg.crm.dynamics.com")
+            .expect("constructor should succeed");
+        let result = tm.get_token().await;
+
+        // Restore PATH before asserting so a panic doesn't leak state.
+        {
+            let _guard = LOCK.lock().unwrap();
+            unsafe {
+                match original {
+                    Some(v) => std::env::set_var("PATH", v),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+
+        assert!(
+            result.is_err(),
+            "token acquisition should fail when `az` is unreachable"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("az account get-access-token") || err.contains("Azure CLI"),
+            "error should reference the Azure CLI invocation: {err}"
+        );
+    }
 }

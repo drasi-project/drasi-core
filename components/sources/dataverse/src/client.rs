@@ -268,3 +268,167 @@ impl DataverseClient {
         &self.api_version
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! HTTP error-path tests for `DataverseClient`.
+    //!
+    //! These tests stand the client up against `wiremock` and verify the
+    //! observable behaviour of failure modes that the production code is
+    //! expected to handle:
+    //! - Non-2xx HTTP responses (`401`, `429`, `503`) surface as errors with
+    //!   diagnostic context rather than panicking.
+    //! - Malformed OData responses (missing `@odata.deltaLink`) deserialize
+    //!   without crashing — `delta_link` is `None`.
+
+    use super::*;
+    use async_trait::async_trait;
+    use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Static-token identity provider used to bypass real auth in unit tests.
+    struct StaticToken(&'static str);
+
+    #[async_trait]
+    impl IdentityProvider for StaticToken {
+        async fn get_credentials(&self, _ctx: &CredentialContext) -> anyhow::Result<Credentials> {
+            Ok(Credentials::Token {
+                username: "test".to_string(),
+                token: self.0.to_string(),
+            })
+        }
+
+        fn clone_box(&self) -> Box<dyn IdentityProvider> {
+            Box::new(StaticToken(self.0))
+        }
+    }
+
+    fn client_for(server: &MockServer) -> DataverseClient {
+        DataverseClient::new(&server.uri(), "v9.2", Arc::new(StaticToken("test-token")))
+    }
+
+    #[tokio::test]
+    async fn initial_change_tracking_propagates_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client
+            .initial_change_tracking("accounts", None)
+            .await
+            .expect_err("401 must surface as an error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("401"), "error should mention status: {msg}");
+    }
+
+    #[tokio::test]
+    async fn delta_link_propagates_429() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "5")
+                    .set_body_string("too many requests"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let delta_url = format!("{}/api/data/v9.2/accounts?$deltatoken=abc", server.uri());
+        let err = client
+            .follow_delta_link(&delta_url)
+            .await
+            .expect_err("429 must surface as an error");
+        assert!(format!("{err:?}").contains("429"));
+    }
+
+    #[tokio::test]
+    async fn delta_link_propagates_503() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let delta_url = format!("{}/api/data/v9.2/accounts?$deltatoken=abc", server.uri());
+        let err = client
+            .follow_delta_link(&delta_url)
+            .await
+            .expect_err("503 must surface as an error");
+        assert!(format!("{err:?}").contains("503"));
+    }
+
+    #[tokio::test]
+    async fn delta_response_without_delta_link_parses_with_none() {
+        // A delta response that only contains `value` (no `@odata.deltaLink` and
+        // no `@odata.nextLink`) must still deserialize. Callers can then decide
+        // how to handle the missing token.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "@odata.context": "context",
+                "value": []
+            })))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let url = format!("{}/api/data/v9.2/accounts?$deltatoken=abc", server.uri());
+        let resp = client
+            .follow_delta_link(&url)
+            .await
+            .expect("malformed-but-valid OData response should deserialize");
+        assert!(resp.delta_link.is_none(), "delta_link should be absent");
+        assert!(resp.next_link.is_none(), "next_link should be absent");
+        assert!(resp.value.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_json_body_surfaces_as_parse_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client
+            .initial_change_tracking("accounts", None)
+            .await
+            .expect_err("non-JSON body must surface as a parse error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("parse") || msg.contains("decoding"),
+            "error should reference parsing: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn next_link_propagates_500() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/data/v9.2/accounts"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let next_url = format!("{}/api/data/v9.2/accounts?$skiptoken=xyz", server.uri());
+        let err = client
+            .follow_next_link(&next_url)
+            .await
+            .expect_err("500 must surface as an error");
+        assert!(format!("{err:?}").contains("500"));
+    }
+}

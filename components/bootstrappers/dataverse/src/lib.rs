@@ -865,6 +865,272 @@ mod tests {
         let json = serde_json::json!({"Value": 123});
         assert_eq!(convert_json_value(&json), ElementValue::Integer(123));
     }
+
+    mod validate {
+        use super::*;
+
+        #[test]
+        fn rejects_missing_environment_url() {
+            let result = DataverseBootstrapProvider::builder()
+                .with_tenant_id("t")
+                .with_client_id("c")
+                .with_client_secret("s")
+                .with_entities(vec!["account".to_string()])
+                .build();
+            let err = match result {
+                Ok(_) => panic!("missing environment_url should fail validation"),
+                Err(e) => e,
+            };
+            assert!(format!("{err}").contains("environment_url"));
+        }
+
+        #[test]
+        fn rejects_missing_entities() {
+            let result = DataverseBootstrapProvider::builder()
+                .with_environment_url("https://test.crm.dynamics.com")
+                .with_tenant_id("t")
+                .with_client_id("c")
+                .with_client_secret("s")
+                .build();
+            let err = match result {
+                Ok(_) => panic!("missing entities should fail validation"),
+                Err(e) => e,
+            };
+            assert!(format!("{err}").contains("entit"));
+        }
+
+        #[test]
+        fn rejects_missing_credentials_when_no_identity_provider() {
+            // No tenant/client/secret AND no identity provider AND no Azure CLI mode.
+            let result = DataverseBootstrapProvider::builder()
+                .with_environment_url("https://test.crm.dynamics.com")
+                .with_entities(vec!["account".to_string()])
+                .build();
+            assert!(result.is_err(), "should require credentials");
+        }
+    }
+
+    /// Bootstrap end-to-end tests using `wiremock` to simulate the Dataverse
+    /// OData Web API. These verify that the provider:
+    /// - Pages through `@odata.nextLink` until exhausted
+    /// - Emits one `SourceChange::Insert` per fetched record
+    /// - Filters entities based on `BootstrapRequest.node_labels`
+    mod bootstrap_e2e {
+        use super::*;
+        use async_trait::async_trait;
+        use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapProvider};
+        use drasi_lib::channels::BootstrapEvent;
+        use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
+        use serde_json::json;
+        use tokio::sync::mpsc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// Identity provider that returns a fixed token to bypass real OAuth2.
+        struct StaticToken;
+
+        #[async_trait]
+        impl IdentityProvider for StaticToken {
+            async fn get_credentials(
+                &self,
+                _ctx: &CredentialContext,
+            ) -> anyhow::Result<Credentials> {
+                Ok(Credentials::Token {
+                    username: "test".to_string(),
+                    token: "mock-token".to_string(),
+                })
+            }
+            fn clone_box(&self) -> Box<dyn IdentityProvider> {
+                Box::new(StaticToken)
+            }
+        }
+
+        fn make_request(query_id: &str, labels: Vec<String>) -> BootstrapRequest {
+            BootstrapRequest {
+                query_id: query_id.to_string(),
+                node_labels: labels,
+                relation_labels: Vec::new(),
+                request_id: "req-1".to_string(),
+            }
+        }
+
+        async fn collect_events(mut rx: mpsc::Receiver<BootstrapEvent>) -> Vec<BootstrapEvent> {
+            let mut out = Vec::new();
+            while let Some(ev) = rx.recv().await {
+                out.push(ev);
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn pages_through_odata_next_link() {
+            let server = MockServer::start().await;
+            let uri = server.uri();
+
+            // Page 1 → returns nextLink to /accounts/page2 with 2 records
+            Mock::given(method("GET"))
+                .and(path("/api/data/v9.2/accounts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [
+                        { "accountid": "id-1", "name": "One" },
+                        { "accountid": "id-2", "name": "Two" }
+                    ],
+                    "@odata.nextLink": format!("{uri}/api/data/v9.2/accounts/page2")
+                })))
+                .mount(&server)
+                .await;
+
+            // Page 2 → returns 2 more records, no nextLink (terminating page)
+            Mock::given(method("GET"))
+                .and(path("/api/data/v9.2/accounts/page2"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [
+                        { "accountid": "id-3", "name": "Three" },
+                        { "accountid": "id-4", "name": "Four" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let provider = DataverseBootstrapProvider::builder()
+                .with_environment_url(&uri)
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(StaticToken)
+                .build()
+                .expect("provider should build");
+
+            let (tx, rx) = mpsc::channel(16);
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                "test-source".to_string(),
+            );
+            let request = make_request("q-1", Vec::new());
+
+            let result = provider
+                .bootstrap(request, &ctx, tx, None)
+                .await
+                .expect("bootstrap should succeed");
+            // Drop is implicit when the channel sender goes out of scope
+            // (it's moved into bootstrap()), so the receiver is now closed.
+
+            assert_eq!(result.event_count, 4, "all four records should be reported");
+
+            let events = collect_events(rx).await;
+            assert_eq!(events.len(), 4, "channel should carry one event per record");
+
+            // Each event must be a SourceChange::Insert with the expected element id.
+            let mut seen_ids: Vec<String> = events
+                .iter()
+                .map(|e| match &e.change {
+                    SourceChange::Insert { element } => match element {
+                        Element::Node { metadata, .. } => {
+                            metadata.reference.element_id.to_string()
+                        }
+                        _ => panic!("expected Node element"),
+                    },
+                    other => panic!("expected Insert, got {other:?}"),
+                })
+                .collect();
+            seen_ids.sort();
+            assert_eq!(
+                seen_ids,
+                vec![
+                    "account:id-1",
+                    "account:id-2",
+                    "account:id-3",
+                    "account:id-4"
+                ]
+            );
+
+            // Sequence numbers must be unique and monotonic.
+            let mut seqs: Vec<u64> = events.iter().map(|e| e.sequence).collect();
+            seqs.sort();
+            assert_eq!(seqs, vec![0, 1, 2, 3]);
+        }
+
+        #[tokio::test]
+        async fn filters_entities_by_requested_labels() {
+            let server = MockServer::start().await;
+
+            // Only `accounts` is mounted. If the provider mistakenly fetches
+            // `contacts`, wiremock's default 404 would surface as an error.
+            Mock::given(method("GET"))
+                .and(path("/api/data/v9.2/accounts"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [
+                        { "accountid": "id-1", "name": "Only" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let provider = DataverseBootstrapProvider::builder()
+                .with_environment_url(server.uri())
+                .with_entities(vec!["account".to_string(), "contact".to_string()])
+                .with_identity_provider(StaticToken)
+                .build()
+                .expect("provider should build");
+
+            let (tx, rx) = mpsc::channel(8);
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                "test-source".to_string(),
+            );
+            // Only request `account` — `contact` should be skipped entirely.
+            let request = make_request("q-1", vec!["account".to_string()]);
+
+            let result = provider
+                .bootstrap(request, &ctx, tx, None)
+                .await
+                .expect("bootstrap should succeed");
+            assert_eq!(result.event_count, 1);
+
+            let events = collect_events(rx).await;
+            assert_eq!(events.len(), 1);
+            match &events[0].change {
+                SourceChange::Insert { element } => match element {
+                    Element::Node { metadata, .. } => {
+                        assert_eq!(
+                            metadata.reference.element_id.as_ref(),
+                            "account:id-1"
+                        );
+                    }
+                    _ => panic!("expected Node"),
+                },
+                other => panic!("expected Insert, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn returns_zero_when_no_labels_match() {
+            let server = MockServer::start().await;
+            // No mocks are mounted — if the provider hits the server it gets 404.
+
+            let provider = DataverseBootstrapProvider::builder()
+                .with_environment_url(server.uri())
+                .with_entities(vec!["account".to_string()])
+                .with_identity_provider(StaticToken)
+                .build()
+                .expect("provider should build");
+
+            let (tx, rx) = mpsc::channel(8);
+            let ctx = BootstrapContext::new_minimal(
+                "test-server".to_string(),
+                "test-source".to_string(),
+            );
+            // Request a label that the provider isn't configured for.
+            let request = make_request("q-1", vec!["unrelated".to_string()]);
+
+            let result = provider
+                .bootstrap(request, &ctx, tx, None)
+                .await
+                .expect("bootstrap should succeed without HTTP calls");
+            assert_eq!(result.event_count, 0);
+
+            let events = collect_events(rx).await;
+            assert!(events.is_empty(), "no events should be emitted");
+        }
+    }
 }
 
 /// Dynamic plugin entry point.

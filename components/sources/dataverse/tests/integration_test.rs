@@ -12,341 +12,282 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration test for the Dataverse source using wiremock to simulate the
-//! Dataverse OData Web API. This is a client harness test since we cannot run
-//! a real Dataverse instance in a container.
+//! Integration tests for the Dataverse source's HTTP client + change parsing
+//! pipeline using `wiremock`.
 //!
-//! The test simulates the full change tracking lifecycle:
-//! 1. OAuth2 token acquisition
-//! 2. Initial change tracking request (get delta token)
-//! 3. Polling with delta token → INSERT detected
-//! 4. Polling with delta token → UPDATE detected
-//! 5. Polling with delta token → DELETE detected
+//! These tests stand the OData client against an in-process mock server and
+//! drive the same call sequence the polling worker performs:
+//!
+//! 1. Initial change tracking request → returns a `@odata.deltaLink`
+//! 2. Follow delta link → INSERT detected
+//! 3. Follow next delta link → UPDATE detected
+//! 4. Follow next delta link → DELETE detected
+//! 5. Follow next delta link → no changes (loop stabilizes)
+//!
+//! This avoids depending on the full `DrasiLib` runtime (sources, queries,
+//! reactions, dispatchers) so the test can run reliably in CI.
 
-#[cfg(test)]
-mod integration_tests {
-    use drasi_lib::builder::Query;
-    use drasi_lib::channels::ResultDiff;
-    use drasi_lib::DrasiLib;
-    use drasi_reaction_application::subscription::SubscriptionOptions;
-    use drasi_reaction_application::ApplicationReaction;
-    use drasi_source_dataverse::DataverseSource;
-    use serde_json::json;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use wiremock::matchers::{header, method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+use async_trait::async_trait;
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
+use drasi_source_dataverse::client::DataverseClient;
+use drasi_source_dataverse::types::{parse_delta_changes, DataverseChange};
+use serde_json::json;
+use std::sync::Arc;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const SOURCE_ID: &str = "test-dv-source";
-    const QUERY_ID: &str = "test-dv-query";
+/// Identity provider that returns a static token so the client can focus on
+/// HTTP behaviour without exercising a real OAuth2 flow.
+struct StaticToken;
 
-    /// Helper: Create a mock OAuth2 token response
-    fn token_response() -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "access_token": "mock-access-token-12345"
-        }))
+#[async_trait]
+impl IdentityProvider for StaticToken {
+    async fn get_credentials(&self, _ctx: &CredentialContext) -> anyhow::Result<Credentials> {
+        Ok(Credentials::Token {
+            username: "test".to_string(),
+            token: "mock-access-token-12345".to_string(),
+        })
     }
 
-    /// Helper: Create an OData response with delta link (no data, initial tracking)
-    fn empty_delta_response(mock_server_uri: &str) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts"),
+    fn clone_box(&self) -> Box<dyn IdentityProvider> {
+        Box::new(StaticToken)
+    }
+}
+
+/// Drive the full INSERT → UPDATE → DELETE delta sequence against a mock
+/// Dataverse Web API and verify that each change is parsed correctly.
+#[tokio::test]
+async fn dataverse_client_full_change_lifecycle() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+
+    // 1. Initial change tracking request: empty value, returns an initial delta token.
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
             "value": [],
-            "@odata.deltaLink": format!("{mock_server_uri}/api/data/v9.2/accounts?$deltatoken=initial-token-1")
-        }))
-    }
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=after-initial")
+        })))
+        .mount(&server)
+        .await;
 
-    /// Helper: Create an OData delta response with a new/updated record
-    fn insert_delta_response(mock_server_uri: &str) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts"),
-            "value": [
-                {
-                    "@odata.etag": "W/\"1001\"",
-                    "accountid": "aaaa-bbbb-cccc-0001",
-                    "name": "Contoso Ltd",
-                    "revenue": 5000000.0,
-                    "statecode": 0
-                }
-            ],
-            "@odata.deltaLink": format!("{mock_server_uri}/api/data/v9.2/accounts?$deltatoken=after-insert-token-2")
-        }))
-    }
+    let client = DataverseClient::new(&uri, "v9.2", Arc::new(StaticToken));
 
-    /// Helper: Create an OData delta response with an updated record
-    fn update_delta_response(mock_server_uri: &str) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts"),
-            "value": [
-                {
-                    "@odata.etag": "W/\"1002\"",
-                    "accountid": "aaaa-bbbb-cccc-0001",
-                    "name": "Contoso Updated",
-                    "revenue": 7500000.0,
-                    "statecode": 0
-                }
-            ],
-            "@odata.deltaLink": format!("{mock_server_uri}/api/data/v9.2/accounts?$deltatoken=after-update-token-3")
-        }))
-    }
+    // Step 1: initial change tracking → expect a delta link, no changes.
+    let initial = client
+        .initial_change_tracking("accounts", None)
+        .await
+        .expect("initial change tracking should succeed");
+    assert!(initial.value.is_empty(), "no records on initial");
+    let initial_delta = initial
+        .delta_link
+        .clone()
+        .expect("initial delta link must be present");
 
-    /// Helper: Create an OData delta response with a deleted record
-    fn delete_delta_response(mock_server_uri: &str) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts"),
-            "value": [
-                {
-                    "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts/$deletedEntity"),
-                    "id": "aaaa-bbbb-cccc-0001",
-                    "reason": "deleted"
-                }
-            ],
-            "@odata.deltaLink": format!("{mock_server_uri}/api/data/v9.2/accounts?$deltatoken=after-delete-token-4")
-        }))
-    }
+    // 2. Re-mount the path with INSERT response. Because every call hits the
+    //    same path, we replace the mock for each subsequent stage by resetting
+    //    the server.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [{
+                "@odata.etag": "W/\"1001\"",
+                "accountid": "aaaa-bbbb-cccc-0001",
+                "name": "Contoso Ltd",
+                "revenue": 5_000_000.0,
+                "statecode": 0
+            }],
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=after-insert")
+        })))
+        .mount(&server)
+        .await;
 
-    /// Helper: Create an empty delta response (no changes)
-    fn no_changes_response(mock_server_uri: &str, token: &str) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "@odata.context": format!("{mock_server_uri}/api/data/v9.2/$metadata#accounts"),
-            "value": [],
-            "@odata.deltaLink": format!("{mock_server_uri}/api/data/v9.2/accounts?$deltatoken={token}")
-        }))
-    }
-
-    /// Full integration test: CREATE → UPDATE → DELETE via wiremock client harness
-    ///
-    /// This test simulates the Dataverse Web API using wiremock and verifies that
-    /// the source detects INSERT, UPDATE, and DELETE changes flowing through to
-    /// an ApplicationReaction.
-    #[tokio::test]
-    #[ignore] // Run with: cargo test -p drasi-source-dataverse -- --ignored --nocapture
-    async fn test_dataverse_change_detection_end_to_end() {
-        // 1. Start mock server
-        let mock_server = MockServer::start().await;
-        let mock_uri = mock_server.uri();
-
-        // 2. Mount OAuth2 token mock (always available)
-        Mock::given(method("POST"))
-            .and(path_regex(r".*/oauth2/v2.0/token"))
-            .respond_with(token_response())
-            .expect(1..)
-            .mount(&mock_server)
-            .await;
-
-        // 3. Mount initial change tracking request (GET /api/data/v9.2/accounts with Prefer header)
-        let mock_uri_for_initial = mock_uri.clone();
-        Mock::given(method("GET"))
-            .and(path("/api/data/v9.2/accounts"))
-            .and(header(
-                "Prefer",
-                "odata.track-changes,odata.maxpagesize=1000",
-            ))
-            .respond_with(empty_delta_response(&mock_uri_for_initial))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        // 4. Mount delta link endpoint - returns sequenced responses
-        // We use a custom responder that returns different responses based on call count
-        let mock_uri_for_delta = mock_uri.clone();
-
-        // Since wiremock doesn't natively support stateful responses easily,
-        // we'll mount multiple mocks with different deltatoken query params.
-        // The source follows delta links, so each response directs to the next token.
-
-        // Initial token → returns INSERT
-        Mock::given(method("GET"))
-            .and(path_regex(r".*/accounts\?.*deltatoken=initial-token-1"))
-            .respond_with(insert_delta_response(&mock_uri_for_delta))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        // After-insert token → returns UPDATE
-        Mock::given(method("GET"))
-            .and(path_regex(
-                r".*/accounts\?.*deltatoken=after-insert-token-2",
-            ))
-            .respond_with(update_delta_response(&mock_uri_for_delta))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        // After-update token → returns DELETE
-        Mock::given(method("GET"))
-            .and(path_regex(
-                r".*/accounts\?.*deltatoken=after-update-token-3",
-            ))
-            .respond_with(delete_delta_response(&mock_uri_for_delta))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
-
-        // After-delete token → returns no changes (stabilize)
-        Mock::given(method("GET"))
-            .and(path_regex(
-                r".*/accounts\?.*deltatoken=after-delete-token-4",
-            ))
-            .respond_with(no_changes_response(
-                &mock_uri_for_delta,
-                "after-delete-token-4",
-            ))
-            .expect(0..)
-            .mount(&mock_server)
-            .await;
-
-        // 5. Create identity provider that uses the mock server for token acquisition
-        let token_url = format!("{mock_uri}/oauth2/v2.0/token");
-        let identity_provider = drasi_source_dataverse::auth::TokenManager::with_token_url(
-            "mock-tenant-id",
-            "mock-client-id",
-            "mock-client-secret",
-            &mock_uri,
-            &token_url,
-        )
-        .expect("Failed to create TokenManager");
-
-        // 6. Create Dataverse source pointing to mock server
-        let source = DataverseSource::builder(SOURCE_ID)
-            .with_environment_url(&mock_uri)
-            .with_identity_provider(identity_provider)
-            .with_entities(vec!["account".to_string()])
-            .with_min_interval_ms(100) // Fast polling for test
-            .with_max_interval_seconds(1)
-            .with_auto_start(true)
-            .build()
-            .expect("Failed to build DataverseSource");
-
-        // 7. Create query
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
-                MATCH (n:account)
-                RETURN n.accountid AS accountid, n.name AS name, n.revenue AS revenue
-            "#,
-            )
-            .from_source(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(false) // No bootstrap - we test CDC only
-            .build();
-
-        // 8. Create application reaction to capture results
-        let (reaction, handle) = ApplicationReaction::builder("test-reaction")
-            .with_query(QUERY_ID)
-            .build();
-
-        // 9. Build and start DrasiLib
-        let drasi = DrasiLib::builder()
-            .with_id("dataverse-integration-test")
-            .with_source(source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .build()
-            .await
-            .expect("Failed to build DrasiLib");
-
-        drasi.start().await.expect("Failed to start DrasiLib");
-
-        // 10. Create subscription
-        let mut subscription = handle
-            .subscribe_with_options(
-                SubscriptionOptions::default().with_timeout(Duration::from_secs(2)),
-            )
-            .await
-            .expect("Failed to subscribe");
-
-        // Wait for source to start and do initial delta token acquisition
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        // 11. Collect results - expecting INSERT, UPDATE, DELETE
-        let mut found_insert = false;
-        let mut found_update = false;
-        let mut found_delete = false;
-
-        // Keep collecting for up to 15 seconds
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-
-        while tokio::time::Instant::now() < deadline {
-            match tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await {
-                Ok(Some(result)) => {
-                    println!(
-                        "[TEST] Got QueryResult for query '{}' with {} diffs",
-                        result.query_id,
-                        result.results.len()
-                    );
-
-                    for diff in &result.results {
-                        match diff {
-                            ResultDiff::Add { data } => {
-                                println!("[TEST] ADD: {data}");
-                                if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
-                                    if name == "Contoso Ltd" {
-                                        found_insert = true;
-                                        println!("[TEST] ✓ INSERT detected: Contoso Ltd");
-                                    }
-                                }
-                            }
-                            ResultDiff::Update {
-                                before,
-                                after,
-                                data,
-                                ..
-                            } => {
-                                println!("[TEST] UPDATE: before={before}, after={after}");
-                                if let Some(name) = after.get("name").and_then(|v| v.as_str()) {
-                                    if name == "Contoso Updated" {
-                                        found_update = true;
-                                        println!("[TEST] ✓ UPDATE detected: Contoso Updated");
-                                    }
-                                }
-                            }
-                            ResultDiff::Delete { data } => {
-                                println!("[TEST] DELETE: {data}");
-                                found_delete = true;
-                                println!("[TEST] ✓ DELETE detected");
-                            }
-                            _ => {
-                                println!("[TEST] Other diff: {diff:?}");
-                            }
-                        }
-                    }
-
-                    if found_insert && found_update && found_delete {
-                        println!("[TEST] All changes detected!");
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    println!("[TEST] Subscription ended");
-                    break;
-                }
-                Err(_) => {
-                    // Timeout on recv - continue polling
-                    println!("[TEST] Recv timeout, continuing...");
-                }
-            }
+    // Step 2: follow delta link → INSERT detected.
+    let after_insert = client
+        .follow_delta_link(&initial_delta)
+        .await
+        .expect("follow_delta_link should succeed");
+    let changes = parse_delta_changes(&after_insert, "account");
+    assert_eq!(changes.len(), 1, "exactly one INSERT change expected");
+    match &changes[0] {
+        DataverseChange::NewOrUpdated {
+            id,
+            entity_name,
+            attributes,
+        } => {
+            assert_eq!(id, "aaaa-bbbb-cccc-0001");
+            assert_eq!(entity_name, "account");
+            assert_eq!(
+                attributes.get("name").and_then(|v| v.as_str()),
+                Some("Contoso Ltd")
+            );
         }
-
-        // 11. Stop DrasiLib
-        drasi.stop().await.expect("Failed to stop DrasiLib");
-
-        // 12. Assert all changes were detected
-        assert!(
-            found_insert,
-            "INSERT was not detected! The source did not emit the new account record."
-        );
-        assert!(
-            found_update,
-            "UPDATE was not detected! The source did not emit the updated account record."
-        );
-        assert!(
-            found_delete,
-            "DELETE was not detected! The source did not emit the deleted account record."
-        );
-
-        println!("[TEST] ✓ All assertions passed - INSERT, UPDATE, DELETE detected.");
+        other => panic!("expected NewOrUpdated, got {other:?}"),
     }
+    let insert_delta = after_insert
+        .delta_link
+        .clone()
+        .expect("delta link after insert");
+
+    // 3. UPDATE response.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [{
+                "@odata.etag": "W/\"1002\"",
+                "accountid": "aaaa-bbbb-cccc-0001",
+                "name": "Contoso Updated",
+                "revenue": 7_500_000.0,
+                "statecode": 0
+            }],
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=after-update")
+        })))
+        .mount(&server)
+        .await;
+
+    let after_update = client
+        .follow_delta_link(&insert_delta)
+        .await
+        .expect("follow_delta_link for update should succeed");
+    let changes = parse_delta_changes(&after_update, "account");
+    assert_eq!(changes.len(), 1);
+    match &changes[0] {
+        DataverseChange::NewOrUpdated { attributes, .. } => {
+            assert_eq!(
+                attributes.get("name").and_then(|v| v.as_str()),
+                Some("Contoso Updated")
+            );
+        }
+        other => panic!("expected NewOrUpdated for update, got {other:?}"),
+    }
+    let update_delta = after_update
+        .delta_link
+        .clone()
+        .expect("delta link after update");
+
+    // 4. DELETE response (entry with `$deletedEntity` context).
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [{
+                "@odata.context": format!(
+                    "{uri}/api/data/v9.2/$metadata#accounts/$deletedEntity"
+                ),
+                "id": "aaaa-bbbb-cccc-0001",
+                "reason": "deleted"
+            }],
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=after-delete")
+        })))
+        .mount(&server)
+        .await;
+
+    let after_delete = client
+        .follow_delta_link(&update_delta)
+        .await
+        .expect("follow_delta_link for delete should succeed");
+    let changes = parse_delta_changes(&after_delete, "account");
+    assert_eq!(changes.len(), 1, "exactly one DELETE change expected");
+    match &changes[0] {
+        DataverseChange::Deleted { id, entity_name } => {
+            assert_eq!(id, "aaaa-bbbb-cccc-0001");
+            assert_eq!(entity_name, "account");
+        }
+        other => panic!("expected Deleted, got {other:?}"),
+    }
+    let delete_delta = after_delete
+        .delta_link
+        .clone()
+        .expect("delta link after delete");
+
+    // 5. Final no-changes poll: the polling loop must stabilize without
+    //    emitting spurious changes.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [],
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=after-delete")
+        })))
+        .mount(&server)
+        .await;
+
+    let stable = client
+        .follow_delta_link(&delete_delta)
+        .await
+        .expect("stabilizing poll should succeed");
+    let changes = parse_delta_changes(&stable, "account");
+    assert!(
+        changes.is_empty(),
+        "no changes expected on stabilization, got {} changes",
+        changes.len()
+    );
+}
+
+/// Verify that the client correctly walks through a multi-page initial
+/// response via `@odata.nextLink`, accumulating records from every page
+/// and returning the final delta token.
+#[tokio::test]
+async fn dataverse_client_paginates_initial_change_tracking() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+
+    // Page 1: returns nextLink to a `/page2` URL on the same server.
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [
+                { "accountid": "id-1", "name": "One" },
+                { "accountid": "id-2", "name": "Two" }
+            ],
+            "@odata.nextLink": format!("{uri}/api/data/v9.2/accounts/page2")
+        })))
+        .mount(&server)
+        .await;
+
+    // Page 2: returns the final delta link, no nextLink.
+    Mock::given(method("GET"))
+        .and(path("/api/data/v9.2/accounts/page2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@odata.context": format!("{uri}/api/data/v9.2/$metadata#accounts"),
+            "value": [
+                { "accountid": "id-3", "name": "Three" }
+            ],
+            "@odata.deltaLink":
+                format!("{uri}/api/data/v9.2/accounts?$deltatoken=final")
+        })))
+        .mount(&server)
+        .await;
+
+    let client = DataverseClient::new(&uri, "v9.2", Arc::new(StaticToken));
+
+    let page1 = client
+        .initial_change_tracking("accounts", None)
+        .await
+        .expect("page 1 should succeed");
+    assert_eq!(page1.value.len(), 2);
+    assert!(page1.delta_link.is_none());
+    let next = page1.next_link.expect("page 1 must hand off via nextLink");
+
+    let page2 = client
+        .follow_next_link(&next)
+        .await
+        .expect("page 2 should succeed");
+    assert_eq!(page2.value.len(), 1);
+    assert!(page2.next_link.is_none());
+    let final_delta = page2.delta_link.expect("final delta link required");
+    assert!(final_delta.contains("$deltatoken=final"));
 }

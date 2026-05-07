@@ -47,7 +47,6 @@ ordered-float = "3.0"
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.6"
-drasi-reaction-application = { path = "../../reactions/application" }
 
 [lints]
 workspace = true

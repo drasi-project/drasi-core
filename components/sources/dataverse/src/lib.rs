@@ -144,6 +144,75 @@ impl DataverseSource {
         DataverseSourceBuilder::new(id)
     }
 
+    /// Compute the next polling interval given the current interval and whether
+    /// changes were observed in the most recent poll.
+    ///
+    /// Implements the platform's two-phase multiplicative backoff:
+    /// - On `changes_detected = true`, reset to `min_interval_ms` for responsive polling.
+    /// - On `changes_detected = false`, multiply by 1.2x while under the 5s threshold,
+    ///   then 1.5x above it, capped at `max_interval_ms`.
+    ///
+    /// Extracted as a pure function so the algorithm can be unit-tested.
+    pub(crate) fn next_backoff_interval(
+        current_interval_ms: u64,
+        min_interval_ms: u64,
+        max_interval_ms: u64,
+        changes_detected: bool,
+    ) -> u64 {
+        const THRESHOLD_MS: u64 = 5000;
+        const SLOW_BACKOFF: f64 = 1.2;
+        const FAST_BACKOFF: f64 = 1.5;
+
+        if changes_detected {
+            return min_interval_ms;
+        }
+        let multiplier = if current_interval_ms < THRESHOLD_MS {
+            SLOW_BACKOFF
+        } else {
+            FAST_BACKOFF
+        };
+        ((current_interval_ms as f64 * multiplier) as u64).min(max_interval_ms)
+    }
+
+    /// State-store key for an entity's delta token. Format matches the platform's
+    /// `{entity}-deltatoken` checkpoint key for cross-implementation compatibility.
+    pub(crate) fn delta_token_key(entity_name: &str) -> String {
+        format!("{entity_name}-deltatoken")
+    }
+
+    /// Load a previously persisted delta token from the state store, if any.
+    ///
+    /// Returns `Some(token)` when the entry exists and is valid UTF-8;
+    /// `None` when the key is missing, the value is malformed, or the store errors.
+    pub(crate) async fn load_delta_token(
+        store: &Arc<dyn drasi_lib::StateStoreProvider>,
+        source_id: &str,
+        entity_name: &str,
+    ) -> Option<String> {
+        let key = Self::delta_token_key(entity_name);
+        match store.get(source_id, &key).await {
+            Ok(Some(bytes)) => String::from_utf8(bytes).ok(),
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("[{source_id}] Failed to load delta token for {entity_name}: {e}");
+                None
+            }
+        }
+    }
+
+    /// Persist the latest delta token to the state store.
+    pub(crate) async fn save_delta_token(
+        store: &Arc<dyn drasi_lib::StateStoreProvider>,
+        source_id: &str,
+        entity_name: &str,
+        token: &str,
+    ) {
+        let key = Self::delta_token_key(entity_name);
+        if let Err(e) = store.set(source_id, &key, token.as_bytes().to_vec()).await {
+            log::warn!("[{source_id}] Failed to persist delta token for {entity_name}: {e}");
+        }
+    }
+
     /// Run the polling loop for a single entity.
     ///
     /// This is the Rust equivalent of the platform's `SyncWorker.ExecuteAsync()`.
@@ -173,31 +242,18 @@ impl DataverseSource {
         min_interval_ms: u64,
         max_interval_seconds: u64,
     ) {
-        const THRESHOLD_MS: u64 = 5000;
-        const SLOW_BACKOFF: f64 = 1.2;
-        const FAST_BACKOFF: f64 = 1.5;
-
         let mut current_interval_ms = min_interval_ms;
         let max_interval_ms = max_interval_seconds * 1000;
 
         // Load last delta token from state store (like platform's checkpoint resume)
-        let state_key = format!("{entity_name}-deltatoken");
         let mut delta_link: Option<String> = None;
 
         if let Some(ref store) = state_store {
-            match store.get(&source_id, &state_key).await {
-                Ok(Some(bytes)) => {
-                    if let Ok(token) = String::from_utf8(bytes) {
-                        log::info!("[{source_id}] Resuming from checkpoint for {entity_name}");
-                        delta_link = Some(token);
-                    }
-                }
-                Ok(None) => {
-                    log::info!("[{source_id}] No checkpoint found for {entity_name}, getting current delta token");
-                }
-                Err(e) => {
-                    log::warn!("[{source_id}] Failed to load delta token for {entity_name}: {e}");
-                }
+            delta_link = Self::load_delta_token(store, &source_id, &entity_name).await;
+            if delta_link.is_some() {
+                log::info!("[{source_id}] Resuming from checkpoint for {entity_name}");
+            } else {
+                log::info!("[{source_id}] No checkpoint found for {entity_name}, getting current delta token");
             }
         }
 
@@ -219,15 +275,11 @@ impl DataverseSource {
                 {
                     Ok(token) => {
                         log::info!("[{source_id}] Initial delta token obtained for {entity_name}");
-                        delta_link = Some(token);
                         // Save the initial token
                         if let Some(ref store) = state_store {
-                            if let Some(ref dl) = delta_link {
-                                let _ = store
-                                    .set(&source_id, &state_key, dl.as_bytes().to_vec())
-                                    .await;
-                            }
+                            Self::save_delta_token(store, &source_id, &entity_name, &token).await;
                         }
+                        delta_link = Some(token);
                         break;
                     }
                     Err(e) => {
@@ -271,34 +323,28 @@ impl DataverseSource {
             .await
             {
                 Ok((new_delta_link, change_count)) => {
-                    if change_count > 0 {
-                        // Changes detected - reset to minimum interval (responsive polling)
-                        current_interval_ms = min_interval_ms;
+                    let changes_detected = change_count > 0;
+                    if changes_detected {
                         log::info!(
                             "[{source_id}] Got {change_count} changes for entity {entity_name}"
                         );
-                    } else {
-                        // No changes - two-phase multiplicative backoff
-                        let multiplier = if current_interval_ms < THRESHOLD_MS {
-                            SLOW_BACKOFF
-                        } else {
-                            FAST_BACKOFF
-                        };
-                        current_interval_ms =
-                            ((current_interval_ms as f64 * multiplier) as u64).min(max_interval_ms);
                     }
+                    current_interval_ms = Self::next_backoff_interval(
+                        current_interval_ms,
+                        min_interval_ms,
+                        max_interval_ms,
+                        changes_detected,
+                    );
 
                     // Save the new delta token (like platform's state store Put)
                     if let Some(ref dl) = new_delta_link {
                         delta_link = Some(dl.clone());
                         if let Some(ref store) = state_store {
-                            let _ = store
-                                .set(&source_id, &state_key, dl.as_bytes().to_vec())
-                                .await;
+                            Self::save_delta_token(store, &source_id, &entity_name, dl).await;
                         }
                     }
 
-                    if change_count > 0 {
+                    if changes_detected {
                         continue;
                     }
                 }
@@ -1441,6 +1487,176 @@ mod tests {
                 }
                 _ => panic!("Expected List"),
             }
+        }
+    }
+
+    mod backoff {
+        use super::*;
+
+        #[test]
+        fn resets_to_min_when_changes_detected() {
+            // Even at very large current intervals, a change observation should
+            // snap us back to min for responsive polling.
+            let next = DataverseSource::next_backoff_interval(20_000, 500, 30_000, true);
+            assert_eq!(next, 500);
+        }
+
+        #[test]
+        fn slow_backoff_under_threshold() {
+            // Below 5s, multiplier is 1.2x.
+            let next = DataverseSource::next_backoff_interval(1000, 500, 30_000, false);
+            assert_eq!(next, 1200);
+
+            let next = DataverseSource::next_backoff_interval(4000, 500, 30_000, false);
+            assert_eq!(next, 4800);
+        }
+
+        #[test]
+        fn fast_backoff_above_threshold() {
+            // At/above 5s, multiplier is 1.5x.
+            let next = DataverseSource::next_backoff_interval(5000, 500, 30_000, false);
+            assert_eq!(next, 7500);
+
+            let next = DataverseSource::next_backoff_interval(10_000, 500, 30_000, false);
+            assert_eq!(next, 15_000);
+        }
+
+        #[test]
+        fn does_not_exceed_max() {
+            // Capped at the configured max.
+            let next = DataverseSource::next_backoff_interval(25_000, 500, 30_000, false);
+            assert_eq!(next, 30_000);
+
+            // Already at max; staying at max.
+            let next = DataverseSource::next_backoff_interval(30_000, 500, 30_000, false);
+            assert_eq!(next, 30_000);
+        }
+
+        #[test]
+        fn full_progression_no_changes() {
+            // From min, repeatedly back off; verify the sequence reaches the cap
+            // without ever overshooting.
+            let min = 500;
+            let max = 30_000;
+            let mut current = min;
+            let mut steps = 0;
+            while current < max {
+                let next = DataverseSource::next_backoff_interval(current, min, max, false);
+                assert!(
+                    next > current || next == max,
+                    "interval should grow or hit the cap (was {current}, became {next})"
+                );
+                assert!(next <= max, "interval must never exceed max ({next} > {max})");
+                current = next;
+                steps += 1;
+                assert!(steps < 100, "backoff failed to converge");
+            }
+            assert_eq!(current, max);
+        }
+
+        #[test]
+        fn full_progression_with_change_resets() {
+            // Back off twice, then observe a change: should drop straight back to min.
+            let min = 500;
+            let max = 30_000;
+            let mut current = min;
+            current = DataverseSource::next_backoff_interval(current, min, max, false);
+            current = DataverseSource::next_backoff_interval(current, min, max, false);
+            assert!(current > min);
+            current = DataverseSource::next_backoff_interval(current, min, max, true);
+            assert_eq!(current, min);
+        }
+    }
+
+    mod state_store_helpers {
+        use super::*;
+        use drasi_lib::MemoryStateStoreProvider;
+
+        fn store() -> Arc<dyn drasi_lib::StateStoreProvider> {
+            Arc::new(MemoryStateStoreProvider::new())
+        }
+
+        #[test]
+        fn delta_token_key_matches_platform_format() {
+            // The state-key format must remain `{entity}-deltatoken` for
+            // cross-implementation checkpoint compatibility.
+            assert_eq!(
+                DataverseSource::delta_token_key("account"),
+                "account-deltatoken"
+            );
+        }
+
+        #[tokio::test]
+        async fn load_returns_none_on_empty_store() {
+            let s = store();
+            let result = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            assert!(result.is_none(), "no checkpoint should be present initially");
+        }
+
+        #[tokio::test]
+        async fn save_then_load_round_trip() {
+            let s = store();
+            DataverseSource::save_delta_token(&s, "src-1", "account", "delta-token-123").await;
+
+            let loaded = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            assert_eq!(loaded.as_deref(), Some("delta-token-123"));
+        }
+
+        #[tokio::test]
+        async fn checkpoints_are_isolated_per_entity() {
+            let s = store();
+            DataverseSource::save_delta_token(&s, "src-1", "account", "token-A").await;
+            DataverseSource::save_delta_token(&s, "src-1", "contact", "token-B").await;
+
+            assert_eq!(
+                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                Some("token-A")
+            );
+            assert_eq!(
+                DataverseSource::load_delta_token(&s, "src-1", "contact").await.as_deref(),
+                Some("token-B")
+            );
+        }
+
+        #[tokio::test]
+        async fn checkpoints_are_isolated_per_source() {
+            let s = store();
+            DataverseSource::save_delta_token(&s, "src-1", "account", "token-A").await;
+            DataverseSource::save_delta_token(&s, "src-2", "account", "token-B").await;
+
+            assert_eq!(
+                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                Some("token-A")
+            );
+            assert_eq!(
+                DataverseSource::load_delta_token(&s, "src-2", "account").await.as_deref(),
+                Some("token-B")
+            );
+        }
+
+        #[tokio::test]
+        async fn save_overwrites_previous_value() {
+            let s = store();
+            DataverseSource::save_delta_token(&s, "src-1", "account", "token-old").await;
+            DataverseSource::save_delta_token(&s, "src-1", "account", "token-new").await;
+
+            assert_eq!(
+                DataverseSource::load_delta_token(&s, "src-1", "account").await.as_deref(),
+                Some("token-new")
+            );
+        }
+
+        #[tokio::test]
+        async fn load_skips_invalid_utf8() {
+            let s = store();
+            let key = DataverseSource::delta_token_key("account");
+            // Write deliberately invalid UTF-8 directly.
+            s.set("src-1", &key, vec![0xff, 0xfe, 0xfd])
+                .await
+                .expect("set should succeed");
+
+            let loaded = DataverseSource::load_delta_token(&s, "src-1", "account").await;
+            assert!(loaded.is_none(), "non-UTF8 stored value should be ignored");
         }
     }
 }
