@@ -529,31 +529,47 @@ impl Query for DrasiQuery {
 
         // Read the last checkpoints and propagate source_position to subscription settings
         // so sources can resume from where they left off.
+        //
+        // Only propagate checkpoint recovery for persistent (non-volatile) backends.
+        // Volatile backends (in-memory, or StorageBackendSpec::Memory) rebuild the
+        // element index fresh on each start, so bootstrap must run to populate the
+        // graph state. Skipping bootstrap against an empty graph would produce
+        // incorrect results.
         let mut subscription_settings = subscription_settings;
-        let mut last_checkpoint_sequence: u64 = 0;
-        match checkpoint_store.read_all_checkpoints().await {
-            Ok(checkpoints) => {
-                for settings in &mut subscription_settings {
-                    if let Some(cp) = checkpoints.get(&settings.source_id) {
-                        if cp.sequence > last_checkpoint_sequence {
-                            last_checkpoint_sequence = cp.sequence;
+        let has_persistent_backend = self
+            .base
+            .config
+            .storage_backend
+            .as_ref()
+            .map(|backend| !self.index_factory.is_volatile(backend))
+            .unwrap_or(false);
+        let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        if has_persistent_backend {
+            match checkpoint_store.read_all_checkpoints().await {
+                Ok(checkpoints) => {
+                    for settings in &mut subscription_settings {
+                        if let Some(cp) = checkpoints.get(&settings.source_id) {
+                            checkpoint_sequences_per_source
+                                .insert(settings.source_id.clone(), cp.sequence);
+                            settings.last_sequence = Some(cp.sequence);
+                            settings.request_position_handle = true;
+                            if let Some(pos) = &cp.source_position {
+                                settings.resume_from = Some(pos.clone());
+                            }
+                            debug!(
+                                "Query '{}' resuming source '{}' from checkpoint: seq={}",
+                                self.base.config.id, settings.source_id, cp.sequence
+                            );
                         }
-                        settings.last_sequence = Some(cp.sequence);
-                        if let Some(pos) = &cp.source_position {
-                            settings.resume_from = Some(pos.clone());
-                        }
-                        debug!(
-                            "Query '{}' resuming source '{}' from checkpoint: seq={}",
-                            self.base.config.id, settings.source_id, cp.sequence
-                        );
                     }
                 }
-            }
-            Err(e) => {
-                warn!(
-                    "Query '{}' failed to read checkpoints, starting fresh: {e}",
-                    self.base.config.id
-                );
+                Err(e) => {
+                    warn!(
+                        "Query '{}' failed to read checkpoints, starting fresh: {e}",
+                        self.base.config.id
+                    );
+                }
             }
         }
 
@@ -1110,16 +1126,7 @@ impl Query for DrasiQuery {
                 // Track last processed sequence per source for dedup.
                 // Sequences are assigned per-source, so dedup must also be per-source.
                 let mut last_processed_per_source: std::collections::HashMap<String, u64> =
-                    std::collections::HashMap::new();
-                // Initialize with the global checkpoint sequence for all known sources.
-                // On restart, all sources advance their counters past checkpoint.sequence,
-                // so events with seq <= that value are duplicates from any source.
-                if last_checkpoint_sequence > 0 {
-                    for sid in &source_ids_for_processor {
-                        last_processed_per_source
-                            .insert(sid.clone(), last_checkpoint_sequence);
-                    }
-                }
+                    checkpoint_sequences_per_source.clone();
 
                 loop {
                     // Check if query is still running
@@ -1209,35 +1216,44 @@ impl Query for DrasiQuery {
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
                                     profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
+                                    // Stage checkpoint inside the session via pre-commit hook.
+                                    // This ensures checkpoint persistence is atomic with index updates.
+                                    let cp_store = checkpoint_store_for_processor.clone();
+                                    let cp_source_id = source_id.clone();
+                                    let cp_position = source_position.clone();
+                                    let hook = move || {
+                                        const MAX_POS_BYTES: usize = 65_536;
+                                        async move {
+                                            if let Some(seq) = sequence {
+                                                // Enforce position size limit at checkpoint time:
+                                                // oversized positions are skipped to preserve the
+                                                // last known good position in the store.
+                                                let pos_ref = match &cp_position {
+                                                    Some(p) if p.len() <= MAX_POS_BYTES => Some(p),
+                                                    _ => None,
+                                                };
+                                                cp_store
+                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
+                                                    .await?;
+                                            }
+                                            Ok(())
+                                        }
+                                    };
+
                                     match continuous_query_for_processor
-                                        .process_source_change(source_change)
+                                        .process_source_change_with_hook(source_change, hook)
                                         .await
                                     {
                                         Ok(results) => {
                                             profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
 
-                                            // Persist checkpoint after successful processing
+                                            // Advance dedup and notify source on successful commit
                                             if let Some(seq) = sequence {
-                                                if let Err(e) = checkpoint_store_for_processor
-                                                    .stage_checkpoint(
-                                                        &source_id,
-                                                        seq,
-                                                        source_position.as_ref(),
-                                                    )
-                                                    .await
-                                                {
-                                                    error!(
-                                                        "Query '{query_id}' failed to persist checkpoint \
-                                                         (seq={seq}, source='{source_id}'): {e}"
-                                                    );
-                                                } else {
-                                                    // Only advance dedup and notify source on successful persist
-                                                    last_processed_per_source
-                                                        .insert(source_id.clone(), seq);
+                                                last_processed_per_source
+                                                    .insert(source_id.clone(), seq);
 
-                                                    if let Some(handle) = position_handles_for_processor.get(&source_id) {
-                                                        handle.store(seq, std::sync::atomic::Ordering::Release);
-                                                    }
+                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
                                                 }
                                             }
 
