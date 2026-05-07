@@ -213,3 +213,154 @@ fn format_value_for_key(value: &ElementValue) -> String {
         ElementValue::Object(_) => "object".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mysql_cdc::events::row_events::mysql_value::MySqlValue;
+    use ordered_float::OrderedFloat;
+
+    #[test]
+    fn test_tiny_int() {
+        let v = mysql_value_to_element_value(&MySqlValue::TinyInt(42));
+        assert_eq!(v, ElementValue::Integer(42));
+    }
+
+    #[test]
+    fn test_small_int() {
+        let v = mysql_value_to_element_value(&MySqlValue::SmallInt(1000));
+        assert_eq!(v, ElementValue::Integer(1000));
+    }
+
+    #[test]
+    fn test_medium_int() {
+        let v = mysql_value_to_element_value(&MySqlValue::MediumInt(100_000));
+        assert_eq!(v, ElementValue::Integer(100_000));
+    }
+
+    #[test]
+    fn test_int() {
+        let v = mysql_value_to_element_value(&MySqlValue::Int(123_456));
+        assert_eq!(v, ElementValue::Integer(123_456));
+    }
+
+    #[test]
+    fn test_big_int() {
+        let v = mysql_value_to_element_value(&MySqlValue::BigInt(9_999_999_999));
+        assert_eq!(v, ElementValue::Integer(9_999_999_999));
+    }
+
+    #[test]
+    fn test_float() {
+        let v = mysql_value_to_element_value(&MySqlValue::Float(3.14));
+        assert!(matches!(v, ElementValue::Float(_)));
+    }
+
+    #[test]
+    fn test_double() {
+        let v = mysql_value_to_element_value(&MySqlValue::Double(2.718281828));
+        assert_eq!(v, ElementValue::Float(OrderedFloat(2.718281828)));
+    }
+
+    #[test]
+    fn test_decimal_valid() {
+        let v = mysql_value_to_element_value(&MySqlValue::Decimal("12.34".to_string()));
+        assert_eq!(v, ElementValue::Float(OrderedFloat(12.34)));
+    }
+
+    #[test]
+    fn test_decimal_invalid() {
+        let v = mysql_value_to_element_value(&MySqlValue::Decimal("not_a_number".to_string()));
+        assert_eq!(v, ElementValue::String(Arc::from("not_a_number")));
+    }
+
+    #[test]
+    fn test_string() {
+        let v = mysql_value_to_element_value(&MySqlValue::String("hello".to_string()));
+        assert_eq!(v, ElementValue::String(Arc::from("hello")));
+    }
+
+    #[test]
+    fn test_bit() {
+        let v = mysql_value_to_element_value(&MySqlValue::Bit(vec![true, false, true]));
+        assert_eq!(
+            v,
+            ElementValue::List(vec![
+                ElementValue::Bool(true),
+                ElementValue::Bool(false),
+                ElementValue::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_enum() {
+        let v = mysql_value_to_element_value(&MySqlValue::Enum(2));
+        assert_eq!(v, ElementValue::String(Arc::from("2")));
+    }
+
+    #[test]
+    fn test_set() {
+        let v = mysql_value_to_element_value(&MySqlValue::Set(7));
+        assert_eq!(v, ElementValue::String(Arc::from("7")));
+    }
+
+    #[test]
+    fn test_blob() {
+        let v = mysql_value_to_element_value(&MySqlValue::Blob(vec![0xDE, 0xAD]));
+        assert_eq!(v, ElementValue::String(Arc::from("3q0=")));
+    }
+
+    #[test]
+    fn test_year() {
+        let v = mysql_value_to_element_value(&MySqlValue::Year(2024));
+        assert_eq!(v, ElementValue::Integer(2024));
+    }
+
+    #[test]
+    fn test_date() {
+        use mysql_cdc::events::row_events::mysql_value::Date;
+        let v = mysql_value_to_element_value(&MySqlValue::Date(Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        }));
+        assert_eq!(v, ElementValue::String(Arc::from("2024-06-15")));
+    }
+
+    #[test]
+    fn test_time() {
+        use mysql_cdc::events::row_events::mysql_value::Time;
+        let v = mysql_value_to_element_value(&MySqlValue::Time(Time {
+            hour: 13,
+            minute: 45,
+            second: 30,
+            millis: 500,
+        }));
+        assert_eq!(v, ElementValue::String(Arc::from("013:45:30.500")));
+    }
+
+    #[test]
+    fn test_datetime() {
+        use mysql_cdc::events::row_events::mysql_value::DateTime;
+        let v = mysql_value_to_element_value(&MySqlValue::DateTime(DateTime {
+            year: 2024,
+            month: 1,
+            day: 2,
+            hour: 3,
+            minute: 4,
+            second: 5,
+            millis: 6,
+        }));
+        assert_eq!(
+            v,
+            ElementValue::String(Arc::from("2024-01-02 03:04:05.006"))
+        );
+    }
+
+    #[test]
+    fn test_timestamp_valid() {
+        let v = mysql_value_to_element_value(&MySqlValue::Timestamp(1700000000));
+        assert!(matches!(v, ElementValue::String(_)));
+    }
+}
