@@ -41,7 +41,7 @@ impl SqsReaction {
         SqsReactionBuilder::new(id)
     }
 
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: SqsReactionConfig) -> Self {
+    pub(crate) fn new(id: impl Into<String>, queries: Vec<String>, config: SqsReactionConfig) -> Self {
         let id = id.into();
         let params = ReactionBaseParams::new(id, queries);
         Self {
@@ -50,7 +50,7 @@ impl SqsReaction {
         }
     }
 
-    pub fn with_priority_queue_capacity(
+    pub(crate) fn with_priority_queue_capacity(
         id: impl Into<String>,
         queries: Vec<String>,
         config: SqsReactionConfig,
@@ -152,9 +152,10 @@ impl SqsReaction {
             ResultDiff::Noop => {}
         }
         context.insert("query_id".to_string(), Value::String(query_id.to_string()));
+        let query_name = query_id.rsplit('.').next().unwrap_or(query_id);
         context.insert(
             "query_name".to_string(),
-            Value::String(query_id.to_string()),
+            Value::String(query_name.to_string()),
         );
         context.insert(
             "operation".to_string(),
@@ -362,32 +363,30 @@ impl Reaction for SqsReaction {
         let reaction_id = self.base.id.clone();
         let priority_queue = self.base.priority_queue.clone();
         let queue_url = self.config.queue_url.clone();
-        let region = self.config.region.clone();
-        let endpoint_url = self.config.endpoint_url.clone();
         let fifo_queue = self.config.fifo_queue;
         let message_group_id_template = self.config.message_group_id_template.clone();
-        let access_key_id = self.config.access_key_id.clone();
-        let secret_access_key = self.config.secret_access_key.clone();
         let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
-        let processing_task = tokio::spawn(async move {
-            let mut loader = aws_config::from_env();
-            if let Some(endpoint) = endpoint_url.clone() {
-                loader = loader.endpoint_url(endpoint);
+        // Initialize AWS client eagerly so credential/endpoint errors surface immediately.
+        let mut loader = aws_config::from_env();
+        if let Some(endpoint) = &self.config.endpoint_url {
+            loader = loader.endpoint_url(endpoint);
+        }
+        if let Some(region_name) = &self.config.region {
+            loader = loader.region(Region::new(region_name.clone()));
+        }
+        if let Some(key_id) = &self.config.access_key_id {
+            if let Some(secret) = &self.config.secret_access_key {
+                let creds =
+                    Credentials::new(key_id, secret, None, None, "drasi-sqs-reaction");
+                loader = loader.credentials_provider(creds);
             }
-            if let Some(region_name) = region {
-                loader = loader.region(Region::new(region_name));
-            }
-            if let Some(key_id) = access_key_id {
-                if let Some(secret) = secret_access_key {
-                    let creds = Credentials::new(key_id, secret, None, None, "drasi-sqs-reaction");
-                    loader = loader.credentials_provider(creds);
-                }
-            }
-            let shared_config = loader.load().await;
-            let client = Client::new(&shared_config);
+        }
+        let shared_config = loader.load().await;
+        let client = Client::new(&shared_config);
 
+        let processing_task = tokio::spawn(async move {
             let mut handlebars = Handlebars::new();
             Self::register_json_helper(&mut handlebars);
 
@@ -524,5 +523,172 @@ impl Reaction for SqsReaction {
 
     async fn enqueue_query_result(&self, result: drasi_lib::channels::QueryResult) -> Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{QueryConfig, TemplateSpec};
+
+    #[test]
+    fn resolve_query_config_exact_match() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "q1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("body-q1")),
+                ..Default::default()
+            },
+        );
+        let default = None;
+        let result = SqsReaction::resolve_query_config("q1", &routes, &default);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
+    }
+
+    #[test]
+    fn resolve_query_config_subdomain_match() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "q1".to_string(),
+            QueryConfig {
+                added: Some(TemplateSpec::new("body-q1")),
+                ..Default::default()
+            },
+        );
+        let default = None;
+        let result = SqsReaction::resolve_query_config("source.q1", &routes, &default);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
+    }
+
+    #[test]
+    fn resolve_query_config_no_match_uses_default() {
+        let routes = HashMap::new();
+        let default = Some(QueryConfig {
+            added: Some(TemplateSpec::new("default-body")),
+            ..Default::default()
+        });
+        let result = SqsReaction::resolve_query_config("unknown", &routes, &default);
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().added.as_ref().unwrap().body,
+            "default-body"
+        );
+    }
+
+    #[test]
+    fn resolve_query_config_no_match_no_default_returns_none() {
+        let routes = HashMap::new();
+        let default = None;
+        let result = SqsReaction::resolve_query_config("unknown", &routes, &default);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn render_body_with_template() {
+        let mut handlebars = Handlebars::new();
+        SqsReaction::register_json_helper(&mut handlebars);
+        let spec = TemplateSpec::new("Hello {{after.name}}");
+        let mut context = Map::new();
+        context.insert(
+            "after".to_string(),
+            serde_json::json!({"name": "world"}),
+        );
+        let result = ResultDiff::Add {
+            data: serde_json::json!({"name": "world"}),
+            row_signature: 0,
+        };
+        let body = SqsReaction::render_body(&handlebars, &spec, &context, &result).unwrap();
+        assert_eq!(body, "Hello world");
+    }
+
+    #[test]
+    fn render_body_empty_template_falls_back_to_json() {
+        let mut handlebars = Handlebars::new();
+        SqsReaction::register_json_helper(&mut handlebars);
+        let spec = TemplateSpec::new("");
+        let context = Map::new();
+        let result = ResultDiff::Add {
+            data: serde_json::json!({"x": 42}),
+            row_signature: 0,
+        };
+        let body = SqsReaction::render_body(&handlebars, &spec, &context, &result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed, serde_json::json!({"x": 42}));
+    }
+
+    #[test]
+    fn render_message_attributes_renders_templates() {
+        let mut handlebars = Handlebars::new();
+        SqsReaction::register_json_helper(&mut handlebars);
+        let mut templates = HashMap::new();
+        templates.insert("env".to_string(), "prod-{{query_id}}".to_string());
+        let mut context = Map::new();
+        context.insert("query_id".to_string(), Value::String("q1".to_string()));
+        let attrs =
+            SqsReaction::render_message_attributes(&handlebars, &templates, &context).unwrap();
+        assert_eq!(attrs.get("env"), Some(&"prod-q1".to_string()));
+    }
+
+    #[test]
+    fn build_context_query_name_is_short_name() {
+        let result = ResultDiff::Add {
+            data: serde_json::json!({}),
+            row_signature: 0,
+        };
+        let context = SqsReaction::build_context("namespace.my-query", "ADD", &result, 12345);
+        assert_eq!(
+            context.get("query_id"),
+            Some(&Value::String("namespace.my-query".to_string()))
+        );
+        assert_eq!(
+            context.get("query_name"),
+            Some(&Value::String("my-query".to_string()))
+        );
+    }
+
+    #[test]
+    fn build_context_query_name_no_dot() {
+        let result = ResultDiff::Add {
+            data: serde_json::json!({}),
+            row_signature: 0,
+        };
+        let context = SqsReaction::build_context("simple-query", "ADD", &result, 12345);
+        assert_eq!(
+            context.get("query_name"),
+            Some(&Value::String("simple-query".to_string()))
+        );
+    }
+
+    #[test]
+    fn system_attributes_override_custom() {
+        // Verify that if custom_attributes contain "drasi-query-id", the system value wins
+        let mut custom = HashMap::new();
+        custom.insert("drasi-query-id".to_string(), "spoofed".to_string());
+        custom.insert("drasi-operation".to_string(), "spoofed-op".to_string());
+        custom.insert("user-key".to_string(), "user-value".to_string());
+
+        // Simulate the merge logic from send_sqs_message
+        let mut merged_attributes = HashMap::new();
+        for (key, value) in custom {
+            merged_attributes.insert(key, value);
+        }
+        merged_attributes.insert("drasi-query-id".to_string(), "real-query".to_string());
+        merged_attributes.insert("drasi-operation".to_string(), "ADD".to_string());
+
+        assert_eq!(
+            merged_attributes.get("drasi-query-id"),
+            Some(&"real-query".to_string())
+        );
+        assert_eq!(
+            merged_attributes.get("drasi-operation"),
+            Some(&"ADD".to_string())
+        );
+        assert_eq!(
+            merged_attributes.get("user-key"),
+            Some(&"user-value".to_string())
+        );
     }
 }

@@ -129,13 +129,10 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = SqsReactionSchemas::openapi();
-        serde_json::to_string(
-            &api.components
-                .as_ref()
-                .expect("OpenAPI components missing")
-                .schemas,
-        )
-        .expect("failed to serialize schema")
+        let Some(components) = api.components.as_ref() else {
+            return "{}".to_string();
+        };
+        serde_json::to_string(&components.schemas).unwrap_or_else(|_| "{}".to_string())
     }
 
     async fn create_reaction(
@@ -167,12 +164,23 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
                 builder.with_message_group_id_template(mapper.resolve_string(group_id_template)?);
         }
         if let Some(access_key_id) = &dto.access_key_id {
-            if let Some(secret_access_key) = &dto.secret_access_key {
-                builder = builder.with_credentials(
-                    mapper.resolve_string(access_key_id)?,
-                    mapper.resolve_string(secret_access_key)?,
-                );
+            match &dto.secret_access_key {
+                Some(secret_access_key) => {
+                    builder = builder.with_credentials(
+                        mapper.resolve_string(access_key_id)?,
+                        mapper.resolve_string(secret_access_key)?,
+                    );
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "access_key_id provided without secret_access_key"
+                    ));
+                }
             }
+        } else if dto.secret_access_key.is_some() {
+            return Err(anyhow::anyhow!(
+                "secret_access_key provided without access_key_id"
+            ));
         }
         if let Some(default_template) = &dto.default_template {
             builder = builder.with_default_template(map_query_config(default_template));
