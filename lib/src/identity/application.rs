@@ -27,7 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Boxed async callback type produced from a user-supplied closure.
+/// Boxed async credential callback that a user-supplied closure is stored as.
 type AsyncCredentialCallback = dyn Fn(&CredentialContext) -> Pin<Box<dyn Future<Output = Result<Credentials>> + Send>>
     + Send
     + Sync;
@@ -63,6 +63,9 @@ pub struct ApplicationIdentityProvider {
 
 impl ApplicationIdentityProvider {
     /// Create a provider backed by an async closure.
+    ///
+    /// See also [`ApplicationIdentityProvider::new_sync`] for synchronous
+    /// callbacks.
     pub fn new<F, Fut>(callback: F) -> Self
     where
         F: Fn(&CredentialContext) -> Fut + Send + Sync + 'static,
@@ -77,6 +80,8 @@ impl ApplicationIdentityProvider {
     ///
     /// Convenience wrapper for callbacks that don't need to await — the
     /// closure result is wrapped in a ready future.
+    ///
+    /// See also [`ApplicationIdentityProvider::new`] for async callbacks.
     pub fn new_sync<F>(callback: F) -> Self
     where
         F: Fn(&CredentialContext) -> Result<Credentials> + Send + Sync + 'static,
@@ -186,11 +191,11 @@ mod tests {
 
     #[tokio::test]
     async fn clone_box_shares_underlying_callback() {
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
-        CALLS.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_cb = calls.clone();
 
-        let provider = ApplicationIdentityProvider::new_sync(|_ctx| {
-            CALLS.fetch_add(1, Ordering::SeqCst);
+        let provider = ApplicationIdentityProvider::new_sync(move |_ctx| {
+            calls_for_cb.fetch_add(1, Ordering::SeqCst);
             Ok(Credentials::UsernamePassword {
                 username: "u".into(),
                 password: "p".into(),
@@ -208,7 +213,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -223,5 +228,49 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("auth backend unavailable"));
+    }
+
+    #[tokio::test]
+    async fn sync_closure_returns_certificate() {
+        let provider = ApplicationIdentityProvider::new_sync(|_ctx| {
+            Ok(Credentials::Certificate {
+                cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----".into(),
+                key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".into(),
+                username: Some("cert-user".into()),
+            })
+        });
+
+        let creds = provider
+            .get_credentials(&CredentialContext::new())
+            .await
+            .unwrap();
+
+        assert!(creds.is_certificate());
+        assert_eq!(
+            creds,
+            Credentials::Certificate {
+                cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----".into(),
+                key_pem: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----".into(),
+                username: Some("cert-user".into()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_impl_does_not_leak_callback_state() {
+        let provider = ApplicationIdentityProvider::new_sync(|_ctx| {
+            Ok(Credentials::UsernamePassword {
+                username: "should-not-appear".into(),
+                password: "super-secret".into(),
+            })
+        });
+
+        let formatted = format!("{provider:?}");
+
+        assert!(formatted.contains("ApplicationIdentityProvider"));
+        // The Debug impl is intentionally opaque — it must not surface
+        // closure-captured state or anything the closure might return.
+        assert!(!formatted.contains("super-secret"));
+        assert!(!formatted.contains("should-not-appear"));
     }
 }
