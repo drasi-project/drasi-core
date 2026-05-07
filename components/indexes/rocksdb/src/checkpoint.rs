@@ -137,7 +137,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
 
                         let pos_key = format!("{SOURCE_POSITION_PREFIX}{source_id}");
                         let pos_data = txn.get_cf(&cf, &pos_key).map_err(IndexError::other)?;
-                        let source_position = pos_data.map(|v| Bytes::from(v));
+                        let source_position = pos_data.map(Bytes::from);
 
                         Ok(Some(SourceCheckpoint {
                             sequence,
@@ -187,7 +187,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
                             // Read corresponding position
                             let pos_key = format!("{SOURCE_POSITION_PREFIX}{source_id}");
                             let pos_data = txn.get_cf(&cf, &pos_key).map_err(IndexError::other)?;
-                            let source_position = pos_data.map(|v| Bytes::from(v));
+                            let source_position = pos_data.map(Bytes::from);
 
                             result.insert(
                                 source_id,
