@@ -29,11 +29,11 @@ Attach this provider with `GtfsRtSource::builder(...).with_bootstrap_provider(bo
 
 | Field | Description | Default |
 |---|---|---|
-| `trip_updates_url` | Trip updates feed URL | `None` |
-| `vehicle_positions_url` | Vehicle positions feed URL | `None` |
-| `alerts_url` | Alerts feed URL | `None` |
+| `tripUpdatesUrl` | Trip updates feed URL | `None` |
+| `vehiclePositionsUrl` | Vehicle positions feed URL | `None` |
+| `alertsUrl` | Alerts feed URL | `None` |
 | `headers` | Optional HTTP headers | `{}` |
-| `timeout_secs` | HTTP timeout in seconds | `15` |
+| `timeoutSecs` | HTTP timeout in seconds | `15` |
 | `language` | Preferred language for translated strings | `"en"` |
 
 At least one feed URL must be configured.

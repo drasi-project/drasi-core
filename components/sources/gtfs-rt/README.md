@@ -104,14 +104,14 @@ let source = GtfsRtSource::builder("transit")
 
 | Field | Description | Default |
 |---|---|---|
-| `trip_updates_url` | Trip updates feed URL | `None` |
-| `vehicle_positions_url` | Vehicle positions feed URL | `None` |
-| `alerts_url` | Alerts feed URL | `None` |
-| `poll_interval_secs` | Poll interval in seconds | `30` |
-| `timeout_secs` | HTTP timeout in seconds | `15` |
+| `tripUpdatesUrl` | Trip updates feed URL | `None` |
+| `vehiclePositionsUrl` | Vehicle positions feed URL | `None` |
+| `alertsUrl` | Alerts feed URL | `None` |
+| `pollIntervalSecs` | Poll interval in seconds | `30` |
+| `timeoutSecs` | HTTP timeout in seconds | `15` |
 | `headers` | Optional HTTP headers (e.g. API keys) | `{}` |
 | `language` | Preferred language for translated strings | `"en"` |
-| `initial_cursor_mode` | First-poll behavior | `StartFromBeginning` |
+| `initialCursorMode` | First-poll behavior | `StartFromBeginning` |
 
 At least one feed URL must be configured.
 
