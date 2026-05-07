@@ -167,7 +167,8 @@ fn resolve_path<'a>(value: &'a JsonValue, path: &str) -> Option<&'a JsonValue> {
 
 /// Convert TemplateContext to JSON for direct path resolution.
 fn context_to_json(context: &TemplateContext) -> JsonValue {
-    serde_json::to_value(context).unwrap_or(JsonValue::Null)
+    serde_json::to_value(context)
+        .expect("TemplateContext serialization should never fail (all fields are JSON-safe)")
 }
 
 #[cfg(test)]

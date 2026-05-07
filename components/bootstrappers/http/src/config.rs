@@ -236,6 +236,11 @@ impl EndpointConfig {
                 "Validation error: endpoint[{index}].url cannot be empty"
             ));
         }
+        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
+            return Err(anyhow::anyhow!(
+                "Validation error: endpoint[{index}].url must start with http:// or https://"
+            ));
+        }
         if self.response.mappings.is_empty() {
             return Err(anyhow::anyhow!(
                 "Validation error: endpoint[{index}].response.mappings must have at least one mapping"

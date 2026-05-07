@@ -14,13 +14,15 @@
 
 //! Pagination strategies for HTTP bootstrap requests.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use reqwest::header::HeaderMap;
 use serde_json::Value as JsonValue;
+use url::Url;
 
 use crate::config::PaginationConfig;
 
 /// Describes how to modify the next request for pagination.
+#[derive(Debug)]
 pub enum NextPage {
     /// Modify query parameters on the original URL.
     QueryParams(Vec<(String, String)>),
@@ -43,8 +45,43 @@ pub trait Paginator: Send + Sync {
     ) -> Result<Option<NextPage>>;
 }
 
+/// Validate that a pagination-followed URL shares the same scheme+host as the
+/// original endpoint URL (SSRF prevention).
+fn validate_pagination_url(next_url: &str, origin_host: &str) -> Result<String> {
+    let parsed = Url::parse(next_url)
+        .map_err(|e| anyhow!("Invalid pagination URL '{}': {}", next_url, e))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(anyhow!(
+            "Pagination URL has disallowed scheme '{}': {}",
+            scheme,
+            next_url
+        ));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("Pagination URL has no host: {}", next_url))?;
+
+    if host != origin_host {
+        return Err(anyhow!(
+            "Pagination URL host '{}' does not match origin host '{}' (SSRF protection)",
+            host,
+            origin_host
+        ));
+    }
+
+    Ok(next_url.to_string())
+}
+
+/// Extract the host from a URL string for SSRF origin validation.
+pub fn extract_origin_host(url: &str) -> Option<String> {
+    Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string()))
+}
+
 /// Create a paginator from configuration.
-pub fn create_paginator(config: &PaginationConfig) -> Box<dyn Paginator> {
+pub fn create_paginator(config: &PaginationConfig, origin_host: String) -> Box<dyn Paginator> {
     match config {
         PaginationConfig::OffsetLimit {
             offset_param,
@@ -89,6 +126,7 @@ pub fn create_paginator(config: &PaginationConfig) -> Box<dyn Paginator> {
         } => Box::new(LinkHeaderPaginator {
             page_size_param: page_size_param.clone(),
             page_size: *page_size,
+            origin_host: origin_host.clone(),
         }),
         PaginationConfig::NextUrl {
             next_url_path,
@@ -96,6 +134,7 @@ pub fn create_paginator(config: &PaginationConfig) -> Box<dyn Paginator> {
         } => Box::new(NextUrlPaginator {
             next_url_path: next_url_path.clone(),
             base_url: base_url.clone(),
+            origin_host,
         }),
     }
 }
@@ -253,6 +292,7 @@ impl Paginator for CursorPaginator {
 struct LinkHeaderPaginator {
     page_size_param: Option<String>,
     page_size: Option<u64>,
+    origin_host: String,
 }
 
 impl Paginator for LinkHeaderPaginator {
@@ -274,10 +314,12 @@ impl Paginator for LinkHeaderPaginator {
             return Ok(None);
         }
 
-        // Parse Link header for rel="next"
         let next_url = parse_link_header_next(response_headers);
         match next_url {
-            Some(url) => Ok(Some(NextPage::NewUrl(url))),
+            Some(url) => {
+                let validated = validate_pagination_url(&url, &self.origin_host)?;
+                Ok(Some(NextPage::NewUrl(validated)))
+            }
             None => Ok(None),
         }
     }
@@ -288,6 +330,7 @@ impl Paginator for LinkHeaderPaginator {
 struct NextUrlPaginator {
     next_url_path: String,
     base_url: Option<String>,
+    origin_host: String,
 }
 
 impl Paginator for NextUrlPaginator {
@@ -312,7 +355,8 @@ impl Paginator for NextUrlPaginator {
                 } else {
                     url
                 };
-                Ok(Some(NextPage::NewUrl(full_url)))
+                let validated = validate_pagination_url(&full_url, &self.origin_host)?;
+                Ok(Some(NextPage::NewUrl(validated)))
             }
             _ => Ok(None),
         }
@@ -435,10 +479,12 @@ fn navigate_segment<'a>(value: &'a JsonValue, segment: &str) -> Option<&'a JsonV
 }
 
 /// Parse the Link header to find the URL with rel="next".
+/// Uses bracket-aware splitting to handle commas inside URL angle brackets.
 fn parse_link_header_next(headers: &HeaderMap) -> Option<String> {
     let link_header = headers.get("link")?.to_str().ok()?;
 
-    for part in link_header.split(',') {
+    // Split on commas that are outside angle brackets
+    for part in split_link_header(link_header) {
         let part = part.trim();
         // Check if this part has rel="next"
         if part.contains("rel=\"next\"") || part.contains("rel='next'") {
@@ -452,6 +498,27 @@ fn parse_link_header_next(headers: &HeaderMap) -> Option<String> {
     }
 
     None
+}
+
+/// Split a Link header value on commas that are outside angle brackets.
+fn split_link_header(header: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0u32;
+    let mut start = 0;
+
+    for (i, c) in header.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&header[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&header[start..]);
+    parts
 }
 
 #[cfg(test)]
@@ -522,7 +589,7 @@ mod tests {
             total_path: None,
         };
 
-        let mut paginator = create_paginator(&config);
+        let mut paginator = create_paginator(&config, "example.com".to_string());
         let initial = paginator.initial_params();
         assert_eq!(
             initial,
@@ -553,7 +620,7 @@ mod tests {
             page_size: Some(10),
         };
 
-        let mut paginator = create_paginator(&config);
+        let mut paginator = create_paginator(&config, "example.com".to_string());
 
         let headers = HeaderMap::new();
         let body = json!({"data": [{"id": "a"}, {"id": "b"}], "has_more": true});
@@ -572,7 +639,7 @@ mod tests {
             base_url: Some("https://instance.salesforce.com".to_string()),
         };
 
-        let mut paginator = create_paginator(&config);
+        let mut paginator = create_paginator(&config, "instance.salesforce.com".to_string());
         let headers = HeaderMap::new();
 
         let body = json!({"nextRecordsUrl": "/services/data/v56.0/query/abc-123"});
@@ -611,5 +678,53 @@ mod tests {
         let result = navigate_path(&data, "$");
         assert!(result.is_some());
         assert!(result.unwrap().is_array());
+    }
+
+    #[test]
+    fn test_ssrf_protection_rejects_different_host() {
+        let config = PaginationConfig::NextUrl {
+            next_url_path: "$.next".to_string(),
+            base_url: None,
+        };
+
+        let mut paginator = create_paginator(&config, "api.example.com".to_string());
+        let headers = HeaderMap::new();
+
+        // Attacker injects an internal URL in the response
+        let body = json!({"next": "http://169.254.169.254/latest/meta-data/"}); // DevSkim: ignore DS137138
+        let result = paginator.next_page(&body, &headers, 10);
+        assert!(result.is_err(), "Should reject URL to different host");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("SSRF protection"), "Error should mention SSRF: {err_msg}");
+    }
+
+    #[test]
+    fn test_ssrf_protection_allows_same_host() {
+        let config = PaginationConfig::NextUrl {
+            next_url_path: "$.next".to_string(),
+            base_url: None,
+        };
+
+        let mut paginator = create_paginator(&config, "api.example.com".to_string());
+        let headers = HeaderMap::new();
+
+        let body = json!({"next": "https://api.example.com/page/2"});
+        let result = paginator.next_page(&body, &headers, 10).unwrap();
+        assert!(matches!(result, Some(NextPage::NewUrl(_))));
+    }
+
+    #[test]
+    fn test_ssrf_protection_rejects_non_http_scheme() {
+        let config = PaginationConfig::NextUrl {
+            next_url_path: "$.next".to_string(),
+            base_url: None,
+        };
+
+        let mut paginator = create_paginator(&config, "api.example.com".to_string());
+        let headers = HeaderMap::new();
+
+        let body = json!({"next": "file:///etc/passwd"});
+        let result = paginator.next_page(&body, &headers, 10);
+        assert!(result.is_err(), "Should reject non-HTTP scheme");
     }
 }

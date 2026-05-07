@@ -41,11 +41,21 @@ use crate::template_engine::TemplateEngine;
 /// Maximum number of pages to fetch per endpoint to prevent infinite loops.
 const MAX_PAGES: u64 = 10_000;
 
+/// Maximum backoff delay (60 seconds) to prevent unbounded sleep.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// A resolved endpoint bundling config with its resolved auth.
+struct ResolvedEndpoint {
+    config: EndpointConfig,
+    auth: Option<ResolvedAuth>,
+}
+
 /// HTTP Bootstrap Provider that fetches data from REST APIs.
 pub struct HttpBootstrapProvider {
     config: HttpBootstrapConfig,
     client: Client,
-    resolved_auths: Vec<Option<ResolvedAuth>>,
+    endpoints: Vec<ResolvedEndpoint>,
+    engine: TemplateEngine,
 }
 
 impl HttpBootstrapProvider {
@@ -61,8 +71,8 @@ impl HttpBootstrapProvider {
             .build()
             .context("Failed to build HTTP client")?;
 
-        // Resolve authentication for each endpoint
-        let mut resolved_auths = Vec::new();
+        // Resolve authentication for each endpoint and bundle them together
+        let mut endpoints = Vec::new();
         for endpoint in &config.endpoints {
             let auth = match &endpoint.auth {
                 Some(auth_config) => Some(
@@ -71,13 +81,19 @@ impl HttpBootstrapProvider {
                 ),
                 None => None,
             };
-            resolved_auths.push(auth);
+            endpoints.push(ResolvedEndpoint {
+                config: endpoint.clone(),
+                auth,
+            });
         }
+
+        let engine = TemplateEngine::new();
 
         Ok(Self {
             config,
             client,
-            resolved_auths,
+            endpoints,
+            engine,
         })
     }
 
@@ -90,7 +106,6 @@ impl HttpBootstrapProvider {
         request: &BootstrapRequest,
         event_tx: &drasi_lib::channels::BootstrapEventSender,
     ) -> Result<u64> {
-        let engine = TemplateEngine::new();
         let mut total_sent: u64 = 0;
 
         // Determine content type override
@@ -100,11 +115,13 @@ impl HttpBootstrapProvider {
             .as_ref()
             .map(ContentType::from_override);
 
-        // Set up pagination
+        // Set up pagination with SSRF protection (origin host validation)
+        let origin_host = pagination::extract_origin_host(&endpoint.url)
+            .unwrap_or_default();
         let mut paginator: Option<Box<dyn Paginator>> = endpoint
             .pagination
             .as_ref()
-            .map(pagination::create_paginator);
+            .map(|p| pagination::create_paginator(p, origin_host));
 
         // Get initial pagination params
         let initial_params: Vec<(String, String)> = paginator
@@ -196,7 +213,7 @@ impl HttpBootstrapProvider {
                 &items,
                 &endpoint.response.mappings,
                 &context.source_id,
-                &engine,
+                &self.engine,
             );
 
             for result in element_results {
@@ -272,7 +289,9 @@ impl HttpBootstrapProvider {
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 let factor = 1u64.checked_shl(attempt - 1).unwrap_or(u64::MAX);
-                let delay = retry_delay.saturating_mul(factor.min(u32::MAX as u64) as u32);
+                let delay = retry_delay
+                    .saturating_mul(factor.min(u32::MAX as u64) as u32)
+                    .min(MAX_RETRY_DELAY);
                 debug!("Retry attempt {attempt} after {delay:?} delay");
                 tokio::time::sleep(delay).await;
             }
@@ -402,11 +421,9 @@ impl BootstrapProvider for HttpBootstrapProvider {
 
         let mut total_events: u64 = 0;
 
-        for (i, endpoint) in self.config.endpoints.iter().enumerate() {
-            let auth = &self.resolved_auths[i];
-
+        for resolved in &self.endpoints {
             match self
-                .fetch_endpoint(endpoint, auth, context, &request, &event_tx)
+                .fetch_endpoint(&resolved.config, &resolved.auth, context, &request, &event_tx)
                 .await
             {
                 Ok(count) => {
@@ -415,7 +432,7 @@ impl BootstrapProvider for HttpBootstrapProvider {
                 Err(e) => {
                     error!(
                         "Failed to bootstrap from endpoint '{}': {}",
-                        endpoint.url, e
+                        resolved.config.url, e
                     );
                     return Err(e);
                 }

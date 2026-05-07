@@ -65,10 +65,10 @@ fn test_request(node_labels: Vec<String>, relation_labels: Vec<String>) -> Boots
     }
 }
 
-/// Collect all bootstrap events from the channel.
+/// Collect all bootstrap events from the channel (waits for senders to drop).
 async fn collect_events(mut rx: mpsc::Receiver<BootstrapEvent>) -> Vec<BootstrapEvent> {
     let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
+    while let Some(event) = rx.recv().await {
         events.push(event);
     }
     events
@@ -224,7 +224,7 @@ async fn test_offset_limit_pagination() {
     let context = test_context("test-source");
     let request = test_request(vec!["User".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -319,7 +319,7 @@ async fn test_cursor_pagination_stripe_style() {
     let context = test_context("test-source");
     let request = test_request(vec!["Customer".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -421,7 +421,7 @@ async fn test_link_header_pagination_github_style() {
     let context = test_context("test-source");
     let request = test_request(vec!["Repository".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -557,7 +557,7 @@ async fn test_next_url_pagination_salesforce_style() {
     let context = test_context("test-source");
     let request = test_request(vec!["Account".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -626,7 +626,7 @@ async fn test_bearer_auth() {
     let context = test_context("test-source");
     let request = test_request(vec!["Secret".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -699,7 +699,7 @@ async fn test_api_key_header_auth() {
     let context = test_context("test-source");
     let request = test_request(vec!["Product".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -780,7 +780,7 @@ async fn test_basic_auth() {
     let context = test_context("test-source");
     let request = test_request(vec!["Call".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -878,7 +878,7 @@ async fn test_oauth2_client_credentials() {
     let context = test_context("test-source");
     let request = test_request(vec!["Data".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -978,7 +978,7 @@ async fn test_multi_endpoint_bootstrap() {
     let context = test_context("test-source");
     let request = test_request(vec!["User".to_string(), "Order".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1049,7 +1049,7 @@ async fn test_retry_on_failure() {
     let context = test_context("test-source");
     let request = test_request(vec!["Item".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1057,6 +1057,74 @@ async fn test_retry_on_failure() {
 
     assert_eq!(result.event_count, 1);
     // Should have made 3 requests total (2 failures + 1 success)
+    assert_eq!(request_count.load(Ordering::SeqCst), 3);
+}
+
+// ── Test: Retries exhausted returns error ───────────────────────────────────
+
+#[tokio::test]
+async fn test_retries_exhausted_returns_error() {
+    let request_count = Arc::new(AtomicU64::new(0));
+
+    let app = Router::new().route(
+        "/always-fail",
+        get({
+            let request_count = request_count.clone();
+            move || {
+                let request_count = request_count.clone();
+                async move {
+                    request_count.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Server Error").into_response()
+                }
+            }
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/always-fail"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["Item".to_string()],
+                        properties: None,
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 2,
+        retry_delay_ms: 10, // Very short for testing
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("test-source");
+    let request = test_request(vec!["Item".to_string()], vec![]);
+
+    let (tx, _rx) = mpsc::channel(100);
+    let result = provider.bootstrap(request, &context, tx, None).await;
+
+    assert!(result.is_err(), "Should return error when all retries exhausted");
+    let err = result.unwrap_err();
+    let err_chain = format!("{err:?}"); // Debug format shows full chain
+    assert!(
+        err_chain.contains("500") || err_chain.contains("error status") || err_chain.contains("Failed to fetch"),
+        "Error should mention HTTP failure: {err_chain}"
+    );
+    // Should have made 3 total attempts (1 initial + 2 retries)
     assert_eq!(request_count.load(Ordering::SeqCst), 3);
 }
 
@@ -1108,7 +1176,7 @@ async fn test_relations_mapping() {
     let context = test_context("test-source");
     let request = test_request(vec![], vec!["FOLLOWS".to_string()]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1211,7 +1279,7 @@ async fn test_page_number_pagination() {
     let context = test_context("test-source");
     let request = test_request(vec!["Item".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1273,7 +1341,7 @@ async fn test_label_filtering() {
     // Request only "Animal" labels - should filter out all "Person" nodes
     let request = test_request(vec!["Animal".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1332,7 +1400,7 @@ async fn test_descriptor_creates_provider_from_json_config() {
 
     let context = test_context("dto-source");
     let request = test_request(vec!["User".to_string()], vec![]);
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1474,7 +1542,7 @@ async fn test_xml_response_parsing() {
     let context = test_context("xml-source");
     let request = test_request(vec!["XmlNode".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1552,7 +1620,7 @@ async fn test_yaml_response_parsing() {
     let context = test_context("yaml-source");
     let request = test_request(vec!["YamlNode".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await
@@ -1633,7 +1701,7 @@ async fn test_type_preservation_in_properties() {
     let context = test_context("typed-source");
     let request = test_request(vec!["TypedNode".to_string()], vec![]);
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(100);
     let result = provider
         .bootstrap(request, &context, tx, None)
         .await

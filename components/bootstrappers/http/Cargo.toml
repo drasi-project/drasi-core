@@ -46,6 +46,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.0", features = ["full"] }
 ordered-float = "3.0"
 quick-xml = { version = "0.31", features = ["serialize"] }
+url = "2"
 
 [dev-dependencies]
 axum = "0.7"

@@ -143,8 +143,13 @@ impl OAuth2TokenProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unable to read response".to_string());
+            let truncated = if body.len() > 256 {
+                format!("{}... (truncated)", &body[..256])
+            } else {
+                body
+            };
             return Err(anyhow::anyhow!(
-                "OAuth2 token request failed with status {status}: {body}"
+                "OAuth2 token request failed with status {status}: {truncated}"
             ));
         }
 
@@ -256,5 +261,160 @@ pub async fn apply_auth(
                 .context("Failed to get OAuth2 token")?;
             Ok(builder.bearer_auth(token))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn test_oauth2_token_caching() {
+        // Start a mock token server that counts requests
+        let request_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let app = {
+            let request_count = request_count.clone();
+            axum::Router::new().route(
+                "/token",
+                axum::routing::post(move || {
+                    let request_count = request_count.clone();
+                    async move {
+                        request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        axum::Json(serde_json::json!({
+                            "access_token": "test-token-123",
+                            "expires_in": 3600,
+                            "token_type": "Bearer"
+                        }))
+                    }
+                }),
+            )
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let token_url = format!("http://127.0.0.1:{}/token", addr.port()); // DevSkim: ignore DS137138
+        let client = Client::new();
+
+        let provider = OAuth2TokenProvider::new(
+            token_url,
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            vec!["read".to_string()],
+            client,
+        );
+
+        // First call fetches from server
+        let token1 = provider.get_token().await.unwrap();
+        assert_eq!(token1, "test-token-123");
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "First call should hit the server"
+        );
+
+        // Second call should return cached token (no additional request)
+        let token2 = provider.get_token().await.unwrap();
+        assert_eq!(token2, "test-token-123");
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Second call should use cache, not hit server"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_token_refresh_on_expiry() {
+        let request_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+        let app = {
+            let request_count = request_count.clone();
+            axum::Router::new().route(
+                "/token",
+                axum::routing::post(move || {
+                    let request_count = request_count.clone();
+                    async move {
+                        let count =
+                            request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        axum::Json(serde_json::json!({
+                            "access_token": format!("token-{}", count + 1),
+                            "expires_in": 1,
+                            "token_type": "Bearer"
+                        }))
+                    }
+                }),
+            )
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let token_url = format!("http://127.0.0.1:{}/token", addr.port()); // DevSkim: ignore DS137138
+        let client = Client::new();
+
+        let provider = OAuth2TokenProvider::new(
+            token_url,
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            vec![],
+            client,
+        );
+
+        // First call — token expires immediately (1s - 60s safety = already expired)
+        let token1 = provider.get_token().await.unwrap();
+        assert_eq!(token1, "token-1");
+
+        // Second call should refresh since token is already expired
+        let token2 = provider.get_token().await.unwrap();
+        assert_eq!(token2, "token-2");
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "Expired token should trigger refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth2_error_is_truncated() {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                let body = "x".repeat(500);
+                (axum::http::StatusCode::BAD_REQUEST, body).into_response()
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let token_url = format!("http://127.0.0.1:{}/token", addr.port()); // DevSkim: ignore DS137138
+        let client = Client::new();
+
+        let provider = OAuth2TokenProvider::new(
+            token_url,
+            "client-id".to_string(),
+            "client-secret".to_string(),
+            vec![],
+            client,
+        );
+
+        let err = provider.get_token().await.unwrap_err();
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("truncated"),
+            "Error should be truncated: {err_msg}"
+        );
+        assert!(err_msg.len() < 400, "Error message should be bounded");
     }
 }

@@ -20,7 +20,7 @@ Fetches initial state from REST APIs to populate Drasi continuous queries. Suppo
 | `endpoints` | array | (required) | List of endpoint configurations |
 | `timeoutSeconds` | integer | 30 | HTTP request timeout in seconds |
 | `maxRetries` | integer | 3 | Maximum retry attempts on failure |
-| `retryDelayMs` | integer | 1000 | Base delay between retries (multiplied by attempt number) |
+| `retryDelayMs` | integer | 1000 | Base delay between retries in milliseconds; grows exponentially (delay × 2^(attempt−1)), capped at 60 seconds |
 
 ### Endpoint Config
 
@@ -315,8 +315,7 @@ Fetch all customers. Uses **cursor-based** pagination (`starting_after` + `has_m
       "method": "GET",
       "auth": {
         "type": "basic",
-        "username_env": "STRIPE_SECRET_KEY",
-        "password_env": null
+        "username_env": "STRIPE_SECRET_KEY"
       },
       "pagination": {
         "type": "cursor",
