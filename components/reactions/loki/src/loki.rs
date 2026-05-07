@@ -560,7 +560,9 @@ impl Reaction for LokiReaction {
                         labels: rendered_labels.clone(),
                         values: Vec::new(),
                     });
-                    stream.values.push(((base_timestamp_ns + ts_offset).to_string(), log_line));
+                    stream
+                        .values
+                        .push(((base_timestamp_ns + ts_offset).to_string(), log_line));
                     ts_offset += 1;
                     debug!(
                         "[{reaction_name}] streams buffered so far: {}",
