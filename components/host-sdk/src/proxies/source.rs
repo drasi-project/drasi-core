@@ -185,6 +185,12 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
+        // Pass last_sequence across FFI (bool flag + u64 value)
+        let (has_last_sequence, last_sequence_val) = match settings.last_sequence {
+            Some(seq) => (true, seq),
+            None => (false, 0u64),
+        };
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -194,6 +200,8 @@ impl Source for SourceProxy {
             relations_ffi,
             resume_from_ptr,
             resume_from_len,
+            has_last_sequence,
+            last_sequence_val,
         );
 
         if resp_ptr.is_null() {

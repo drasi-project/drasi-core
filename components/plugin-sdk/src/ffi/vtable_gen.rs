@@ -379,6 +379,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         relations_json: FfiStr,
         resume_from_ptr: *const u8,
         resume_from_len: u32,
+        has_last_sequence: bool,
+        last_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -405,7 +407,11 @@ pub fn build_source_vtable<T: Source + 'static>(
             relations,
             resume_from,
             request_position_handle: false,
-            last_sequence: None,
+            last_sequence: if has_last_sequence {
+                Some(last_sequence)
+            } else {
+                None
+            },
         };
 
         let handle = (w.runtime_handle)().handle().clone();
@@ -720,6 +726,8 @@ pub fn build_source_vtable_from_boxed(
         relations_json: FfiStr,
         resume_from_ptr: *const u8,
         resume_from_len: u32,
+        has_last_sequence: bool,
+        last_sequence: u64,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -746,7 +754,11 @@ pub fn build_source_vtable_from_boxed(
             relations,
             resume_from,
             request_position_handle: false,
-            last_sequence: None,
+            last_sequence: if has_last_sequence {
+                Some(last_sequence)
+            } else {
+                None
+            },
         };
 
         let handle = (w.runtime_handle)().handle().clone();

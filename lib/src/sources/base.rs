@@ -379,10 +379,10 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
     ) {
         if let Some(last_seq) = settings.last_sequence {
-            // Only advance the counter, never go backwards
-            let current = self.next_sequence.load(Ordering::Relaxed);
-            if last_seq >= current {
-                self.set_next_sequence(last_seq);
+            // Atomically advance to last_seq+1, never go backwards.
+            // fetch_max is safe under concurrent subscriptions.
+            let prev = self.next_sequence.fetch_max(last_seq + 1, Ordering::Relaxed);
+            if last_seq + 1 > prev {
                 info!(
                     "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
                     self.id,
@@ -493,6 +493,9 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
+        // Recover sequence counter from checkpoint before anything else
+        self.apply_subscription_settings(settings);
+
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
             settings.query_id,
@@ -668,16 +671,17 @@ impl SourceBase {
     const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
 
     pub async fn dispatch_event(&self, mut wrapper: SourceEventWrapper) -> Result<()> {
-        // Validate source_position size
+        // Warn about oversized source positions; the checkpoint layer will
+        // enforce the limit and preserve the last good position.
         if let Some(ref pos) = wrapper.source_position {
             if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
                 warn!(
-                    "[{}] Source position exceeds maximum size ({} bytes > {} limit), stripping position",
+                    "[{}] Source position is large ({} bytes > {} limit); \
+                     checkpoint staging will preserve the previous good position",
                     self.id,
                     pos.len(),
                     Self::MAX_SOURCE_POSITION_BYTES
                 );
-                wrapper.source_position = None;
             }
         }
 
