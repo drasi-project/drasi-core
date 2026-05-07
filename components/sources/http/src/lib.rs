@@ -251,7 +251,7 @@ use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentType, *};
-use drasi_lib::config::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
+use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;

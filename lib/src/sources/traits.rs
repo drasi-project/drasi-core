@@ -161,7 +161,7 @@ pub trait Source: Send + Sync {
     /// This is a best-effort introspection hook used by inspection APIs and
     /// future MCP adapters. Sources that cannot determine their schema should
     /// return `None`.
-    fn describe_schema(&self) -> Option<crate::config::SourceSchema> {
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
         None
     }
 
@@ -267,7 +267,7 @@ impl Source for Box<dyn Source + 'static> {
         (**self).auto_start()
     }
 
-    fn describe_schema(&self) -> Option<crate::config::SourceSchema> {
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
         (**self).describe_schema()
     }
 

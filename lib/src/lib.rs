@@ -87,6 +87,9 @@ pub mod state_guard;
 // Config module needs to be public for configuration types
 pub mod config;
 
+// Schema discovery types (separate from configuration)
+pub mod schema;
+
 // Indexes module for storage backend configuration
 pub mod indexes;
 
@@ -157,10 +160,15 @@ pub use managers::{init_tracing, try_init_tracing};
 pub use config::snapshot::QuerySnapshot;
 /// Configuration types
 pub use config::{
-    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, GraphNodeSchema, GraphRelationSchema,
-    GraphSchema, NodeSchema, PropertySchema, PropertyType, QueryConfig, QueryLanguage,
-    QueryRuntime, ReactionRuntime, ReactionSnapshot, RelationSchema, RuntimeConfig, SourceRuntime,
-    SourceSchema, SourceSnapshot, SourceSubscriptionSettings,
+    BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
+    QueryRuntime, ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
+    SourceSubscriptionSettings,
+};
+
+/// Schema discovery types (also available via `config::` for backward compatibility)
+pub use schema::{
+    normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
+    PropertySchema, PropertyType, RelationSchema, SourceSchema,
 };
 
 /// Storage backend configuration types

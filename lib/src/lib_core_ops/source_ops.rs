@@ -22,9 +22,10 @@ use std::collections::HashMap;
 
 use crate::channels::{ComponentEvent, ComponentStatus};
 use crate::component_ops::map_component_error;
-use crate::config::{GraphSchema, SourceRuntime, SourceSchema};
+use crate::config::SourceRuntime;
 use crate::error::{DrasiError, Result};
 use crate::lib_core::DrasiLib;
+use crate::schema::{GraphSchema, SourceSchema};
 use crate::sources::Source;
 
 impl DrasiLib {
@@ -438,9 +439,9 @@ mod tests {
     use crate::channels::ComponentStatus;
     use crate::channels::{SourceEventWrapper, SubscriptionResponse};
     use crate::component_graph::ComponentStatusHandle;
-    use crate::config::{NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema};
     use crate::error::DrasiError;
     use crate::lib_core::DrasiLib;
+    use crate::schema::{NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema};
     use crate::sources::tests::{create_test_mock_source, TestMockSource};
     use crate::sources::COMPONENT_GRAPH_SOURCE_ID;
     use crate::test_helpers::wait_for_component_status;

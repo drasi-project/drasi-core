@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::config::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
+use drasi_lib::schema::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
 use log::{debug, info};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};

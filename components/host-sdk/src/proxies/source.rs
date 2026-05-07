@@ -22,7 +22,8 @@ use async_trait::async_trait;
 
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::SubscriptionResponse;
-use drasi_lib::config::{SourceSchema, SourceSubscriptionSettings};
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::schema::SourceSchema;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;

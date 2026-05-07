@@ -25,10 +25,11 @@ use std::collections::BTreeMap;
 
 use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
-use crate::config::{SourceRuntime, SourceSchema};
+use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
+use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 

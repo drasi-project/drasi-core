@@ -181,7 +181,7 @@ pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use drasi_lib::config::{
+use drasi_lib::schema::{
     normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
 };
 use log::{debug, error, info};

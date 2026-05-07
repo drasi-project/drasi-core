@@ -143,7 +143,7 @@ impl InspectionAPI {
     pub async fn get_source_schema(
         &self,
         id: &str,
-    ) -> crate::error::Result<Option<crate::config::SourceSchema>> {
+    ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
         self.state_guard.require_initialized()?;
         self.source_manager
             .get_source_schema(id.to_string())
@@ -152,10 +152,10 @@ impl InspectionAPI {
     }
 
     /// Get the merged graph schema across all registered sources and queries.
-    pub async fn get_graph_schema(&self) -> crate::error::Result<crate::config::GraphSchema> {
+    pub async fn get_graph_schema(&self) -> crate::error::Result<crate::schema::GraphSchema> {
         self.state_guard.require_initialized()?;
 
-        let mut schema = crate::config::GraphSchema::default();
+        let mut schema = crate::schema::GraphSchema::default();
 
         for (source_id, _) in self.source_manager.list_sources().await {
             if source_id == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
