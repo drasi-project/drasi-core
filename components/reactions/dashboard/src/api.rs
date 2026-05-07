@@ -37,6 +37,7 @@ pub struct ApiState {
     state_store: Option<Arc<dyn StateStoreProvider>>,
     snapshot_store: QuerySnapshotStore,
     results_api_url: Option<String>,
+    results_api_client: Option<reqwest::Client>,
 }
 
 impl ApiState {
@@ -52,10 +53,19 @@ impl ApiState {
             state_store,
             snapshot_store,
             results_api_url: None,
+            results_api_client: None,
         }
     }
 
     pub fn with_results_api_url(mut self, url: Option<String>) -> Self {
+        if url.is_some() {
+            self.results_api_client = Some(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .expect("failed to build reqwest client"),
+            );
+        }
         self.results_api_url = url;
         self
     }
@@ -131,10 +141,11 @@ fn not_found(message: impl Into<String>) -> ApiError {
 }
 
 fn internal_error(error: anyhow::Error) -> ApiError {
+    log::error!("dashboard API internal error: {error:#}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
-            error: error.to_string(),
+            error: "internal server error".to_string(),
         }),
     )
 }
@@ -268,22 +279,23 @@ async fn get_query_snapshot(
     State(state): State<ApiState>,
     Path(query_id): Path<String>,
 ) -> ApiResult<Json<QuerySnapshot>> {
+    // Validate query_id against the known query list to prevent SSRF.
+    if !state.query_ids.contains(&query_id) {
+        return Err(not_found(format!("query '{query_id}' not found")));
+    }
+
     let snapshot = state.snapshot_store.get_snapshot(&query_id).await;
     if !snapshot.rows.is_empty() || snapshot.aggregation.is_some() {
         return Ok(Json(snapshot));
     }
 
     // Fall back to the results API if configured and local snapshot is empty.
-    if let Some(base_url) = &state.results_api_url {
+    if let (Some(base_url), Some(client)) = (&state.results_api_url, &state.results_api_client) {
         let url = format!(
             "{}/queries/{}/results",
             base_url.trim_end_matches('/'),
             query_id
         );
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_default();
         if let Ok(response) = client.get(&url).send().await {
             if let Ok(rows) = response.json::<Vec<serde_json::Value>>().await {
                 return Ok(Json(QuerySnapshot {

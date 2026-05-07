@@ -62,6 +62,7 @@ export class DashboardSocket {
     this.notifyStatus("Connecting");
 
     this.socket.onopen = () => {
+      this.reconnectDelayMs = 1000;
       this.notifyStatus("Connected");
       if (this.subscriptions.size > 0) {
         this.send({
@@ -91,6 +92,7 @@ export class DashboardSocket {
       this.notifyStatus("Disconnected");
       if (!this.stopped) {
         window.setTimeout(() => this.connect(), this.reconnectDelayMs);
+        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
       }
     };
 

@@ -32,6 +32,7 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | `port` | `u16` | `3000` | Bind port |
 | `heartbeat_interval_ms` | `u64` | `30000` | WebSocket heartbeat interval |
 | `results_api_url` | `Option<String>` | `None` | Optional results API URL for snapshot bootstrap |
+| `priority_queue_capacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
 | `queries` | `Vec<String>` | `[]` | Subscribed query IDs |
 
 ## Predefined Dashboards

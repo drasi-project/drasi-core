@@ -596,7 +596,7 @@ function renderKpi(widget, runtime, container) {
   container.innerHTML = `
     <div class="widget-kpi">
       <div class="kpi-value">${formatNumber(value)}</div>
-      <div class="kpi-label">${label}</div>
+      <div class="kpi-label">${escapeHtml(label)}</div>
     </div>`;
 }
 

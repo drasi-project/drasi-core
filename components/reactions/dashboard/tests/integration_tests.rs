@@ -52,7 +52,6 @@ where
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-reaction-dashboard -- --ignored --nocapture
 async fn test_dashboard_reaction_end_to_end() -> Result<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .is_test(true)
@@ -85,9 +84,21 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
         .await?;
 
     core.start().await?;
-    sleep(Duration::from_millis(750)).await;
 
+    // Poll until the server is ready (max 10 seconds).
     let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(resp) = client.get("http://localhost:19110/").send().await {
+            if resp.status().is_success() {
+                break;
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(anyhow::anyhow!("server did not become ready within 10 seconds"));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
 
     // Verify static UI endpoint.
     let root_response = client.get("http://localhost:19110/").send().await?;
@@ -148,7 +159,9 @@ async fn test_dashboard_reaction_end_to_end() -> Result<()> {
             r#"{"type":"subscribe","query_ids":["test-query"]}"#.to_string(),
         ))
         .await?;
-    sleep(Duration::from_millis(200)).await;
+    // Brief yield to let server process the subscribe before we send data.
+    tokio::task::yield_now().await;
+    sleep(Duration::from_millis(50)).await;
 
     // INSERT verification.
     source_handle

@@ -44,11 +44,10 @@ serde_json = "1.0"
 futures = "0.3"
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
-rust-embed = { version = "8", features = ["axum"] }
-mime_guess = "2"
+rust-embed = { version = "8", features = ["axum", "mime-guess"] }
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 drasi-core.workspace = true

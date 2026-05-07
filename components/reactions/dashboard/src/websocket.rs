@@ -235,8 +235,6 @@ impl QuerySnapshotStore {
                 ResultDiff::Update { before, after, .. } => {
                     if let Some(idx) = find_row_index(&snapshot.rows, before) {
                         snapshot.rows[idx] = after.clone();
-                    } else if let Some(idx) = find_row_index(&snapshot.rows, after) {
-                        snapshot.rows[idx] = after.clone();
                     } else {
                         snapshot.rows.push(after.clone());
                     }
@@ -301,8 +299,11 @@ async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<Stri
     let (mut sender, mut receiver) = socket.split();
     let mut hub_receiver = hub.subscribe();
 
+    // Build allowed set for validating subscription requests.
+    let allowed_query_ids: HashSet<String> = query_ids.iter().cloned().collect();
+
     // New clients are subscribed to all reaction queries by default.
-    let subscriptions = Arc::new(RwLock::new(query_ids.into_iter().collect::<HashSet<_>>()));
+    let subscriptions = Arc::new(RwLock::new(allowed_query_ids.clone()));
 
     let subscriptions_for_send = Arc::clone(&subscriptions);
     let mut send_task = tokio::spawn(async move {
@@ -357,7 +358,9 @@ async fn handle_socket(socket: WebSocket, hub: WebSocketHub, query_ids: Vec<Stri
                     Ok(ClientMessage::Subscribe { query_ids }) => {
                         let mut subscriptions = subscriptions_for_receive.write().await;
                         for query_id in query_ids {
-                            subscriptions.insert(query_id);
+                            if allowed_query_ids.contains(&query_id) {
+                                subscriptions.insert(query_id);
+                            }
                         }
                     }
                     Ok(ClientMessage::Unsubscribe { query_ids }) => {

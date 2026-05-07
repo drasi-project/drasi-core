@@ -71,51 +71,7 @@ impl DashboardReaction {
         DashboardReactionBuilder::new(id)
     }
 
-    /// Create a new DashboardReaction.
-    pub fn new(
-        id: impl Into<String>,
-        queries: Vec<String>,
-        config: DashboardReactionConfig,
-    ) -> Self {
-        Self::create_internal(id.into(), queries, config, None, true, Vec::new())
-    }
-
-    /// Create a DashboardReaction with custom priority queue capacity.
-    pub fn with_priority_queue_capacity(
-        id: impl Into<String>,
-        queries: Vec<String>,
-        config: DashboardReactionConfig,
-        priority_queue_capacity: usize,
-    ) -> Self {
-        Self::create_internal(
-            id.into(),
-            queries,
-            config,
-            Some(priority_queue_capacity),
-            true,
-            Vec::new(),
-        )
-    }
-
     pub(crate) fn from_builder(
-        id: String,
-        queries: Vec<String>,
-        config: DashboardReactionConfig,
-        priority_queue_capacity: Option<usize>,
-        auto_start: bool,
-        predefined_dashboards: Vec<DashboardConfig>,
-    ) -> Self {
-        Self::create_internal(
-            id,
-            queries,
-            config,
-            priority_queue_capacity,
-            auto_start,
-            predefined_dashboards,
-        )
-    }
-
-    fn create_internal(
         id: String,
         queries: Vec<String>,
         config: DashboardReactionConfig,
@@ -149,9 +105,9 @@ fn serve_asset(path: &str) -> Response {
 
     match DashboardAssets::get(effective_path) {
         Some(content) => {
-            let mime = mime_guess::from_path(effective_path).first_or_octet_stream();
+            let mime = content.metadata.mimetype();
             (
-                [(header::CONTENT_TYPE, mime.as_ref())],
+                [(header::CONTENT_TYPE, mime)],
                 content.data.into_owned(),
             )
                 .into_response()
@@ -337,7 +293,11 @@ impl Reaction for DashboardReaction {
         let server_status_handle = self.base.status_handle();
         let server_handle = tokio::spawn(async move {
             let cors = CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(tower_http::cors::AllowOrigin::exact(
+                    format!("http://{host}:{port}")
+                        .parse()
+                        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("null")),
+                ))
                 .allow_methods([
                     Method::GET,
                     Method::POST,
