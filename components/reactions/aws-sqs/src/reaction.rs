@@ -251,11 +251,12 @@ impl SqsReaction {
         message_group_id: Option<String>,
     ) -> Result<()> {
         let mut merged_attributes = HashMap::new();
-        merged_attributes.insert("drasi-query-id".to_string(), query_id.to_string());
-        merged_attributes.insert("drasi-operation".to_string(), operation.to_string());
         for (key, value) in custom_attributes {
             merged_attributes.insert(key, value);
         }
+        // System attributes inserted after custom ones so they cannot be overwritten.
+        merged_attributes.insert("drasi-query-id".to_string(), query_id.to_string());
+        merged_attributes.insert("drasi-operation".to_string(), operation.to_string());
 
         let mut request = client
             .send_message()

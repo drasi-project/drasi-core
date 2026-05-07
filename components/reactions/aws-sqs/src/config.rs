@@ -109,3 +109,24 @@ pub struct SqsReactionConfig {
     #[serde(default)]
     pub routes: HashMap<String, QueryConfig>,
 }
+
+impl SqsReactionConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.queue_url.trim().is_empty() {
+            return Err(anyhow::anyhow!("queue_url is required"));
+        }
+        if let Some(ref endpoint) = self.endpoint_url {
+            let parsed = url::Url::parse(endpoint.trim())
+                .map_err(|e| anyhow::anyhow!("endpoint_url is not a valid URL: {e}"))?;
+            match parsed.scheme() {
+                "https" | "http" => {}
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "endpoint_url scheme must be http or https, got: {other}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
