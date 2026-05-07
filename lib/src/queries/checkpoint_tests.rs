@@ -560,10 +560,7 @@ mod tests {
 
         // However, the checkpoint SHOULD still be stored in the checkpoint store.
         // Verify by reading it directly.
-        let query_instance = query_manager
-            .get_query_instance("e2e-query")
-            .await
-            .unwrap();
+        let query_instance = query_manager.get_query_instance("e2e-query").await.unwrap();
         let cp_store = query_instance
             .as_any()
             .downcast_ref::<crate::queries::DrasiQuery>()
@@ -1210,8 +1207,14 @@ mod tests {
         if let Some(store) = cp_store {
             let checkpoints = store.read_all_checkpoints().await.unwrap();
             // Each source should have its own checkpoint
-            assert!(checkpoints.contains_key("src-alpha"), "Source A should have a checkpoint");
-            assert!(checkpoints.contains_key("src-beta"), "Source B should have a checkpoint");
+            assert!(
+                checkpoints.contains_key("src-alpha"),
+                "Source A should have a checkpoint"
+            );
+            assert!(
+                checkpoints.contains_key("src-beta"),
+                "Source B should have a checkpoint"
+            );
         }
     }
 
