@@ -103,7 +103,8 @@ impl MySqlDecoder {
                 .get(idx)
                 .cloned()
                 .unwrap_or_else(|| format!("col_{idx}"));
-            let value = self.value_at(row, fallback_row, idx)?;
+            let col_type = table.get_column_type(idx).ok().flatten();
+            let value = self.value_at(row, fallback_row, idx, col_type)?;
 
             if let Some(keys) = configured_keys {
                 if keys.contains(&column_key) {
@@ -148,6 +149,7 @@ impl MySqlDecoder {
         row: &BinlogRow,
         fallback_row: Option<&BinlogRow>,
         idx: usize,
+        col_type: Option<mysql_common::constants::ColumnType>,
     ) -> Result<ElementValue> {
         let value = row
             .as_ref(idx)
@@ -155,7 +157,7 @@ impl MySqlDecoder {
 
         match value {
             None => Ok(ElementValue::Null),
-            Some(value) => binlog_value_to_element_value(value),
+            Some(value) => binlog_value_to_element_value(value, col_type),
         }
     }
 
@@ -175,9 +177,12 @@ impl MySqlDecoder {
     }
 }
 
-fn binlog_value_to_element_value(value: &BinlogValue<'_>) -> Result<ElementValue> {
+fn binlog_value_to_element_value(
+    value: &BinlogValue<'_>,
+    col_type: Option<mysql_common::constants::ColumnType>,
+) -> Result<ElementValue> {
     match value {
-        BinlogValue::Value(value) => Ok(mysql_value_to_element_value(value)),
+        BinlogValue::Value(value) => Ok(mysql_value_to_element_value(value, col_type)),
         BinlogValue::Jsonb(value) => {
             let json = serde_json::Value::try_from(value.clone())
                 .context("Failed to convert MySQL JSONB value to JSON")?;
@@ -189,10 +194,22 @@ fn binlog_value_to_element_value(value: &BinlogValue<'_>) -> Result<ElementValue
     }
 }
 
-fn mysql_value_to_element_value(value: &Value) -> ElementValue {
+fn mysql_value_to_element_value(
+    value: &Value,
+    col_type: Option<mysql_common::constants::ColumnType>,
+) -> ElementValue {
+    use mysql_common::constants::ColumnType;
+
     match value {
         Value::NULL => ElementValue::Null,
         Value::Bytes(bytes) => {
+            // YEAR columns come as Bytes in binlog; parse as integer for consistency
+            if col_type == Some(ColumnType::MYSQL_TYPE_YEAR) {
+                let text = String::from_utf8_lossy(bytes);
+                if let Ok(val) = text.parse::<i64>() {
+                    return ElementValue::Integer(val);
+                }
+            }
             ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).into_owned()))
         }
         Value::Int(val) => ElementValue::Integer(*val),
@@ -225,19 +242,19 @@ mod tests {
 
     #[test]
     fn test_null() {
-        let v = mysql_value_to_element_value(&Value::NULL);
+        let v = mysql_value_to_element_value(&Value::NULL, None);
         assert_eq!(v, ElementValue::Null);
     }
 
     #[test]
     fn test_int() {
-        let v = mysql_value_to_element_value(&Value::Int(123_456));
+        let v = mysql_value_to_element_value(&Value::Int(123_456), None);
         assert_eq!(v, ElementValue::Integer(123_456));
     }
 
     #[test]
     fn test_uint_overflow() {
-        let v = mysql_value_to_element_value(&Value::UInt((i64::MAX as u64) + 1));
+        let v = mysql_value_to_element_value(&Value::UInt((i64::MAX as u64) + 1), None);
         assert_eq!(
             v,
             ElementValue::String(Arc::from(((i64::MAX as u64) + 1).to_string()))
@@ -246,31 +263,41 @@ mod tests {
 
     #[test]
     fn test_float() {
-        let v = mysql_value_to_element_value(&Value::Float(3.14));
+        let v = mysql_value_to_element_value(&Value::Float(3.14), None);
         assert_eq!(v, ElementValue::Float(OrderedFloat(f64::from(3.14_f32))));
     }
 
     #[test]
     fn test_double() {
-        let v = mysql_value_to_element_value(&Value::Double(2.718281828));
+        let v = mysql_value_to_element_value(&Value::Double(2.718281828), None);
         assert_eq!(v, ElementValue::Float(OrderedFloat(2.718281828)));
     }
 
     #[test]
     fn test_bytes() {
-        let v = mysql_value_to_element_value(&Value::Bytes(b"hello".to_vec()));
+        let v = mysql_value_to_element_value(&Value::Bytes(b"hello".to_vec()), None);
         assert_eq!(v, ElementValue::String(Arc::from("hello")));
     }
 
     #[test]
     fn test_date() {
-        let v = mysql_value_to_element_value(&Value::Date(2024, 6, 15, 13, 45, 30, 0));
+        let v = mysql_value_to_element_value(&Value::Date(2024, 6, 15, 13, 45, 30, 0), None);
         assert_eq!(v, ElementValue::String(Arc::from("2024-06-15 13:45:30")));
     }
 
     #[test]
     fn test_time() {
-        let v = mysql_value_to_element_value(&Value::Time(false, 1, 13, 45, 30, 500));
+        let v = mysql_value_to_element_value(&Value::Time(false, 1, 13, 45, 30, 500), None);
         assert_eq!(v, ElementValue::String(Arc::from("037:45:30.000500")));
+    }
+
+    #[test]
+    fn test_year_bytes_parsed_as_integer() {
+        use mysql_common::constants::ColumnType;
+        let v = mysql_value_to_element_value(
+            &Value::Bytes(b"2025".to_vec()),
+            Some(ColumnType::MYSQL_TYPE_YEAR),
+        );
+        assert_eq!(v, ElementValue::Integer(2025));
     }
 }

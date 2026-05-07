@@ -22,6 +22,7 @@ use chrono::Utc;
 use log::{info, warn};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, OptsBuilder, Row};
+use mysql_common::constants::ColumnType;
 use ordered_float::OrderedFloat;
 
 use drasi_core::models::{
@@ -173,34 +174,7 @@ impl MySqlBootstrapHandler {
         let columns = row.columns_ref();
         for (idx, column) in columns.iter().enumerate() {
             let col_name = column.name_str().to_string();
-            let value = match row.as_ref(idx) {
-                Some(mysql_async::Value::NULL) => ElementValue::Null,
-                Some(mysql_async::Value::Bytes(bytes)) => {
-                    ElementValue::String(Arc::from(String::from_utf8_lossy(bytes).as_ref()))
-                }
-                Some(mysql_async::Value::Int(val)) => ElementValue::Integer(*val),
-                Some(mysql_async::Value::UInt(val)) => {
-                    if *val <= i64::MAX as u64 {
-                        ElementValue::Integer(*val as i64)
-                    } else {
-                        ElementValue::String(Arc::from(val.to_string()))
-                    }
-                }
-                Some(mysql_async::Value::Float(val)) => {
-                    ElementValue::Float(OrderedFloat(*val as f64))
-                }
-                Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
-                Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => ElementValue::String(
-                    Arc::from(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")),
-                ),
-                Some(mysql_async::Value::Time(_, days, hours, minutes, seconds, micros)) => {
-                    let total_hours = days * 24 + u32::from(*hours);
-                    ElementValue::String(Arc::from(format!(
-                        "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
-                    )))
-                }
-                None => ElementValue::Null,
-            };
+            let value = self.convert_column_value(row, idx, column.column_type());
 
             if let Some(keys) = self.table_keys.get(table_name) {
                 if keys.contains(&col_name) {
@@ -235,5 +209,105 @@ impl MySqlBootstrapHandler {
         };
 
         Ok(SourceChange::Insert { element })
+    }
+
+    /// Converts a MySQL row value to an ElementValue using column type metadata.
+    ///
+    /// The text protocol returns all values as `Value::Bytes`. We use the column
+    /// type to properly parse integers, floats, dates, etc. so that bootstrap
+    /// and CDC produce identical type mappings.
+    fn convert_column_value(&self, row: &Row, idx: usize, col_type: ColumnType) -> ElementValue {
+        match row.as_ref(idx) {
+            None | Some(mysql_async::Value::NULL) => ElementValue::Null,
+            Some(mysql_async::Value::Int(val)) => ElementValue::Integer(*val),
+            Some(mysql_async::Value::UInt(val)) => {
+                if *val <= i64::MAX as u64 {
+                    ElementValue::Integer(*val as i64)
+                } else {
+                    ElementValue::String(Arc::from(val.to_string()))
+                }
+            }
+            Some(mysql_async::Value::Float(val)) => ElementValue::Float(OrderedFloat(*val as f64)),
+            Some(mysql_async::Value::Double(val)) => ElementValue::Float(OrderedFloat(*val)),
+            Some(mysql_async::Value::Date(y, m, d, h, min, s, _)) => ElementValue::String(
+                Arc::from(format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")),
+            ),
+            Some(mysql_async::Value::Time(_, days, hours, minutes, seconds, micros)) => {
+                let total_hours = days * 24 + u32::from(*hours);
+                ElementValue::String(Arc::from(format!(
+                    "{total_hours:03}:{minutes:02}:{seconds:02}.{micros:06}"
+                )))
+            }
+            Some(mysql_async::Value::Bytes(bytes)) => {
+                let text = String::from_utf8_lossy(bytes);
+                match col_type {
+                    // Integer types
+                    ColumnType::MYSQL_TYPE_TINY
+                    | ColumnType::MYSQL_TYPE_SHORT
+                    | ColumnType::MYSQL_TYPE_LONG
+                    | ColumnType::MYSQL_TYPE_LONGLONG
+                    | ColumnType::MYSQL_TYPE_INT24
+                    | ColumnType::MYSQL_TYPE_YEAR => {
+                        if let Ok(val) = text.parse::<i64>() {
+                            ElementValue::Integer(val)
+                        } else if let Ok(val) = text.parse::<u64>() {
+                            if val <= i64::MAX as u64 {
+                                ElementValue::Integer(val as i64)
+                            } else {
+                                ElementValue::String(Arc::from(text.into_owned()))
+                            }
+                        } else {
+                            ElementValue::String(Arc::from(text.into_owned()))
+                        }
+                    }
+                    // Float types
+                    ColumnType::MYSQL_TYPE_FLOAT => {
+                        if let Ok(val) = text.parse::<f32>() {
+                            ElementValue::Float(OrderedFloat(val as f64))
+                        } else {
+                            ElementValue::String(Arc::from(text.into_owned()))
+                        }
+                    }
+                    ColumnType::MYSQL_TYPE_DOUBLE => {
+                        if let Ok(val) = text.parse::<f64>() {
+                            ElementValue::Float(OrderedFloat(val))
+                        } else {
+                            ElementValue::String(Arc::from(text.into_owned()))
+                        }
+                    }
+                    // Date/time types — keep as formatted strings
+                    ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => {
+                        // CDC formats dates as "YYYY-MM-DD HH:MM:SS", add time component
+                        ElementValue::String(Arc::from(format!("{text} 00:00:00")))
+                    }
+                    ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => {
+                        // CDC formats time as "HHH:MM:SS.micros", normalize
+                        let parts: Vec<&str> = text.splitn(2, '.').collect();
+                        let time_part = parts[0];
+                        let micros = parts.get(1).unwrap_or(&"000000");
+                        let hms: Vec<&str> = time_part.split(':').collect();
+                        if hms.len() == 3 {
+                            let h: u32 = hms[0].parse().unwrap_or(0);
+                            let m: u32 = hms[1].parse().unwrap_or(0);
+                            let s: u32 = hms[2].parse().unwrap_or(0);
+                            let micros_val: u32 = micros.parse().unwrap_or(0);
+                            ElementValue::String(Arc::from(format!(
+                                "{h:03}:{m:02}:{s:02}.{micros_val:06}"
+                            )))
+                        } else {
+                            ElementValue::String(Arc::from(text.into_owned()))
+                        }
+                    }
+                    ColumnType::MYSQL_TYPE_DATETIME | ColumnType::MYSQL_TYPE_DATETIME2 => {
+                        ElementValue::String(Arc::from(text.into_owned()))
+                    }
+                    ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2 => {
+                        ElementValue::String(Arc::from(text.into_owned()))
+                    }
+                    // All other types (VARCHAR, DECIMAL, ENUM, SET, BLOB, etc.) as strings
+                    _ => ElementValue::String(Arc::from(text.into_owned())),
+                }
+            }
+        }
     }
 }
