@@ -30,7 +30,7 @@ use tokio::sync::RwLock;
 use drasi_lib::identity::{Credentials, IdentityProvider};
 
 /// Authentication method for acquiring Dataverse access tokens.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum AuthMethod {
     /// OAuth2 client credentials flow (client_id + client_secret).
     ClientSecret {
@@ -41,6 +41,26 @@ pub enum AuthMethod {
     /// Azure CLI token acquisition (`az account get-access-token`).
     /// Requires `az login` to have been run beforehand.
     AzureCli,
+}
+
+/// Manual `Debug` implementation that redacts `client_secret` so it cannot
+/// leak through `tracing`, panic messages, or any `{:?}` formatting.
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClientSecret {
+                tenant_id,
+                client_id,
+                ..
+            } => f
+                .debug_struct("ClientSecret")
+                .field("tenant_id", tenant_id)
+                .field("client_id", client_id)
+                .field("client_secret", &"[REDACTED]")
+                .finish(),
+            Self::AzureCli => f.debug_struct("AzureCli").finish(),
+        }
+    }
 }
 
 /// OAuth2 token response from Azure AD.
@@ -232,8 +252,12 @@ impl TokenManager {
 
         if !response.status().is_success() {
             let status = response.status();
+            // The full response body may contain tenant/client diagnostics that
+            // shouldn't surface in user-facing error messages or aggregated
+            // logs; keep it at debug level only.
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("OAuth2 token request failed with status {status}: {body}");
+            log::debug!("OAuth2 token error body: {body}");
+            anyhow::bail!("OAuth2 token request failed with status {status}");
         }
 
         let token_response: TokenResponse = response
@@ -387,6 +411,25 @@ mod tests {
     }
 
     #[test]
+    fn auth_method_debug_redacts_client_secret() {
+        // `AuthMethod` is held inside `TokenManager` and may surface in tracing
+        // spans / panic messages; the secret must never appear in Debug output.
+        let auth = AuthMethod::ClientSecret {
+            tenant_id: "tenant-1".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "super-secret-do-not-leak".to_string(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(
+            !dbg.contains("super-secret-do-not-leak"),
+            "client_secret must not appear in Debug output: {dbg}"
+        );
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(dbg.contains("tenant-1"));
+        assert!(dbg.contains("client-1"));
+    }
+
+    #[test]
     fn test_token_manager_azure_cli() {
         let tm = TokenManager::azure_cli("https://myorg.crm.dynamics.com").expect("should create");
         assert_eq!(tm.resource, "https://myorg.crm.dynamics.com");
@@ -507,6 +550,47 @@ mod tests {
         assert!(
             err.contains("az account get-access-token") || err.contains("Azure CLI"),
             "error should reference the Azure CLI invocation: {err}"
+        );
+    }
+
+    /// The OAuth2 token endpoint can return error bodies that contain tenant
+    /// or client diagnostics. Verify those are NOT folded into the surfaced
+    /// error message (they're logged at debug level only).
+    #[tokio::test]
+    async fn oauth_error_body_is_not_in_surfaced_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let sensitive_marker = "DO_NOT_LEAK_TENANT_DIAGNOSTIC_12345";
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(format!(
+                    r#"{{"error":"invalid_client","error_description":"{sensitive_marker}"}}"#
+                )),
+            )
+            .mount(&server)
+            .await;
+
+        let token_url = format!("{}/oauth2/v2.0/token", server.uri());
+        let tm = TokenManager::with_token_url(
+            "tenant-1",
+            "client-1",
+            "client-secret",
+            "https://myorg.crm.dynamics.com",
+            &token_url,
+        )
+        .expect("token manager should construct");
+
+        let err = tm.get_token().await.expect_err("401 must surface as error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("401"),
+            "error must mention the HTTP status: {msg}"
+        );
+        assert!(
+            !msg.contains(sensitive_marker),
+            "OAuth error body must not appear in surfaced error: {msg}"
         );
     }
 }

@@ -41,7 +41,7 @@ use std::collections::HashMap;
 /// };
 /// assert!(config.validate().is_ok());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DataverseBootstrapConfig {
     /// Dataverse environment URL (e.g., "https://myorg.crm.dynamics.com")
     pub environment_url: String,
@@ -78,6 +78,25 @@ pub struct DataverseBootstrapConfig {
 
     /// Number of records per page (default: 5000)
     pub page_size: usize,
+}
+
+/// Manual `Debug` implementation that redacts `client_secret` so it cannot
+/// leak through `tracing`, panic messages, or any `{:?}` formatting.
+impl std::fmt::Debug for DataverseBootstrapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataverseBootstrapConfig")
+            .field("environment_url", &self.environment_url)
+            .field("tenant_id", &self.tenant_id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("use_azure_cli", &self.use_azure_cli)
+            .field("entities", &self.entities)
+            .field("entity_set_overrides", &self.entity_set_overrides)
+            .field("entity_columns", &self.entity_columns)
+            .field("api_version", &self.api_version)
+            .field("page_size", &self.page_size)
+            .finish()
+    }
 }
 
 fn default_api_version() -> String {
@@ -305,5 +324,26 @@ mod tests {
             config.validate().is_ok(),
             "Azure CLI mode should not require client credentials"
         );
+    }
+
+    #[test]
+    fn debug_redacts_client_secret() {
+        // Any `{:?}` formatting must never expose the OAuth2 client_secret.
+        let config = DataverseBootstrapConfig {
+            environment_url: "https://myorg.crm.dynamics.com".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "super-secret-do-not-leak".to_string(),
+            entities: vec!["account".to_string()],
+            ..Default::default()
+        };
+        let dbg = format!("{config:?}");
+        assert!(
+            !dbg.contains("super-secret-do-not-leak"),
+            "client_secret must not appear in Debug output: {dbg}"
+        );
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(dbg.contains("tenant-1"));
+        assert!(dbg.contains("client-1"));
     }
 }

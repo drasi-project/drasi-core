@@ -147,6 +147,10 @@ impl DataverseClient {
     ///
     /// * `delta_link` - The delta link URL from a previous response
     pub async fn follow_delta_link(&self, delta_link: &str) -> Result<ODataDeltaResponse> {
+        // Reject cross-origin delta links to prevent SSRF via attacker-controlled
+        // OData responses (see `ensure_same_origin` for rationale).
+        self.ensure_same_origin(delta_link, "delta_link")?;
+
         let token = self.get_token().await?;
 
         let response = self
@@ -182,6 +186,10 @@ impl DataverseClient {
     ///
     /// * `next_link` - The next link URL from the current page
     pub async fn follow_next_link(&self, next_link: &str) -> Result<ODataDeltaResponse> {
+        // Reject cross-origin next links to prevent SSRF via attacker-controlled
+        // OData responses (see `ensure_same_origin` for rationale).
+        self.ensure_same_origin(next_link, "next_link")?;
+
         let token = self.get_token().await?;
 
         let response = self
@@ -266,6 +274,38 @@ impl DataverseClient {
     /// Get the API version.
     pub fn api_version(&self) -> &str {
         &self.api_version
+    }
+
+    /// Reject delta/next link URLs that point outside the configured Dataverse
+    /// environment. The OData server controls the contents of `@odata.deltaLink`
+    /// and `@odata.nextLink`; without this check, a compromised, misconfigured,
+    /// or proxied response could redirect the client (with its bearer token)
+    /// to an arbitrary host — e.g., the cloud metadata service at
+    /// `169.254.169.254` (SSRF).
+    fn ensure_same_origin(&self, link: &str, kind: &str) -> Result<()> {
+        let parsed = url::Url::parse(link)
+            .with_context(|| format!("{kind} is not a valid URL: {link}"))?;
+        let base = url::Url::parse(&self.base_url)
+            .with_context(|| format!("client base_url is not a valid URL: {}", self.base_url))?;
+
+        // Compare scheme + host + port. We accept any path/query as long as the
+        // origin matches the configured environment.
+        if parsed.scheme() != base.scheme()
+            || parsed.host_str() != base.host_str()
+            || parsed.port_or_known_default() != base.port_or_known_default()
+        {
+            anyhow::bail!(
+                "{kind} origin '{}://{}{}' does not match configured Dataverse environment '{}'",
+                parsed.scheme(),
+                parsed.host_str().unwrap_or(""),
+                parsed
+                    .port()
+                    .map(|p| format!(":{p}"))
+                    .unwrap_or_default(),
+                self.base_url,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -430,5 +470,72 @@ mod tests {
             .await
             .expect_err("500 must surface as an error");
         assert!(format!("{err:?}").contains("500"));
+    }
+
+    /// SSRF guard: `follow_delta_link` must reject a URL that points outside
+    /// the configured Dataverse environment. Without this, an attacker who
+    /// influences the OData response body can redirect the bearer-token
+    /// request to e.g. the cloud metadata service.
+    #[tokio::test]
+    async fn follow_delta_link_rejects_cross_origin() {
+        let server = MockServer::start().await;
+        // No mocks are mounted: the request must be blocked before it leaves.
+        let client = client_for(&server);
+
+        let err = client
+            .follow_delta_link("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("cross-origin delta_link must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("origin") && msg.contains("does not match"),
+            "error should explain origin mismatch: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_next_link_rejects_cross_origin() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        let err = client
+            .follow_next_link("https://attacker.example.com/api/data/v9.2/accounts")
+            .await
+            .expect_err("cross-origin next_link must be rejected");
+        assert!(format!("{err:?}").contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn follow_delta_link_rejects_different_scheme() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        // Same host, different scheme — still a different origin.
+        let server_host = url::Url::parse(&server.uri())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        let err = client
+            .follow_delta_link(&format!("ftp://{server_host}/api/data/v9.2/accounts"))
+            .await
+            .expect_err("scheme mismatch must be rejected");
+        assert!(format!("{err:?}").contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn follow_delta_link_rejects_malformed_url() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        let err = client
+            .follow_delta_link("not a url")
+            .await
+            .expect_err("malformed URL must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not a valid URL") || msg.contains("delta_link"),
+            "error should explain parse failure: {msg}"
+        );
     }
 }

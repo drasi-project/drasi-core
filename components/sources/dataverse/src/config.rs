@@ -41,7 +41,7 @@ use std::collections::HashMap;
 /// - `min_interval_ms`: Minimum adaptive polling interval (default: 500)
 /// - `max_interval_seconds`: Maximum adaptive polling interval (default: 30)
 /// - `api_version`: Dataverse Web API version (default: `v9.2`)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DataverseSourceConfig {
     /// Dataverse environment URL (e.g., `https://myorg.crm.dynamics.com`).
     pub environment_url: String,
@@ -91,6 +91,26 @@ pub struct DataverseSourceConfig {
 
     /// Dataverse Web API version (default: `v9.2`).
     pub api_version: String,
+}
+
+/// Manual `Debug` implementation that redacts `client_secret` so it cannot
+/// leak through `tracing`, panic messages, or any `{:?}` formatting.
+impl std::fmt::Debug for DataverseSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataverseSourceConfig")
+            .field("environment_url", &self.environment_url)
+            .field("tenant_id", &self.tenant_id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("use_azure_cli", &self.use_azure_cli)
+            .field("entities", &self.entities)
+            .field("entity_set_overrides", &self.entity_set_overrides)
+            .field("entity_columns", &self.entity_columns)
+            .field("min_interval_ms", &self.min_interval_ms)
+            .field("max_interval_seconds", &self.max_interval_seconds)
+            .field("api_version", &self.api_version)
+            .finish()
+    }
 }
 
 impl DataverseSourceConfig {
@@ -355,5 +375,33 @@ mod tests {
             config.select_columns("account"),
             Some("name,accountid".to_string())
         );
+    }
+
+    #[test]
+    fn debug_redacts_client_secret() {
+        // Defence-in-depth: any `{:?}` formatting (tracing, panic messages,
+        // structured logs) must never expose the OAuth2 client_secret.
+        let config = DataverseSourceConfig {
+            environment_url: "https://myorg.crm.dynamics.com".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            client_id: "client-1".to_string(),
+            client_secret: "super-secret-do-not-leak".to_string(),
+            use_azure_cli: false,
+            entities: vec!["account".to_string()],
+            entity_set_overrides: HashMap::new(),
+            entity_columns: HashMap::new(),
+            min_interval_ms: 500,
+            max_interval_seconds: 30,
+            api_version: "v9.2".to_string(),
+        };
+        let dbg = format!("{config:?}");
+        assert!(
+            !dbg.contains("super-secret-do-not-leak"),
+            "client_secret must not appear in Debug output: {dbg}"
+        );
+        assert!(dbg.contains("[REDACTED]"));
+        // Non-sensitive fields should still be visible for diagnostics.
+        assert!(dbg.contains("tenant-1"));
+        assert!(dbg.contains("client-1"));
     }
 }
