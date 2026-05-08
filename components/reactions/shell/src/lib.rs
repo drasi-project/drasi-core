@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod config;
+#![cfg(target_os = "linux")]
+
+pub mod config;
 pub mod descriptor;
-mod shell;
 mod executor;
-mod metric;
+mod shell;
+mod state;
 
-use std::collections::HashMap;
 use config::QueryConfig;
+use std::collections::HashMap;
 
-use crate::config::{ ShellReactionConfig, ShellCommand, ShellExtension };
+use crate::config::{
+    default_capture_limit, default_kill_on_drop, default_max_concurrent,
+    default_max_recent_invocations, default_max_stdin_bytes, default_timeout_s,
+};
+use crate::config::{ShellCommand, ShellExtension, ShellReactionConfig};
 use crate::shell::ShellReaction;
-use crate::config::{default_capture_limit, default_kill_on_drop, default_max_concurrent, default_max_stdin_bytes, default_timeout_s};
-
 
 pub struct ShellReactionBuilder {
     id: String,
@@ -40,6 +44,7 @@ pub struct ShellReactionBuilder {
     capture_limit: usize,
     timeout_s: u64,
     kill_on_drop: bool,
+    max_recent_invocations: usize,
     env: HashMap<String, String>, // global env vars for all commands
 }
 
@@ -60,6 +65,7 @@ impl ShellReactionBuilder {
             capture_limit: config::default_capture_limit(),
             timeout_s: config::default_timeout_s(),
             kill_on_drop: config::default_kill_on_drop(),
+            max_recent_invocations: config::default_max_recent_invocations(),
             env: HashMap::new(),
         }
     }
@@ -77,7 +83,11 @@ impl ShellReactionBuilder {
     }
 
     /// Add a route configuration for a specific query
-    pub fn with_route(mut self, query_id: impl Into<String>, config: QueryConfig<ShellExtension>) -> Self {
+    pub fn with_route(
+        mut self,
+        query_id: impl Into<String>,
+        config: QueryConfig<ShellExtension>,
+    ) -> Self {
         self.routes.insert(query_id.into(), config);
         self
     }
@@ -106,7 +116,6 @@ impl ShellReactionBuilder {
         self
     }
 
-
     /// Set whether to auto start the reaction
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
@@ -128,6 +137,12 @@ impl ShellReactionBuilder {
     /// Set the maximum number of bytes to read from stdin
     pub fn with_max_stdin_bytes(mut self, max_stdin_bytes: usize) -> Self {
         self.max_stdin_bytes = max_stdin_bytes;
+        self
+    }
+
+    /// Set the maximum number of recent invocations to keep track of
+    pub fn with_max_recent_invocations(mut self, max_recent_invocations: usize) -> Self {
+        self.max_recent_invocations = max_recent_invocations;
         self
     }
 
@@ -168,6 +183,7 @@ impl ShellReactionBuilder {
         self.capture_limit = config.capture_limit;
         self.timeout_s = config.timeout_s;
         self.kill_on_drop = config.kill_on_drop;
+        self.max_recent_invocations = config.max_recent_invocations;
         self.env = config.env;
         self.routes = config.routes;
         self.default_template = config.default_template;
@@ -187,6 +203,7 @@ impl ShellReactionBuilder {
             routes: self.routes,
             default_template: self.default_template,
             commands: self.commands,
+            max_recent_invocations: self.max_recent_invocations,
         };
 
         ShellReaction::from_builder(
@@ -198,3 +215,17 @@ impl ShellReactionBuilder {
         )
     }
 }
+
+/// Dynamic plugin entry point.
+///
+/// Dynamic plugin entry point.
+#[cfg(feature = "dynamic-plugin")]
+drasi_plugin_sdk::export_plugin!(
+    plugin_id = "shell-reaction",
+    core_version = env!("CARGO_PKG_VERSION"),
+    lib_version = env!("CARGO_PKG_VERSION"),
+    plugin_version = env!("CARGO_PKG_VERSION"),
+    source_descriptors = [],
+    reaction_descriptors = [descriptor::ShellReactionDescriptor],
+    bootstrap_descriptors = [],
+);
