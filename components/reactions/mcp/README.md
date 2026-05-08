@@ -53,18 +53,23 @@ name: my-mcp-reaction
 spec:
   kind: MCP
   queries:
-    query1:
-      title: "Example Query"
-      description: "Example query resource"
-      added:
-        template: '{"type":"added","data":{{json after}}}'
-      updated:
-        template: '{"type":"updated","before":{{json before}},"after":{{json after}}}'
-      deleted:
-        template: '{"type":"deleted","data":{{json before}}}'
+    query1: {}
   properties:
     port: 3000
+    host: "0.0.0.0"
     bearerToken: "${MCP_AUTH_TOKEN}"
+    maxSessions: 100
+    sessionChannelCapacity: 1024
+    routes:
+      query1:
+        title: "Example Query"
+        description: "Example query resource"
+        added:
+          template: '{"type":"added","data":{{json after}}}'
+        updated:
+          template: '{"type":"updated","before":{{json before}},"after":{{json after}}}'
+        deleted:
+          template: '{"type":"deleted","data":{{json before}}}'
 ```
 
 ### Configuration Options
@@ -72,8 +77,21 @@ spec:
 | Option | Description | Type | Default |
 |--------|-------------|------|---------|
 | `port` | HTTP port for MCP server | u16 | `3000` |
+| `host` | Bind address for HTTP server | String | `0.0.0.0` |
 | `bearerToken` | Optional bearer token (ConfigValue) | Option\<String\> | None |
-| `routes` | Query-specific template configurations | HashMap\<String, QueryConfig\> | `{}` |
+| `maxSessions` | Maximum concurrent SSE sessions | usize | `100` |
+| `sessionChannelCapacity` | Channel buffer size per session | usize | `1024` |
+| `routes` | Query-specific template configurations (keyed by query ID) | HashMap\<String, QueryConfig\> | `{}` |
+
+Per-query template config (`routes.<queryId>`):
+
+| Option | Description | Type |
+|--------|-------------|------|
+| `title` | MCP resource title | String |
+| `description` | MCP resource description | String |
+| `added.template` | Handlebars template for ADD operations | String |
+| `updated.template` | Handlebars template for UPDATE operations | String |
+| `deleted.template` | Handlebars template for DELETE operations | String |
 
 ### Template Variables
 
