@@ -226,13 +226,10 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = McpReactionSchemas::openapi();
-        serde_json::to_string(
-            &api.components
-                .as_ref()
-                .expect("OpenAPI components missing")
-                .schemas,
-        )
-        .expect("Failed to serialize config schema")
+        api.components
+            .as_ref()
+            .and_then(|c| serde_json::to_string(&c.schemas).ok())
+            .unwrap_or_default()
     }
 
     async fn create_reaction(
@@ -245,7 +242,6 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
         log::info!(
             "[{id}] Creating MCP reaction (queries: {query_ids:?}, auto_start: {auto_start})"
         );
-        log::debug!("[{id}] Raw config JSON: {config_json}");
 
         let dto: McpReactionConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();

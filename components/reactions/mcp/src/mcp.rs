@@ -370,27 +370,20 @@ impl Reaction for McpReaction {
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
 
-        let reaction_id = self.base.id.clone();
-        let config = self.config.clone();
-        let query_ids = self.base.queries.clone();
-        let sessions = self.sessions.clone();
-        let subscriptions = self.subscriptions.clone();
-        let subscribers_by_uri = self.subscribers_by_uri.clone();
-        let current_results = self.current_results.clone();
+        let state = Arc::new(McpState {
+            reaction_id: self.base.id.clone(),
+            config: self.config.clone(),
+            query_ids: self.base.queries.clone(),
+            sessions: self.sessions.clone(),
+            subscriptions: self.subscriptions.clone(),
+            subscribers_by_uri: self.subscribers_by_uri.clone(),
+            current_results: self.current_results.clone(),
+        });
+
         let bound_port = self.bound_port.clone();
-
+        let server_state = state.clone();
         let server_task = tokio::spawn(async move {
-            let state = Arc::new(McpState {
-                reaction_id,
-                config,
-                query_ids,
-                sessions,
-                subscriptions,
-                subscribers_by_uri,
-                current_results,
-            });
-
-            if let Err(error) = run_server(state, bound_port).await {
+            if let Err(error) = run_server(server_state, bound_port).await {
                 error!("MCP server failed: {error}");
             }
         });
@@ -398,15 +391,12 @@ impl Reaction for McpReaction {
         *self.server_task.lock().await = Some(server_task);
 
         let status_handle = self.base.status_handle();
-        let subscriptions = self.subscriptions.clone();
-        let subscribers_by_uri = self.subscribers_by_uri.clone();
-        let sessions = self.sessions.clone();
         let priority_queue = self.base.priority_queue.clone();
-        let current_results = self.current_results.clone();
-        let reaction_id = self.base.id.clone();
         let query_configs = self.config.routes.clone();
+        let processing_state = state.clone();
 
         let processing_handle = tokio::spawn(async move {
+            let reaction_id = &processing_state.reaction_id;
             info!("[{reaction_id}] MCP result processing task started");
             let mut handlebars = Handlebars::new();
             register_json_helper(&mut handlebars);
@@ -440,7 +430,7 @@ impl Reaction for McpReaction {
                 );
 
                 for diff in &query_result.results {
-                    apply_diff(&query_id, diff, &current_results).await;
+                    apply_diff(&query_id, diff, &processing_state.current_results).await;
 
                     let (template, operation) = match diff {
                         ResultDiff::Add { .. } => {
@@ -536,7 +526,7 @@ impl Reaction for McpReaction {
                     };
 
                     let subscribed_sessions = {
-                        let subscribers = subscribers_by_uri.read().await;
+                        let subscribers = processing_state.subscribers_by_uri.read().await;
                         subscribers.get(&uri).cloned().unwrap_or_else(HashSet::new)
                     };
 
@@ -554,7 +544,7 @@ impl Reaction for McpReaction {
 
                     let mut to_cleanup = Vec::new();
                     {
-                        let sessions_guard = sessions.read().await;
+                        let sessions_guard = processing_state.sessions.read().await;
                         for session_id in subscribed_sessions {
                             if let Some(session) = sessions_guard.get(&session_id) {
                                 match session.sender.try_send(notification_text.clone()) {
@@ -572,13 +562,7 @@ impl Reaction for McpReaction {
                     }
 
                     for session_id in to_cleanup {
-                        cleanup_session_maps(
-                            &session_id,
-                            &sessions,
-                            &subscriptions,
-                            &subscribers_by_uri,
-                        )
-                        .await;
+                        processing_state.cleanup_session(&session_id).await;
                     }
                 }
             }
@@ -694,31 +678,12 @@ async fn apply_diff(
     }
 }
 
+/// Remove the first occurrence of `target` from the list.
+/// NOTE: This is O(n) per call. For queries with very large result sets, consider
+/// keying results by a stable identifier (e.g., primary key) for O(1) removal.
 fn remove_first(list: &mut Vec<Value>, target: &Value) {
     if let Some(index) = list.iter().position(|item| item == target) {
         list.remove(index);
-    }
-}
-
-async fn cleanup_session_maps(
-    session_id: &str,
-    sessions: &Arc<RwLock<HashMap<String, SessionState>>>,
-    subscriptions: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    subscribers_by_uri: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-) {
-    debug!("Cleaning up disconnected session {session_id}");
-    sessions.write().await.remove(session_id);
-    let mut subscriptions_guard = subscriptions.write().await;
-    if let Some(uris) = subscriptions_guard.remove(session_id) {
-        let mut subscribers_guard = subscribers_by_uri.write().await;
-        for uri in uris {
-            if let Some(set) = subscribers_guard.get_mut(&uri) {
-                set.remove(session_id);
-                if set.is_empty() {
-                    subscribers_guard.remove(&uri);
-                }
-            }
-        }
     }
 }
 
@@ -741,6 +706,9 @@ fn validate_subscription_uri<'a>(uri: &'a str, query_ids: &[String]) -> Option<&
 fn resource_uri(query_id: &str) -> Option<Url> {
     Url::parse(&format!("drasi://query/{query_id}")).ok()
 }
+
+/// Maximum length for a session ID header value.
+const MAX_SESSION_ID_LEN: usize = 64;
 
 fn parse_bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
@@ -810,6 +778,7 @@ async fn run_server(state: Arc<McpState>, bound_port: Arc<AtomicU16>) -> Result<
             CorsLayer::new()
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
                 .allow_headers(Any)
+                // TODO: make allowed origins configurable for production deployments
                 .allow_origin(Any),
         );
 
@@ -841,6 +810,7 @@ async fn handle_post(
     let session_id = headers
         .get(MCP_SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
+        .filter(|s| s.len() <= MAX_SESSION_ID_LEN)
         .map(str::to_string);
 
     // JSON-RPC batch support: accept both single objects and arrays.
@@ -949,7 +919,7 @@ async fn handle_post(
                 .unwrap_or(Value::Null)
             });
 
-            let mut response = Json(body).into_response();
+            let mut response = (result.status, Json(body)).into_response();
             if let Some(sid) = result.session_id {
                 if let Ok(header_value) = HeaderValue::from_str(&sid) {
                     response
@@ -1022,7 +992,7 @@ async fn handle_single_request(
             let new_session_id = match session_id {
                 Some(id) if state.sessions.read().await.contains_key(id) => id.clone(),
                 _ => {
-                    let sessions = state.sessions.read().await;
+                    let mut sessions = state.sessions.write().await;
                     if sessions.len() >= state.config.max_sessions {
                         warn!(
                             "[{}] Maximum session limit ({}) reached, rejecting initialize",
@@ -1041,7 +1011,6 @@ async fn handle_single_request(
                             status: StatusCode::SERVICE_UNAVAILABLE,
                         };
                     }
-                    drop(sessions);
 
                     let sid = Uuid::new_v4().to_string();
                     let (tx, rx) = mpsc::channel(state.config.session_channel_capacity);
@@ -1049,7 +1018,7 @@ async fn handle_single_request(
                         sender: tx,
                         receiver: Arc::new(Mutex::new(Some(rx))),
                     };
-                    state.sessions.write().await.insert(sid.clone(), session);
+                    sessions.insert(sid.clone(), session);
                     info!("[{}] New MCP session created: {sid}", state.reaction_id);
                     sid
                 }
@@ -1369,6 +1338,7 @@ async fn handle_sse(State(state): State<Arc<McpState>>, headers: HeaderMap) -> i
     let session_id = headers
         .get(MCP_SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
+        .filter(|s| s.len() <= MAX_SESSION_ID_LEN)
         .map(str::to_string);
     let session_id = match session_id {
         Some(id) => id,
@@ -1447,14 +1417,25 @@ mod tests {
             AUTHORIZATION,
             HeaderValue::from_static("Bearer secret-token"),
         );
+        // Correct token → allowed
         assert!(check_authorization(
             &headers,
             &Some("secret-token".to_string())
         ));
+        // Wrong token → denied
         assert!(!check_authorization(
             &headers,
             &Some("wrong-token".to_string())
         ));
+        // Missing Authorization header → denied
+        let empty_headers = HeaderMap::new();
+        assert!(!check_authorization(
+            &empty_headers,
+            &Some("secret-token".to_string())
+        ));
+        // No token required (None) → any request allowed
+        assert!(check_authorization(&headers, &None));
+        assert!(check_authorization(&empty_headers, &None));
     }
 
     #[test]
@@ -1469,6 +1450,8 @@ mod tests {
     fn test_template_rendering() {
         let mut handlebars = Handlebars::new();
         register_json_helper(&mut handlebars);
+
+        // Test ADD template
         let mut context = Map::new();
         context.insert("after".to_string(), json!({"id": 1}));
         let rendered = handlebars
@@ -1477,6 +1460,38 @@ mod tests {
         let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
         assert_eq!(parsed["operation"], "added");
         assert_eq!(parsed["data"]["id"], 1);
+
+        // Test UPDATE template
+        let mut context = Map::new();
+        context.insert("before".to_string(), json!({"id": 1, "name": "old"}));
+        context.insert("after".to_string(), json!({"id": 1, "name": "new"}));
+        let rendered = handlebars
+            .render_template(DEFAULT_UPDATED_TEMPLATE, &context)
+            .expect("update template should render");
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(parsed["operation"], "updated");
+        assert_eq!(parsed["before"]["name"], "old");
+        assert_eq!(parsed["after"]["name"], "new");
+
+        // Test DELETE template
+        let mut context = Map::new();
+        context.insert("before".to_string(), json!({"id": 1, "name": "deleted"}));
+        let rendered = handlebars
+            .render_template(DEFAULT_DELETED_TEMPLATE, &context)
+            .expect("delete template should render");
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(parsed["operation"], "deleted");
+        assert_eq!(parsed["data"]["name"], "deleted");
+
+        // Test custom template with json helper
+        let custom_template = r#"{"result":{{json after}}}"#;
+        let mut context = Map::new();
+        context.insert("after".to_string(), json!({"complex": [1, 2, 3]}));
+        let rendered = handlebars
+            .render_template(custom_template, &context)
+            .expect("custom template should render");
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert_eq!(parsed["result"]["complex"], json!([1, 2, 3]));
     }
 
     #[tokio::test]
@@ -1491,14 +1506,85 @@ mod tests {
             current_results: Arc::new(RwLock::new(HashMap::new())),
         };
 
+        let uri = "drasi://query/query1";
+
+        // Add subscription
+        state.add_subscription("session1", uri).await;
+        {
+            let subscriptions = state.subscriptions.read().await;
+            assert!(subscriptions
+                .get("session1")
+                .is_some_and(|set| set.contains(uri)));
+        }
+
+        // Verify get_subscribers_for_uri (via subscribers_by_uri)
+        {
+            let subscribers = state.subscribers_by_uri.read().await;
+            assert!(subscribers
+                .get(uri)
+                .is_some_and(|set| set.contains("session1")));
+        }
+
+        // Duplicate add should not create duplicate entries
+        state.add_subscription("session1", uri).await;
+        {
+            let subscribers = state.subscribers_by_uri.read().await;
+            assert_eq!(subscribers.get(uri).map(|s| s.len()), Some(1));
+        }
+
+        // Remove subscription
+        state.remove_subscription("session1", uri).await;
+        {
+            let subscriptions = state.subscriptions.read().await;
+            assert!(
+                subscriptions.get("session1").is_none(),
+                "session entry should be removed when empty"
+            );
+            let subscribers = state.subscribers_by_uri.read().await;
+            assert!(
+                subscribers.get(uri).is_none(),
+                "uri entry should be removed when no subscribers"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_session() {
+        let state = McpState {
+            reaction_id: "test".to_string(),
+            config: McpReactionConfig::default(),
+            query_ids: vec!["query1".to_string(), "query2".to_string()],
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
+            current_results: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        // Create a session
+        let (tx, _rx) = mpsc::channel(16);
+        state.sessions.write().await.insert(
+            "session1".to_string(),
+            SessionState {
+                sender: tx,
+                receiver: Arc::new(Mutex::new(None)),
+            },
+        );
+
+        // Add subscriptions
         state
             .add_subscription("session1", "drasi://query/query1")
             .await;
+        state
+            .add_subscription("session1", "drasi://query/query2")
+            .await;
 
-        let subscriptions = state.subscriptions.read().await;
-        assert!(subscriptions
-            .get("session1")
-            .is_some_and(|set| set.contains("drasi://query/query1")));
+        // Cleanup session
+        state.cleanup_session("session1").await;
+
+        // Verify everything is cleaned up
+        assert!(state.sessions.read().await.is_empty());
+        assert!(state.subscriptions.read().await.is_empty());
+        assert!(state.subscribers_by_uri.read().await.is_empty());
     }
 
     #[test]
