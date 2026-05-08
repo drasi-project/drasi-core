@@ -210,7 +210,7 @@ impl Drop for SessionStream {
 
 /// MCP reaction exposes Drasi query results via MCP protocol.
 pub struct McpReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: McpReactionConfig,
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
     subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -323,16 +323,10 @@ impl Reaction for McpReaction {
     }
 
     fn properties(&self) -> HashMap<String, Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "port".to_string(),
-            Value::Number((self.bound_port() as u64).into()),
-        );
-        props.insert(
-            "requires_auth".to_string(),
-            Value::Bool(self.config.bearer_token.is_some()),
-        );
-        props
+        use crate::descriptor::McpReactionConfigDto;
+
+        self.base
+            .properties_or_serialize(&McpReactionConfigDto::from(&self.config))
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -473,7 +467,7 @@ impl Reaction for McpReaction {
                     context.insert("queryId".to_string(), Value::String(query_id.clone()));
 
                     match diff {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             context.insert("after".to_string(), data.clone());
                         }
                         ResultDiff::Update {
@@ -486,10 +480,10 @@ impl Reaction for McpReaction {
                             context.insert("after".to_string(), after.clone());
                             context.insert("data".to_string(), data.clone());
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             context.insert("before".to_string(), data.clone());
                         }
-                        ResultDiff::Aggregation { before, after } => {
+                        ResultDiff::Aggregation { before, after, .. } => {
                             if let Some(before) = before {
                                 context.insert("before".to_string(), before.clone());
                             }
@@ -684,13 +678,13 @@ async fn apply_diff(
     let mut results = current.write().await;
     let entry = results.entry(query_id.to_string()).or_default();
     match diff {
-        ResultDiff::Add { data } => entry.push(data.clone()),
-        ResultDiff::Delete { data } => remove_first(entry, data),
+        ResultDiff::Add { data, .. } => entry.push(data.clone()),
+        ResultDiff::Delete { data, .. } => remove_first(entry, data),
         ResultDiff::Update { before, after, .. } => {
             remove_first(entry, before);
             entry.push(after.clone());
         }
-        ResultDiff::Aggregation { before, after } => {
+        ResultDiff::Aggregation { before, after, .. } => {
             if let Some(before) = before {
                 remove_first(entry, before);
             }

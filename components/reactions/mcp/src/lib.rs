@@ -203,6 +203,58 @@ mod tests {
         assert_eq!(reaction.config().bearer_token.as_deref(), Some("token"));
         assert_eq!(reaction.config().max_sessions, 50);
     }
+
+    #[test]
+    fn test_builder_fallback_produces_camel_case() {
+        let reaction = McpReactionBuilder::new("mcp-fallback")
+            .with_host("127.0.0.1")
+            .with_port(9090)
+            .with_bearer_token("secret-token")
+            .with_max_sessions(50)
+            .with_session_channel_capacity(512)
+            .with_queries(vec!["q1".to_string()])
+            .build()
+            .unwrap();
+
+        let props = reaction.properties();
+
+        // Must use camelCase keys (DTO serialization)
+        assert!(
+            props.contains_key("bearerToken"),
+            "expected camelCase 'bearerToken', got keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            props.contains_key("maxSessions"),
+            "expected camelCase 'maxSessions'"
+        );
+        assert!(
+            props.contains_key("sessionChannelCapacity"),
+            "expected camelCase 'sessionChannelCapacity'"
+        );
+
+        // Must NOT have snake_case keys
+        assert!(
+            !props.contains_key("bearer_token"),
+            "should not have snake_case 'bearer_token'"
+        );
+        assert!(
+            !props.contains_key("max_sessions"),
+            "should not have snake_case 'max_sessions'"
+        );
+        assert!(
+            !props.contains_key("session_channel_capacity"),
+            "should not have snake_case 'session_channel_capacity'"
+        );
+
+        // Values should be correct
+        assert_eq!(
+            props.get("host").and_then(|v| v.as_str()),
+            Some("127.0.0.1")
+        );
+        assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(9090));
+        assert_eq!(props.get("maxSessions").and_then(|v| v.as_u64()), Some(50));
+    }
 }
 
 /// Dynamic plugin entry point.

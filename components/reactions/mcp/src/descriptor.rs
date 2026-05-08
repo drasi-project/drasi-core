@@ -19,7 +19,7 @@ use drasi_plugin_sdk::prelude::*;
 use std::collections::HashMap;
 use utoipa::OpenApi;
 
-use crate::{McpReactionBuilder, NotificationTemplate, QueryConfig};
+use crate::{McpReactionBuilder, McpReactionConfig, NotificationTemplate, QueryConfig};
 
 /// DTO for MCP notification template.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -153,6 +153,46 @@ fn map_template(dto: &NotificationTemplateDto) -> NotificationTemplate {
     }
 }
 
+impl From<&NotificationTemplate> for NotificationTemplateDto {
+    fn from(t: &NotificationTemplate) -> Self {
+        Self {
+            template: t.template.clone(),
+        }
+    }
+}
+
+impl From<&QueryConfig> for McpQueryConfigDto {
+    fn from(config: &QueryConfig) -> Self {
+        Self {
+            title: config.title.clone(),
+            description: config.description.clone(),
+            added: config.added.as_ref().map(NotificationTemplateDto::from),
+            updated: config.updated.as_ref().map(NotificationTemplateDto::from),
+            deleted: config.deleted.as_ref().map(NotificationTemplateDto::from),
+        }
+    }
+}
+
+impl From<&McpReactionConfig> for McpReactionConfigDto {
+    fn from(config: &McpReactionConfig) -> Self {
+        Self {
+            host: Some(ConfigValue::Static(config.host.clone())),
+            port: Some(ConfigValue::Static(config.port)),
+            bearer_token: config
+                .bearer_token
+                .as_ref()
+                .map(|t| ConfigValue::Static(t.clone())),
+            max_sessions: Some(config.max_sessions),
+            session_channel_capacity: Some(config.session_channel_capacity),
+            routes: config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), McpQueryConfigDto::from(v)))
+                .collect(),
+        }
+    }
+}
+
 fn map_query_config(dto: &McpQueryConfigDto) -> QueryConfig {
     QueryConfig {
         title: dto.title.clone(),
@@ -253,7 +293,9 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
         log::info!("[{id}] MCP reaction created successfully");
         Ok(Box::new(reaction))
     }
