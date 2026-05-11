@@ -24,6 +24,7 @@ pub struct ShellReactionMetrics {
     stdout_truncations: AtomicUsize,
     stderr_truncations: AtomicUsize,
     stdin_payload_rejections: AtomicUsize,
+    results_processed: AtomicUsize,
 }
 
 impl ShellReactionMetrics {
@@ -34,6 +35,7 @@ impl ShellReactionMetrics {
             stdout_truncations: AtomicUsize::new(0),
             stderr_truncations: AtomicUsize::new(0),
             stdin_payload_rejections: AtomicUsize::new(0),
+            results_processed: AtomicUsize::new(0),
         }
     }
 
@@ -59,6 +61,11 @@ impl ShellReactionMetrics {
 
     pub fn record_stdin_rejection(&self) {
         self.stdin_payload_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_result_processed(&self) {
+        self.results_processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -107,17 +114,17 @@ pub struct RecentInvocation {
     pub exit_status: Option<i32>,
     pub stdout: String,
     pub stderr: String,
-    pub executable: String,
+    pub executable: String, // the command that was executed (for better observability in properties)
 }
 
 #[derive(Debug)]
 pub struct RecentInvocations {
     pub invocations: VecDeque<RecentInvocation>,
-    pub max_recent_invocations: usize,
+    pub max_recent_invocations: u32,
 }
 
 impl RecentInvocations {
-    pub fn new(max_recent_invocations: usize) -> Self {
+    pub fn new(max_recent_invocations: u32) -> Self {
         Self {
             invocations: VecDeque::new(),
             max_recent_invocations,
@@ -126,7 +133,7 @@ impl RecentInvocations {
 
     pub fn add_invocation(&mut self, invocation: RecentInvocation) {
         self.invocations.push_front(invocation);
-        if self.invocations.len() > self.max_recent_invocations {
+        if self.invocations.len() as u32 > self.max_recent_invocations {
             self.invocations.pop_back();
         }
     }
@@ -183,6 +190,13 @@ impl ShellReactionState {
             serde_json::json!(self
                 .metrics
                 .stdin_payload_rejections
+                .load(std::sync::atomic::Ordering::Relaxed)),
+        );
+        props.insert(
+            "results_processed".to_string(),
+            serde_json::json!(self
+                .metrics
+                .results_processed
                 .load(std::sync::atomic::Ordering::Relaxed)),
         );
 

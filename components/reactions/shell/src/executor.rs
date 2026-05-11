@@ -99,7 +99,7 @@ impl ShellExecutor {
 
         // spawn a background task
         Ok(tokio::spawn(async move {
-            let sem = Arc::new(Semaphore::new(max_concurrent));
+            let sem = Arc::new(Semaphore::new(max_concurrent as usize));
             let cancel = CancellationToken::new();
 
             loop {
@@ -239,7 +239,7 @@ impl ShellExecutor {
         // get the stdin data
         let stdin_data = if let Some(spec) = spec {
             // load and render the local env values if exist.
-            for (key, value) in &spec.extension.envs {
+            for (key, value) in &spec.extension.env {
                 let rendered_value = handlebars.render_template(value, &context)?;
                 command_env.insert(key.clone(), rendered_value);
             }
@@ -606,6 +606,7 @@ impl ShellExecutor {
                     executable: command.executable.clone(),
                 };
 
+                state.metrics.record_result_processed();
                 debug!("[{}] Command execution completed. pid: {}, exit_status: {}, command: {:?}, stdout_length: {}, stderr_length: {}", state.reaction_id, pid, exit_status, command, recent_invocation.stdout.len(), recent_invocation.stderr.len());
 
                 state
@@ -647,7 +648,7 @@ impl ShellExecutor {
         }
     }
 
-    async fn read_limited<R>(mut reader: R, mut limit: usize) -> anyhow::Result<(Vec<u8>, bool)>
+    pub async fn read_limited<R>(mut reader: R, mut limit: usize) -> anyhow::Result<(Vec<u8>, bool)>
     where
         R: tokio::io::AsyncRead + Unpin,
     {
