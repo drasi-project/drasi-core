@@ -69,6 +69,7 @@ pub struct MqttSourceBuilder {
     id: String,
     host: String,
     port: u16,
+    client_id: Option<String>,
     topics: Vec<MqttTopicConfig>,
     topic_mappings: Vec<TopicMapping>,
     event_channel_capacity: usize,
@@ -106,6 +107,7 @@ impl MqttSourceBuilder {
             id: id.into(),
             host: default_host(),
             port: default_port(),
+            client_id: None,
             identity_provider: None,
             topics: vec![],
             topic_mappings: vec![],
@@ -317,9 +319,16 @@ impl MqttSourceBuilder {
         self
     }
 
+    /// Set the MQTT client_id sent on CONNECT. If unset, the Drasi source_id is used.
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
+    }
+
     pub fn with_config(mut self, config: MqttSourceConfig) -> Self {
         self.host = config.host;
         self.port = config.port;
+        self.client_id = config.client_id;
         self.identity_provider = config.identity_provider;
         self.topics = config.topics;
         self.topic_mappings = config.topic_mappings;
@@ -351,6 +360,7 @@ impl MqttSourceBuilder {
         let config = MqttSourceConfig {
             host: self.host,
             port: self.port,
+            client_id: self.client_id,
             identity_provider: self.identity_provider,
             topics: self.topics,
             topic_mappings: self.topic_mappings,
@@ -447,6 +457,7 @@ mod tests {
             let config = MqttSourceConfig {
                 host: "localhost".to_string(),
                 port: 8080,
+                client_id: None,
                 identity_provider: None,
                 topics: vec![MqttTopicConfig {
                     topic: "test/topic".to_string(),

@@ -276,6 +276,9 @@ pub struct MqttSourceConfigDto {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<ConfigValue<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<ConfigValue<String>>,
 }
 
 #[derive(OpenApi)]
@@ -342,7 +345,7 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "1.0.0"
+        "1.1.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -452,6 +455,7 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
         let config = MqttSourceConfig {
             host: mapper.resolve_string(&dto.host)?,
             port: mapper.resolve_typed(&dto.port)?,
+            client_id: mapper.resolve_optional(&dto.client_id)?,
             identity_provider: None,
             topics,
             topic_mappings,
