@@ -105,6 +105,45 @@ fn map_query_config(dto: &SseQueryConfigDto) -> crate::QueryConfig {
     }
 }
 
+impl From<&crate::TemplateSpec> for SseTemplateSpecDto {
+    fn from(spec: &crate::TemplateSpec) -> Self {
+        Self {
+            template: spec.template.clone(),
+            path: spec.extension.path.clone(),
+        }
+    }
+}
+
+impl From<&crate::QueryConfig> for SseQueryConfigDto {
+    fn from(config: &crate::QueryConfig) -> Self {
+        Self {
+            added: config.added.as_ref().map(SseTemplateSpecDto::from),
+            updated: config.updated.as_ref().map(SseTemplateSpecDto::from),
+            deleted: config.deleted.as_ref().map(SseTemplateSpecDto::from),
+        }
+    }
+}
+
+impl From<&crate::SseReactionConfig> for SseReactionConfigDto {
+    fn from(config: &crate::SseReactionConfig) -> Self {
+        Self {
+            host: Some(ConfigValue::Static(config.host.clone())),
+            port: Some(ConfigValue::Static(config.port)),
+            sse_path: Some(ConfigValue::Static(config.sse_path.clone())),
+            heartbeat_interval_ms: Some(ConfigValue::Static(config.heartbeat_interval_ms)),
+            routes: config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), SseQueryConfigDto::from(v)))
+                .collect(),
+            default_template: config
+                .default_template
+                .as_ref()
+                .map(SseQueryConfigDto::from),
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(components(schemas(SseReactionConfigDto, SseQueryConfigDto, SseTemplateSpecDto,)))]
 struct SseReactionSchemas;
@@ -172,7 +211,9 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

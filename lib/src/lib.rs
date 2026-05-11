@@ -43,6 +43,9 @@ pub mod context;
 /// State store provider for persistent plugin state
 pub mod state_store;
 
+/// Write-Ahead Log plugin contract for transient source crash recovery
+pub mod wal;
+
 /// Error types for drasi-lib
 pub mod error;
 
@@ -190,6 +193,9 @@ pub use indexes::IndexBackendPlugin;
 pub use state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
+
+/// Write-Ahead Log plugin contract and configuration types
+pub use wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig, MIN_MAX_EVENTS};
 
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
