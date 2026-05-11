@@ -129,7 +129,11 @@ pub trait Query: Send + Sync {
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
-    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Return the number of active subscription forwarder tasks (diagnostic/testing).
+    async fn subscription_count(&self) -> usize {
+        0
+    }
 
     /// Subscribe to query results for reactions
     /// Returns a broadcast receiver for Arc-wrapped QueryResults
@@ -286,6 +290,8 @@ pub struct DrasiQuery {
     // Use QueryBase for common functionality
     base: QueryBase,
     output_state: Arc<RwLock<QueryOutputState>>,
+    // Pre-computed config hash for bootstrap APIs
+    config_hash: u64,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -319,6 +325,7 @@ impl DrasiQuery {
         let priority_queue = PriorityQueue::new(priority_capacity);
         let outbox_capacity = config.outbox_capacity;
         let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
+        let config_hash = crate::queries::compute_config_hash(&config);
 
         // Create QueryBase for common functionality
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
@@ -327,6 +334,7 @@ impl DrasiQuery {
             instance_id: instance_id.into(),
             base,
             output_state: Arc::new(RwLock::new(QueryOutputState::new(outbox_capacity))),
+            config_hash,
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -392,14 +400,6 @@ impl DrasiQuery {
             }
             Err(_) => Err(FetchError::TimedOut),
         }
-    }
-}
-
-#[cfg(test)]
-impl DrasiQuery {
-    /// Count active subscription forwarder tasks (testing helper)
-    pub async fn subscription_task_count(&self) -> usize {
-        self.subscription_tasks.read().await.len()
     }
 }
 
@@ -1293,8 +1293,8 @@ impl Query for DrasiQuery {
         &self.base.config
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    async fn subscription_count(&self) -> usize {
+        self.subscription_tasks.read().await.len()
     }
 
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse> {
@@ -1314,11 +1314,15 @@ impl Query for DrasiQuery {
         // This ensures reactions don't observe a partial result set during initialization.
         self.wait_until_running().await?;
 
-        let state = self.output_state.read().await;
-        Ok(SnapshotResponse {
-            results: state.get_results_as_vec(),
-            as_of_sequence: state.as_of_sequence(),
-        })
+        let (results_clone, as_of_sequence) = {
+            let state = self.output_state.read().await;
+            (state.clone_results(), state.as_of_sequence())
+        };
+        Ok(SnapshotResponse::new(
+            results_clone,
+            as_of_sequence,
+            self.config_hash,
+        ))
     }
 
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
@@ -1326,10 +1330,14 @@ impl Query for DrasiQuery {
         self.wait_until_running().await?;
 
         let state = self.output_state.read().await;
-        let results = state.fetch_outbox_after(after_sequence)?;
+        let results = state.fetch_outbox_after(after_sequence).map_err(|mut gap| {
+            gap.config_hash = self.config_hash;
+            gap
+        })?;
         Ok(OutboxResponse {
             latest_sequence: state.as_of_sequence(),
             results,
+            config_hash: self.config_hash,
         })
     }
 }
@@ -1608,14 +1616,11 @@ impl QueryManager {
                 return Err(anyhow::anyhow!("Query '{id}' is not running"));
             }
 
-            // Downcast to DrasiQuery to access get_current_results
-            // Since all queries are DrasiQuery instances, this is safe
-            let drasi_query = query
-                .as_any()
-                .downcast_ref::<DrasiQuery>()
-                .ok_or_else(|| anyhow::anyhow!("Internal error: invalid query type"))?;
-
-            Ok(drasi_query.get_current_results().await)
+            let snapshot = query
+                .fetch_snapshot()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch snapshot: {e}"))?;
+            Ok(snapshot.to_vec())
         } else {
             Err(crate::managers::ComponentNotFoundError::new("query", id).into())
         }

@@ -701,6 +701,10 @@ impl StateStoreProvider for RedbStateStoreProvider {
         .await
         .map_err(|e| StateStoreError::Other(format!("Task join error: {e}")))?
     }
+
+    fn is_durable(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

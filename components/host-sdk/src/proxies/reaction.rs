@@ -21,10 +21,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use drasi_lib::reactions::Reaction;
+use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use drasi_plugin_sdk::ffi::{
-    FfiComponentStatus, FfiRuntimeContext, FfiStr, ReactionPluginVtable, ReactionVtable,
+    FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus,
+    FfiOutboxResponse, FfiResult, FfiRuntimeContext, FfiSnapshotResponse, FfiStr,
+    ReactionPluginVtable, ReactionVtable,
 };
 use libloading::Library;
 
@@ -332,6 +335,271 @@ impl Reaction for ReactionProxy {
             .map_err(|_| anyhow::anyhow!("Thread panicked"))?;
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
+
+    fn is_durable(&self) -> bool {
+        (self.vtable.is_durable_fn)(self.vtable.state as *const c_void)
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        (self.vtable.needs_snapshot_on_fresh_start_fn)(self.vtable.state as *const c_void)
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        let ordinal =
+            (self.vtable.default_recovery_policy_fn)(self.vtable.state as *const c_void);
+        match ordinal {
+            0 => ReactionRecoveryPolicy::Strict,
+            1 => ReactionRecoveryPolicy::AutoReset,
+            2 => ReactionRecoveryPolicy::AutoSkipGap,
+            _ => ReactionRecoveryPolicy::Strict,
+        }
+    }
+
+    // TODO(#400): `bootstrap()` FFI bridge deferred.
+    // The async bootstrap hook requires marshaling a `BootstrapContext` (which
+    // carries an `Arc<dyn Query>`) across the FFI boundary. This is complex
+    // and should be implemented alongside the orchestration that invokes it.
+    // Until then, dynamically-loaded reaction plugins use the default no-op.
+
+    async fn bootstrap(
+        &self,
+        ctx: drasi_lib::reactions::bootstrap_context::BootstrapContext,
+    ) -> anyhow::Result<()> {
+        // Build the host-side callback context that the plugin's callbacks will
+        // use to call back into the host's async BootstrapContext.
+        let host_handle = tokio::runtime::Handle::current();
+        let ctx = Arc::new(HostBootstrapCallbackCtx {
+            ctx,
+            host_handle,
+        });
+
+        let query_id_str = ctx.ctx.query_id.clone();
+        let is_reset = ctx.ctx.is_reset;
+
+        // Leak an Arc reference for the callback lifetime. We un-leak after
+        // the FFI call returns (see below).
+        let ctx_raw = Arc::into_raw(ctx.clone()) as *mut c_void;
+
+        let query_id_ffi = FfiStr::from_str(&query_id_str);
+
+        let ffi_ctx = FfiBootstrapContext {
+            query_id: query_id_ffi,
+            is_reset,
+            callback_ctx: ctx_raw,
+            fetch_snapshot_fn: host_bootstrap_fetch_snapshot,
+            fetch_outbox_fn: host_bootstrap_fetch_outbox,
+            read_checkpoint_fn: host_bootstrap_read_checkpoint,
+            write_checkpoint_fn: host_bootstrap_write_checkpoint,
+        };
+
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let bootstrap_fn = self.vtable.bootstrap_fn;
+        let ffi_ctx_ptr = &ffi_ctx as *const FfiBootstrapContext;
+        let ffi_ctx_send = SendConstPtr(ffi_ctx_ptr);
+
+        let result = std::thread::spawn(move || {
+            // SAFETY: ffi_ctx lives on the caller's stack and we join() immediately,
+            // so the pointer is valid for the duration of this call.
+            (bootstrap_fn)(state.as_ptr(), ffi_ctx_send.as_ptr())
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("Thread panicked during bootstrap"))?;
+
+        // Reclaim the leaked Arc reference.
+        unsafe {
+            Arc::from_raw(ctx_raw as *const HostBootstrapCallbackCtx);
+        }
+
+        unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
+    }
+}
+
+// ============================================================================
+// Host-side bootstrap callback support
+// ============================================================================
+
+/// Send-safe wrapper for `*const T`.
+struct SendConstPtr<T>(*const T);
+unsafe impl<T> Send for SendConstPtr<T> {}
+impl<T> SendConstPtr<T> {
+    fn as_ptr(&self) -> *const T {
+        self.0
+    }
+}
+
+/// Shared state for host-side bootstrap callbacks.
+struct HostBootstrapCallbackCtx {
+    ctx: drasi_lib::reactions::bootstrap_context::BootstrapContext,
+    host_handle: tokio::runtime::Handle,
+}
+
+/// Dispatch an async operation to the host's tokio runtime from a blocking
+/// thread and wait synchronously for the result.
+fn host_dispatch<R: Send + 'static>(
+    host_ctx: &HostBootstrapCallbackCtx,
+    fut: impl std::future::Future<Output = R> + Send + 'static,
+) -> R {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<R>(0);
+    host_ctx.host_handle.spawn(async move {
+        let result = fut.await;
+        let _ = tx.send(result);
+    });
+    rx.recv().expect("host bootstrap dispatch channel dropped")
+}
+
+extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotResponse {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+        let result = host_dispatch(host_ctx, {
+            // SAFETY: we hold an Arc reference for the lifetime of the FFI call.
+            let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+            async move { ctx_ref.ctx.fetch_snapshot().await }
+        });
+        match result {
+            Ok(snapshot) => {
+                let data = snapshot.to_vec();
+                let data_json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".into());
+                FfiSnapshotResponse {
+                    data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(data_json),
+                    as_of_sequence: snapshot.as_of_sequence,
+                    config_hash: snapshot.config_hash,
+                    error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+                }
+            }
+            Err(e) => FfiSnapshotResponse {
+                data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+                as_of_sequence: 0,
+                config_hash: 0,
+                error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(format!("{e}")),
+            },
+        }
+    }))
+    .unwrap_or_else(|_| FfiSnapshotResponse {
+        data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+        as_of_sequence: 0,
+        config_hash: 0,
+        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(
+            "panic in host bootstrap callback".into(),
+        ),
+    })
+}
+
+extern "C" fn host_bootstrap_fetch_outbox(
+    ctx: *mut c_void,
+    after_sequence: u64,
+) -> FfiOutboxResponse {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+        let result = host_dispatch(host_ctx, {
+            let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+            async move { ctx_ref.ctx.fetch_outbox(after_sequence).await }
+        });
+        match result {
+            Ok(outbox) => {
+                // Deref Arc<QueryResult> to &QueryResult for serialization.
+                let results_ref: Vec<&drasi_lib::channels::QueryResult> =
+                    outbox.results.iter().map(|r| r.as_ref()).collect();
+                let results_json =
+                    serde_json::to_string(&results_ref).unwrap_or_else(|_| "[]".into());
+                FfiOutboxResponse {
+                    results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(results_json),
+                    latest_sequence: outbox.latest_sequence,
+                    config_hash: outbox.config_hash,
+                    error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+                }
+            }
+            Err(e) => {
+                let err_msg = match e {
+                    drasi_lib::queries::output_state::FetchError::OutboxGap(gap) => {
+                        format!("OutboxGap:{}", gap.earliest_available)
+                    }
+                    other => format!("{other}"),
+                };
+                FfiOutboxResponse {
+                    results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+                    latest_sequence: 0,
+                    config_hash: 0,
+                    error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(err_msg),
+                }
+            }
+        }
+    }))
+    .unwrap_or_else(|_| FfiOutboxResponse {
+        results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+        latest_sequence: 0,
+        config_hash: 0,
+        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(
+            "panic in host bootstrap callback".into(),
+        ),
+    })
+}
+
+extern "C" fn host_bootstrap_read_checkpoint(ctx: *mut c_void) -> FfiCheckpointResult {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+        let result = host_dispatch(host_ctx, {
+            let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+            async move { ctx_ref.ctx.read_checkpoint().await }
+        });
+        match result {
+            Ok(Some(cp)) => FfiCheckpointResult {
+                found: true,
+                checkpoint: FfiCheckpoint {
+                    sequence: cp.sequence,
+                    config_hash: cp.config_hash,
+                },
+                error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+            },
+            Ok(None) => FfiCheckpointResult {
+                found: false,
+                checkpoint: FfiCheckpoint {
+                    sequence: 0,
+                    config_hash: 0,
+                },
+                error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+            },
+            Err(e) => FfiCheckpointResult {
+                found: false,
+                checkpoint: FfiCheckpoint {
+                    sequence: 0,
+                    config_hash: 0,
+                },
+                error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(format!("{e}")),
+            },
+        }
+    }))
+    .unwrap_or_else(|_| FfiCheckpointResult {
+        found: false,
+        checkpoint: FfiCheckpoint {
+            sequence: 0,
+            config_hash: 0,
+        },
+        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(
+            "panic in host bootstrap callback".into(),
+        ),
+    })
+}
+
+extern "C" fn host_bootstrap_write_checkpoint(
+    ctx: *mut c_void,
+    checkpoint: FfiCheckpoint,
+) -> FfiResult {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+        let cp = drasi_lib::reactions::ReactionCheckpoint {
+            sequence: checkpoint.sequence,
+            config_hash: checkpoint.config_hash,
+        };
+        let result = host_dispatch(host_ctx, {
+            let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+            async move { ctx_ref.ctx.write_checkpoint(&cp).await }
+        });
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::err(format!("{e}")),
+        }
+    }))
+    .unwrap_or_else(|_| FfiResult::err("panic in host bootstrap callback".into()))
 }
 
 impl Drop for ReactionProxy {

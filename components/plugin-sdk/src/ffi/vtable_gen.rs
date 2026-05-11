@@ -136,6 +136,170 @@ fn dispatch_mode_to_ffi(m: DispatchMode) -> FfiDispatchMode {
 }
 
 // ============================================================================
+// FFI bootstrap backend
+// ============================================================================
+
+/// Plugin-side bootstrap backend that calls through FFI callback function pointers.
+///
+/// When the host invokes `bootstrap_fn`, the plugin constructs this backend
+/// wrapping the `FfiBootstrapContext`'s callback pointers. Each async method
+/// uses `spawn_blocking` to call the synchronous FFI callback without blocking
+/// the async runtime.
+struct FfiBootstrapBackend {
+    fetch_snapshot_fn: FfiBootstrapFetchSnapshotFn,
+    fetch_outbox_fn: FfiBootstrapFetchOutboxFn,
+    read_checkpoint_fn: FfiBootstrapReadCheckpointFn,
+    write_checkpoint_fn: FfiBootstrapWriteCheckpointFn,
+    /// Opaque host context passed to all callbacks (raw pointer for Copy semantics).
+    callback_ctx: *mut c_void,
+}
+
+unsafe impl Send for FfiBootstrapBackend {}
+unsafe impl Sync for FfiBootstrapBackend {}
+
+/// SAFETY: FfiOwnedStr contains *mut c_char which is not Send.
+/// We own the data exclusively after the callback returns, so sending
+/// the struct across thread boundaries is safe.
+struct SendFfiSnapshotResponse(FfiSnapshotResponse);
+unsafe impl Send for SendFfiSnapshotResponse {}
+struct SendFfiOutboxResponse(FfiOutboxResponse);
+unsafe impl Send for SendFfiOutboxResponse {}
+struct SendFfiCheckpointResult(FfiCheckpointResult);
+unsafe impl Send for SendFfiCheckpointResult {}
+struct SendFfiResult(FfiResult);
+unsafe impl Send for SendFfiResult {}
+
+#[async_trait::async_trait]
+impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
+    async fn fetch_snapshot(
+        &self,
+    ) -> Result<
+        drasi_lib::queries::output_state::SnapshotResponse,
+        drasi_lib::queries::output_state::FetchError,
+    > {
+        let cb = self.fetch_snapshot_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp = tokio::task::spawn_blocking(move || SendFfiSnapshotResponse(cb(ctx.as_ptr())))
+            .await
+            .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            })?
+            .0;
+
+        // Check for error.
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            });
+        }
+
+        // Deserialize data_json into Vec<serde_json::Value>.
+        let data_json = unsafe { resp.data_json.into_string() };
+        let values: Vec<serde_json::Value> =
+            serde_json::from_str(&data_json).unwrap_or_default();
+
+        Ok(drasi_lib::queries::output_state::SnapshotResponse::from_vec(
+            values,
+            resp.as_of_sequence,
+            resp.config_hash,
+        ))
+    }
+
+    async fn fetch_outbox(
+        &self,
+        after_sequence: u64,
+    ) -> Result<
+        drasi_lib::queries::output_state::OutboxResponse,
+        drasi_lib::queries::output_state::FetchError,
+    > {
+        let cb = self.fetch_outbox_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp =
+            tokio::task::spawn_blocking(move || SendFfiOutboxResponse(cb(ctx.as_ptr(), after_sequence)))
+                .await
+                .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                    status: drasi_lib::ComponentStatus::Error,
+                })?
+                .0;
+
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            if err_str.starts_with("OutboxGap:") {
+                return Err(drasi_lib::queries::output_state::FetchError::OutboxGap(
+                    drasi_lib::queries::output_state::OutboxGap {
+                        requested: after_sequence,
+                        earliest_available: 0,
+                        latest_sequence: resp.latest_sequence,
+                        config_hash: resp.config_hash,
+                    },
+                ));
+            }
+            return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            });
+        }
+
+        let results_json = unsafe { resp.results_json.into_string() };
+        let results: Vec<drasi_lib::channels::QueryResult> =
+            serde_json::from_str(&results_json).unwrap_or_default();
+
+        Ok(drasi_lib::queries::output_state::OutboxResponse {
+            results: results.into_iter().map(Arc::new).collect(),
+            latest_sequence: resp.latest_sequence,
+            config_hash: resp.config_hash,
+        })
+    }
+
+    async fn read_checkpoint(
+        &self,
+    ) -> anyhow::Result<Option<drasi_lib::reactions::ReactionCheckpoint>> {
+        let cb = self.read_checkpoint_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp = tokio::task::spawn_blocking(move || SendFfiCheckpointResult(cb(ctx.as_ptr())))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
+            .0;
+
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            return Err(anyhow::anyhow!("{err_str}"));
+        }
+
+        if !resp.found {
+            return Ok(None);
+        }
+
+        Ok(Some(drasi_lib::reactions::ReactionCheckpoint {
+            sequence: resp.checkpoint.sequence,
+            config_hash: resp.checkpoint.config_hash,
+        }))
+    }
+
+    async fn write_checkpoint(
+        &self,
+        checkpoint: &drasi_lib::reactions::ReactionCheckpoint,
+    ) -> anyhow::Result<()> {
+        let cb = self.write_checkpoint_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let ffi_cp = FfiCheckpoint {
+            sequence: checkpoint.sequence,
+            config_hash: checkpoint.config_hash,
+        };
+        let result = tokio::task::spawn_blocking(move || SendFfiResult(cb(ctx.as_ptr(), ffi_cp)))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
+            .0;
+
+        unsafe {
+            result
+                .into_result()
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+// ============================================================================
 // Thread-local context for per-instance log routing
 // ============================================================================
 
@@ -1122,6 +1286,67 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         });
     }
 
+    extern "C" fn is_durable_fn<T: Reaction + 'static>(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.is_durable()
+    }
+
+    extern "C" fn needs_snapshot_on_fresh_start_fn<T: Reaction + 'static>(
+        state: *const c_void,
+    ) -> bool {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.needs_snapshot_on_fresh_start()
+    }
+
+    extern "C" fn default_recovery_policy_fn<T: Reaction + 'static>(
+        state: *const c_void,
+    ) -> u8 {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.default_recovery_policy() as u8
+    }
+
+    extern "C" fn bootstrap_fn<T: Reaction + 'static>(
+        state: *mut c_void,
+        ctx: *const FfiBootstrapContext,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            let ffi_ctx = unsafe { &*ctx };
+
+            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let is_reset = ffi_ctx.is_reset;
+
+            let backend = FfiBootstrapBackend {
+                fetch_snapshot_fn: ffi_ctx.fetch_snapshot_fn,
+                fetch_outbox_fn: ffi_ctx.fetch_outbox_fn,
+                read_checkpoint_fn: ffi_ctx.read_checkpoint_fn,
+                write_checkpoint_fn: ffi_ctx.write_checkpoint_fn,
+                callback_ctx: ffi_ctx.callback_ctx,
+            };
+
+            let bootstrap_ctx = drasi_lib::reactions::BootstrapContext::from_backend(
+                query_id,
+                is_reset,
+                Box::new(backend),
+            );
+
+            let log_ctx = build_reaction_log_ctx(w);
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.bootstrap(bootstrap_ctx).await;
+                clear_instance_log_ctx();
+                r
+            });
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = reaction.id().to_string();
     let cached_type_name = reaction.type_name().to_string();
 
@@ -1153,6 +1378,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         deprovision_fn: deprovision_fn::<T>,
         initialize_fn: initialize_fn::<T>,
         start_result_push_fn: start_result_push_fn::<T>,
+        is_durable_fn: is_durable_fn::<T>,
+        needs_snapshot_on_fresh_start_fn: needs_snapshot_on_fresh_start_fn::<T>,
+        default_recovery_policy_fn: default_recovery_policy_fn::<T>,
+        bootstrap_fn: bootstrap_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1457,6 +1686,62 @@ pub fn build_reaction_vtable_from_boxed(
         });
     }
 
+    extern "C" fn is_durable_fn(state: *const c_void) -> bool {
+        let w = wrapper_ref(state);
+        w.inner.is_durable()
+    }
+
+    extern "C" fn needs_snapshot_on_fresh_start_fn(state: *const c_void) -> bool {
+        let w = wrapper_ref(state);
+        w.inner.needs_snapshot_on_fresh_start()
+    }
+
+    extern "C" fn default_recovery_policy_fn(state: *const c_void) -> u8 {
+        let w = wrapper_ref(state);
+        w.inner.default_recovery_policy() as u8
+    }
+
+    extern "C" fn bootstrap_fn(
+        state: *mut c_void,
+        ctx: *const FfiBootstrapContext,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = wrapper_ref(state);
+            let ffi_ctx = unsafe { &*ctx };
+
+            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let is_reset = ffi_ctx.is_reset;
+
+            let backend = FfiBootstrapBackend {
+                fetch_snapshot_fn: ffi_ctx.fetch_snapshot_fn,
+                fetch_outbox_fn: ffi_ctx.fetch_outbox_fn,
+                read_checkpoint_fn: ffi_ctx.read_checkpoint_fn,
+                write_checkpoint_fn: ffi_ctx.write_checkpoint_fn,
+                callback_ctx: ffi_ctx.callback_ctx,
+            };
+
+            let bootstrap_ctx = drasi_lib::reactions::BootstrapContext::from_backend(
+                query_id,
+                is_reset,
+                Box::new(backend),
+            );
+
+            let log_ctx = build_dyn_reaction_log_ctx(w);
+            let handle = (w.runtime_handle)().handle().clone();
+            let arc = wrapper_arc(state);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let r = arc.inner.bootstrap(bootstrap_ctx).await;
+                clear_instance_log_ctx();
+                r
+            });
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = reaction.id().to_string();
     let cached_type_name = reaction.type_name().to_string();
 
@@ -1493,6 +1778,10 @@ pub fn build_reaction_vtable_from_boxed(
         deprovision_fn,
         initialize_fn,
         start_result_push_fn,
+        is_durable_fn,
+        needs_snapshot_on_fresh_start_fn,
+        default_recovery_policy_fn,
+        bootstrap_fn,
         drop_fn,
     }
 }

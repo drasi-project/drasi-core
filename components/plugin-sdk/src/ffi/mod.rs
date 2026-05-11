@@ -60,11 +60,14 @@ pub use vtable_gen::{
     current_instance_log_ctx, InstanceLogContext,
 };
 pub use vtables::{
-    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapPushCallbackFn,
-    FfiBootstrapReceiver, FfiBootstrapSender, FfiChangePushCallbackFn, FfiChangeReceiver,
-    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSourceEvent,
-    FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable, ReactionVtable,
-    SourcePluginVtable, SourceVtable, StateStoreVtable,
+    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext,
+    FfiBootstrapEvent, FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn,
+    FfiBootstrapPushCallbackFn, FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver,
+    FfiBootstrapSender, FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn,
+    FfiChangeReceiver, FfiCheckpoint, FfiCheckpointResult, FfiOutboxResponse,
+    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotResponse,
+    FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable,
+    ReactionPluginVtable, ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

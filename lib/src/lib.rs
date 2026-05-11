@@ -129,7 +129,7 @@ pub use lib_core::DrasiLib;
 pub use error::{DrasiError, Result};
 
 /// Recovery policy and error types for checkpoint-based recovery
-pub use recovery::{RecoveryError, RecoveryPolicy};
+pub use recovery::{ReactionRecoveryPolicy, RecoveryError, RecoveryPolicy};
 
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
@@ -202,6 +202,8 @@ pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeCont
 
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
+/// Checkpoint type for durable reaction progress tracking
+pub use reactions::ReactionCheckpoint;
 /// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
 

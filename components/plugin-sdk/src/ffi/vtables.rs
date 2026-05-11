@@ -227,6 +227,75 @@ drasi_ffi_primitives::ffi_vtable! {
 // Reaction vtable
 // ============================================================================
 
+// --- FFI types for the reaction bootstrap bridge ---
+
+/// FFI-safe checkpoint data.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiCheckpoint {
+    pub sequence: u64,
+    pub config_hash: u64,
+}
+
+/// Result of a checkpoint read — `found=false` means no checkpoint exists.
+#[repr(C)]
+pub struct FfiCheckpointResult {
+    pub found: bool,
+    pub checkpoint: FfiCheckpoint,
+    /// Non-null on error.
+    pub error: FfiOwnedStr,
+}
+
+/// FFI-safe snapshot response.
+/// `data_json` is JSON-serialized `Vec<serde_json::Value>`.
+#[repr(C)]
+pub struct FfiSnapshotResponse {
+    pub data_json: FfiOwnedStr,
+    pub as_of_sequence: u64,
+    pub config_hash: u64,
+    /// Non-null on error.
+    pub error: FfiOwnedStr,
+}
+
+/// FFI-safe outbox response.
+/// `results_json` is JSON-serialized `Vec<QueryResult>`.
+#[repr(C)]
+pub struct FfiOutboxResponse {
+    pub results_json: FfiOwnedStr,
+    pub latest_sequence: u64,
+    pub config_hash: u64,
+    /// Non-null on error.
+    pub error: FfiOwnedStr,
+}
+
+/// Callback signatures for FfiBootstrapContext.
+pub type FfiBootstrapFetchSnapshotFn = extern "C" fn(*mut c_void) -> FfiSnapshotResponse;
+pub type FfiBootstrapFetchOutboxFn = extern "C" fn(*mut c_void, u64) -> FfiOutboxResponse;
+pub type FfiBootstrapReadCheckpointFn = extern "C" fn(*mut c_void) -> FfiCheckpointResult;
+pub type FfiBootstrapWriteCheckpointFn = extern "C" fn(*mut c_void, FfiCheckpoint) -> FfiResult;
+
+/// FFI-safe bootstrap context passed to `bootstrap_fn`.
+///
+/// The host builds this and passes a pointer. The plugin calls the callback
+/// function pointers with `callback_ctx` to invoke `fetch_snapshot()`, etc.
+#[repr(C)]
+pub struct FfiBootstrapContext {
+    /// Query ID this bootstrap is for.
+    pub query_id: FfiStr,
+    /// Whether this is a full reset (true) or gap recovery (false).
+    pub is_reset: bool,
+    /// Opaque host context passed as first arg to all callbacks.
+    pub callback_ctx: *mut c_void,
+    /// Fetch a snapshot of the query's live result set.
+    pub fetch_snapshot_fn: FfiBootstrapFetchSnapshotFn,
+    /// Fetch outbox entries after a given sequence.
+    pub fetch_outbox_fn: FfiBootstrapFetchOutboxFn,
+    /// Read the persisted checkpoint for this query subscription.
+    pub read_checkpoint_fn: FfiBootstrapReadCheckpointFn,
+    /// Write a checkpoint for this query subscription.
+    pub write_checkpoint_fn: FfiBootstrapWriteCheckpointFn,
+}
+
 drasi_ffi_primitives::ffi_vtable! {
     /// FFI-safe vtable for a Reaction instance.
     pub struct ReactionVtable {
@@ -254,6 +323,20 @@ drasi_ffi_primitives::ffi_vtable! {
         /// The plugin spawns a forwarder task that reads from an internal channel
         /// and calls `reaction.enqueue_query_result()` for each item.
         fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),
+
+        // Recovery archetype methods
+        /// Whether this reaction requires a durable state store.
+        fn is_durable_fn(state: *const) -> bool,
+        /// Whether this reaction needs a full snapshot on first start.
+        fn needs_snapshot_on_fresh_start_fn(state: *const) -> bool,
+        /// Default recovery policy (returned as u8 ordinal: 0=Strict, 1=AutoReset, 2=AutoSkipGap).
+        fn default_recovery_policy_fn(state: *const) -> u8,
+
+        // Bootstrap hook
+        /// Called during startup when bootstrap or recovery is needed.
+        /// The FfiBootstrapContext provides callbacks for fetch_snapshot, fetch_outbox,
+        /// and checkpoint read/write.
+        fn bootstrap_fn(state: *mut, ctx: *const FfiBootstrapContext) -> FfiResult,
     }
 }
 

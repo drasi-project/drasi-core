@@ -37,6 +37,26 @@ pub enum RecoveryPolicy {
     AutoReset,
 }
 
+/// Behavior when a reaction's checkpoint falls behind the query outbox.
+///
+/// Configured per-reaction via `ReactionBaseParams::recovery_policy` or by
+/// overriding `Reaction::default_recovery_policy()`. Unlike the query-side
+/// `RecoveryPolicy`, reactions support an additional `AutoSkipGap` variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionRecoveryPolicy {
+    /// Fail startup if the outbox cannot satisfy the checkpoint position.
+    /// Requires manual intervention. Favors correctness over availability.
+    #[default]
+    Strict,
+    /// Wipe checkpoint and re-bootstrap from a full snapshot.
+    /// Favors availability; the reaction re-processes everything from scratch.
+    AutoReset,
+    /// Skip the gap and resume from the latest available outbox entry.
+    /// Accepts potential data loss in exchange for minimal disruption.
+    AutoSkipGap,
+}
+
 /// Errors specific to checkpoint-based recovery.
 #[derive(Debug, thiserror::Error)]
 pub enum RecoveryError {
@@ -112,5 +132,40 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("q1"));
         assert!(msg.contains("gap"));
+    }
+
+    #[test]
+    fn reaction_default_is_strict() {
+        assert_eq!(
+            ReactionRecoveryPolicy::default(),
+            ReactionRecoveryPolicy::Strict
+        );
+    }
+
+    #[test]
+    fn reaction_json_round_trip() {
+        for (policy, expected_json) in [
+            (ReactionRecoveryPolicy::Strict, "\"strict\""),
+            (ReactionRecoveryPolicy::AutoReset, "\"auto_reset\""),
+            (ReactionRecoveryPolicy::AutoSkipGap, "\"auto_skip_gap\""),
+        ] {
+            let json = serde_json::to_string(&policy).unwrap();
+            assert_eq!(json, expected_json);
+            let back: ReactionRecoveryPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, policy);
+        }
+    }
+
+    #[test]
+    fn reaction_yaml_round_trip() {
+        for policy in [
+            ReactionRecoveryPolicy::Strict,
+            ReactionRecoveryPolicy::AutoReset,
+            ReactionRecoveryPolicy::AutoSkipGap,
+        ] {
+            let yaml = serde_yaml::to_string(&policy).unwrap();
+            let back: ReactionRecoveryPolicy = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(back, policy);
+        }
     }
 }
