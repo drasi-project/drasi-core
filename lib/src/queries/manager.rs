@@ -42,6 +42,9 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
+use crate::queries::output_state::{
+    FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
+};
 use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
@@ -131,6 +134,25 @@ pub trait Query: Send + Sync {
     /// Subscribe to query results for reactions
     /// Returns a broadcast receiver for Arc-wrapped QueryResults
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse>;
+
+    /// Fetch a snapshot of the live result set.
+    ///
+    /// Returns the current results (as an `im::HashMap` clone — O(1) via structural sharing)
+    /// and the `as_of_sequence` reflecting the latest emission.
+    ///
+    /// Blocks until bootstrap completes. Returns `FetchError::TimedOut` if bootstrap
+    /// does not complete within 5 minutes, or `FetchError::NotRunning` if the query
+    /// terminates in a non-Running state.
+    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError>;
+
+    /// Fetch outbox entries after the given sequence number.
+    ///
+    /// Returns `Ok(OutboxResponse)` if the requested position is still in the ring buffer,
+    /// or `Err(FetchError::OutboxGap)` if it has been evicted.
+    ///
+    /// Blocks until bootstrap completes, with the same timeout/error semantics as
+    /// `fetch_snapshot`.
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
 }
 
 /// Bootstrap phase tracking for each source
@@ -144,43 +166,45 @@ enum BootstrapPhase {
 /// Dispatch query evaluation results to the current result set and all subscribed reactions.
 ///
 /// Shared between the regular event processing path and the future queue drain path.
+/// Uses `QueryOutputState` for O(1) result-set updates keyed by `row_signature`,
+/// increments the sequence counter, and pushes to the outbox ring buffer.
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
     source_id: &str,
     query_id: &str,
-    current_results: &RwLock<Vec<serde_json::Value>>,
+    output_state: &RwLock<QueryOutputState>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
-    // Convert Drasi results to our QueryResult format
+    // Convert Drasi results to our QueryResult format, filtering out Noops
     let converted_results: Vec<ResultDiff> = results
         .iter()
-        .map(|ctx| match ctx {
+        .filter_map(|ctx| match ctx {
             QueryPartEvaluationContext::Adding {
                 after,
                 row_signature,
-            } => ResultDiff::Add {
+            } => Some(ResultDiff::Add {
                 data: convert_query_variables_to_json(after),
                 row_signature: *row_signature,
-            },
+            }),
             QueryPartEvaluationContext::Removing {
                 before,
                 row_signature,
-            } => ResultDiff::Delete {
+            } => Some(ResultDiff::Delete {
                 data: convert_query_variables_to_json(before),
                 row_signature: *row_signature,
-            },
+            }),
             QueryPartEvaluationContext::Updating {
                 before,
                 after,
                 row_signature,
-            } => ResultDiff::Update {
+            } => Some(ResultDiff::Update {
                 data: convert_query_variables_to_json(after),
                 before: convert_query_variables_to_json(before),
                 after: convert_query_variables_to_json(after),
                 grouping_keys: None,
                 row_signature: *row_signature,
-            },
+            }),
             // NOTE: When a group empties (last contributor removed), core emits
             // Aggregation { default_after: true, .. } with identity values (count:0,
             // sum:0, etc.) rather than Removing. Proper empty-group → Delete detection
@@ -192,86 +216,62 @@ async fn dispatch_query_results(
                 after,
                 row_signature,
                 ..
-            } => ResultDiff::Aggregation {
+            } => Some(ResultDiff::Aggregation {
                 before: before.as_ref().map(convert_query_variables_to_json),
                 after: convert_query_variables_to_json(after),
                 row_signature: *row_signature,
-            },
-            QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+            }),
+            QueryPartEvaluationContext::Noop => None,
         })
         .collect();
 
-    // Update the current result set based on the changes
-    let mut result_set = current_results.write().await;
-    for result in &converted_results {
-        match result {
-            ResultDiff::Add { data, .. } => {
-                result_set.push(data.clone());
-            }
-            ResultDiff::Delete { data, .. } => {
-                result_set.retain(|item| item != data);
-            }
-            ResultDiff::Update { before, after, .. } => {
-                if let Some(pos) = result_set.iter().position(|item| item == before) {
-                    result_set[pos] = after.clone();
-                } else {
-                    warn!("UPDATE: Could not find exact match for before state, treating as remove+add");
-                    result_set.retain(|item| item != before);
-                    result_set.push(after.clone());
-                }
-            }
-            ResultDiff::Aggregation { before, after, .. } => {
-                if let Some(before) = before {
-                    if let Some(pos) = result_set.iter().position(|item| item == before) {
-                        result_set[pos] = after.clone();
-                    } else {
-                        result_set.retain(|item| item != before);
-                        result_set.push(after.clone());
-                    }
-                } else {
-                    result_set.push(after.clone());
-                }
-            }
-            ResultDiff::Noop => {}
-        }
+    // If all results were Noops, skip outbox/sequence advancement and dispatch
+    if converted_results.is_empty() {
+        return;
     }
-    drop(result_set);
 
-    // sequence is set to 0 here. The result-sequence counter that increments
-    // per emission lands in a follow-up issue (see #396 / Reaction Recovery
-    // doc 01 section 1).
-    let query_result = QueryResult::with_profiling(
-        query_id.to_string(),
-        0,
-        chrono::Utc::now(),
-        converted_results,
-        {
-            let mut meta = HashMap::new();
-            meta.insert(
-                "source_id".to_string(),
-                serde_json::Value::String(source_id.to_string()),
-            );
-            meta.insert(
-                "processed_by".to_string(),
-                serde_json::Value::String("drasi-core".to_string()),
-            );
-            meta.insert(
-                "result_count".to_string(),
-                serde_json::Value::Number(results.len().into()),
-            );
-            meta
-        },
-        profiling,
-    );
+    // Apply diffs to the output state, build QueryResult, increment sequence,
+    // push to outbox, and get back the Arc for zero-copy dispatch — all in one
+    // write-lock acquisition.
+    let arc_result = {
+        let mut state = output_state.write().await;
+        state.apply_diffs(&converted_results);
+
+        let result_count = converted_results.len();
+        let query_result = QueryResult::with_profiling(
+            query_id.to_string(),
+            0, // sequence assigned by advance_sequence_and_push
+            chrono::Utc::now(),
+            converted_results,
+            {
+                let mut meta = HashMap::new();
+                meta.insert(
+                    "source_id".to_string(),
+                    serde_json::Value::String(source_id.to_string()),
+                );
+                meta.insert(
+                    "processed_by".to_string(),
+                    serde_json::Value::String("drasi-core".to_string()),
+                );
+                meta.insert(
+                    "result_count".to_string(),
+                    serde_json::Value::Number(result_count.into()),
+                );
+                meta
+            },
+            profiling,
+        );
+
+        state.advance_sequence_and_push(query_result)
+    };
 
     debug!(
-        "Query '{}' sending {} results to reactions",
-        query_id,
-        results.len()
+        "Query '{query_id}' sending {} results to reactions (seq={})",
+        arc_result.results.len(),
+        arc_result.sequence
     );
 
     // Dispatch query result to all subscribed reactions
-    let arc_result = Arc::new(query_result);
     let dispatchers = dispatchers.read().await;
     for dispatcher in dispatchers.iter() {
         if let Err(e) = dispatcher.dispatch_change(arc_result.clone()).await {
@@ -285,7 +285,7 @@ pub struct DrasiQuery {
     instance_id: String,
     // Use QueryBase for common functionality
     base: QueryBase,
-    current_results: Arc<RwLock<Vec<serde_json::Value>>>,
+    output_state: Arc<RwLock<QueryOutputState>>,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -302,6 +302,8 @@ pub struct DrasiQuery {
     middleware_registry: Arc<MiddlewareTypeRegistry>,
     // FutureQueueSource for temporal query support
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
+    // Configurable bootstrap timeout for fetch APIs
+    bootstrap_timeout: std::time::Duration,
 }
 
 impl DrasiQuery {
@@ -315,6 +317,8 @@ impl DrasiQuery {
         // Create priority queue with configured capacity (fallback to 10000 if not set)
         let priority_capacity = config.priority_queue_capacity.unwrap_or(10000);
         let priority_queue = PriorityQueue::new(priority_capacity);
+        let outbox_capacity = config.outbox_capacity;
+        let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
 
         // Create QueryBase for common functionality
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
@@ -322,7 +326,7 @@ impl DrasiQuery {
         Ok(Self {
             instance_id: instance_id.into(),
             base,
-            current_results: Arc::new(RwLock::new(Vec::new())),
+            output_state: Arc::new(RwLock::new(QueryOutputState::new(outbox_capacity))),
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -331,6 +335,7 @@ impl DrasiQuery {
             index_factory,
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
+            bootstrap_timeout,
         })
     }
 
@@ -343,7 +348,50 @@ impl DrasiQuery {
     }
 
     pub async fn get_current_results(&self) -> Vec<serde_json::Value> {
-        self.current_results.read().await.clone()
+        self.output_state.read().await.get_results_as_vec()
+    }
+
+    /// Wait until the query has finished bootstrapping (status is no longer `Starting`).
+    ///
+    /// Returns `Ok(())` if the query reaches `Running` status.
+    /// Returns `Err(FetchError::NotRunning)` if it reaches a terminal non-Running state.
+    /// Returns `Err(FetchError::TimedOut)` if bootstrap doesn't complete within the
+    /// configured `bootstrap_timeout_secs`.
+    async fn wait_until_running(&self) -> Result<(), FetchError> {
+        let mut status_rx = self.base.status_handle().subscribe_status();
+
+        // Check current value first (avoids waiting if already transitioned)
+        let current = *status_rx.borrow_and_update();
+        match current {
+            ComponentStatus::Running => return Ok(()),
+            ComponentStatus::Starting => {} // need to wait
+            other => return Err(FetchError::NotRunning { status: other }),
+        }
+
+        // Wait for a non-Starting status, with timeout
+        let result = tokio::time::timeout(
+            self.bootstrap_timeout,
+            status_rx.wait_for(|s| *s != ComponentStatus::Starting),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(status_ref)) => {
+                let status = *status_ref;
+                if status == ComponentStatus::Running {
+                    Ok(())
+                } else {
+                    Err(FetchError::NotRunning { status })
+                }
+            }
+            Ok(Err(_)) => {
+                // Watch channel closed — sender dropped, treat as not running
+                Err(FetchError::NotRunning {
+                    status: ComponentStatus::Stopped,
+                })
+            }
+            Err(_) => Err(FetchError::TimedOut),
+        }
     }
 }
 
@@ -754,7 +802,7 @@ impl Query for DrasiQuery {
             let query_id = self.base.config.id.clone();
             let bootstrap_state = self.bootstrap_state.clone();
             let instance_id = self.instance_id.clone();
-            let bootstrap_current_results = self.current_results.clone();
+            let bootstrap_output_state = self.output_state.clone();
 
             let mut bootstrap_handles = Vec::new();
             let mut abort_handles = Vec::new();
@@ -776,7 +824,7 @@ impl Query for DrasiQuery {
                 let bootstrap_state_clone = bootstrap_state.clone();
                 let base_dispatchers_clone = base_dispatchers.clone();
                 let instance_id_clone = instance_id.clone();
-                let current_results_clone = bootstrap_current_results.clone();
+                let output_state_clone = bootstrap_output_state.clone();
                 let bootstrap_gate_clone = bootstrap_gate.clone();
 
                 let span = tracing::info_span!(
@@ -804,46 +852,46 @@ impl Query for DrasiQuery {
                                             query_id_clone, results.len(), count
                                         );
 
-                                        // Apply bootstrap results to current_results so they
-                                        // are visible via the query results API.
-                                        let mut result_set = current_results_clone.write().await;
-                                        for ctx in &results {
-                                            match ctx {
-                                                QueryPartEvaluationContext::Adding { after, .. } => {
-                                                    result_set.push(convert_query_variables_to_json(after));
-                                                }
-                                                QueryPartEvaluationContext::Removing { before, .. } => {
-                                                    let data = convert_query_variables_to_json(before);
-                                                    result_set.retain(|item| item != &data);
-                                                }
-                                                QueryPartEvaluationContext::Updating { before, after, .. } => {
-                                                    let before_json = convert_query_variables_to_json(before);
-                                                    let after_json = convert_query_variables_to_json(after);
-                                                    if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
-                                                        result_set[pos] = after_json;
-                                                    } else {
-                                                        result_set.retain(|item| item != &before_json);
-                                                        result_set.push(after_json);
+                                        // Convert results to ResultDiffs and apply to output state.
+                                        // During bootstrap, we only update the result set (no outbox
+                                        // push, no sequence increment, no dispatch to reactions).
+                                        let diffs: Vec<ResultDiff> = results
+                                            .iter()
+                                            .map(|ctx| match ctx {
+                                                QueryPartEvaluationContext::Adding { after, row_signature } => {
+                                                    ResultDiff::Add {
+                                                        data: convert_query_variables_to_json(after),
+                                                        row_signature: *row_signature,
                                                     }
                                                 }
-                                                QueryPartEvaluationContext::Aggregation { before, after, .. } => {
-                                                    let after_json = convert_query_variables_to_json(after);
-                                                    if let Some(before) = before {
-                                                        let before_json = convert_query_variables_to_json(before);
-                                                        if let Some(pos) = result_set.iter().position(|item| item == &before_json) {
-                                                            result_set[pos] = after_json;
-                                                        } else {
-                                                            result_set.retain(|item| item != &before_json);
-                                                            result_set.push(after_json);
-                                                        }
-                                                    } else {
-                                                        result_set.push(after_json);
+                                                QueryPartEvaluationContext::Removing { before, row_signature } => {
+                                                    ResultDiff::Delete {
+                                                        data: convert_query_variables_to_json(before),
+                                                        row_signature: *row_signature,
                                                     }
                                                 }
-                                                QueryPartEvaluationContext::Noop => {}
-                                            }
-                                        }
-                                        drop(result_set);
+                                                QueryPartEvaluationContext::Updating { before, after, row_signature } => {
+                                                    ResultDiff::Update {
+                                                        data: convert_query_variables_to_json(after),
+                                                        before: convert_query_variables_to_json(before),
+                                                        after: convert_query_variables_to_json(after),
+                                                        grouping_keys: None,
+                                                        row_signature: *row_signature,
+                                                    }
+                                                }
+                                                QueryPartEvaluationContext::Aggregation { before, after, row_signature, .. } => {
+                                                    ResultDiff::Aggregation {
+                                                        before: before.as_ref().map(convert_query_variables_to_json),
+                                                        after: convert_query_variables_to_json(after),
+                                                        row_signature: *row_signature,
+                                                    }
+                                                }
+                                                QueryPartEvaluationContext::Noop => ResultDiff::Noop,
+                                            })
+                                            .collect();
+
+                                        let mut state = output_state_clone.write().await;
+                                        state.apply_diffs(&diffs);
                                     }
                                 }
                                 Err(e) => {
@@ -987,7 +1035,7 @@ impl Query for DrasiQuery {
         let continuous_query_for_processor = continuous_query.clone();
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
-        let current_results = self.current_results.clone();
+        let output_state = self.output_state.clone();
         let task_handle_clone = self.base.task_handle.clone();
         let priority_queue = self.priority_queue.clone();
         let instance_id = self.instance_id.clone();
@@ -1108,7 +1156,7 @@ impl Query for DrasiQuery {
                                                         &due_result.results,
                                                         &due_result.source_id,
                                                         &query_id,
-                                                        &current_results,
+                                                        &output_state,
                                                         &base_dispatchers,
                                                         profiling,
                                                     )
@@ -1142,7 +1190,7 @@ impl Query for DrasiQuery {
                                                     &results,
                                                     &source_id,
                                                     &query_id,
-                                                    &current_results,
+                                                    &output_state,
                                                     &base_dispatchers,
                                                     profiling,
                                                 )
@@ -1259,6 +1307,30 @@ impl Query for DrasiQuery {
             .subscribe(&reaction_id)
             .await
             .context("Failed to subscribe to query")
+    }
+
+    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+        // Block until bootstrap is complete (status transitions from Starting to Running).
+        // This ensures reactions don't observe a partial result set during initialization.
+        self.wait_until_running().await?;
+
+        let state = self.output_state.read().await;
+        Ok(SnapshotResponse {
+            results: state.get_results_as_vec(),
+            as_of_sequence: state.as_of_sequence(),
+        })
+    }
+
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+        // Block until bootstrap is complete — outbox is only populated by live processing.
+        self.wait_until_running().await?;
+
+        let state = self.output_state.read().await;
+        let results = state.fetch_outbox_after(after_sequence)?;
+        Ok(OutboxResponse {
+            latest_sequence: state.as_of_sequence(),
+            results,
+        })
     }
 }
 

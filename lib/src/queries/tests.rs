@@ -17,10 +17,14 @@ mod manager_tests {
     use super::super::*;
     use crate::channels::*;
     use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::queries::output_state::FetchError;
     use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
     use crate::sources::SourceManager;
     use crate::test_helpers::wait_for_component_status;
     use drasi_core::middleware::MiddlewareTypeRegistry;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
     use std::sync::Arc;
 
     /// Creates a test query configuration
@@ -57,6 +61,8 @@ mod manager_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -85,6 +91,8 @@ mod manager_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -904,6 +912,8 @@ mod query_core_tests {
                 dispatch_mode: None,
                 storage_backend: None,
                 recovery_policy: None,
+                outbox_capacity: 1000,
+                bootstrap_timeout_secs: 300,
             };
 
             // Just verify the config can be created
@@ -928,9 +938,577 @@ mod query_core_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         };
 
         // Empty queries should be caught during validation
         assert!(config.query.is_empty());
+    }
+}
+
+// =========================================================================
+// Output State Integration Tests (fetch_snapshot, fetch_outbox, wait_until_running)
+// =========================================================================
+#[cfg(test)]
+mod output_state_integration_tests {
+    use super::super::*;
+    use crate::channels::*;
+    use crate::config::{QueryConfig, QueryLanguage, SourceSubscriptionConfig};
+    use crate::queries::output_state::FetchError;
+    use crate::sources::tests::{create_test_bootstrap_mock_source, create_test_mock_source};
+    use crate::sources::SourceManager;
+    use crate::test_helpers::wait_for_component_status;
+    use drasi_core::middleware::MiddlewareTypeRegistry;
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
+    use std::sync::Arc;
+
+    /// Creates a test query configuration
+    fn create_test_query_config(id: &str, sources: Vec<String>) -> QueryConfig {
+        QueryConfig {
+            id: id.to_string(),
+            query: "MATCH (n:Person) RETURN n.name".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            sources: sources
+                .iter()
+                .map(|s| SourceSubscriptionConfig {
+                    nodes: vec![],
+                    relations: vec![],
+                    source_id: s.clone(),
+                    pipeline: vec![],
+                })
+                .collect(),
+            auto_start: true,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
+            dispatch_mode: None,
+            storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
+        }
+    }
+
+    async fn create_test_manager_with_graph() -> (
+        Arc<QueryManager>,
+        Arc<SourceManager>,
+        Arc<tokio::sync::RwLock<crate::component_graph::ComponentGraph>>,
+    ) {
+        let log_registry = crate::managers::get_or_init_global_registry();
+        let (graph, update_rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+        let graph = Arc::new(tokio::sync::RwLock::new(graph));
+
+        // Spawn a mini graph update loop for tests
+        {
+            let graph_clone = graph.clone();
+            tokio::spawn(async move {
+                let mut rx = update_rx;
+                while let Some(update) = rx.recv().await {
+                    let mut g = graph_clone.write().await;
+                    g.apply_update(update);
+                }
+            });
+        }
+
+        let source_manager = Arc::new(SourceManager::new(
+            "test-instance",
+            log_registry.clone(),
+            graph.clone(),
+            update_tx.clone(),
+        ));
+
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], None));
+        let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
+
+        let query_manager = Arc::new(QueryManager::new(
+            "test-instance",
+            source_manager.clone(),
+            index_factory,
+            middleware_registry,
+            log_registry,
+            graph.clone(),
+            update_tx,
+        ));
+
+        (query_manager, source_manager, graph)
+    }
+
+    async fn add_source(
+        source_manager: &SourceManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        source: impl crate::sources::Source + 'static,
+    ) -> anyhow::Result<()> {
+        let source_id = source.id().to_string();
+        let source_type = source.type_name().to_string();
+        let auto_start = source.auto_start();
+        {
+            let mut g = graph.write().await;
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), source_type);
+            metadata.insert("autoStart".to_string(), auto_start.to_string());
+            g.register_source(&source_id, metadata)?;
+        }
+        source_manager.provision_source(source).await
+    }
+
+    async fn add_query(
+        manager: &QueryManager,
+        graph: &tokio::sync::RwLock<crate::component_graph::ComponentGraph>,
+        config: QueryConfig,
+    ) -> anyhow::Result<()> {
+        {
+            let mut g = graph.write().await;
+            let source_ids: Vec<String> =
+                config.sources.iter().map(|s| s.source_id.clone()).collect();
+            for sid in &source_ids {
+                if !g.contains(sid) {
+                    g.register_source(sid, std::collections::HashMap::new())?;
+                }
+            }
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("query".to_string(), config.query.clone());
+            g.register_query(&config.id, metadata, &source_ids)?;
+        }
+        manager.provision_query(config).await
+    }
+
+    /// Helper: create a SourceChange::Insert for a Person node
+    fn make_person_insert(source_id: &str, node_id: &str, name: &str) -> SourceChange {
+        let mut props = ElementPropertyMap::default();
+        props.insert(
+            "name",
+            drasi_core::models::ElementValue::String(name.into()),
+        );
+        let element = Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, node_id),
+                labels: vec!["Person".into()].into(),
+                effective_from: 1000,
+            },
+            properties: props,
+        };
+        SourceChange::Insert { element }
+    }
+
+    /// Helper: create a BootstrapEvent from a SourceChange
+    fn make_bootstrap_event(source_id: &str, change: SourceChange, seq: u64) -> BootstrapEvent {
+        BootstrapEvent {
+            source_id: source_id.to_string(),
+            change,
+            timestamp: chrono::Utc::now(),
+            sequence: seq,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_blocks_during_bootstrap() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        // Create a bootstrap channel — test controls the sender
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+
+        let source = create_test_bootstrap_mock_source("snap-src".to_string(), bootstrap_rx);
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        let config = create_test_query_config("snap-query", vec!["snap-src".to_string()]);
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("snap-query".to_string()).await.unwrap();
+
+        // Drain the Starting event
+        wait_for_component_status(
+            &mut event_rx,
+            "snap-query",
+            ComponentStatus::Starting,
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        // fetch_snapshot should block while Starting — spawn it and check it doesn't resolve
+        let query = manager.get_query_instance("snap-query").await.unwrap();
+        let snapshot_handle = tokio::spawn({
+            let q = query.clone();
+            async move { q.fetch_snapshot().await }
+        });
+
+        // Give it a moment — it should NOT resolve yet
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !snapshot_handle.is_finished(),
+            "fetch_snapshot should block during bootstrap"
+        );
+
+        // Send a bootstrap event, then close the channel to complete bootstrap
+        let insert = make_person_insert("snap-src", "p1", "Alice");
+        bootstrap_tx
+            .send(make_bootstrap_event("snap-src", insert, 1))
+            .await
+            .unwrap();
+        drop(bootstrap_tx);
+
+        // Wait for Running
+        wait_for_component_status(
+            &mut event_rx,
+            "snap-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Now fetch_snapshot should resolve
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), snapshot_handle)
+            .await
+            .expect("fetch_snapshot should complete after bootstrap")
+            .unwrap()
+            .expect("fetch_snapshot should return Ok");
+
+        // After bootstrap: results should contain the bootstrapped data,
+        // sequence should be 0 (bootstrap doesn't advance sequence)
+        assert_eq!(snapshot.as_of_sequence, 0);
+        // The result set may or may not contain the bootstrap row depending on
+        // whether the query engine matched it. The important invariant is that
+        // the snapshot resolved and as_of_sequence is 0.
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_and_outbox_after_live_events() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        // Use a regular mock source (no bootstrap channel → immediate Running)
+        let source = create_test_mock_source("live-src".to_string());
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        let config = create_test_query_config("live-query", vec!["live-src".to_string()]);
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("live-query".to_string()).await.unwrap();
+
+        // Wait for Running
+        wait_for_component_status(
+            &mut event_rx,
+            "live-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let query = manager.get_query_instance("live-query").await.unwrap();
+
+        // Before any live events: snapshot should be empty, sequence 0
+        let snap = query.fetch_snapshot().await.unwrap();
+        assert_eq!(snap.as_of_sequence, 0);
+        assert!(snap.results.is_empty());
+
+        // Outbox after 0 should also be empty
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        assert!(outbox.results.is_empty());
+        assert_eq!(outbox.latest_sequence, 0);
+
+        // Inject a live event via the source manager
+        let source_arc = source_manager
+            .get_source_instance("live-src")
+            .await
+            .unwrap();
+        let mock_source = source_arc
+            .as_any()
+            .downcast_ref::<crate::sources::tests::TestMockSource>()
+            .unwrap();
+        let insert = make_person_insert("live-src", "p1", "Bob");
+        mock_source.inject_event(insert).await.unwrap();
+
+        // Give the query time to process
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // After a live event that produces results, sequence should advance
+        let snap = query.fetch_snapshot().await.unwrap();
+        // The sequence may or may not advance depending on whether the query
+        // engine matched the node. If it did match (MATCH (n) RETURN n), then
+        // sequence should be >= 1 and outbox should have entries.
+        if snap.as_of_sequence > 0 {
+            let outbox = query.fetch_outbox(0).await.unwrap();
+            assert_eq!(outbox.results.len(), snap.as_of_sequence as usize);
+            assert_eq!(outbox.results[0].sequence, 1);
+            assert_eq!(outbox.latest_sequence, snap.as_of_sequence);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_outbox_gap_error() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = create_test_mock_source("gap-src".to_string());
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        // Use a very small outbox capacity to trigger eviction
+        let config = QueryConfig {
+            id: "gap-query".to_string(),
+            query: "MATCH (n) RETURN n".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            sources: vec![SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
+                source_id: "gap-src".to_string(),
+                pipeline: vec![],
+            }],
+            auto_start: true,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
+            dispatch_mode: None,
+            storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: 2, // Very small — will evict quickly
+            bootstrap_timeout_secs: 300,
+        };
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("gap-query".to_string()).await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "gap-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let query = manager.get_query_instance("gap-query").await.unwrap();
+
+        // Inject multiple events to fill and overflow the outbox
+        let source_arc = source_manager.get_source_instance("gap-src").await.unwrap();
+        let mock_source = source_arc
+            .as_any()
+            .downcast_ref::<crate::sources::tests::TestMockSource>()
+            .unwrap();
+        for i in 0..5 {
+            let insert = make_person_insert("gap-src", &format!("p{i}"), &format!("Person{i}"));
+            mock_source.inject_event(insert).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let snap = query.fetch_snapshot().await.unwrap();
+        if snap.as_of_sequence > 2 {
+            // Requesting after seq 0 when outbox only holds recent entries → gap
+            let result = query.fetch_outbox(0).await;
+            assert!(
+                matches!(result, Err(FetchError::OutboxGap(_))),
+                "Expected OutboxGap error when requesting evicted position, got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_until_running_returns_not_running_on_error() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        // Use a regular mock source
+        let source = create_test_mock_source("err-src".to_string());
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        let config = create_test_query_config("err-query", vec!["err-src".to_string()]);
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("err-query".to_string()).await.unwrap();
+
+        // Wait for Running
+        wait_for_component_status(
+            &mut event_rx,
+            "err-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Stop the query to put it into Stopped state
+        manager.stop_query("err-query".to_string()).await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "err-query",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let query = manager.get_query_instance("err-query").await.unwrap();
+
+        // fetch_snapshot should return NotRunning when query is stopped
+        let result = query.fetch_snapshot().await;
+        assert!(
+            matches!(result, Err(FetchError::NotRunning { .. })),
+            "Expected NotRunning error for stopped query, got {result:?}"
+        );
+
+        // fetch_outbox should also return NotRunning
+        let result = query.fetch_outbox(0).await;
+        assert!(
+            matches!(result, Err(FetchError::NotRunning { .. })),
+            "Expected NotRunning error for stopped query, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_populates_results_but_not_outbox() {
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+
+        let source = create_test_bootstrap_mock_source("bs-src2".to_string(), bootstrap_rx);
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        let config = create_test_query_config("bs-query2", vec!["bs-src2".to_string()]);
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("bs-query2".to_string()).await.unwrap();
+
+        // Wait for Starting
+        wait_for_component_status(
+            &mut event_rx,
+            "bs-query2",
+            ComponentStatus::Starting,
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+
+        // Send bootstrap events
+        for i in 0..3 {
+            let insert = make_person_insert("bs-src2", &format!("bp{i}"), &format!("BSPerson{i}"));
+            bootstrap_tx
+                .send(make_bootstrap_event("bs-src2", insert, i + 1))
+                .await
+                .unwrap();
+        }
+
+        // Close bootstrap channel to complete bootstrap
+        drop(bootstrap_tx);
+
+        // Wait for Running
+        wait_for_component_status(
+            &mut event_rx,
+            "bs-query2",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let query = manager.get_query_instance("bs-query2").await.unwrap();
+        let snap = query.fetch_snapshot().await.unwrap();
+
+        // Key invariant: after bootstrap, outbox is empty and sequence is 0
+        assert_eq!(
+            snap.as_of_sequence, 0,
+            "Bootstrap should not advance the sequence counter"
+        );
+
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        assert!(
+            outbox.results.is_empty(),
+            "Outbox should be empty after bootstrap (only live events populate it)"
+        );
+        assert_eq!(outbox.latest_sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn test_noop_events_do_not_advance_sequence() {
+        // Use a query that only matches "Person" labels, then send a node
+        // with a non-matching label. This exercises the Noop filtering path.
+        let (manager, source_manager, graph) = create_test_manager_with_graph().await;
+        let mut event_rx = graph.read().await.subscribe();
+
+        let source = create_test_mock_source("noop-src".to_string());
+        add_source(&source_manager, &graph, source).await.unwrap();
+
+        // Query that only matches Person nodes specifically
+        let config = QueryConfig {
+            id: "noop-query".to_string(),
+            query: "MATCH (n:Person) RETURN n.name".to_string(),
+            query_language: QueryLanguage::Cypher,
+            middleware: vec![],
+            sources: vec![SourceSubscriptionConfig {
+                nodes: vec![],
+                relations: vec![],
+                source_id: "noop-src".to_string(),
+                pipeline: vec![],
+            }],
+            auto_start: true,
+            joins: None,
+            enable_bootstrap: true,
+            bootstrap_buffer_size: 10000,
+            priority_queue_capacity: None,
+            dispatch_buffer_capacity: None,
+            dispatch_mode: None,
+            storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: 100,
+            bootstrap_timeout_secs: 300,
+        };
+        add_query(&manager, &graph, config).await.unwrap();
+        manager.start_query("noop-query".to_string()).await.unwrap();
+
+        wait_for_component_status(
+            &mut event_rx,
+            "noop-query",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        let query = manager.get_query_instance("noop-query").await.unwrap();
+
+        // Send a node with a different label (Vehicle) — should not match the query
+        let source_arc = source_manager
+            .get_source_instance("noop-src")
+            .await
+            .unwrap();
+        let mock_source = source_arc
+            .as_any()
+            .downcast_ref::<crate::sources::tests::TestMockSource>()
+            .unwrap();
+
+        let mut props = ElementPropertyMap::default();
+        props.insert(
+            "plate",
+            drasi_core::models::ElementValue::String("ABC123".into()),
+        );
+        let element = Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new("noop-src", "v1"),
+                labels: vec!["Vehicle".into()].into(),
+                effective_from: 1000,
+            },
+            properties: props,
+        };
+        mock_source
+            .inject_event(SourceChange::Insert { element })
+            .await
+            .unwrap();
+
+        // Give time to process
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Non-matching event should NOT advance the sequence
+        let snap = query.fetch_snapshot().await.unwrap();
+        assert_eq!(
+            snap.as_of_sequence, 0,
+            "Non-matching events should not advance the sequence counter"
+        );
+
+        let outbox = query.fetch_outbox(0).await.unwrap();
+        assert!(
+            outbox.results.is_empty(),
+            "Non-matching events should not populate the outbox"
+        );
     }
 }

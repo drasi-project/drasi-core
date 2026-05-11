@@ -115,6 +115,7 @@ drasi-plugin-sdk = { version = "0.6.3", path = "components/plugin-sdk" }
 drasi-host-sdk = { version = "0.6.3", path = "components/host-sdk" }
 
 # Common dependencies
+im = "15"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.3.3", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.1.10", path = "components/indexes/garnet" }

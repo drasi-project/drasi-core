@@ -434,6 +434,19 @@ pub struct QueryConfig {
         rename = "recoveryPolicy"
     )]
     pub recovery_policy: Option<RecoveryPolicy>,
+    /// Maximum number of recent QueryResult emissions retained in the outbox ring buffer.
+    /// Reactions use this buffer for gap recovery via `fetch_outbox`.
+    /// Default: 1000. Minimum: 1 (values below 1 are clamped to 1).
+    #[serde(default = "default_outbox_capacity", rename = "outboxCapacity")]
+    pub outbox_capacity: usize,
+    /// Maximum time in seconds that `fetch_snapshot` / `fetch_outbox` will wait for
+    /// the query to finish bootstrapping before returning `FetchError::TimedOut`.
+    /// Default: 300 (5 minutes).
+    #[serde(
+        default = "default_bootstrap_timeout_secs",
+        rename = "bootstrapTimeoutSecs"
+    )]
+    pub bootstrap_timeout_secs: u64,
 }
 
 /// Synthetic join configuration for queries
@@ -594,6 +607,14 @@ fn default_enable_bootstrap() -> bool {
 
 fn default_bootstrap_buffer_size() -> usize {
     10000
+}
+
+fn default_outbox_capacity() -> usize {
+    crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY
+}
+
+fn default_bootstrap_timeout_secs() -> u64 {
+    300
 }
 
 // Conversion implementations for QueryJoin types
