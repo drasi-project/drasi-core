@@ -61,6 +61,7 @@ let source = MqttSource::builder("mqtt-source")
   |------|---------|
   | `with_host(host)` | MQTT broker hostname |
   | `with_port(port)` | MQTT broker port |
+  | `with_client_id(client_id)` | MQTT client_id sent on CONNECT (falls back to source_id when omitted) |
   | `with_topic(topic)` | Replace topic list with one topic using default QoS |
   | `with_topic_config(topic, qos)` | Add one topic subscription with explicit QoS |
   | `with_topics(topics)` | Set full topic subscription list |
@@ -102,6 +103,7 @@ sources:
     properties:
       host: localhost
       port: 1883
+      client_id: "drasi-watcher-1"   # optional; defaults to the Drasi source_id
       topics:
         - topic: building/+/+/+
           qos: 1
@@ -134,8 +136,9 @@ sources:
 |------|-------------|---------|
 | `host` | MQTT broker hostname | `localhost` |
 | `port` | MQTT broker port | `1883` |
-| `topics` | Subscriptions with per-topic QoS | none |
-| `topic_mappings` | Topic-to-graph mapping rules | none |
+| `client_id` | MQTT client_id sent on CONNECT. Falls back to the Drasi `source_id` when omitted. Set explicitly for multi-environment deployments against a shared broker, or when broker ACLs / device-registration rules require a specific identifier. | none |
+| `topics` | Subscriptions with per-topic QoS. Every entry must be a well-formed MQTT filter; `#` is only valid as the final segment, `+` only as a whole segment, and shared subscriptions (`$share/...`) are not supported. | none |
+| `topic_mappings` | Topic-to-graph mapping rules. Every `pattern` must be reachable by at least one `topics[]` filter; otherwise validation fails up-front rather than silently dropping messages at runtime. | none |
 | `event_channel_capacity` | Event channel capacity | `20` |
 | `max_retries` | Max retries inside in the event loop upon failure. | `8` |
 | `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff)| `1` |

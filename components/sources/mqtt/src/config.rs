@@ -346,6 +346,12 @@ pub struct MqttSourceConfig {
     #[serde(default = "default_port")]
     pub port: u16,
 
+    /// MQTT client identifier sent on CONNECT. Falls back to the Drasi source_id when unset.
+    /// Set explicitly when running multiple Drasi instances against the same broker, or when
+    /// broker ACLs or device-registration rules require a specific client identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+
     /// Identity provider for authentication (takes precedence over user/password)
     #[serde(skip)]
     pub identity_provider: Option<Box<dyn IdentityProvider>>,
@@ -479,6 +485,13 @@ impl MqttSourceConfig {
             ));
         }
 
+        // validate client_id is non-empty when set
+        if let Some(cid) = self.client_id.as_ref() {
+            if cid.is_empty() {
+                return Err(anyhow::anyhow!("client_id must not be empty when set"));
+            }
+        }
+
         // validate adaptive batching parameters
         if let (Some(min_batch), Some(max_batch)) =
             (self.adaptive_min_batch_size, self.adaptive_max_batch_size)
@@ -506,6 +519,13 @@ impl MqttSourceConfig {
             ));
         }
 
+        // validate MQTT filter syntax for each subscription
+        for (idx, t) in self.topics.iter().enumerate() {
+            validate_mqtt_filter(&t.topic).map_err(|e| {
+                anyhow::anyhow!("topics[{idx}] has invalid MQTT filter '{}': {e}", t.topic)
+            })?;
+        }
+
         // validate topic mappings
         let mut router = matchit::Router::new();
         for topic_mapping in &self.topic_mappings {
@@ -529,6 +549,11 @@ impl MqttSourceConfig {
 
             Self::validate_mapping_placeholders(topic_mapping, &mut router)?;
         }
+
+        // validate that every topic_mappings[].pattern can be reached by at least one
+        // configured topics[] subscription. catches the silent-drop bug where a user
+        // subscribes to one namespace and maps a different one.
+        self.validate_subscription_coverage()?;
 
         // validate authentication config
         if self.username.is_some() ^ self.password.is_some() {
@@ -559,6 +584,14 @@ impl MqttSourceConfig {
         mapping: &TopicMapping,
         router: &mut matchit::Router<()>,
     ) -> anyhow::Result<()> {
+        Self::reject_catchall_segments(&mapping.pattern).map_err(|e| {
+            anyhow::anyhow!(
+                "Error in topic mapping pattern '{}': {}",
+                mapping.pattern,
+                e
+            )
+        })?;
+
         router.insert(&mapping.pattern, ()).map_err(|e| {
             anyhow::anyhow!(
                 "Error in topic mapping pattern '{}': {}",
@@ -749,6 +782,119 @@ impl MqttSourceConfig {
 
         Ok(result)
     }
+
+    /// Reject matchit catch-all segments (`*name`) in topic patterns. We only support
+    /// `{name}` placeholders so the subscription-coverage check has a well-defined
+    /// segment-by-segment compatibility model.
+    fn reject_catchall_segments(pattern: &str) -> anyhow::Result<()> {
+        for seg in pattern.split('/') {
+            if let Some(rest) = seg.strip_prefix('*') {
+                return Err(anyhow::anyhow!(
+                    "matchit catch-all '*{rest}' segments are not supported in topic patterns; use {{name}} placeholders instead"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that every `topic_mappings[].pattern` can be reached by at least one
+    /// subscription in `topics[]`. Forward-direction only: subscriptions without a
+    /// matching mapping are allowed (intentional in some configs).
+    fn validate_subscription_coverage(&self) -> anyhow::Result<()> {
+        for (idx, mapping) in self.topic_mappings.iter().enumerate() {
+            let covered = self
+                .topics
+                .iter()
+                .any(|t| topic_filter_compatible_with_pattern(&t.topic, &mapping.pattern));
+            if !covered {
+                return Err(anyhow::anyhow!(
+                    "topic_mappings[{idx}] pattern '{}' has no compatible subscription in topics[]. \
+                     Add a topic filter that can deliver messages matching this pattern.",
+                    mapping.pattern
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Validate a single MQTT topic filter for protocol-level syntax rules. We enforce:
+/// - `#` is legal only as the final whole segment (MQTT 3.1.1 §4.7 / MQTT 5 §4.7.1.2)
+/// - `+` is legal only as a whole segment
+/// - shared subscriptions (`$share/<group>/...`) are not supported by this source
+fn validate_mqtt_filter(filter: &str) -> anyhow::Result<()> {
+    if filter.is_empty() {
+        return Err(anyhow::anyhow!("filter must not be empty"));
+    }
+    if filter.starts_with("$share/") {
+        return Err(anyhow::anyhow!(
+            "shared subscriptions ($share/...) are not supported"
+        ));
+    }
+    let segments: Vec<&str> = filter.split('/').collect();
+    let last_idx = segments.len() - 1;
+    for (i, seg) in segments.iter().enumerate() {
+        if seg.contains('#') {
+            if *seg != "#" {
+                return Err(anyhow::anyhow!(
+                    "'#' must be a whole segment, found '{seg}'"
+                ));
+            }
+            if i != last_idx {
+                return Err(anyhow::anyhow!("'#' must only appear as the final segment"));
+            }
+        }
+        if seg.contains('+') && *seg != "+" {
+            return Err(anyhow::anyhow!(
+                "'+' must be a whole segment, found '{seg}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Return `true` when at least one topic accepted by the MQTT subscription `filter`
+/// could also match the local routing `pattern`. The check is static; it does not
+/// guarantee any specific topic will arrive, only that the namespaces overlap.
+fn topic_filter_compatible_with_pattern(filter: &str, pattern: &str) -> bool {
+    let f: Vec<&str> = filter.split('/').collect();
+    let p: Vec<&str> = pattern.split('/').collect();
+
+    let filter_has_hash = f.last().is_some_and(|s| *s == "#");
+    let f_prefix: &[&str] = if filter_has_hash {
+        &f[..f.len() - 1]
+    } else {
+        &f
+    };
+
+    if filter_has_hash {
+        // pattern must be at least as long as the non-`#` filter prefix
+        if p.len() < f_prefix.len() {
+            return false;
+        }
+    } else if p.len() != f.len() {
+        return false;
+    }
+
+    for (fs, ps) in f_prefix.iter().zip(p.iter()) {
+        if !segment_compatible(fs, ps) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_placeholder(seg: &str) -> bool {
+    seg.len() >= 3 && seg.starts_with('{') && seg.ends_with('}')
+}
+
+fn segment_compatible(filter_seg: &str, pattern_seg: &str) -> bool {
+    // filter '+' or pattern '{name}' accepts any single-level value
+    if filter_seg == "+" || is_placeholder(pattern_seg) {
+        return true;
+    }
+    // both literal: must be equal
+    filter_seg == pattern_seg
 }
 
 impl Default for MqttSourceConfig {
@@ -756,6 +902,7 @@ impl Default for MqttSourceConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            client_id: None,
             identity_provider: None,
             topics: vec![],
             topic_mappings: vec![],
@@ -789,6 +936,7 @@ impl Debug for MqttSourceConfig {
         f.debug_struct("MqttSourceConfig")
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("client_id", &self.client_id)
             .field("topics", &self.topics)
             .field("topic_mappings", &self.topic_mappings)
             .field("event_channel_capacity", &self.event_channel_capacity)
@@ -839,9 +987,10 @@ mod tests {
         MqttSourceConfig {
             host: "localhost".to_string(),
             port: 1883,
+            client_id: None,
             identity_provider: None,
             topics: vec![MqttTopicConfig {
-                topic: "sensors/temperature".to_string(),
+                topic: "building/+/+/+".to_string(),
                 qos: MqttQoS::ONE,
             }],
             topic_mappings: vec![topic_mapping(MappingMode::PayloadAsField, Some("reading"))],
@@ -1062,8 +1211,9 @@ mod tests {
         let yaml = r#"
 host: "mqtt.example.com"
 port: 9001
+client_id: "drasi-test-1"
 topics:
-  - topic: "sensors/temperature"
+  - topic: "building/+/+/+"
     qos: 1
 topic_mappings:
   - pattern: "building/{floor}/{room}/{device}"
@@ -1123,6 +1273,9 @@ adaptive_window_secs: 3
     #[test]
     fn yaml_deserializes_payload_spread_without_field_name() {
         let yaml = r#"
+topics:
+  - topic: "sensors/+"
+    qos: 1
 topic_mappings:
   - pattern: "sensors/{type}"
     entity:
@@ -1382,6 +1535,9 @@ transport:
     #[test]
     fn yaml_validate_accepts_valid_topic_mapping_pattern() {
         let yaml = r#"
+topics:
+  - topic: "building/+/+/+"
+    qos: 1
 topic_mappings:
   - pattern: "building/{floor}/{room}/{device}"
     entity:
@@ -1505,5 +1661,235 @@ topic_mappings:
         let config: MqttSourceConfig = serde_yaml::from_str(yaml).expect("yaml should deserialize");
         let result = config.validate().expect_err("Validation error expected");
         assert!(result.to_string().contains("Error in topic mapping pattern 'building/{floor}/{room}/{device}': Insertion failed due to conflict with previously registered route: building/{floor}/{room}/{device}"));
+    }
+
+    // ---- client_id (B8) ----
+
+    #[test]
+    fn validate_rejects_empty_client_id() {
+        let mut config = valid_config();
+        config.client_id = Some("".to_string());
+        let err = config
+            .validate()
+            .expect_err("empty client_id should be rejected");
+        assert!(err.to_string().contains("client_id must not be empty"));
+    }
+
+    #[test]
+    fn validate_accepts_explicit_client_id() {
+        let mut config = valid_config();
+        config.client_id = Some("drasi-watcher-1".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    // ---- MQTT filter syntax (S11 preconditions) ----
+
+    #[test]
+    fn validate_mqtt_filter_accepts_well_formed_filters() {
+        assert!(validate_mqtt_filter("a/b/c").is_ok());
+        assert!(validate_mqtt_filter("a/+/c").is_ok());
+        assert!(validate_mqtt_filter("a/#").is_ok());
+        assert!(validate_mqtt_filter("#").is_ok());
+        assert!(validate_mqtt_filter("+").is_ok());
+        assert!(validate_mqtt_filter("/foo").is_ok()); // leading slash -> empty first segment
+        assert!(validate_mqtt_filter("foo//bar").is_ok());
+    }
+
+    #[test]
+    fn validate_mqtt_filter_rejects_hash_not_at_end() {
+        let err = validate_mqtt_filter("a/#/b").expect_err("hash mid-filter should be rejected");
+        assert!(err
+            .to_string()
+            .contains("'#' must only appear as the final segment"));
+    }
+
+    #[test]
+    fn validate_mqtt_filter_rejects_hash_within_segment() {
+        let err = validate_mqtt_filter("a/b#").expect_err("hash in segment should be rejected");
+        assert!(err.to_string().contains("'#' must be a whole segment"));
+    }
+
+    #[test]
+    fn validate_mqtt_filter_rejects_plus_within_segment() {
+        let err = validate_mqtt_filter("a+b/c").expect_err("plus in segment should be rejected");
+        assert!(err.to_string().contains("'+' must be a whole segment"));
+    }
+
+    #[test]
+    fn validate_mqtt_filter_rejects_shared_subscription() {
+        let err = validate_mqtt_filter("$share/group/foo")
+            .expect_err("shared subscriptions should be rejected");
+        assert!(err.to_string().contains("shared subscriptions"));
+    }
+
+    #[test]
+    fn validate_mqtt_filter_rejects_empty() {
+        let err = validate_mqtt_filter("").expect_err("empty filter should be rejected");
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    // ---- compatibility algorithm (S11 core) ----
+
+    #[test]
+    fn compat_filter_plus_matches_placeholder() {
+        assert!(topic_filter_compatible_with_pattern(
+            "building/+/+/+",
+            "building/{floor}/{room}/{device}"
+        ));
+    }
+
+    #[test]
+    fn compat_filter_plus_matches_literal_in_pattern() {
+        // filter "+" accepts any single-level value, so a literal pattern segment is fine
+        assert!(topic_filter_compatible_with_pattern(
+            "sensors/+/data",
+            "sensors/temp/data"
+        ));
+    }
+
+    #[test]
+    fn compat_both_literal_equal() {
+        assert!(topic_filter_compatible_with_pattern("a/b/c", "a/b/c"));
+    }
+
+    #[test]
+    fn compat_filter_literal_vs_pattern_placeholder() {
+        // a literal subscription fixes that level; pattern placeholder still accepts it
+        assert!(topic_filter_compatible_with_pattern(
+            "sensors/temperature",
+            "sensors/{type}"
+        ));
+    }
+
+    #[test]
+    fn compat_filter_literal_mismatch_incompatible() {
+        assert!(!topic_filter_compatible_with_pattern(
+            "devices/{id}/telemetry",
+            "sensors/{type}"
+        ));
+        assert!(!topic_filter_compatible_with_pattern("a/b", "a/c"));
+    }
+
+    #[test]
+    fn compat_hash_at_end_matches_any_remaining() {
+        assert!(topic_filter_compatible_with_pattern(
+            "factory/#",
+            "factory/{floor}/sensor/{id}"
+        ));
+        assert!(topic_filter_compatible_with_pattern(
+            "factory/+/sensor/#",
+            "factory/{floor}/sensor/{id}/{attribute}"
+        ));
+    }
+
+    #[test]
+    fn compat_hash_only_filter_matches_anything() {
+        assert!(topic_filter_compatible_with_pattern("#", "anything/at/all"));
+        assert!(topic_filter_compatible_with_pattern("#", "x"));
+    }
+
+    #[test]
+    fn compat_filter_longer_than_pattern_no_hash_incompatible() {
+        assert!(!topic_filter_compatible_with_pattern("a/b/c", "a/b"));
+    }
+
+    #[test]
+    fn compat_filter_shorter_than_pattern_no_hash_incompatible() {
+        assert!(!topic_filter_compatible_with_pattern("a/b", "a/b/{c}"));
+        assert!(!topic_filter_compatible_with_pattern("a/+", "a/b/c/d"));
+    }
+
+    #[test]
+    fn compat_leading_slash_filter_and_pattern() {
+        // both produce an empty first segment; equal -> compatible
+        assert!(topic_filter_compatible_with_pattern("/foo/+", "/foo/{x}"));
+    }
+
+    #[test]
+    fn compat_empty_middle_segment() {
+        assert!(topic_filter_compatible_with_pattern("foo//bar", "foo//bar"));
+        // empty literal in filter does not match a placeholder (placeholder expects non-empty-ish)
+        // but our algorithm treats an empty pattern segment as a literal; equality holds.
+        assert!(topic_filter_compatible_with_pattern(
+            "foo//bar",
+            "foo//{rest}"
+        ));
+    }
+
+    #[test]
+    fn compat_hash_filter_one_segment_pattern_zero_after_prefix() {
+        // filter "factory/+/sensor/#" against pattern "factory/{floor}/sensor"
+        // the `#` allows the pattern to end at the prefix length
+        assert!(topic_filter_compatible_with_pattern(
+            "factory/+/sensor/#",
+            "factory/{floor}/sensor"
+        ));
+    }
+
+    // ---- subscription coverage cross-validation (S11) ----
+
+    #[test]
+    fn validate_subscription_coverage_errors_on_orphan_mapping() {
+        let mut config = valid_config();
+        // Replace the compatible subscription with one that cannot deliver the fixture's
+        // 4-segment "building/{floor}/{room}/{device}" pattern.
+        config.topics = vec![MqttTopicConfig {
+            topic: "sensors/+".to_string(),
+            qos: MqttQoS::ONE,
+        }];
+
+        let err = config
+            .validate()
+            .expect_err("orphan mapping should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("topic_mappings[0]"));
+        assert!(msg.contains("building/{floor}/{room}/{device}"));
+        assert!(msg.contains("no compatible subscription"));
+    }
+
+    #[test]
+    fn validate_subscription_coverage_passes_with_one_matching_filter() {
+        // valid_config()'s topic is "building/+/+/+" which matches the fixture pattern.
+        let config = valid_config();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_subscription_coverage_passes_with_hash_filter() {
+        let mut config = valid_config();
+        config.topics = vec![MqttTopicConfig {
+            topic: "building/#".to_string(),
+            qos: MqttQoS::ONE,
+        }];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_subscription_coverage_no_mappings_is_ok() {
+        // No mappings, no orphan to flag.
+        let mut config = valid_config();
+        config.topic_mappings = vec![];
+        // topic-only config is unusual but should not error from coverage.
+        assert!(config.validate().is_ok());
+    }
+
+    // ---- matchit catch-all rejection (S11 invariant) ----
+
+    #[test]
+    fn validate_rejects_catchall_in_topic_mapping_pattern() {
+        let mut config = valid_config();
+        // Replace fixture pattern with a matchit `*name` catch-all.
+        config.topic_mappings[0].pattern = "devices/*rest".to_string();
+        // Coverage check requires a compatible-looking subscription so we don't trip that path.
+        config.topics = vec![MqttTopicConfig {
+            topic: "devices/foo".to_string(),
+            qos: MqttQoS::ONE,
+        }];
+        let err = config
+            .validate()
+            .expect_err("matchit catch-all should be rejected");
+        assert!(err
+            .to_string()
+            .contains("catch-all '*rest' segments are not supported"));
     }
 }
