@@ -12,29 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod base;
-pub mod config_hash;
-pub mod label_extractor;
-pub mod manager;
-pub mod output_state;
-pub mod priority_queue;
-pub mod sequence_dedup;
-pub mod subscription_builder;
+//! Write-Ahead Log plugin contract.
+//!
+//! Defines the [`WalProvider`] trait for durable event logging used by
+//! transient sources (HTTP, gRPC, etc.) for crash recovery. External crates
+//! (e.g., `drasi-wal-redb`) provide concrete implementations.
 
-#[cfg(test)]
-mod tests;
+mod config;
+mod error;
+mod traits;
 
-#[cfg(test)]
-mod joins_test;
-
-#[cfg(test)]
-mod checkpoint_tests;
-
-pub use base::QueryBase;
-pub use config_hash::compute_config_hash;
-pub use label_extractor::*;
-pub use manager::*;
-pub use output_state::{FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse};
-pub use priority_queue::*;
-pub use sequence_dedup::SequenceDedup;
-pub use subscription_builder::*;
+pub use config::{CapacityPolicy, WriteAheadLogConfig, MIN_MAX_EVENTS};
+pub use error::WalError;
+pub use traits::WalProvider;

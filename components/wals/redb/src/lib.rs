@@ -12,29 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod base;
-pub mod config_hash;
-pub mod label_extractor;
-pub mod manager;
-pub mod output_state;
-pub mod priority_queue;
-pub mod sequence_dedup;
-pub mod subscription_builder;
+//! Redb-backed Write-Ahead Log implementation for Drasi transient sources.
+//!
+//! This crate implements the [`WalProvider`](drasi_lib::WalProvider) trait
+//! using [redb](https://docs.rs/redb) for durable event storage. Each
+//! registered source gets its own redb file at `{root_dir}/{source_id}.redb`.
+//!
+//! Events are serialized via explicit DTOs (not by deriving serde on core
+//! domain types), keeping the wire format decoupled from the core model.
+
+mod dto;
+mod provider;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod joins_test;
-
-#[cfg(test)]
-mod checkpoint_tests;
-
-pub use base::QueryBase;
-pub use config_hash::compute_config_hash;
-pub use label_extractor::*;
-pub use manager::*;
-pub use output_state::{FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse};
-pub use priority_queue::*;
-pub use sequence_dedup::SequenceDedup;
-pub use subscription_builder::*;
+pub use provider::RedbWalProvider;
