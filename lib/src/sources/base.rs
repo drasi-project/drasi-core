@@ -407,7 +407,8 @@ impl SourceBase {
     /// Reset the sequence counter, typically after recovering from a checkpoint.
     /// The next dispatched event will receive `sequence + 1`.
     pub fn set_next_sequence(&self, sequence: u64) {
-        self.next_sequence.store(sequence + 1, Ordering::Relaxed);
+        self.next_sequence
+            .store(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Apply subscription settings that affect the source base.
