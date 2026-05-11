@@ -48,7 +48,7 @@ pub struct ShellTemplateSpecDto {
 
     /// Per-invocation environment variables merged with global env.
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
-    pub envs: HashMap<String, String>,
+    pub env: HashMap<String, String>,
 }
 
 /// DTO for per-query shell template configuration.
@@ -76,7 +76,7 @@ pub struct ShellQueryConfigDto {
 pub struct ShellReactionConfigDto {
     /// Maximum number of concurrent shell commands. Default: 100.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_concurrent: Option<usize>,
+    pub max_concurrent: Option<u32>,
 
     /// Maximum bytes to send to stdin. Default: 1 MB.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,7 +96,7 @@ pub struct ShellReactionConfigDto {
 
     /// Maximum number of recent invocations to retain. Default: 100.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_recent_invocations: Option<usize>,
+    pub max_recent_invocations: Option<u32>,
 
     /// Global environment variables applied to all commands.
     #[serde(default)]
@@ -119,7 +119,7 @@ fn map_template_spec(dto: &ShellTemplateSpecDto) -> crate::config::TemplateSpec<
     crate::config::TemplateSpec {
         template: dto.template.clone(),
         extension: ShellExtension {
-            envs: dto.envs.clone(),
+            env: dto.env.clone(),
         },
     }
 }

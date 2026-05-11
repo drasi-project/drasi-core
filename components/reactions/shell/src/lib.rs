@@ -20,6 +20,12 @@ mod executor;
 mod shell;
 mod state;
 
+#[cfg(test)]
+mod tests;
+
+pub use config::{ShellCommand, ShellExtension, ShellReactionConfig};
+pub use shell::ShellReaction;
+
 use config::QueryConfig;
 use std::collections::HashMap;
 
@@ -27,8 +33,6 @@ use crate::config::{
     default_capture_limit, default_kill_on_drop, default_max_concurrent,
     default_max_recent_invocations, default_max_stdin_bytes, default_timeout_s,
 };
-use crate::config::{ShellCommand, ShellExtension, ShellReactionConfig};
-use crate::shell::ShellReaction;
 
 pub struct ShellReactionBuilder {
     id: String,
@@ -39,12 +43,12 @@ pub struct ShellReactionBuilder {
     auto_start: bool,
     default_template: Option<QueryConfig<ShellExtension>>,
 
-    max_concurrent: usize,
+    max_concurrent: u32,
     max_stdin_bytes: usize,
     capture_limit: usize,
     timeout_s: u64,
     kill_on_drop: bool,
-    max_recent_invocations: usize,
+    max_recent_invocations: u32,
     env: HashMap<String, String>, // global env vars for all commands
 }
 
@@ -129,7 +133,7 @@ impl ShellReactionBuilder {
     }
 
     /// Set the maximum number of concurrent commands to run
-    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+    pub fn with_max_concurrent(mut self, max_concurrent: u32) -> Self {
         self.max_concurrent = max_concurrent;
         self
     }
@@ -141,7 +145,7 @@ impl ShellReactionBuilder {
     }
 
     /// Set the maximum number of recent invocations to keep track of
-    pub fn with_max_recent_invocations(mut self, max_recent_invocations: usize) -> Self {
+    pub fn with_max_recent_invocations(mut self, max_recent_invocations: u32) -> Self {
         self.max_recent_invocations = max_recent_invocations;
         self
     }
