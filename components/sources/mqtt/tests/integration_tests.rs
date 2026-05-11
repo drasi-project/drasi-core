@@ -1286,7 +1286,7 @@ async fn test_full_pipeline_with_application_reaction() -> Result<()> {
 
     // verify the results
     match &query_result.results[0] {
-        ResultDiff::Add { data } => {
+        ResultDiff::Add { data, .. } => {
             let value = &data["val"];
             let room = &data["room"];
             let value_ok = value
@@ -1305,5 +1305,131 @@ async fn test_full_pipeline_with_application_reaction() -> Result<()> {
     // cleanup
     core.stop().await?;
     guard.cleanup().await;
+    Ok(())
+}
+
+// ---------- B8: explicit client_id, two-source no-collision check ----------
+
+/// Two MqttSource instances configured with distinct `client_id`s connect to the same
+/// broker without disconnecting each other. Mosquitto v3.1.1/v5 will boot the older
+/// session when a second client arrives with the same client_id, so this test would
+/// regress if `start()` silently dropped the configured client_id.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_mqtt_explicit_client_id_does_not_collide() -> Result<()> {
+    init_logging();
+
+    let broker_config = MosquittoConfig::new()
+        .with_listener(1883)
+        .with_allow_anonymous(true);
+
+    let mut guard = MosquittoGuard::new(&broker_config).await?;
+
+    let make_config = || MqttSourceConfig {
+        host: "localhost".to_string(),
+        port: broker_config.listener,
+        topics: vec![MqttTopicConfig {
+            topic: "client-id-test/+".to_string(),
+            qos: drasi_source_mqtt::MqttQoS::ONE,
+        }],
+        ..Default::default()
+    };
+
+    let slot_a = slot_name();
+    let slot_b = slot_name();
+
+    let source_a = MqttSource::builder(slot_a.clone())
+        .with_config(make_config())
+        .with_client_id("drasi-watcher-a")
+        .build()
+        .await?;
+
+    let source_b = MqttSource::builder(slot_b.clone())
+        .with_config(make_config())
+        .with_client_id("drasi-watcher-b")
+        .build()
+        .await?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("mqtt-client-id-test")
+            .with_source(source_a)
+            .with_source(source_b)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    wait_for_source_status(&core, &slot_a, drasi_lib::ComponentStatus::Running).await?;
+    wait_for_source_status(&core, &slot_b, drasi_lib::ComponentStatus::Running).await?;
+
+    // Hold for a moment so a same-client_id kick would have time to surface as
+    // a status transition out of Running on one of the two sources.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    assert_eq!(
+        core.get_source_status(&slot_a).await?,
+        drasi_lib::ComponentStatus::Running,
+        "source A was kicked off the broker"
+    );
+    assert_eq!(
+        core.get_source_status(&slot_b).await?,
+        drasi_lib::ComponentStatus::Running,
+        "source B was kicked off the broker"
+    );
+
+    core.stop().await?;
+    guard.cleanup().await;
+    Ok(())
+}
+
+// ---------- S11: orphan topic_mappings pattern fails build() ----------
+
+/// An MQTT subscription that cannot deliver topics matching any configured
+/// topic_mappings pattern must fail validation at builder.build() time. Without this
+/// check the source would start cleanly, accept messages, and silently drop them all.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_mqtt_orphan_pattern_fails_validation() -> Result<()> {
+    init_logging();
+
+    let result = MqttSource::builder("orphan-slot")
+        .with_host("localhost")
+        .with_port(1883)
+        .with_topic_config("sensors/temperature", drasi_source_mqtt::MqttQoS::ONE)
+        .with_topic_mappings(vec![TopicMapping {
+            pattern: "devices/{id}/telemetry".to_string(),
+            entity: MappingEntity {
+                label: "Device".to_string(),
+                id: "{id}".to_string(),
+            },
+            properties: MappingProperties {
+                mode: drasi_source_mqtt::config::MappingMode::PayloadAsField,
+                field_name: Some("payload".to_string()),
+                inject_id: None,
+                inject: vec![],
+            },
+            nodes: vec![],
+            relations: vec![],
+        }])
+        .build()
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("orphan mapping should fail build"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no compatible subscription"),
+        "unexpected error message: {msg}"
+    );
+    assert!(
+        msg.contains("devices/{id}/telemetry"),
+        "error did not name the orphan pattern: {msg}"
+    );
     Ok(())
 }

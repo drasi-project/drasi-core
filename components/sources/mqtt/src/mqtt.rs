@@ -400,7 +400,15 @@ impl Source for MqttSource {
 
         let status_handle = self.base.status_handle();
 
-        match MqttConnection::new(source_id_for_task.clone(), &config, identity_provider).await {
+        // Resolve the MQTT-protocol-level client_id. Falls back to the Drasi source_id
+        // when unset, preserving the historic behavior. Log messages keep using source_id.
+        let mqtt_client_id = self
+            .config
+            .client_id
+            .clone()
+            .unwrap_or_else(|| source_id_for_task.clone());
+
+        match MqttConnection::new(mqtt_client_id, &config, identity_provider).await {
             Ok((mut connection, event_loop_wrapper)) => {
                 // connection successfully created.
                 // Run subscription loop
