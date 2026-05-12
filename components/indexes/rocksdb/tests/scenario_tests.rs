@@ -612,3 +612,63 @@ mod source_update_upsert {
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
     }
 }
+
+mod checkpoint_tests {
+    use super::*;
+    use drasi_core::interface::{CheckpointStore, SessionControl};
+    use drasi_index_rocksdb::checkpoint::RocksDbCheckpointStore;
+
+    #[tokio::test]
+    async fn sequence_counter() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_round_trip() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn result_sequence_counter() {
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbResultIndex::new(db, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::result_sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+}

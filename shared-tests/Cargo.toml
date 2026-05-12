@@ -15,6 +15,7 @@ drasi-core.workspace = true
 drasi-query-cypher.workspace = true
 drasi-functions-cypher.workspace = true
 drasi-middleware = { workspace = true, features = ["decoder", "map", "parse_json", "promote", "relabel", "unwind"] }
+bytes = "1"
 serde = "1.0.163"
 serde_json = "1.0.96"
 async-trait = "0.1.68"

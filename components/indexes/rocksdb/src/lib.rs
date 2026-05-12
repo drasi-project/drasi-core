@@ -30,6 +30,7 @@
 //!     .build()?;
 //! ```
 
+pub mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
 mod plugin;
@@ -38,6 +39,7 @@ mod session_state;
 mod storage_models;
 
 // Re-export the plugin provider and unified DB opener for easy access
+pub use checkpoint::RocksDbCheckpointStore;
 pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
 

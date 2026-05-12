@@ -25,6 +25,8 @@ use drasi_core::{
     evaluation::context::{QueryPartEvaluationContext, QueryVariables},
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
+    in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
+    interface::CheckpointStore,
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -129,6 +131,7 @@ pub trait Query: Send + Sync {
     async fn stop(&self) -> Result<()>;
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
+    fn as_any(&self) -> &dyn std::any::Any;
 
     /// Return the number of active subscription forwarder tasks (diagnostic/testing).
     async fn subscription_count(&self) -> usize {
@@ -308,6 +311,8 @@ pub struct DrasiQuery {
     middleware_registry: Arc<MiddlewareTypeRegistry>,
     // FutureQueueSource for temporal query support
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
+    // Persisted checkpoint_store across stop/start cycles for checkpoint recovery
+    checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
     // Configurable bootstrap timeout for fetch APIs
     bootstrap_timeout: std::time::Duration,
 }
@@ -343,6 +348,7 @@ impl DrasiQuery {
             index_factory,
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
+            checkpoint_store: Arc::new(RwLock::new(None)),
             bootstrap_timeout,
         })
     }
@@ -402,6 +408,21 @@ impl DrasiQuery {
         }
     }
 }
+
+#[cfg(test)]
+impl DrasiQuery {
+    /// Count active subscription forwarder tasks (testing helper)
+    pub async fn subscription_task_count(&self) -> usize {
+        self.subscription_tasks.read().await.len()
+    }
+
+    /// Access the checkpoint store (for internal/test use only).
+    #[doc(hidden)]
+    pub async fn get_checkpoint_store(&self) -> Option<Arc<dyn CheckpointStore>> {
+        self.checkpoint_store.read().await.clone()
+    }
+}
+
 
 #[async_trait]
 impl Query for DrasiQuery {
@@ -490,7 +511,11 @@ impl Query for DrasiQuery {
             builder = builder.with_joins(drasi_joins);
         }
 
-        // Build indexes - either from configured backend or default in-memory
+        // Build indexes - either from configured backend or default in-memory.
+        // Keep a reference to the checkpoint_store for persistence.
+        // Reuse the persisted checkpoint_store across stop/start cycles so that
+        // in-memory checkpoints survive restarts within the same process lifetime.
+        let checkpoint_store: Arc<dyn CheckpointStore>;
         if let Some(backend_ref) = &self.base.config.storage_backend {
             debug!(
                 "Query '{}' using storage backend: {:?}",
@@ -498,23 +523,39 @@ impl Query for DrasiQuery {
             );
             let index_factory = self.index_factory.clone();
 
-            let index_set = index_factory
+            let created = index_factory
                 .build(backend_ref, &self.base.config.id)
                 .await
-                .context("Failed to build index set")?;
+                .context("Failed to build indexes")?;
+
+            // Use backend-provided checkpoint store, or create in-memory fallback
+            checkpoint_store = match created.checkpoint_store {
+                Some(store) => store,
+                None => {
+                    // Backend didn't provide one; reuse persisted or create new
+                    let existing = self.checkpoint_store.read().await.clone();
+                    existing.unwrap_or_else(|| Arc::new(InMemoryCheckpointStore::new()))
+                }
+            };
 
             builder = builder
-                .with_element_index(index_set.element_index)
-                .with_archive_index(index_set.archive_index)
-                .with_result_index(index_set.result_index)
-                .with_future_queue(index_set.future_queue)
-                .with_session_control(index_set.session_control);
+                .with_element_index(created.set.element_index)
+                .with_archive_index(created.set.archive_index)
+                .with_result_index(created.set.result_index)
+                .with_future_queue(created.set.future_queue)
+                .with_session_control(created.set.session_control);
         } else {
             debug!(
                 "Query '{}' using default in-memory indexes",
                 self.base.config.id
             );
+            // Reuse persisted checkpoint_store if available (e.g., after stop/restart)
+            let existing = self.checkpoint_store.read().await.clone();
+            checkpoint_store = existing.unwrap_or_else(|| Arc::new(InMemoryCheckpointStore::new()));
         };
+
+        // Persist the checkpoint_store for future stop/start cycles
+        *self.checkpoint_store.write().await = Some(checkpoint_store.clone());
 
         let continuous_query = match builder.try_build().await {
             Ok(query) => query,
@@ -571,6 +612,46 @@ impl Query for DrasiQuery {
                     ));
                 }
             };
+
+        // Read the last checkpoints and propagate source_position to subscription settings
+        // so sources can resume from where they left off.
+        //
+        // Only propagate checkpoint recovery when the checkpoint store is persistent.
+        // Volatile (in-memory) stores don't survive restarts, and their paired element
+        // indexes rebuild fresh on each start — bootstrap must run to populate the
+        // graph state. Skipping bootstrap against an empty graph would produce
+        // incorrect results.
+        let mut subscription_settings = subscription_settings;
+        let has_persistent_backend = checkpoint_store.is_persistent();
+        let mut checkpoint_sequences_per_source: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        if has_persistent_backend {
+            match checkpoint_store.read_all_checkpoints().await {
+                Ok(checkpoints) => {
+                    for settings in &mut subscription_settings {
+                        if let Some(cp) = checkpoints.get(&settings.source_id) {
+                            checkpoint_sequences_per_source
+                                .insert(settings.source_id.clone(), cp.sequence);
+                            settings.last_sequence = Some(cp.sequence);
+                            settings.request_position_handle = true;
+                            if let Some(pos) = &cp.source_position {
+                                settings.resume_from = Some(pos.clone());
+                            }
+                            debug!(
+                                "Query '{}' resuming source '{}' from checkpoint: seq={}",
+                                self.base.config.id, settings.source_id, cp.sequence
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Query '{}' failed to read checkpoints, starting fresh: {e}",
+                        self.base.config.id
+                    );
+                }
+            }
+        }
 
         // Set up FutureQueueSource for temporal query support.
         // This creates a virtual source that polls the future queue and emits
@@ -650,6 +731,11 @@ impl Query for DrasiQuery {
             }
         }
 
+        let mut position_handles: std::collections::HashMap<
+            String,
+            Arc<std::sync::atomic::AtomicU64>,
+        > = std::collections::HashMap::new();
+
         for (source_id, source, settings) in sources_to_subscribe {
             let subscription_response = match source.subscribe(settings.clone()).await {
                 Ok(response) => response,
@@ -688,6 +774,11 @@ impl Query for DrasiQuery {
                     .write()
                     .await
                     .insert(source_id.to_string(), BootstrapPhase::NotStarted);
+            }
+
+            // Collect position handle if source provides one
+            if let Some(handle) = subscription_response.position_handle {
+                position_handles.insert(source_id.clone(), handle);
             }
 
             // Spawn task to forward events from receiver to priority queue
@@ -1033,6 +1124,7 @@ impl Query for DrasiQuery {
 
         // Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
+        let checkpoint_store_for_processor = checkpoint_store.clone();
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
         let output_state = self.output_state.clone();
@@ -1041,6 +1133,14 @@ impl Query for DrasiQuery {
         let instance_id = self.instance_id.clone();
         let reporter_for_processor = self.base.status_handle();
         let fq_source_for_processor = Arc::clone(&future_queue_source);
+        let position_handles_for_processor = position_handles;
+        let source_ids_for_processor: Vec<String> = self
+            .base
+            .config
+            .sources
+            .iter()
+            .map(|s| s.source_id.clone())
+            .collect();
 
         // Create shutdown channel for graceful termination
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1105,6 +1205,11 @@ impl Query for DrasiQuery {
 
                 info!("Query '{query_id}' starting priority queue event processor");
 
+                // Track last processed sequence per source for dedup.
+                // Sequences are assigned per-source, so dedup must also be per-source.
+                let mut last_processed_per_source: std::collections::HashMap<String, u64> =
+                    checkpoint_sequences_per_source.clone();
+
                 loop {
                     // Check if query is still running
                     let current_status = reporter_for_processor.get_status().await;
@@ -1128,21 +1233,41 @@ impl Query for DrasiQuery {
                         // Dequeue events from priority queue (blocks until available)
                         arc_event = priority_queue.dequeue() => {
                             // Try to extract without cloning if we have sole ownership (zero-copy path).
-                            let (source_id, event, _timestamp, profiling_opt, _sequence) =
+                            let parts =
                                 match SourceEventWrapper::try_unwrap_arc(arc_event) {
                                     Ok(parts) => parts,
                                     Err(arc) => {
-                                        (
-                                            arc.source_id.clone(),
-                                            arc.event.clone(),
-                                            arc.timestamp,
-                                            arc.profiling.clone(),
-                                            arc.sequence,
-                                        )
+                                        crate::channels::events::SourceEventParts {
+                                            source_id: arc.source_id.clone(),
+                                            event: arc.event.clone(),
+                                            timestamp: arc.timestamp,
+                                            profiling: arc.profiling.clone(),
+                                            sequence: arc.sequence,
+                                            source_position: arc.source_position.clone(),
+                                        }
                                     }
                                 };
+                            let source_id = parts.source_id;
+                            let event = parts.event;
+                            let profiling_opt = parts.profiling;
+                            let sequence = parts.sequence;
+                            let source_position = parts.source_position;
 
                             debug!("Query '{query_id}' processing event from source '{source_id}'");
+
+                            // Dedup: skip events with sequence ≤ last processed for this source
+                            if let Some(seq) = sequence {
+                                let last_for_source = last_processed_per_source
+                                    .get(&source_id)
+                                    .copied()
+                                    .unwrap_or(0);
+                                if seq <= last_for_source {
+                                    debug!(
+                                        "Query '{query_id}' skipping duplicate event from '{source_id}' (seq={seq}, last_processed={last_for_source})"
+                                    );
+                                    continue;
+                                }
+                            }
 
                             match event {
                                 SourceEvent::Control(SourceControl::FuturesDue) => {
@@ -1178,12 +1303,46 @@ impl Query for DrasiQuery {
                                     profiling.query_receive_ns = Some(crate::profiling::timestamp_ns());
                                     profiling.query_core_call_ns = Some(crate::profiling::timestamp_ns());
 
+                                    // Stage checkpoint inside the session via pre-commit hook.
+                                    // This ensures checkpoint persistence is atomic with index updates.
+                                    let cp_store = checkpoint_store_for_processor.clone();
+                                    let cp_source_id = source_id.clone();
+                                    let cp_position = source_position.clone();
+                                    let hook = move || {
+                                        async move {
+                                            if let Some(seq) = sequence {
+                                                // Enforce position size limit at checkpoint time:
+                                                // oversized positions are skipped to preserve the
+                                                // last known good position in the store.
+                                                let pos_ref = match &cp_position {
+                                                    Some(p) if p.len() <= crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES => Some(p),
+                                                    _ => None,
+                                                };
+                                                cp_store
+                                                    .stage_checkpoint(&cp_source_id, seq, pos_ref)
+                                                    .await?;
+                                            }
+                                            Ok(())
+                                        }
+                                    };
+
                                     match continuous_query_for_processor
-                                        .process_source_change(source_change)
+                                        .process_source_change_with_hook(source_change, hook)
                                         .await
                                     {
                                         Ok(results) => {
                                             profiling.query_core_return_ns = Some(crate::profiling::timestamp_ns());
+
+                                            // Advance dedup and notify source on successful commit
+                                            if let Some(seq) = sequence {
+                                                last_processed_per_source
+                                                    .insert(source_id.clone(), seq);
+
+                                                if let Some(handle) = position_handles_for_processor.get(&source_id) {
+                                                    handle.store(seq, std::sync::atomic::Ordering::Release);
+                                                }
+                                            }
+
                                             if !results.is_empty() {
                                                 profiling.query_send_ns = Some(crate::profiling::timestamp_ns());
                                                 dispatch_query_results(
@@ -1291,6 +1450,10 @@ impl Query for DrasiQuery {
 
     fn get_config(&self) -> &QueryConfig {
         &self.base.config
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     async fn subscription_count(&self) -> usize {
