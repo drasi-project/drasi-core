@@ -217,17 +217,6 @@ impl MsSqlBootstrapHandler {
             return Ok((0, None));
         }
 
-        // Capture the current CDC max LSN *before* starting the snapshot
-        // transaction. This LSN represents the point-in-time at which the
-        // bootstrap snapshot is consistent, and will be used as the resume
-        // position when the source stream restarts after a checkpoint.
-        let snapshot_lsn = Self::get_max_lsn(client).await?;
-        if let Some(ref lsn) = snapshot_lsn {
-            info!("Captured snapshot LSN for checkpoint: {}", lsn.to_hex());
-        } else {
-            warn!("No CDC LSN available — snapshot_lsn will be None");
-        }
-
         // Start bootstrap transaction with snapshot isolation
         info!("Starting bootstrap transaction with snapshot isolation");
         client
@@ -241,6 +230,17 @@ impl MsSqlBootstrapHandler {
             .await?
             .into_results()
             .await?;
+
+        // Capture the current CDC max LSN *inside* the snapshot transaction.
+        // This ensures the LSN is consistent with the snapshot boundary:
+        // any committed change visible in the snapshot has an LSN ≤ snapshot_lsn,
+        // so the CDC stream can resume from here without overlap or gaps.
+        let snapshot_lsn = Self::get_max_lsn(client).await?;
+        if let Some(ref lsn) = snapshot_lsn {
+            info!("Captured snapshot LSN for checkpoint: {}", lsn.to_hex());
+        } else {
+            warn!("No CDC LSN available — snapshot_lsn will be None");
+        }
 
         let mut total_count = 0;
 
