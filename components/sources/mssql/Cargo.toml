@@ -58,6 +58,8 @@ testcontainers = "0.26"
 drasi-bootstrap-mssql = { path = "../../bootstrappers/mssql" }
 drasi-reaction-application = { path = "../../reactions/application" }
 drasi-index-rocksdb = { workspace = true }
+drasi-host-sdk = { path = "../../host-sdk" }
+drasi-plugin-sdk = { workspace = true }
 tempfile = "3"
 bytes = "1"
 

@@ -323,6 +323,15 @@ impl Source for MsSqlSource {
             }
         }
 
+        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
+        // does not race. Without this, the CDC loop could dispatch events to
+        // old dead receivers, silently dropping them while advancing the LSN.
+        self.base.clear_dispatchers().await;
+
+        // Clear stale resume LSNs — they will be repopulated by subscribe()
+        // on the next lifecycle with fresh checkpoint data.
+        self.subscriber_resume_lsns.write().await.clear();
+
         self.base.set_status(ComponentStatus::Stopped, None).await;
 
         Ok(())

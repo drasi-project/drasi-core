@@ -34,7 +34,7 @@ use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::Instrument;
 
 use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
@@ -181,6 +181,10 @@ pub struct SourceBase {
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
     raw_config: Option<serde_json::Value>,
+    /// Notified whenever a new subscriber registers via `create_streaming_receiver`.
+    /// Sources can await `wait_for_subscribers()` before starting their polling
+    /// loop to avoid dispatching events before any subscriber exists.
+    subscriber_notify: Arc<Notify>,
 }
 
 impl SourceBase {
@@ -229,6 +233,7 @@ impl SourceBase {
             position_handles: Arc::new(RwLock::new(HashMap::new())),
             next_sequence: Arc::new(AtomicU64::new(1)),
             raw_config: None,
+            subscriber_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -464,6 +469,7 @@ impl SourceBase {
             position_handles: self.position_handles.clone(),
             next_sequence: self.next_sequence.clone(),
             raw_config: self.raw_config.clone(),
+            subscriber_notify: self.subscriber_notify.clone(),
         }
     }
 
@@ -521,7 +527,33 @@ impl SourceBase {
             }
         };
 
+        // Wake any task blocked in wait_for_subscribers().
+        // Use notify_one() which stores a permit even if no one is waiting yet,
+        // avoiding a race between the dispatchers check and the await.
+        self.subscriber_notify.notify_one();
+
         Ok(receiver)
+    }
+
+    /// Wait until at least one subscriber has registered.
+    ///
+    /// Sources that start a background polling loop (e.g. CDC) should call
+    /// this before entering their poll loop on a restart cycle. Without this,
+    /// events dispatched before `subscribe()` creates a new dispatcher would
+    /// be silently dropped, advancing the checkpoint past changes that no
+    /// subscriber ever received.
+    ///
+    /// Returns immediately if at least one dispatcher already exists (fresh
+    /// start with bootstrap, or broadcast mode which always has one).
+    pub async fn wait_for_subscribers(&self) {
+        loop {
+            let dispatchers = self.dispatchers.read().await;
+            if !dispatchers.is_empty() {
+                return;
+            }
+            drop(dispatchers);
+            self.subscriber_notify.notified().await;
+        }
     }
 
     /// Subscribe to this source with optional bootstrap
@@ -930,6 +962,19 @@ impl SourceBase {
             }
         }
 
+        // Clear stale dispatchers so that a subsequent start()+subscribe()
+        // cycle does not race: without this, the CDC polling loop could
+        // dispatch events to the old (dead) channel receivers before the
+        // new subscribe() call creates fresh dispatchers, silently dropping
+        // events while still advancing the checkpoint LSN.
+        //
+        // Broadcast mode keeps a single persistent dispatcher that hands
+        // out receivers; channel mode creates one dispatcher per subscriber.
+        if self.dispatch_mode == DispatchMode::Channel {
+            let mut dispatchers = self.dispatchers.write().await;
+            dispatchers.clear();
+        }
+
         self.set_status(
             ComponentStatus::Stopped,
             Some(format!("Source '{}' stopped", self.id)),
@@ -937,6 +982,24 @@ impl SourceBase {
         .await;
         info!("Source '{}' stopped", self.id);
         Ok(())
+    }
+
+    /// Clear stale dispatchers from a prior lifecycle.
+    ///
+    /// Sources that manage their own stop/start lifecycle (instead of using
+    /// `stop_common()`) **must** call this at the end of their `stop()`
+    /// implementation. Without this, a subsequent `start()` + `subscribe()`
+    /// cycle can race: the polling loop dispatches events to the old (dead)
+    /// channel receivers before `subscribe()` creates fresh dispatchers,
+    /// silently dropping events while still advancing the checkpoint.
+    ///
+    /// Only channel-mode dispatchers are cleared — broadcast mode keeps a
+    /// single persistent dispatcher.
+    pub async fn clear_dispatchers(&self) {
+        if self.dispatch_mode == DispatchMode::Channel {
+            let mut dispatchers = self.dispatchers.write().await;
+            dispatchers.clear();
+        }
     }
 
     /// Clear the source's state store partition.

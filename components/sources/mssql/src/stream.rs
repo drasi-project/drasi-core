@@ -163,8 +163,28 @@ async fn run_cdc_polling_loop(
             .unwrap_or_else(|| "NONE (will use current)".to_string())
     );
 
+    // Track consecutive errors for connection health monitoring
+    let mut consecutive_errors = 0u32;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
+    // Wait for at least one subscriber before entering the CDC polling loop.
+    // On a restart cycle, dispatchers are cleared during stop() so the source
+    // would otherwise dispatch events to an empty list, silently dropping them
+    // while advancing the checkpoint LSN past those changes.
+    tokio::select! {
+        _ = base.wait_for_subscribers() => {
+            debug!("Subscriber(s) registered, starting CDC poll loop for '{source_id}'");
+        }
+        _ = shutdown_rx.wait_for(|v| *v) => {
+            info!("CDC polling loop for source '{source_id}' shutdown while waiting for subscribers");
+            return Ok(());
+        }
+    }
+
     // Check if any subscriber has communicated a resume position that's earlier
     // than our checkpoint. If so, rewind to the minimum to ensure no events are missed.
+    // This must happen AFTER wait_for_subscribers because subscriber_resume_lsns is
+    // populated during subscribe(), which triggers the subscriber notification.
     {
         let resume_guard = subscriber_resume_lsns.read().await;
         if let Some(resume_lsn) = resume_guard.values().copied().min() {
@@ -188,10 +208,6 @@ async fn run_cdc_polling_loop(
             }
         }
     }
-
-    // Track consecutive errors for connection health monitoring
-    let mut consecutive_errors = 0u32;
-    const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
     // Main polling loop
     let poll_interval = Duration::from_millis(config.poll_interval_ms);

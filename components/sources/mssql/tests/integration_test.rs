@@ -1060,3 +1060,261 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// FFI boundary test — verifies checkpoint/recovery through cdylib plugins.
+//
+// This is the same stop/insert/restart scenario as the test above, but the
+// MSSQL source and bootstrap are loaded as cdylib plugins through the FFI
+// vtable boundary — the same path used by drasi-server in production.
+//
+// This catches bugs where position_handle, bootstrap_result_receiver, or
+// supports_replay are not wired through FFI and checkpoint data silently
+// fails to persist.
+// ============================================================================
+
+/// Locate plugin cdylibs in the workspace target directory.
+fn ffi_plugin_dir() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // mssql source is at components/sources/mssql, workspace root is ../../../
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("Cannot find workspace root");
+    workspace_root.join("target").join("debug").join("plugins")
+}
+
+fn ffi_plugin_filename(crate_name: &str) -> String {
+    let lib_name = crate_name.replace('-', "_");
+    if cfg!(target_os = "macos") {
+        format!("lib{lib_name}.dylib")
+    } else {
+        format!("lib{lib_name}.so")
+    }
+}
+
+fn ffi_plugin_exists(crate_name: &str) -> bool {
+    ffi_plugin_dir()
+        .join(ffi_plugin_filename(crate_name))
+        .exists()
+}
+
+/// Full system stop/restart test through the FFI boundary — the exact scenario
+/// the user reported as broken when testing with drasi-server.
+///
+/// Prerequisite: build cdylib plugins first:
+///   cargo build --lib -p drasi-source-mssql --features dynamic-plugin
+///   cargo build --lib -p drasi-bootstrap-mssql --features dynamic-plugin
+///   cp target/debug/libdrasi_source_mssql.so target/debug/plugins/
+///   cp target/debug/libdrasi_bootstrap_mssql.so target/debug/plugins/
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
+    use drasi_host_sdk::{callbacks, loader::load_plugin_from_path};
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use drasi_plugin_sdk::descriptor::{BootstrapPluginDescriptor, SourcePluginDescriptor};
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    if !ffi_plugin_exists("drasi-source-mssql") || !ffi_plugin_exists("drasi-bootstrap-mssql") {
+        panic!(
+            "SKIP: cdylib plugins not found in {:?}. Build with:\n  \
+             cargo build --lib -p drasi-source-mssql --features dynamic-plugin\n  \
+             cargo build --lib -p drasi-bootstrap-mssql --features dynamic-plugin\n  \
+             cp target/debug/libdrasi_source_mssql.so target/debug/plugins/\n  \
+             cp target/debug/libdrasi_bootstrap_mssql.so target/debug/plugins/",
+            ffi_plugin_dir()
+        );
+    }
+
+    let tmp_dir = tempfile::TempDir::new()?;
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        // --- Setup MSSQL testcontainer ---
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed the table so bootstrap has data
+        let mut client = db_config.connect().await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (700, 'Seed', 1.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(3)).await;
+
+        // --- Load cdylib plugins through FFI ---
+        let plugin_dir = ffi_plugin_dir();
+        let source_path = plugin_dir.join(ffi_plugin_filename("drasi-source-mssql"));
+        let bootstrap_path = plugin_dir.join(ffi_plugin_filename("drasi-bootstrap-mssql"));
+
+        let source_plugin = load_plugin_from_path(
+            &source_path,
+            std::ptr::null_mut(),
+            callbacks::default_log_callback_fn(),
+            std::ptr::null_mut(),
+            callbacks::default_lifecycle_callback_fn(),
+        )
+        .context("Failed to load MSSQL source cdylib")?;
+
+        let bootstrap_plugin = load_plugin_from_path(
+            &bootstrap_path,
+            std::ptr::null_mut(),
+            callbacks::default_log_callback_fn(),
+            std::ptr::null_mut(),
+            callbacks::default_lifecycle_callback_fn(),
+        )
+        .context("Failed to load MSSQL bootstrap cdylib")?;
+
+        // Create source through FFI with JSON config
+        let source_config = serde_json::json!({
+            "host": db_config.host,
+            "port": db_config.port,
+            "database": db_config.database,
+            "user": db_config.user,
+            "password": db_config.password,
+            "tables": [TEST_TABLE],
+            "pollIntervalMs": 500,
+            "trustServerCertificate": true,
+            "startPosition": "current"
+        });
+        let source = source_plugin.source_plugins[0]
+            .create_source(SOURCE_ID, &source_config, true)
+            .await
+            .context("Failed to create MSSQL source through FFI")?;
+
+        // Verify supports_replay through FFI
+        assert!(
+            source.supports_replay(),
+            "MSSQL source must report supports_replay=true through FFI"
+        );
+
+        // Create bootstrap provider through FFI
+        let bootstrap_config = serde_json::json!({
+            "host": db_config.host,
+            "port": db_config.port,
+            "database": db_config.database,
+            "user": db_config.user,
+            "password": db_config.password,
+            "tables": [TEST_TABLE],
+            "trustServerCertificate": true
+        });
+        let bootstrap_provider = bootstrap_plugin.bootstrap_plugins[0]
+            .create_bootstrap_provider(&bootstrap_config, &source_config)
+            .await
+            .context("Failed to create MSSQL bootstrap through FFI")?;
+
+        // Set bootstrap provider on source (through FFI vtable)
+        source.set_bootstrap_provider(bootstrap_provider).await;
+
+        // Build DrasiLib with persistent RocksDB backend
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction-ffi-restart")
+            .with_query(QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-ffi-restart-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .context("Failed to build DrasiLib with FFI plugins")?;
+
+        // --- Phase 1: Start, bootstrap, process a CDC event ---
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        // Wait for bootstrap to complete
+        sleep(Duration::from_secs(5)).await;
+
+        // Insert a CDC row to advance checkpoint beyond bootstrap
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (701, 'PreStop', 2.00);",
+        )
+        .await?;
+
+        wait_for_change(&mut sub, 20, |entry| {
+            matches_change(entry, "ADD", &[("id", "701"), ("name", "PreStop")])
+        })
+        .await
+        .context("Did not observe CDC row 701 before stop — FFI event dispatch may be broken")?;
+
+        // Let the checkpoint persist
+        sleep(Duration::from_secs(2)).await;
+
+        // --- Phase 2: Full stop ---
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        sleep(Duration::from_millis(500)).await;
+
+        // --- Phase 3: Insert data while everything is stopped ---
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (702, 'WhileStopped', 3.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(3)).await;
+
+        // --- Phase 4: Full restart ---
+        core.start().await.context("Failed to restart DrasiLib")?;
+
+        // --- Phase 5: Verify the offline change is delivered ---
+        wait_for_change(&mut sub, 30, |entry| {
+            matches_change(entry, "ADD", &[("id", "702"), ("name", "WhileStopped")])
+        })
+        .await
+        .context(
+            "CRITICAL: Row 702 'WhileStopped' was NOT delivered after restart. \
+             Checkpoint recovery through FFI boundary is BROKEN. \
+             This is the exact user-reported bug: stop Drasi, make changes, \
+             restart → changes not delivered.",
+        )?;
+
+        core.stop().await.context("Failed to final stop")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => {
+            anyhow::bail!("test_ffi_mssql_full_restart_picks_up_offline_changes timed out")
+        }
+    }
+
+    Ok(())
+}
