@@ -181,10 +181,10 @@ impl ShellExecutor {
     ) -> anyhow::Result<()> {
         // get the operation, data val and result type
         let (operation, data_value, result_type) = match result {
-            ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+            ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
             ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-            ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+            ResultDiff::Aggregation { before, after, .. } => {
                 let aggregation_data = json!({
                     "before": before,
                     "after": after,
