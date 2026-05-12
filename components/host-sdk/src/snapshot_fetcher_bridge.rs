@@ -73,25 +73,29 @@ struct SnapshotIteratorState {
 }
 
 extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> FfiOwnedStr {
-    if iter_ctx.is_null() {
-        return FfiOwnedStr::from_string(String::new());
-    }
-    let state = unsafe { &mut *(iter_ctx as *mut SnapshotIteratorState) };
-    if state.pos >= state.rows.len() {
-        return FfiOwnedStr::from_string(String::new());
-    }
-    let row = &state.rows[state.pos];
-    state.pos += 1;
-    let json = serde_json::to_string(row).unwrap_or_else(|_| "null".into());
-    FfiOwnedStr::from_string(json)
+    ffi_guard(FfiOwnedStr::from_string(String::new()), || {
+        if iter_ctx.is_null() {
+            return FfiOwnedStr::from_string(String::new());
+        }
+        let state = unsafe { &mut *(iter_ctx as *mut SnapshotIteratorState) };
+        if state.pos >= state.rows.len() {
+            return FfiOwnedStr::from_string(String::new());
+        }
+        let row = &state.rows[state.pos];
+        state.pos += 1;
+        let json = serde_json::to_string(row).unwrap_or_else(|_| "null".into());
+        FfiOwnedStr::from_string(json)
+    })
 }
 
 extern "C" fn snapshot_iter_drop(iter_ctx: *mut c_void) {
-    if !iter_ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(iter_ctx as *mut SnapshotIteratorState));
+    ffi_guard((), || {
+        if !iter_ctx.is_null() {
+            unsafe {
+                drop(Box::from_raw(iter_ctx as *mut SnapshotIteratorState));
+            }
         }
-    }
+    })
 }
 
 fn make_error_response(msg: String) -> FfiSnapshotIteratorResponse {
