@@ -30,6 +30,9 @@ mod joins_test;
 #[cfg(test)]
 mod checkpoint_tests;
 
+#[cfg(test)]
+mod e2e_checkpoint_tests;
+
 pub use base::QueryBase;
 pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
