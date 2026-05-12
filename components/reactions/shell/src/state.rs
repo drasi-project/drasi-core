@@ -24,7 +24,7 @@ pub struct ShellReactionMetrics {
     stdout_truncations: AtomicUsize,
     stderr_truncations: AtomicUsize,
     stdin_payload_rejections: AtomicUsize,
-    results_processed: AtomicUsize,
+    results_processed_success: AtomicUsize,
 }
 
 impl ShellReactionMetrics {
@@ -35,7 +35,7 @@ impl ShellReactionMetrics {
             stdout_truncations: AtomicUsize::new(0),
             stderr_truncations: AtomicUsize::new(0),
             stdin_payload_rejections: AtomicUsize::new(0),
-            results_processed: AtomicUsize::new(0),
+            results_processed_success: AtomicUsize::new(0),
         }
     }
 
@@ -64,8 +64,8 @@ impl ShellReactionMetrics {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn record_result_processed(&self) {
-        self.results_processed
+    pub fn record_result_processed_success(&self) {
+        self.results_processed_success
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -193,10 +193,10 @@ impl ShellReactionState {
                 .load(std::sync::atomic::Ordering::Relaxed)),
         );
         props.insert(
-            "results_processed".to_string(),
+            "results_processed_success".to_string(),
             serde_json::json!(self
                 .metrics
-                .results_processed
+                .results_processed_success
                 .load(std::sync::atomic::Ordering::Relaxed)),
         );
 

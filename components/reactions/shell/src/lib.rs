@@ -74,7 +74,7 @@ impl ShellReactionBuilder {
         }
     }
 
-    /// Set the query IDs to subscibe to
+    /// Set the query IDs to subscribe to
     pub fn with_queries(mut self, queries: Vec<String>) -> Self {
         self.queries = queries;
         self
@@ -220,8 +220,6 @@ impl ShellReactionBuilder {
     }
 }
 
-/// Dynamic plugin entry point.
-///
 /// Dynamic plugin entry point.
 #[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(

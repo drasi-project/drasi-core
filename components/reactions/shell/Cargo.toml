@@ -27,12 +27,11 @@ log = "0.4"
 tokio-util = { version = "0.7" }
 handlebars = "5.1"
 libc = "0.2.186"
-nix = { version = "0.31.2", features = ["process", "user"] }
+nix = { version = "0.31.2", features = ["process", "user", "fs"] }
 chrono = "0.4"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 regex = "1.12.3"
-which = "6"
 
 [dev-dependencies]
 drasi-source-http = { path = "../../sources/http"}

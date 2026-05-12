@@ -184,7 +184,7 @@ let reaction = ShellReaction::new(
 
 | Name | Description | Type | Required |
 |------|-------------|------|----------|
-| `executable` | Absolute path (or `PATH`-resolvable name) of the command to execute. Must be executable at configuration time. | `String` | Yes |
+| `executable` | Absolute path of the command to execute. Must be executable at configuration time. | `String` | Yes |
 | `args` | Command-line arguments passed to the executable before stdin. | `Vec<String>` | No |
 
 ### QueryConfig\<ShellExtension\>
@@ -290,7 +290,7 @@ The reaction exposes runtime metrics as component properties:
 | Property | Description |
 |----------|-------------|
 | `active_processes` | Number of commands currently running |
-| `results_processed` | Total result diffs processed since startup |
+| `results_processed_success` | Total result diffs processed successfully since startup |
 | `timeout_firings` | Total commands killed due to timeout |
 | `non_zero_exits` | Total commands that exited with a non-zero status |
 | `stdout_truncations` | Total invocations where stdout exceeded `capture_limit` |
@@ -353,6 +353,6 @@ This reaction is compiled as a dynamic plugin (cdylib) that can be loaded by dra
 cargo build -p drasi-reaction-shell --features dynamic-plugin
 ```
 
-The compiled `.so` (Linux) / `.dylib` (macOS) / `.dll` (Windows) is placed in `target/debug/` and can be copied to the server's `plugins/` directory.
+For this Linux-only crate, the compiled plugin artifact is the `.so` shared library placed in `target/debug/`, which can be copied to the server's `plugins/` directory.
 
 For more details on the plugin descriptor pattern and configuration DTOs, see the [Reaction Developer Guide](../README.md#packaging-as-a-dynamic-plugin).

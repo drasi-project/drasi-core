@@ -7,7 +7,6 @@
 if [ "$FAIL_EXIT" = "true" ]; then
     echo "Simulating failure by exiting with status 1."
     exit 1
-fi
 else
     read -r input
     echo "$input"

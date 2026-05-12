@@ -29,7 +29,7 @@ use crate::ShellReactionBuilder;
 #[schema(as = reaction::shell::ShellCommand)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShellCommandDto {
-    /// Executable path or name.
+    /// Executable path.
     pub executable: String,
 
     /// Arguments to pass to the executable.
@@ -94,7 +94,7 @@ pub struct ShellReactionConfigDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kill_on_drop: Option<bool>,
 
-    /// Maximum number of recent invocations to retain. Default: 100.
+    /// Maximum number of recent invocations to retain. Default: 10.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_recent_invocations: Option<u32>,
 
