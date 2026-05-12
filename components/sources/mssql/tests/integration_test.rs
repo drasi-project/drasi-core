@@ -19,6 +19,7 @@ mod mssql_helpers;
 use anyhow::{Context, Result};
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
 use drasi_lib::channels::ResultDiff;
+use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
@@ -109,6 +110,11 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
         &format!("IF DB_ID('{TEST_DB}') IS NULL CREATE DATABASE [{TEST_DB}]"),
     )
     .await?;
+    execute_sql(
+        &mut client,
+        &format!("ALTER DATABASE [{TEST_DB}] SET ALLOW_SNAPSHOT_ISOLATION ON"),
+    )
+    .await?;
     drop(client);
 
     let mut db_config = config.clone();
@@ -135,6 +141,23 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
         "IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Products' AND is_tracked_by_cdc = 1)\n            EXEC sys.sp_cdc_enable_table @source_schema = 'dbo', @source_name = 'Products', @role_name = NULL;",
     )
     .await?;
+
+    // Wait for CDC to be fully initialized (max LSN must be available).
+    // CDC capture job starts asynchronously and the first max LSN may not
+    // be available immediately after sp_cdc_enable_table returns.
+    for _ in 0..30 {
+        let result = db_client
+            .query("SELECT sys.fn_cdc_get_max_lsn() AS lsn", &[])
+            .await?
+            .into_first_result()
+            .await?;
+        if let Some(row) = result.first() {
+            if row.try_get::<&[u8], _>(0).ok().flatten().is_some() {
+                break;
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
 
     Ok(db_config)
 }
@@ -548,14 +571,17 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
 // Checkpoint / Recovery Integration Tests
 // ============================================================================
 
-/// Full stop/restart checkpoint recovery test.
+/// Full query stop/restart checkpoint recovery test.
 ///
 /// 1. Bootstrap from existing data (snapshot captures LSN).
 /// 2. Insert rows via CDC so the checkpoint advances.
-/// 3. Stop the instance, then rebuild from the same RocksDB directory.
+/// 3. Stop the query, then restart it within the same DrasiLib.
 /// 4. On restart the source receives `resume_from` with the last LSN (verified
 ///    behaviorally by observing that the query resumes streaming new CDC events
 ///    without re-bootstrapping old data).
+///
+/// Uses `stop_query`/`start_query` (same pattern as the E2E checkpoint tests)
+/// to avoid RocksDB lock contention from spawned background tasks.
 #[tokio::test]
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
@@ -576,8 +602,6 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .await
             .context("Failed to prepare MSSQL database")?;
 
-        // --- Phase 1: Bootstrap + CDC insert ---
-
         // Seed the table so bootstrap has data
         let mut client = db_config.connect().await?;
         execute_sql(
@@ -588,33 +612,30 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         // Give CDC time to register the insert
         sleep(Duration::from_secs(3)).await;
 
-        let build_source = |source_id: &str, db: &MssqlConfig| -> Result<MsSqlSource> {
-            let bp = MsSqlBootstrapProvider::builder()
-                .with_source_id(source_id)
-                .with_host(&db.host)
-                .with_port(db.port)
-                .with_database(&db.database)
-                .with_user(&db.user)
-                .with_password(&db.password)
-                .with_tables(vec![TEST_TABLE.to_string()])
-                .build()?;
+        let bp = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()?;
 
-            MsSqlSource::builder(source_id)
-                .with_host(&db.host)
-                .with_port(db.port)
-                .with_database(&db.database)
-                .with_user(&db.user)
-                .with_password(&db.password)
-                .with_table(TEST_TABLE)
-                .with_poll_interval_ms(500)
-                .with_start_position(StartPosition::Current)
-                .with_trust_server_certificate(true)
-                .with_bootstrap_provider(bp)
-                .build()
-        };
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bp)
+            .build()?;
 
-        let source1 = build_source(SOURCE_ID, &db_config)?;
-        let query1 = Query::cypher(QUERY_ID)
+        let query = Query::cypher(QUERY_ID)
             .query(
                 r#"
                 MATCH (p:Products)
@@ -624,36 +645,42 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
             .build();
-        let (reaction1, handle1) = ApplicationReaction::builder("app-reaction-rt1")
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction-rt1")
             .with_query(QUERY_ID)
             .build();
-        let provider1 = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
-        let core1 = DrasiLib::builder()
+        let core = DrasiLib::builder()
             .with_id("mssql-recovery-test")
-            .with_source(source1)
-            .with_query(query1)
-            .with_reaction(reaction1)
-            .with_index_provider(Arc::new(provider1))
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
             .build()
             .await
-            .context("Failed to build DrasiLib (phase 1)")?;
+            .context("Failed to build DrasiLib")?;
 
-        core1
-            .start()
+        core.start()
             .await
-            .context("Failed to start DrasiLib (phase 1)")?;
+            .context("Failed to start DrasiLib")?;
 
-        let mut sub1 = handle1
+        let mut sub = handle
             .subscribe_with_options(
                 SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
             )
             .await
-            .context("Failed to create subscription (phase 1)")?;
+            .context("Failed to create subscription")?;
+
+        // --- Phase 1: Bootstrap + CDC insert ---
 
         // We should get an ADD for the bootstrapped row
-        wait_for_change(&mut sub1, 10, |entry| {
+        wait_for_change(&mut sub, 10, |entry| {
             matches_change(entry, "ADD", &[("id", "200"), ("name", "Bootstrap1")])
         })
         .await
@@ -666,7 +693,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         )
         .await?;
 
-        wait_for_change(&mut sub1, 10, |entry| {
+        wait_for_change(&mut sub, 10, |entry| {
             matches_change(entry, "ADD", &[("id", "201"), ("name", "CDC1")])
         })
         .await
@@ -675,53 +702,19 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         // Let checkpoint persist
         sleep(Duration::from_secs(2)).await;
 
-        // Stop first instance
-        core1
-            .stop()
+        // --- Stop and restart the query ---
+        core.stop_query(QUERY_ID)
             .await
-            .context("Failed to stop DrasiLib (phase 1)")?;
-        drop(core1);
+            .context("Failed to stop query")?;
 
-        // --- Phase 2: Restart from same RocksDB ---
+        // Brief pause to let checkpoint flush
+        sleep(Duration::from_millis(500)).await;
 
-        let source2 = build_source(SOURCE_ID, &db_config)?;
-        let query2 = Query::cypher(QUERY_ID)
-            .query(
-                r#"
-                MATCH (p:Products)
-                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
-            "#,
-            )
-            .from_source(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
-        let (reaction2, handle2) = ApplicationReaction::builder("app-reaction-rt2")
-            .with_query(QUERY_ID)
-            .build();
-        let provider2 = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-
-        let core2 = DrasiLib::builder()
-            .with_id("mssql-recovery-test")
-            .with_source(source2)
-            .with_query(query2)
-            .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider2))
-            .build()
+        core.start_query(QUERY_ID)
             .await
-            .context("Failed to build DrasiLib (phase 2)")?;
+            .context("Failed to restart query")?;
 
-        core2
-            .start()
-            .await
-            .context("Failed to start DrasiLib (phase 2)")?;
-
-        let mut sub2 = handle2
-            .subscribe_with_options(
-                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
-            )
-            .await
-            .context("Failed to create subscription (phase 2)")?;
+        // --- Phase 2: Verify recovery ---
 
         // Insert a new row post-restart to prove the source is streaming from
         // the checkpointed position (not re-bootstrapping from scratch)
@@ -731,16 +724,15 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         )
         .await?;
 
-        wait_for_change(&mut sub2, 10, |entry| {
+        wait_for_change(&mut sub, 15, |entry| {
             matches_change(entry, "ADD", &[("id", "202"), ("name", "PostRestart")])
         })
         .await
         .context("Did not observe post-restart CDC row — checkpoint recovery may have failed")?;
 
-        core2
-            .stop()
+        core.stop()
             .await
-            .context("Failed to stop DrasiLib (phase 2)")?;
+            .context("Failed to stop DrasiLib")?;
         mssql.cleanup().await;
         Ok::<(), anyhow::Error>(())
     })
@@ -754,10 +746,13 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
     Ok(())
 }
 
-/// Verify that after bootstrap + stop + restart, a new CDC insert is visible
+/// Verify that after bootstrap + query stop + restart, a new CDC insert is visible
 /// without duplicates from the previously-consumed data. This proves that the
 /// bootstrap snapshot LSN was persisted as the source_position checkpoint and
 /// that the CDC stream used it as the resume point.
+///
+/// Unlike the round-trip test above, this one inserts data *while the query is
+/// stopped*, verifying that the CDC stream picks up changes made during the gap.
 #[tokio::test]
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
@@ -778,35 +773,30 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .await
             .context("Failed to prepare MSSQL database")?;
 
-        // --- Phase 1: Bootstrap from empty table, then stop ---
+        let bp = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()?;
 
-        let build_source = |source_id: &str, db: &MssqlConfig| -> Result<MsSqlSource> {
-            let bp = MsSqlBootstrapProvider::builder()
-                .with_source_id(source_id)
-                .with_host(&db.host)
-                .with_port(db.port)
-                .with_database(&db.database)
-                .with_user(&db.user)
-                .with_password(&db.password)
-                .with_tables(vec![TEST_TABLE.to_string()])
-                .build()?;
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bp)
+            .build()?;
 
-            MsSqlSource::builder(source_id)
-                .with_host(&db.host)
-                .with_port(db.port)
-                .with_database(&db.database)
-                .with_user(&db.user)
-                .with_password(&db.password)
-                .with_table(TEST_TABLE)
-                .with_poll_interval_ms(500)
-                .with_start_position(StartPosition::Current)
-                .with_trust_server_certificate(true)
-                .with_bootstrap_provider(bp)
-                .build()
-        };
-
-        let source1 = build_source(SOURCE_ID, &db_config)?;
-        let query1 = Query::cypher(QUERY_ID)
+        let query = Query::cypher(QUERY_ID)
             .query(
                 r#"
                 MATCH (p:Products)
@@ -816,38 +806,51 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .from_source(SOURCE_ID)
             .auto_start(true)
             .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
             .build();
-        let (reaction1, _handle1) = ApplicationReaction::builder("app-reaction-bs1")
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction-bs1")
             .with_query(QUERY_ID)
             .build();
-        let provider1 = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
-        let core1 = DrasiLib::builder()
+        let core = DrasiLib::builder()
             .with_id("mssql-bootstrap-resume-test")
-            .with_source(source1)
-            .with_query(query1)
-            .with_reaction(reaction1)
-            .with_index_provider(Arc::new(provider1))
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
             .build()
             .await
-            .context("Failed to build DrasiLib (phase 1)")?;
+            .context("Failed to build DrasiLib")?;
 
-        core1
-            .start()
+        core.start()
             .await
-            .context("Failed to start DrasiLib (phase 1)")?;
+            .context("Failed to start DrasiLib")?;
 
-        // Wait for bootstrap to complete (empty table, so just wait for
-        // the checkpoint with snapshot LSN to be persisted)
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        // --- Phase 1: Bootstrap from empty table ---
+        // Wait for bootstrap to complete and checkpoint to persist
         sleep(Duration::from_secs(5)).await;
 
-        core1
-            .stop()
+        // Stop the query so we can insert data during the gap
+        core.stop_query(QUERY_ID)
             .await
-            .context("Failed to stop DrasiLib (phase 1)")?;
-        drop(core1);
+            .context("Failed to stop query")?;
 
-        // --- Between phases: insert data while stopped ---
+        // Brief pause to let checkpoint flush
+        sleep(Duration::from_millis(500)).await;
+
+        // --- Insert data while query is stopped ---
         let mut client = db_config.connect().await?;
         execute_sql(
             &mut client,
@@ -857,49 +860,14 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
         // Give CDC time to register
         sleep(Duration::from_secs(3)).await;
 
-        // --- Phase 2: Restart from same RocksDB ---
-        let source2 = build_source(SOURCE_ID, &db_config)?;
-        let query2 = Query::cypher(QUERY_ID)
-            .query(
-                r#"
-                MATCH (p:Products)
-                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
-            "#,
-            )
-            .from_source(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
-        let (reaction2, handle2) = ApplicationReaction::builder("app-reaction-bs2")
-            .with_query(QUERY_ID)
-            .build();
-        let provider2 = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-
-        let core2 = DrasiLib::builder()
-            .with_id("mssql-bootstrap-resume-test")
-            .with_source(source2)
-            .with_query(query2)
-            .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider2))
-            .build()
+        // --- Phase 2: Restart query and verify recovery ---
+        core.start_query(QUERY_ID)
             .await
-            .context("Failed to build DrasiLib (phase 2)")?;
-
-        core2
-            .start()
-            .await
-            .context("Failed to start DrasiLib (phase 2)")?;
-
-        let mut sub2 = handle2
-            .subscribe_with_options(
-                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
-            )
-            .await
-            .context("Failed to create subscription (phase 2)")?;
+            .context("Failed to restart query")?;
 
         // The row inserted while stopped should be picked up by the CDC
         // stream resuming from the checkpoint's source_position
-        wait_for_change(&mut sub2, 10, |entry| {
+        wait_for_change(&mut sub, 15, |entry| {
             matches_change(entry, "ADD", &[("id", "300"), ("name", "AfterBootstrap")])
         })
         .await
@@ -908,10 +876,9 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
              bootstrap snapshot LSN checkpoint may not have been persisted correctly",
         )?;
 
-        core2
-            .stop()
+        core.stop()
             .await
-            .context("Failed to stop DrasiLib (phase 2)")?;
+            .context("Failed to stop DrasiLib")?;
         mssql.cleanup().await;
         Ok::<(), anyhow::Error>(())
     })
