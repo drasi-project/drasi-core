@@ -109,11 +109,12 @@ async fn test_ffi_streaming_bootstrap() {
     // --- Load the snapshot-test cdylib ---
     let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
-        panic!(
+        eprintln!(
             "SKIP: snapshot-test plugin not found at {}. Build with: \
              cargo build --lib -p drasi-reaction-snapshot-test",
             plugin_path.display()
         );
+        return;
     }
 
     let plugin = load_plugin_from_path(
@@ -187,10 +188,11 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
     // --- Load the snapshot-test cdylib ---
     let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
-        panic!(
+        eprintln!(
             "SKIP: snapshot-test plugin not found at {}",
             plugin_path.display()
         );
+        return;
     }
 
     let plugin = load_plugin_from_path(

@@ -1216,11 +1216,92 @@ impl ReactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::QuerySubscriptionResponse;
     use crate::component_graph::ComponentStatusHandle;
+    use crate::config::schema::QueryConfig;
+    use crate::queries::output_state::{OutboxResponse, SnapshotResponse};
     use crate::sources::tests::TestMockSource;
     use async_trait::async_trait;
+    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
 
-    /// Configurable mock reaction for testing startup validation and bootstrap.
+    // ========================================================================
+    // Mock Query for direct unit tests
+    // ========================================================================
+
+    /// A mock Query that returns canned snapshot/outbox responses.
+    struct MockQuery {
+        config: QueryConfig,
+        snapshot: tokio::sync::RwLock<SnapshotResponse>,
+        outbox_response: tokio::sync::RwLock<Result<OutboxResponse, FetchError>>,
+    }
+
+    impl MockQuery {
+        fn new(config_hash: u64, snapshot_seq: u64) -> Self {
+            let config = QueryConfig {
+                id: "q1".to_string(),
+                query: "MATCH (n) RETURN n".to_string(),
+                query_language: crate::config::schema::QueryLanguage::Cypher,
+                middleware: vec![],
+                sources: vec![],
+                auto_start: true,
+                joins: None,
+                enable_bootstrap: true,
+                bootstrap_buffer_size: 10000,
+                priority_queue_capacity: None,
+                dispatch_buffer_capacity: None,
+                dispatch_mode: None,
+                storage_backend: None,
+                recovery_policy: None,
+                bootstrap_timeout_secs: 300,
+                outbox_capacity: 1000,
+            };
+            let snapshot = SnapshotResponse::new(im::HashMap::new(), snapshot_seq, config_hash);
+            Self {
+                config,
+                snapshot: tokio::sync::RwLock::new(snapshot),
+                outbox_response: tokio::sync::RwLock::new(Ok(OutboxResponse {
+                    results: vec![],
+                    latest_sequence: snapshot_seq,
+                    config_hash,
+                })),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::queries::Query for MockQuery {
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Running
+        }
+        fn get_config(&self) -> &QueryConfig {
+            &self.config
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse> {
+            Err(anyhow::anyhow!("MockQuery does not support subscribe"))
+        }
+        async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+            Ok(self.snapshot.read().await.clone())
+        }
+        async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+            self.outbox_response.read().await.clone()
+        }
+    }
+
+    // ========================================================================
+    // Configurable mock reaction for testing startup validation and bootstrap
+    // ========================================================================
+
     struct MockReaction {
         id: String,
         queries: Vec<String>,
@@ -1228,6 +1309,8 @@ mod tests {
         snapshot_on_fresh: bool,
         policy: ReactionRecoveryPolicy,
         status_handle: ComponentStatusHandle,
+        enqueued: Arc<Mutex<Vec<QueryResult>>>,
+        bootstrap_count: Arc<AtomicUsize>,
     }
 
     impl MockReaction {
@@ -1239,6 +1322,8 @@ mod tests {
                 snapshot_on_fresh: false,
                 policy: ReactionRecoveryPolicy::Strict,
                 status_handle: ComponentStatusHandle::new(id),
+                enqueued: Arc::new(Mutex::new(Vec::new())),
+                bootstrap_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -1302,7 +1387,22 @@ mod tests {
         fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
             self.policy
         }
+        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            self.enqueued.lock().await.push(result);
+            Ok(())
+        }
+        async fn bootstrap(
+            &self,
+            _ctx: crate::reactions::bootstrap_context::BootstrapContext,
+        ) -> Result<()> {
+            self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
+
+    // ========================================================================
+    // Test helpers
+    // ========================================================================
 
     /// Build a DrasiLib with a source and one query (auto_start=false).
     async fn build_core() -> crate::DrasiLib {
@@ -1320,6 +1420,64 @@ mod tests {
             .build()
             .await
             .unwrap()
+    }
+
+    /// Build a DrasiLib with auto-start query and an injected state store.
+    async fn build_core_with_store(
+        store: Arc<crate::state_store::MemoryStateStoreProvider>,
+    ) -> crate::DrasiLib {
+        let source = TestMockSource::new("src1".to_string()).unwrap();
+        crate::DrasiLib::builder()
+            .with_id("test")
+            .with_source(source)
+            .with_query(
+                crate::Query::cypher("q1")
+                    .query("MATCH (n:Test) RETURN n")
+                    .from_source("src1")
+                    .auto_start(true)
+                    .build(),
+            )
+            .with_state_store_provider(store)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Helper: create a SourceChange::Insert for a Test node.
+    fn make_test_insert(source_id: &str, node_id: &str, val: i32) -> drasi_core::models::SourceChange {
+        let mut props = ElementPropertyMap::default();
+        props.insert(
+            "val",
+            drasi_core::models::ElementValue::Integer(val.into()),
+        );
+        let element = Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id, node_id),
+                labels: vec!["Test".into()].into(),
+                effective_from: 1000,
+            },
+            properties: props,
+        };
+        drasi_core::models::SourceChange::Insert { element }
+    }
+
+    /// Inject events into a DrasiLib's source via downcast.
+    async fn inject_events(core: &crate::DrasiLib, count: usize) {
+        let source_arc = core
+            .source_manager
+            .get_source_instance("src1")
+            .await
+            .expect("Source 'src1' not found");
+        let mock_source = source_arc
+            .as_any()
+            .downcast_ref::<TestMockSource>()
+            .expect("Source is not TestMockSource");
+        for i in 0..count {
+            let change = make_test_insert("src1", &format!("node_{i}"), i as i32);
+            mock_source.inject_event(change).await.unwrap();
+        }
+        // Give the query time to process events.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 
     // ========================================================================
@@ -1390,11 +1548,9 @@ mod tests {
         let core = build_core().await;
         core.start().await.unwrap();
 
-        // Default config: not durable, no snapshot, Strict policy — should pass validation.
         let reaction = MockReaction::new("r4", vec!["q1".into()]);
         core.add_reaction(reaction).await.unwrap();
 
-        // start_reaction should succeed (query is stopped but fresh start handles it gracefully).
         let result = core.start_reaction("r4").await;
         assert!(result.is_ok(), "Expected success: {:?}", result.err());
     }
@@ -1410,7 +1566,6 @@ mod tests {
 
         let mut event_rx = core.subscribe_all_component_events();
 
-        // Query not started → fetch_outbox returns NotRunning → falls back to seq 0.
         let reaction = MockReaction::new("r5", vec!["q1".into()]);
         core.add_reaction(reaction).await.unwrap();
         core.start_reaction("r5").await.unwrap();
@@ -1424,5 +1579,368 @@ mod tests {
         .await;
         let status = core.get_reaction_status("r5").await.unwrap();
         assert_eq!(status, ComponentStatus::Running);
+    }
+
+    // ========================================================================
+    // §5 Config-hash mismatch + outbox catch-up tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn config_hash_mismatch_with_auto_reset_triggers_bootstrap() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        // Pre-write a checkpoint with a WRONG config hash.
+        let wrong_cp = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 99999,
+        };
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            "r_reset",
+            "q1",
+            &wrong_cp,
+        )
+        .await
+        .unwrap();
+
+        // Add reaction with AutoReset + needs_snapshot.
+        let reaction = MockReaction::new("r_reset", vec!["q1".into()])
+            .with_snapshot_on_fresh(true)
+            .with_policy(ReactionRecoveryPolicy::AutoReset);
+        let bc = reaction.bootstrap_count.clone();
+        core.add_reaction(reaction).await.unwrap();
+        core.start_reaction("r_reset").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_reset",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Verify: bootstrap was called (AutoReset re-bootstraps).
+        assert!(
+            bc.load(Ordering::SeqCst) > 0,
+            "Expected bootstrap() to be called on config-hash mismatch with AutoReset"
+        );
+
+        // Verify: checkpoint should now have the correct config hash.
+        let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_reset", "q1")
+            .await
+            .unwrap();
+        assert!(cp.is_some(), "Checkpoint should exist after AutoReset");
+        assert_ne!(
+            cp.unwrap().config_hash,
+            99999,
+            "Checkpoint hash should have been updated from the wrong value"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_hash_mismatch_with_strict_fails_startup() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        // Pre-write checkpoint with wrong hash.
+        let wrong_cp = ReactionCheckpoint {
+            sequence: 0,
+            config_hash: 99999,
+        };
+        crate::reactions::checkpoint::write_checkpoint(store.as_ref(), "r_strict", "q1", &wrong_cp)
+            .await
+            .unwrap();
+
+        // Strict policy should reject on hash mismatch.
+        let reaction = MockReaction::new("r_strict", vec!["q1".into()])
+            .with_snapshot_on_fresh(true)
+            .with_policy(ReactionRecoveryPolicy::Strict);
+        core.add_reaction(reaction).await.unwrap();
+
+        let result = core.start_reaction("r_strict").await;
+        assert!(
+            result.is_err(),
+            "Strict policy should fail on config-hash mismatch"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Strict") || msg.contains("manual"),
+            "Error should mention Strict policy: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_catchup_replays_entries_to_reaction() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        // Inject data so the query has outbox entries.
+        inject_events(&core, 3).await;
+
+        // Get the correct config hash for this query.
+        let query_arc = core
+            .query_manager
+            .get_query_instance("q1")
+            .await
+            .unwrap();
+        let config_hash = crate::queries::compute_config_hash(query_arc.get_config());
+
+        // Pre-write a checkpoint with the CORRECT hash but seq=0 (behind the outbox).
+        let old_cp = ReactionCheckpoint {
+            sequence: 0,
+            config_hash,
+        };
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            "r_catchup",
+            "q1",
+            &old_cp,
+        )
+        .await
+        .unwrap();
+
+        // Start reaction — should catch up via outbox.
+        let reaction = MockReaction::new("r_catchup", vec!["q1".into()])
+            .with_snapshot_on_fresh(true)
+            .with_policy(ReactionRecoveryPolicy::AutoReset);
+        let enqueued = reaction.enqueued.clone();
+        core.add_reaction(reaction).await.unwrap();
+        core.start_reaction("r_catchup").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_catchup",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Verify: outbox entries were replayed to the reaction.
+        let results = enqueued.lock().await;
+        assert!(
+            results.len() >= 3,
+            "Expected at least 3 outbox entries replayed, got {}",
+            results.len()
+        );
+
+        // Verify: checkpoint should have advanced.
+        let cp = crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_catchup", "q1")
+            .await
+            .unwrap()
+            .expect("Checkpoint should exist");
+        assert!(
+            cp.sequence > 0,
+            "Checkpoint sequence should have advanced from 0, got {}",
+            cp.sequence
+        );
+    }
+
+    // ========================================================================
+    // §6 handle_broadcast_gap — direct unit tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn broadcast_gap_strict_returns_error() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 10));
+        let reaction: Arc<dyn Reaction> = Arc::new(MockReaction::new("r1", vec!["q1".into()]));
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        let result = ReactionManager::handle_broadcast_gap(
+            "r1",
+            "q1",
+            &reaction,
+            &query,
+            ReactionRecoveryPolicy::Strict,
+            &None,
+            &checkpoints,
+            &bootstrap_mutex,
+        )
+        .await;
+
+        assert!(result.is_err(), "Strict policy should return error on gap");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Strict"),
+            "Error should mention Strict: {msg}"
+        );
+        assert!(
+            checkpoints.read().await.is_empty(),
+            "No checkpoint should be set on Strict error"
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_gap_auto_reset_fetches_snapshot_and_bootstraps() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_snapshot_on_fresh(true)
+                .with_policy(ReactionRecoveryPolicy::AutoReset),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        let result = ReactionManager::handle_broadcast_gap(
+            "r1",
+            "q1",
+            &reaction_trait,
+            &query,
+            ReactionRecoveryPolicy::AutoReset,
+            &None,
+            &checkpoints,
+            &bootstrap_mutex,
+        )
+        .await;
+
+        assert!(result.is_ok(), "AutoReset should succeed: {:?}", result.err());
+
+        // Checkpoint should be set to snapshot sequence.
+        let cps = checkpoints.read().await;
+        let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
+        assert_eq!(cp.sequence, 100, "Checkpoint should match snapshot sequence");
+
+        // Config hash should be computed from the MockQuery's config.
+        let expected_hash = crate::queries::compute_config_hash(query.get_config());
+        assert_eq!(cp.config_hash, expected_hash);
+
+        // Bootstrap should have been called exactly once.
+        assert_eq!(
+            reaction.bootstrap_count.load(Ordering::SeqCst),
+            1,
+            "bootstrap() should have been called once"
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_gap_auto_skip_gap_jumps_to_current_seq() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 50));
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_policy(ReactionRecoveryPolicy::AutoSkipGap),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        let result = ReactionManager::handle_broadcast_gap(
+            "r1",
+            "q1",
+            &reaction_trait,
+            &query,
+            ReactionRecoveryPolicy::AutoSkipGap,
+            &None,
+            &checkpoints,
+            &bootstrap_mutex,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "AutoSkipGap should succeed: {:?}",
+            result.err()
+        );
+
+        // Checkpoint should jump to current sequence.
+        let cps = checkpoints.read().await;
+        let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
+        assert_eq!(
+            cp.sequence, 50,
+            "Checkpoint should jump to latest sequence"
+        );
+
+        // bootstrap() should NOT be called for AutoSkipGap.
+        assert_eq!(
+            reaction.bootstrap_count.load(Ordering::SeqCst),
+            0,
+            "bootstrap() should not be called for AutoSkipGap"
+        );
+    }
+
+    // ========================================================================
+    // Forwarder sequence-filtering test
+    // ========================================================================
+
+    #[tokio::test]
+    async fn forwarder_filters_stale_events_after_gate_opens() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        // Inject initial data so the query has events at seq > 0.
+        inject_events(&core, 5).await;
+
+        // Start reaction — it bootstraps and creates a checkpoint at the current seq.
+        let reaction = MockReaction::new("r_filter", vec!["q1".into()])
+            .with_snapshot_on_fresh(false)
+            .with_policy(ReactionRecoveryPolicy::AutoSkipGap);
+        let enqueued = reaction.enqueued.clone();
+        core.add_reaction(reaction).await.unwrap();
+        core.start_reaction("r_filter").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_filter",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Clear any results that may have arrived during startup.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        enqueued.lock().await.clear();
+
+        // Push NEW data after the reaction is running — only these should be forwarded.
+        inject_events(&core, 3).await;
+
+        // Verify: only the new events should be enqueued (not the 5 old ones).
+        let results = enqueued.lock().await;
+        assert_eq!(
+            results.len(),
+            3,
+            "Expected exactly 3 new events, got {} (stale events should be filtered)",
+            results.len()
+        );
     }
 }
