@@ -14,16 +14,14 @@
 
 #![cfg(target_os = "linux")]
 
+use crate::descriptor::ShellReactionConfigDto;
+use crate::ShellReaction;
 use core::error;
 use drasi_lib::reactions::common::TemplateRouting;
 pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-use crate::descriptor::ShellReactionConfigDto;
-use crate::ShellReaction;
 
 const REGEX_ENV_VAR: &str = r"^[A-Za-z_][A-Za-z0-9_]*$";
 
@@ -150,6 +148,22 @@ impl ShellReactionConfig {
             warn!("[{reaction_id}] Warning: max_recent_invocations is set to 0, no invocation history will be retained");
         }
 
+        let unique_queries: HashSet<&String> = subscribed_queries.iter().collect();
+        if unique_queries.len() != subscribed_queries.len() {
+            let mut seen = HashSet::new();
+            let duplicates: Vec<&String> = subscribed_queries
+                .iter()
+                .filter(|id| !seen.insert(*id))
+                .collect();
+            error!(
+                "[{reaction_id}] Invalid configuration: subscribed_queries contains duplicate query IDs: {duplicates:?}"
+            );
+
+            return Err(anyhow::anyhow!(
+                "subscribed_queries contains duplicate query IDs: {duplicates:?}"
+            ));
+        }
+
         // check that number of commands matches the number of subscribed queries (size check).
         if (self.commands.len() != subscribed_queries.len()) {
             error!("[{reaction_id}] Invalid configuration: number of commands must match the number of subscribed queries. commands: {}, subscribed_queries: {}", self.commands.len(), subscribed_queries.len());
@@ -256,30 +270,7 @@ impl ShellReactionConfig {
                 return Err(anyhow::anyhow!("command executable '{exec}' is not a file"));
             }
 
-            // permissions check
-            let metadata = std::fs::metadata(exec)?;
-            let mode = metadata.permissions().mode();
-            let file_uid = metadata.uid();
-            let file_gid = metadata.gid();
-
-            let current_user_uid = nix::unistd::getuid().as_raw();
-            let current_user_gid = nix::unistd::getgid().as_raw();
-
-            let can_execute = if current_user_uid == 0 {
-                // root can execute any file that has at least one of the execute bits set
-                mode & 0o111 != 0
-            } else if current_user_uid == file_uid {
-                // owner permissions
-                mode & 0o100 != 0
-            } else if current_user_gid == file_gid {
-                // group permissions
-                mode & 0o010 != 0
-            } else {
-                // other permissions
-                mode & 0o001 != 0
-            };
-
-            if !can_execute {
+            if nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_err() {
                 error!("[{reaction_id}] Invalid configuration: command executable '{exec}' is not executable");
                 return Err(anyhow::anyhow!(
                     "command executable '{exec}' is not executable"
@@ -389,6 +380,17 @@ mod tests {
         let (mut config, subscribed) = minimal_config(&["q1", "q2"]);
         config.default_template = None; // no default template
         assert!(config.validate(&subscribed, "test").is_err()); // and no routes → invalid
+    }
+
+    #[test]
+    fn validate_fails_with_duplicate_subscribed_query_ids() {
+        let (config, _) = minimal_config(&["q1"]);
+        let subscribed = vec!["q1".to_string(), "q1".to_string()];
+        let err = config.validate(&subscribed, "test").unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate query IDs"),
+            "unexpected error: {err}"
+        );
     }
 
     //........................... check the numeric limits.

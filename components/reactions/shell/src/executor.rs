@@ -616,7 +616,7 @@ impl ShellExecutor {
                     executable: command.executable.clone(),
                 };
 
-                state.metrics.record_result_processed();
+                state.metrics.record_result_processed_success();
                 debug!("[{}] Command execution completed. pid: {}, exit_status: {}, command: {:?}, stdout_length: {}, stderr_length: {}", state.reaction_id, pid, exit_status, command, recent_invocation.stdout.len(), recent_invocation.stderr.len());
 
                 state

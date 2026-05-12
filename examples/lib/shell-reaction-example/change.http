@@ -7,8 +7,8 @@
 ###   POST /sources/sensors/events       (single event)
 ###   POST /sources/sensors/events/batch (multiple events)
 ###
-### Each event triggers the shell reaction which pipes a rendered template
-### to `cat` (stdout). Replace `cat` in main.rs with your own script.
+### Each event triggers the shell reaction which invokes
+### `/usr/bin/python3 main.py`. Replace that command in main.rs with your own script.
 ### ============================================================================
 
 ### Health check - verify the HTTP source is running

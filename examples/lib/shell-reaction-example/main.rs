@@ -30,12 +30,12 @@
 //! # Add a sensor node
 //! curl -X POST http://localhost:9000/sources/sensors/events \
 //!   -H "Content-Type: application/json" \
-//!   -d '{"operation":"upsert","element":{"type":"node","id":"sensor_01","labels":["sensors"],"properties":{"id":"sensor_01","temperature":22.5,"location":"room-a"}}}'
+//!   -d '{"operation":"insert","element":{"type":"node","id":"sensor_01","labels":["sensors"],"properties":{"id":"sensor_01","temperature":22.5,"location":"room-a"}}}'
 //!
 //! # Update the temperature
 //! curl -X POST http://localhost:9000/sources/sensors/events \
 //!   -H "Content-Type: application/json" \
-//!   -d '{"operation":"upsert","element":{"type":"node","id":"sensor_01","labels":["sensors"],"properties":{"id":"sensor_01","temperature":25.1,"location":"room-a"}}}'
+//!   -d '{"operation":"insert","element":{"type":"node","id":"sensor_01","labels":["sensors"],"properties":{"id":"sensor_01","temperature":25.1,"location":"room-a"}}}'
 //!
 //! # Delete the sensor node
 //! curl -X POST http://localhost:9000/sources/sensors/events \
@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     println!("│ HTTP Source: http://localhost:9000         │");
     println!("│   POST /sources/sensors/events             │");
     println!("├────────────────────────────────────────────┤");
-    println!("│ Shell command: sleep 10 (simulates work)  │");
+    println!("│ Shell command: /usr/bin/python3 main.py    │");
     println!("│ Watching query: sensor-monitor             │");
     println!("├────────────────────────────────────────────┤");
     println!("│ Press Ctrl+C to stop                       │");
