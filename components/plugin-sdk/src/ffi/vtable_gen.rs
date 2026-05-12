@@ -2577,9 +2577,11 @@ fn build_reaction_runtime_context(
         if ffi_ctx.snapshot_fetcher.is_null() {
             None
         } else {
-            Some(Arc::new(super::snapshot_fetcher_proxy::FfiSnapshotFetcherProxy {
-                vtable: ffi_ctx.snapshot_fetcher,
-            }))
+            Some(Arc::new(
+                super::snapshot_fetcher_proxy::FfiSnapshotFetcherProxy {
+                    vtable: ffi_ctx.snapshot_fetcher,
+                },
+            ))
         };
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 

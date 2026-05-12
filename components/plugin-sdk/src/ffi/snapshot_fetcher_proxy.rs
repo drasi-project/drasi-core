@@ -52,9 +52,11 @@ impl drasi_lib::SnapshotFetcher for FfiSnapshotFetcherProxy {
             SendFfiSnapshotIteratorResponse(cb(state.as_ptr(), query_id_ffi))
         })
         .await
-        .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
-            status: drasi_lib::ComponentStatus::Error,
-        })?;
+        .map_err(
+            |_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            },
+        )?;
 
         let resp = wrapped.0;
 

@@ -68,7 +68,7 @@ pub use vtables::{
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
     FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
     FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
-    ReactionVtable, SourcePluginVtable, SourceVtable, SnapshotFetcherVtable, StateStoreVtable,
+    ReactionVtable, SnapshotFetcherVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

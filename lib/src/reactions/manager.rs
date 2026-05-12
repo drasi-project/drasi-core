@@ -1457,12 +1457,13 @@ mod tests {
     }
 
     /// Helper: create a SourceChange::Insert for a Test node.
-    fn make_test_insert(source_id: &str, node_id: &str, val: i32) -> drasi_core::models::SourceChange {
+    fn make_test_insert(
+        source_id: &str,
+        node_id: &str,
+        val: i32,
+    ) -> drasi_core::models::SourceChange {
         let mut props = ElementPropertyMap::default();
-        props.insert(
-            "val",
-            drasi_core::models::ElementValue::Integer(val.into()),
-        );
+        props.insert("val", drasi_core::models::ElementValue::Integer(val.into()));
         let element = Element::Node {
             metadata: ElementMetadata {
                 reference: ElementReference::new(source_id, node_id),
@@ -1618,14 +1619,9 @@ mod tests {
             sequence: 0,
             config_hash: 99999,
         };
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            "r_reset",
-            "q1",
-            &wrong_cp,
-        )
-        .await
-        .unwrap();
+        crate::reactions::checkpoint::write_checkpoint(store.as_ref(), "r_reset", "q1", &wrong_cp)
+            .await
+            .unwrap();
 
         // Add reaction with AutoReset + needs_snapshot.
         let reaction = MockReaction::new("r_reset", vec!["q1".into()])
@@ -1722,11 +1718,7 @@ mod tests {
         inject_events(&core, 3).await;
 
         // Get the correct config hash for this query.
-        let query_arc = core
-            .query_manager
-            .get_query_instance("q1")
-            .await
-            .unwrap();
+        let query_arc = core.query_manager.get_query_instance("q1").await.unwrap();
         let config_hash = crate::queries::compute_config_hash(query_arc.get_config());
 
         // Pre-write a checkpoint with the CORRECT hash but seq=0 (behind the outbox).
@@ -1734,14 +1726,9 @@ mod tests {
             sequence: 0,
             config_hash,
         };
-        crate::reactions::checkpoint::write_checkpoint(
-            store.as_ref(),
-            "r_catchup",
-            "q1",
-            &old_cp,
-        )
-        .await
-        .unwrap();
+        crate::reactions::checkpoint::write_checkpoint(store.as_ref(), "r_catchup", "q1", &old_cp)
+            .await
+            .unwrap();
 
         // Start reaction — should catch up via outbox.
         let reaction = MockReaction::new("r_catchup", vec!["q1".into()])
@@ -1804,10 +1791,7 @@ mod tests {
 
         assert!(result.is_err(), "Strict policy should return error on gap");
         let msg = format!("{}", result.unwrap_err());
-        assert!(
-            msg.contains("Strict"),
-            "Error should mention Strict: {msg}"
-        );
+        assert!(msg.contains("Strict"), "Error should mention Strict: {msg}");
         assert!(
             checkpoints.read().await.is_empty(),
             "No checkpoint should be set on Strict error"
@@ -1838,12 +1822,19 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "AutoReset should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "AutoReset should succeed: {:?}",
+            result.err()
+        );
 
         // Checkpoint should be set to snapshot sequence.
         let cps = checkpoints.read().await;
         let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
-        assert_eq!(cp.sequence, 100, "Checkpoint should match snapshot sequence");
+        assert_eq!(
+            cp.sequence, 100,
+            "Checkpoint should match snapshot sequence"
+        );
 
         // Config hash should be computed from the MockQuery's config.
         let expected_hash = crate::queries::compute_config_hash(query.get_config());
@@ -1889,10 +1880,7 @@ mod tests {
         // Checkpoint should jump to current sequence.
         let cps = checkpoints.read().await;
         let cp = cps.get("q1").expect("Checkpoint for q1 should exist");
-        assert_eq!(
-            cp.sequence, 50,
-            "Checkpoint should jump to latest sequence"
-        );
+        assert_eq!(cp.sequence, 50, "Checkpoint should jump to latest sequence");
 
         // bootstrap() should NOT be called for AutoSkipGap.
         assert_eq!(

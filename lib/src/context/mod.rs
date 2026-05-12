@@ -298,10 +298,7 @@ impl std::fmt::Debug for ReactionRuntimeContext {
             )
             .field(
                 "snapshot_fetcher",
-                &self
-                    .snapshot_fetcher
-                    .as_ref()
-                    .map(|_| "<SnapshotFetcher>"),
+                &self.snapshot_fetcher.as_ref().map(|_| "<SnapshotFetcher>"),
             )
             .finish()
     }

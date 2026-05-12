@@ -106,11 +106,13 @@ impl SnapshotFetcher for InProcessSnapshotFetcher {
             status: ComponentStatus::Error,
         })?;
 
-        let query = provider.get_query_instance(query_id).await.map_err(|_| {
-            FetchError::NotRunning {
-                status: ComponentStatus::Error,
-            }
-        })?;
+        let query =
+            provider
+                .get_query_instance(query_id)
+                .await
+                .map_err(|_| FetchError::NotRunning {
+                    status: ComponentStatus::Error,
+                })?;
 
         let snapshot = query.fetch_snapshot().await?;
         Ok(SnapshotStream::from_snapshot(snapshot))
