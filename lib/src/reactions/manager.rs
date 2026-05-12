@@ -16,7 +16,7 @@ use anyhow::Result;
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use crate::channels::*;
@@ -43,8 +43,8 @@ pub struct ReactionManager {
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     /// Log registry for component log streaming
     log_registry: Arc<ComponentLogRegistry>,
-    /// Handles to subscription forwarder tasks per reaction
-    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+    /// Abort handles to subscription forwarder + supervisor tasks per reaction
+    subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
@@ -176,13 +176,13 @@ impl ReactionManager {
         )
         .await?;
 
-        // Create the bootstrap gate — the processing loop waits on this before
-        // dequeueing. Live subscriptions are wired first so events buffer up in
-        // the priority queue while bootstrap runs.
-        let gate = Arc::new(Notify::new());
+        // Create the bootstrap gate — forwarders wait on this before processing.
+        // Using a watch channel (not Notify) so late subscribers see the current value
+        // and cannot miss the notification.
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
 
         if let Err(e) = self
-            .subscribe_and_bootstrap(&id, reaction.clone(), gate.clone())
+            .subscribe_and_bootstrap(&id, reaction.clone(), gate_rx)
             .await
         {
             // Revert to Error since the reaction can't receive data without subscriptions
@@ -195,8 +195,8 @@ impl ReactionManager {
             return Err(e);
         }
 
-        // Open the gate — processing loop begins draining the priority queue.
-        gate.notify_waiters();
+        // Open the gate — forwarders begin draining buffered events.
+        let _ = gate_tx.send(true);
 
         Ok(())
     }
@@ -255,9 +255,9 @@ impl ReactionManager {
         Ok(())
     }
 
-    /// Wire live subscriptions, perform per-query bootstrap, then return.
+    /// Wire live subscriptions, then perform per-query bootstrap.
     ///
-    /// 1. Subscribe to each query's broadcast channel (events buffer in priority queue)
+    /// 1. Wire subscriptions first (forwarders wait on gate, events buffer in broadcast channel)
     /// 2. Read checkpoints from state store
     /// 3. For each query, run the per-query startup flowchart (§5)
     /// 4. Invoke `reaction.bootstrap()` if any query needed a full reset
@@ -267,7 +267,7 @@ impl ReactionManager {
         &self,
         reaction_id: &str,
         reaction: Arc<dyn Reaction>,
-        gate: Arc<Notify>,
+        gate: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
         let query_ids = reaction.query_ids();
         if query_ids.is_empty() {
@@ -284,7 +284,23 @@ impl ReactionManager {
         let state_store = self.state_store.read().await.clone();
         let policy = reaction.default_recovery_policy();
 
-        // Read existing checkpoints from the state store (batch).
+        // Shared checkpoint map — populated during bootstrap, read by forwarders after gate opens.
+        let shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // 1. Wire subscriptions FIRST so events buffer in broadcast channels
+        //    while bootstrap runs. Forwarders wait on gate before processing.
+        self.wire_subscriptions(
+            reaction_id,
+            &reaction,
+            &query_provider,
+            &query_ids,
+            shared_checkpoints.clone(),
+            gate,
+        )
+        .await?;
+
+        // 2. Read existing checkpoints from the state store (batch).
         let existing_checkpoints = match state_store.as_ref() {
             Some(store) => {
                 crate::reactions::checkpoint::read_checkpoints_batch(
@@ -297,8 +313,8 @@ impl ReactionManager {
             None => HashMap::new(),
         };
 
-        // Per-query bootstrap: build the initial checkpoint map and collect
-        // any queries that need a full bootstrap hook call.
+        // 3. Per-query bootstrap: build the initial checkpoint map and collect
+        //    any queries that need a full bootstrap hook call.
         let mut initial_checkpoints: HashMap<String, ReactionCheckpoint> = HashMap::new();
         let mut bootstrap_queries: Vec<(String, Arc<dyn Query>)> = Vec::new();
 
@@ -363,12 +379,13 @@ impl ReactionManager {
             }
         }
 
-        // Invoke the bootstrap hook if any queries triggered a reset.
+        // 4. Invoke the bootstrap hook if any queries triggered a reset.
         if !bootstrap_queries.is_empty() {
             for (query_id, query) in &bootstrap_queries {
+                let is_reset = existing_checkpoints.contains_key(query_id);
                 let ctx = BootstrapContext::new(
                     query_id.clone(),
-                    true,
+                    is_reset,
                     query.clone(),
                     reaction_id.to_string(),
                     state_store.clone(),
@@ -377,16 +394,10 @@ impl ReactionManager {
             }
         }
 
-        // Now wire up live subscriptions with gap detection (§6).
-        self.wire_subscriptions(
-            reaction_id,
-            &reaction,
-            &query_provider,
-            &query_ids,
-            initial_checkpoints,
-            gate,
-        )
-        .await
+        // Publish the computed checkpoints so forwarders can filter stale events.
+        *shared_checkpoints.write().await = initial_checkpoints;
+
+        Ok(())
     }
 
     /// Handle a fresh start for a query subscription (no existing checkpoint).
@@ -424,6 +435,12 @@ impl ReactionManager {
                     &cp,
                 )
                 .await?;
+            } else {
+                log::debug!(
+                    "[{reaction_id}] No state store — checkpoint for query '{query_id}' \
+                     not persisted (seq={})",
+                    cp.sequence
+                );
             }
 
             bootstrap_queries.push((query_id.to_string(), query.clone()));
@@ -904,17 +921,17 @@ impl ReactionManager {
         reaction: &Arc<dyn Reaction>,
         query_provider: &Arc<dyn QueryProvider>,
         query_ids: &[String],
-        initial_checkpoints: HashMap<String, ReactionCheckpoint>,
-        gate: Arc<Notify>,
+        shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
+        gate: tokio::sync::watch::Receiver<bool>,
     ) -> Result<()> {
         let instance_id = self.instance_id.clone();
         let policy = reaction.default_recovery_policy();
         let state_store = self.state_store.read().await.clone();
-        let mut tasks = Vec::new();
+        let mut abort_handles: Vec<tokio::task::AbortHandle> = Vec::new();
+        let mut join_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // Share the initial checkpoints across forwarder tasks.
-        let shared_checkpoints =
-            Arc::new(RwLock::new(initial_checkpoints));
+        // Mutex to serialize concurrent bootstrap calls (§9 — multi-query gap recovery).
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         for query_id in query_ids {
             let query = query_provider.get_query_instance(query_id).await?;
@@ -925,10 +942,11 @@ impl ReactionManager {
             let reaction = reaction.clone();
             let query_id_clone = query_id.clone();
             let reaction_id_owned = reaction_id.to_string();
-            let gate = gate.clone();
+            let mut gate_rx = gate.clone();
             let query_clone = query.clone();
             let state_store_clone = state_store.clone();
             let checkpoints = shared_checkpoints.clone();
+            let bootstrap_mutex = bootstrap_mutex.clone();
 
             let span = tracing::info_span!(
                 "reaction_forwarder",
@@ -940,15 +958,28 @@ impl ReactionManager {
             let forwarder_task = tokio::spawn(
                 async move {
                     // Wait for the bootstrap gate to open before processing.
-                    gate.notified().await;
+                    // watch::wait_for retains the value, so even late subscribers see it.
+                    let _ = gate_rx.wait_for(|v| *v).await;
+
+                    // Read the initial checkpoint sequence so we can skip stale events
+                    // that were buffered in the broadcast channel during bootstrap.
+                    let initial_seq = {
+                        let cps = checkpoints.read().await;
+                        cps.get(&query_id_clone).map(|cp| cp.sequence).unwrap_or(0)
+                    };
 
                     log::debug!(
-                        "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}'"
+                        "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
+                         (initial_seq={initial_seq})"
                     );
 
                     loop {
                         match receiver.recv().await {
                             Ok(query_result) => {
+                                // Skip events already covered by the bootstrap snapshot/outbox catchup.
+                                if query_result.sequence <= initial_seq {
+                                    continue;
+                                }
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
                                 if let Err(e) = reaction.enqueue_query_result(result).await {
@@ -972,6 +1003,7 @@ impl ReactionManager {
                                         policy,
                                         &state_store_clone,
                                         &checkpoints,
+                                        &bootstrap_mutex,
                                     )
                                     .await
                                     {
@@ -996,41 +1028,53 @@ impl ReactionManager {
                 .instrument(span),
             );
 
-            tasks.push(forwarder_task);
+            abort_handles.push(forwarder_task.abort_handle());
+            join_handles.push(forwarder_task);
         }
 
         // Spawn a supervisor task that monitors all forwarder handles.
-        // When ALL forwarders exit (query channels closed), transition the
-        // reaction to Error state so the host knows subscriptions are lost.
-        let forwarder_handles: Vec<_> = std::mem::take(&mut tasks);
+        // When ALL forwarders exit, check if the reaction is still Running.
+        // Only transition to Error if the exits were unexpected.
         let supervisor_reaction_id = reaction_id.to_string();
         let supervisor_graph = self.graph.clone();
 
         let supervisor = tokio::spawn(async move {
             // Wait for all forwarder tasks to complete.
-            let mut all_tasks = forwarder_handles;
-            for handle in &mut all_tasks {
+            for handle in join_handles {
                 let _ = handle.await;
             }
 
-            // All forwarders exited — transition reaction to Error.
-            log::warn!(
-                "[{supervisor_reaction_id}] All query subscriptions lost — \
-                 transitioning to Error"
-            );
-            let mut graph = supervisor_graph.write().await;
-            let _ = graph.validate_and_transition(
-                &supervisor_reaction_id,
-                ComponentStatus::Error,
-                Some("All query subscriptions lost".to_string()),
-            );
+            // Only transition to Error if the reaction is still Running.
+            // If it's already Stopped/Stopping/Error, this was intentional.
+            let should_transition = {
+                let graph = supervisor_graph.read().await;
+                graph
+                    .get_component(&supervisor_reaction_id)
+                    .map(|n| n.status == ComponentStatus::Running)
+                    .unwrap_or(false)
+            };
+
+            if should_transition {
+                log::warn!(
+                    "[{supervisor_reaction_id}] All query subscriptions lost — \
+                     transitioning to Error"
+                );
+                let mut graph = supervisor_graph.write().await;
+                let _ = graph.validate_and_transition(
+                    &supervisor_reaction_id,
+                    ComponentStatus::Error,
+                    Some("All query subscriptions lost".to_string()),
+                );
+            }
         });
 
-        // Store supervisor + indirectly forwarder handles (supervisor owns them).
+        abort_handles.push(supervisor.abort_handle());
+
+        // Store abort handles so stop_reaction/teardown can cancel everything.
         self.subscription_tasks
             .write()
             .await
-            .insert(reaction_id.to_string(), vec![supervisor]);
+            .insert(reaction_id.to_string(), abort_handles);
 
         Ok(())
     }
@@ -1039,7 +1083,7 @@ impl ReactionManager {
     ///
     /// Applies the reaction's recovery policy:
     /// - `Strict`: return error (forwarder will break)
-    /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint
+    /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
     async fn handle_broadcast_gap(
         reaction_id: &str,
@@ -1049,6 +1093,7 @@ impl ReactionManager {
         policy: ReactionRecoveryPolicy,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
+        bootstrap_mutex: &Arc<tokio::sync::Mutex<()>>,
     ) -> Result<()> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
@@ -1060,6 +1105,9 @@ impl ReactionManager {
                 ))
             }
             ReactionRecoveryPolicy::AutoReset => {
+                // Serialize bootstrap calls — multiple forwarders may hit gaps concurrently.
+                let _guard = bootstrap_mutex.lock().await;
+
                 log::info!(
                     "[{reaction_id}] AutoReset on broadcast gap for query '{query_id}'"
                 );
@@ -1108,11 +1156,19 @@ impl ReactionManager {
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "AutoSkipGap broadcast gap: failed to get current seq \
-                             for '{query_id}': {e}"
-                        ));
+                    Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
+                        // Query not running — fall back to existing checkpoint sequence.
+                        let existing_seq = checkpoints
+                            .read()
+                            .await
+                            .get(query_id)
+                            .map(|cp| cp.sequence)
+                            .unwrap_or(0);
+                        log::info!(
+                            "[{reaction_id}] AutoSkipGap: query '{query_id}' not running, \
+                             keeping checkpoint at seq={existing_seq}"
+                        );
+                        existing_seq
                     }
                 };
 
@@ -1147,12 +1203,12 @@ impl ReactionManager {
     }
 
     async fn abort_subscription_tasks_static(
-        tasks: &Arc<RwLock<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>>,
+        tasks: &Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
         reaction_id: &str,
     ) {
-        if let Some(tasks) = tasks.write().await.remove(reaction_id) {
-            for task in tasks {
-                task.abort();
+        if let Some(handles) = tasks.write().await.remove(reaction_id) {
+            for handle in handles {
+                handle.abort();
             }
         }
     }

@@ -397,19 +397,24 @@ impl Reaction for ReactionProxy {
         let ffi_ctx_ptr = &ffi_ctx as *const FfiBootstrapContext;
         let ffi_ctx_send = SendConstPtr(ffi_ctx_ptr);
 
-        let result = std::thread::spawn(move || {
-            // SAFETY: ffi_ctx lives on the caller's stack and we join() immediately,
-            // so the pointer is valid for the duration of this call.
+        // SAFETY: ffi_ctx lives in this async future's state and we block on
+        // join() (not .await), so the pointer is valid for the duration.
+        // The join() blocks a tokio worker thread — this is an accepted
+        // trade-off per existing FFI conventions. Requires the runtime to have
+        // ≥2 worker threads since host_dispatch spawns back on the same runtime.
+        let join_result = std::thread::spawn(move || {
             (bootstrap_fn)(state.as_ptr(), ffi_ctx_send.as_ptr())
         })
-        .join()
-        .map_err(|_| anyhow::anyhow!("Thread panicked during bootstrap"))?;
+        .join();
 
-        // Reclaim the leaked Arc reference.
+        // Reclaim the leaked Arc reference BEFORE error propagation to prevent
+        // memory leaks on thread panic.
         unsafe {
             Arc::from_raw(ctx_raw as *const HostBootstrapCallbackCtx);
         }
 
+        let result = join_result
+            .map_err(|_| anyhow::anyhow!("Thread panicked during bootstrap"))?;
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 }

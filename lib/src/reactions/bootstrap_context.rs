@@ -91,6 +91,16 @@ impl BootstrapBackend for InProcessBackend {
 ///
 /// Exposes the query's `fetch_snapshot()` and `fetch_outbox()` APIs so the
 /// reaction can synchronize its state, plus checkpoint read/write helpers.
+///
+/// # Contract
+///
+/// **This context is valid only for the duration of the `bootstrap()` call.**
+/// Implementations MUST NOT store the `BootstrapContext` beyond the `bootstrap()`
+/// method's return. The underlying backend may contain raw pointers (e.g., FFI
+/// callback trampolines) that are invalidated when the call returns. Storing and
+/// later using this context would cause undefined behavior.
+///
+/// Future versions may enforce this constraint with lifetime parameters.
 pub struct BootstrapContext {
     /// The query ID this bootstrap is for.
     pub query_id: String,

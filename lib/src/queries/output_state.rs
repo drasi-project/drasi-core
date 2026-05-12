@@ -272,7 +272,14 @@ impl SnapshotResponse {
     /// Create a `SnapshotResponse` from a `Vec<serde_json::Value>`.
     ///
     /// Used by the FFI layer when deserializing snapshot data. The hash key
-    /// for each value is computed from its JSON string representation.
+    /// for each value is computed from its JSON string representation using
+    /// `DefaultHasher`.
+    ///
+    /// **Note:** These keys differ from the `row_signature` values used by the
+    /// live query engine (which computes signatures from solution bindings, not
+    /// JSON strings). This is safe for iteration (`to_vec()`, `stream()`) and
+    /// equality checks on values, but the keys should NOT be used for
+    /// cross-snapshot comparison or incremental diff operations.
     pub fn from_vec(
         values: Vec<serde_json::Value>,
         as_of_sequence: u64,

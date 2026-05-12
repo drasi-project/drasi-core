@@ -226,10 +226,14 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         let err_str = unsafe { resp.error.into_string() };
         if !err_str.is_empty() {
             if err_str.starts_with("OutboxGap:") {
+                let earliest_available = err_str
+                    .strip_prefix("OutboxGap:")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
                 return Err(drasi_lib::queries::output_state::FetchError::OutboxGap(
                     drasi_lib::queries::output_state::OutboxGap {
                         requested: after_sequence,
-                        earliest_available: 0,
+                        earliest_available,
                         latest_sequence: resp.latest_sequence,
                         config_hash: resp.config_hash,
                     },
