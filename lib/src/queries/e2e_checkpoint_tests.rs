@@ -1,8 +1,8 @@
 //! End-to-end tests for checkpoint and recovery features.
 //!
 //! These tests exercise the **public `DrasiLib` API** (`DrasiLib::builder()`,
-//! `start_query()`, `stop_query()`, `remove_query()`, etc.) with a persistent
-//! mock index plugin to validate the full checkpoint/recovery stack.
+//! `start_query()`, `stop_query()`, `remove_query()`, etc.) with the real
+//! RocksDB index backend to validate the full checkpoint/recovery stack.
 //!
 //! Compared to the unit tests in `checkpoint_tests.rs` (which test internal
 //! `QueryManager` wiring), these tests verify that config propagation, index
@@ -20,148 +20,11 @@ use crate::channels::events::SourceEventWrapper;
 use crate::channels::{ComponentStatus, SubscriptionResponse};
 use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
-use crate::indexes::{StorageBackendRef, StorageBackendSpec};
+use crate::indexes::{IndexBackendPlugin, StorageBackendRef, StorageBackendSpec};
 use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
-use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
-use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
-use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
-use drasi_core::interface::{
-    CheckpointStore, CreatedIndexes, ElementArchiveIndex, IndexBackendPlugin, IndexError,
-    IndexSet, NoOpSessionControl, SourceCheckpoint,
-};
-
-// ============================================================================
-// Persistent in-memory checkpoint store (same pattern as checkpoint_tests.rs)
-// ============================================================================
-
-/// A checkpoint store that persists data in memory across calls (not cleared on drop).
-/// Wraps the real in-memory store but signals `is_persistent() == true`.
-#[derive(Clone)]
-struct PersistentCheckpointStore {
-    inner: Arc<RwLock<PersistentCheckpointStoreInner>>,
-}
-
-struct PersistentCheckpointStoreInner {
-    checkpoints: HashMap<String, SourceCheckpoint>,
-    config_hash: Option<u64>,
-}
-
-impl PersistentCheckpointStore {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(PersistentCheckpointStoreInner {
-                checkpoints: HashMap::new(),
-                config_hash: None,
-            })),
-        }
-    }
-}
-
-#[async_trait]
-impl CheckpointStore for PersistentCheckpointStore {
-    fn is_persistent(&self) -> bool {
-        true
-    }
-
-    async fn stage_checkpoint(
-        &self,
-        source_id: &str,
-        sequence: u64,
-        source_position: Option<&Bytes>,
-    ) -> Result<(), IndexError> {
-        let mut inner = self.inner.write().await;
-        inner.checkpoints.insert(
-            source_id.to_string(),
-            SourceCheckpoint {
-                sequence,
-                source_position: source_position.cloned(),
-            },
-        );
-        Ok(())
-    }
-
-    async fn read_checkpoint(
-        &self,
-        source_id: &str,
-    ) -> Result<Option<SourceCheckpoint>, IndexError> {
-        Ok(self.inner.read().await.checkpoints.get(source_id).cloned())
-    }
-
-    async fn read_all_checkpoints(
-        &self,
-    ) -> Result<HashMap<String, SourceCheckpoint>, IndexError> {
-        Ok(self.inner.read().await.checkpoints.clone())
-    }
-
-    async fn clear_checkpoints(&self) -> Result<(), IndexError> {
-        let mut inner = self.inner.write().await;
-        inner.checkpoints.clear();
-        inner.config_hash = None;
-        Ok(())
-    }
-
-    async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
-        self.inner.write().await.config_hash = Some(hash);
-        Ok(())
-    }
-
-    async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
-        Ok(self.inner.read().await.config_hash)
-    }
-}
-
-// ============================================================================
-// Mock persistent index plugin
-// ============================================================================
-
-struct MockPersistentPlugin {
-    stores: RwLock<HashMap<String, Arc<PersistentCheckpointStore>>>,
-}
-
-impl MockPersistentPlugin {
-    fn new() -> Self {
-        Self {
-            stores: RwLock::new(HashMap::new()),
-        }
-    }
-
-    async fn get_store(&self, query_id: &str) -> Arc<PersistentCheckpointStore> {
-        let mut stores = self.stores.write().await;
-        stores
-            .entry(query_id.to_string())
-            .or_insert_with(|| Arc::new(PersistentCheckpointStore::new()))
-            .clone()
-    }
-}
-
-#[async_trait]
-impl IndexBackendPlugin for MockPersistentPlugin {
-    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
-        let store = self.get_store(query_id).await;
-        let element_index = Arc::new(InMemoryElementIndex::new());
-        let archive_index: Arc<dyn ElementArchiveIndex> =
-            Arc::new(InMemoryElementIndex::new());
-        let result_index = Arc::new(InMemoryResultIndex::new());
-        let future_queue = Arc::new(InMemoryFutureQueue::new());
-        let session_control = Arc::new(NoOpSessionControl);
-        Ok(CreatedIndexes {
-            set: IndexSet {
-                element_index,
-                archive_index,
-                result_index,
-                future_queue,
-                session_control,
-            },
-            checkpoint_store: Some(store),
-        })
-    }
-
-    fn is_volatile(&self) -> bool {
-        false
-    }
-}
+use drasi_index_rocksdb::RocksDbIndexProvider;
 
 // ============================================================================
 // Mpsc-based ChangeReceiver for test event injection
@@ -368,12 +231,13 @@ impl Source for E2eTestSource {
 
 async fn build_e2e_lib(
     id: &str,
-    plugin: Arc<MockPersistentPlugin>,
+    tmp_dir: &tempfile::TempDir,
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
+    let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
     let mut builder = DrasiLib::builder()
         .with_id(id)
-        .with_index_provider(plugin as Arc<dyn IndexBackendPlugin>);
+        .with_index_provider(Arc::new(provider) as Arc<dyn IndexBackendPlugin>);
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);
@@ -480,8 +344,8 @@ async fn wait_for_status(core: &DrasiLib, component_id: &str, expected: Componen
 /// Full lifecycle: build → start → feed events → stop → restart → verify resume_from.
 #[tokio::test]
 async fn test_e2e_checkpoint_round_trip() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-rt", plugin.clone(), None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-rt", &tmp_dir, None).await.unwrap();
 
     // Create source and grab shared handles before moving
     let source = E2eTestSource::new("e2e-src", true).unwrap();
@@ -540,8 +404,8 @@ async fn test_e2e_checkpoint_round_trip() {
 /// Volatile query (no storage backend) should never send resume_from.
 #[tokio::test]
 async fn test_e2e_volatile_query_no_checkpoints() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-vol", plugin, None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-vol", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("vol-src", true).unwrap();
     let resume_from = source.last_resume_from();
@@ -577,8 +441,8 @@ async fn test_e2e_volatile_query_no_checkpoints() {
 /// Persistent query + volatile source (supports_replay=false) → rejected.
 #[tokio::test]
 async fn test_e2e_persistent_query_volatile_source_rejected() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-compat", plugin, None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-compat", &tmp_dir, None).await.unwrap();
 
     // Source that does NOT support replay
     let source = E2eTestSource::new("compat-src", false).unwrap();
@@ -599,8 +463,8 @@ async fn test_e2e_persistent_query_volatile_source_rejected() {
 /// Strict policy + PositionUnavailable → query goes to Error state.
 #[tokio::test]
 async fn test_e2e_strict_policy_position_unavailable() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-strict", plugin, None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-strict", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("strict-src", true).unwrap();
     source.set_fail_count(u32::MAX); // always fail
@@ -621,8 +485,8 @@ async fn test_e2e_strict_policy_position_unavailable() {
 /// AutoReset + PositionUnavailable → wipes state and re-bootstraps.
 #[tokio::test]
 async fn test_e2e_auto_reset_position_unavailable() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-reset", plugin, None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-reset", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("reset-src", true).unwrap();
     source.set_fail_count(1); // fail once, succeed on retry
@@ -658,8 +522,8 @@ async fn test_e2e_auto_reset_position_unavailable() {
 /// remove_query() clears persistent state so re-adding starts fresh.
 #[tokio::test]
 async fn test_e2e_remove_query_clears_persistent_state() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-remove", plugin.clone(), None)
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-remove", &tmp_dir, None)
         .await
         .unwrap();
 
@@ -704,8 +568,8 @@ async fn test_e2e_remove_query_clears_persistent_state() {
 /// stop() releases position handles on the source.
 #[tokio::test]
 async fn test_e2e_stop_releases_position_handles() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-handles", plugin, None).await.unwrap();
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-handles", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("handle-src", true).unwrap();
     let removed_count = source.position_handle_removed_handle();
@@ -737,8 +601,8 @@ async fn test_e2e_stop_releases_position_handles() {
 /// Config change (different query string) triggers full re-bootstrap instead of resume.
 #[tokio::test]
 async fn test_e2e_config_change_triggers_rebootstrap() {
-    let plugin = Arc::new(MockPersistentPlugin::new());
-    let core = build_e2e_lib("e2e-cfghash", plugin.clone(), None)
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let core = build_e2e_lib("e2e-cfghash", &tmp_dir, None)
         .await
         .unwrap();
 

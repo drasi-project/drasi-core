@@ -97,6 +97,7 @@ assert_matches = "1.5"
 serial_test = "3.0"
 pretty_assertions = "1.4"
 test-case = "3.3"
+drasi-index-rocksdb = { path = "../components/indexes/rocksdb" }
 
 # Additional testing dependencies
 rstest = "0.18"

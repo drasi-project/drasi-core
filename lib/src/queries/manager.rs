@@ -566,6 +566,12 @@ impl Query for DrasiQuery {
             );
             let index_factory = self.index_factory.clone();
 
+            // Drop the previous checkpoint store handle before re-opening.
+            // For backends like RocksDB that hold an exclusive lock on the
+            // data directory, the old handle must be released before we can
+            // open a new one.  Checkpoint data is already persisted on disk.
+            *self.checkpoint_store.write().await = None;
+
             let created = index_factory
                 .build(backend_ref, &self.base.config.id)
                 .await
@@ -684,7 +690,15 @@ impl Query for DrasiQuery {
             // Config hash check: detect query configuration changes that require
             // a full re-bootstrap. If the stored hash doesn't match the current
             // config, all checkpoints are cleared so sources bootstrap from scratch.
+            //
+            // Checkpoint operations require an active session for transactional
+            // backends (e.g., RocksDB). Wrap read/write/clear calls in begin/commit.
             let current_hash = super::compute_config_hash(&self.base.config);
+
+            if let Some(sc) = &session_control {
+                sc.begin().await.context("Failed to begin session for config hash check")?;
+            }
+
             let config_matches = match checkpoint_store.read_config_hash().await {
                 Ok(Some(stored_hash)) if stored_hash == current_hash => {
                     debug!(
@@ -801,6 +815,16 @@ impl Query for DrasiQuery {
             // even on first run before any checkpoints exist.
             for settings in &mut subscription_settings {
                 settings.request_position_handle = true;
+            }
+
+            // Commit the startup session used for config hash + checkpoint reads/writes.
+            if let Some(sc) = &session_control {
+                if let Err(e) = sc.commit().await {
+                    warn!(
+                        "Query '{}' failed to commit startup session: {e}",
+                        self.base.config.id
+                    );
+                }
             }
         }
 
@@ -1040,6 +1064,23 @@ impl Query for DrasiQuery {
                                             // abort startup rather than mixing stale state with
                                             // a fresh bootstrap.
                                             if has_persistent_backend {
+                                                // Begin a session for the clear operations
+                                                if let Some(sc) = &session_control {
+                                                    if let Err(e) = sc.begin().await {
+                                                        let msg = format!(
+                                                            "Query '{}' auto-reset failed: could not begin session: {e}",
+                                                            self.base.config.id
+                                                        );
+                                                        error!("{msg}");
+                                                        self.base
+                                                            .set_status(ComponentStatus::Error, Some(msg))
+                                                            .await;
+                                                        return Err(anyhow::anyhow!(
+                                                            "AutoReset aborted: failed to begin session for clearing: {e}",
+                                                        ));
+                                                    }
+                                                }
+
                                                 clear_persistent_indexes(
                                                     &self.base.config.id,
                                                     &element_index,
@@ -1049,6 +1090,10 @@ impl Query for DrasiQuery {
                                                 )
                                                 .await;
                                                 if let Err(ce) = checkpoint_store.clear_checkpoints().await {
+                                                    // Rollback on failure
+                                                    if let Some(sc) = &session_control {
+                                                        let _ = sc.rollback();
+                                                    }
                                                     let msg = format!(
                                                         "Query '{}' auto-reset failed: could not clear checkpoints: {ce}",
                                                         self.base.config.id
@@ -1068,6 +1113,16 @@ impl Query for DrasiQuery {
                                                         "Query '{}' failed to write config hash during auto-reset: {he}",
                                                         self.base.config.id
                                                     );
+                                                }
+
+                                                // Commit the clearing session
+                                                if let Some(sc) = &session_control {
+                                                    if let Err(e) = sc.commit().await {
+                                                        warn!(
+                                                            "Query '{}' failed to commit auto-reset session: {e}",
+                                                            self.base.config.id
+                                                        );
+                                                    }
                                                 }
                                             }
 
@@ -2250,19 +2305,32 @@ impl QueryManager {
                     );
                     match self.index_factory.build(backend_ref, &id).await {
                         Ok(created) => {
-                            clear_persistent_indexes(
-                                &id,
-                                &Some(created.set.element_index),
-                                &Some(created.set.archive_index),
-                                &Some(created.set.result_index),
-                                &Some(created.set.future_queue),
-                            )
-                            .await;
+                            // Wrap clearing in a session for transactional backends
+                            if let Err(e) = created.set.session_control.begin().await {
+                                warn!(
+                                    "Query '{id}' failed to begin session for removal cleanup: {e}"
+                                );
+                            } else {
+                                clear_persistent_indexes(
+                                    &id,
+                                    &Some(created.set.element_index),
+                                    &Some(created.set.archive_index),
+                                    &Some(created.set.result_index),
+                                    &Some(created.set.future_queue),
+                                )
+                                .await;
 
-                            if let Some(checkpoint_store) = created.checkpoint_store {
-                                if let Err(e) = checkpoint_store.clear_checkpoints().await {
+                                if let Some(checkpoint_store) = created.checkpoint_store {
+                                    if let Err(e) = checkpoint_store.clear_checkpoints().await {
+                                        warn!(
+                                            "Query '{id}' failed to clear checkpoints on removal: {e}"
+                                        );
+                                    }
+                                }
+
+                                if let Err(e) = created.set.session_control.commit().await {
                                     warn!(
-                                        "Query '{id}' failed to clear checkpoints on removal: {e}"
+                                        "Query '{id}' failed to commit removal cleanup session: {e}"
                                     );
                                 }
                             }
