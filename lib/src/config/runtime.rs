@@ -250,6 +250,10 @@ pub struct RuntimeConfig {
     pub global_dispatch_buffer_capacity: Option<usize>,
     /// Original storage backend configurations
     pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
+    /// Global default recovery policy for all queries.
+    /// Per-query `QueryConfig::recovery_policy` overrides this.
+    /// If neither is set, defaults to `Strict`.
+    pub default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -275,6 +279,7 @@ impl std::fmt::Debug for RuntimeConfig {
                 &self.global_dispatch_buffer_capacity,
             )
             .field("storage_backends", &self.storage_backends)
+            .field("default_recovery_policy", &self.default_recovery_policy)
             .finish()
     }
 }
@@ -303,6 +308,7 @@ impl RuntimeConfig {
         index_provider: Option<Arc<dyn IndexBackendPlugin>>,
         state_store_provider: Option<Arc<dyn StateStoreProvider>>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
+        default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     ) -> Self {
         // Preserve original global defaults for config snapshot round-tripping
         let global_priority_queue_capacity = config.priority_queue_capacity;
@@ -346,13 +352,13 @@ impl RuntimeConfig {
             global_priority_queue_capacity,
             global_dispatch_buffer_capacity,
             storage_backends,
+            default_recovery_policy,
         }
     }
 }
 
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiLibConfig) -> Self {
-        // Default to no index provider, no state store provider, and no identity provider
-        Self::new(config, None, None, None)
+        Self::new(config, None, None, None, None)
     }
 }

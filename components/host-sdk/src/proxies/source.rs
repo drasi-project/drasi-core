@@ -248,12 +248,18 @@ impl Source for SourceProxy {
             receiver,
             bootstrap_receiver,
             position_handle: None,
+            bootstrap_result_receiver: None,
         })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    // TODO(#371-followup): `remove_position_handle` and `supports_replay` use
+    // trait defaults (no-op / true). A follow-up FFI SDK change should add
+    // vtable entries so plugin sources can participate in position-handle
+    // cleanup and declare replay capability.
 
     async fn deprovision(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);

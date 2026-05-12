@@ -37,7 +37,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
-use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use crate::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use crate::channels::*;
 use crate::component_graph::ComponentStatusHandle;
 use crate::context::SourceRuntimeContext;
@@ -557,17 +557,22 @@ impl SourceBase {
         // resume_from overrides bootstrap: a resuming query already has base
         // state in its persistent index and just needs replay from the
         // requested sequence. Re-bootstrapping would corrupt that state.
-        let bootstrap_receiver = if settings.resume_from.is_some() {
+        let (bootstrap_receiver, bootstrap_result_receiver) = if settings.resume_from.is_some() {
             info!(
                 "Query '{}' resuming from sequence {:?}; skipping bootstrap on {} source '{}'",
                 settings.query_id, settings.resume_from, source_type, self.id
             );
-            None
+            (None, None)
         } else if settings.enable_bootstrap {
-            self.handle_bootstrap_subscription(settings, source_type)
+            match self
+                .handle_bootstrap_subscription(settings, source_type)
                 .await?
+            {
+                Some((event_rx, result_rx)) => (Some(event_rx), Some(result_rx)),
+                None => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
 
         // Only persistent (replay-capable) queries request a handle. Volatile
@@ -585,15 +590,24 @@ impl SourceBase {
             receiver,
             bootstrap_receiver,
             position_handle,
+            bootstrap_result_receiver,
         })
     }
 
-    /// Handle bootstrap subscription logic
+    /// Handle bootstrap subscription logic.
+    ///
+    /// Returns the bootstrap event receiver and a oneshot receiver for the
+    /// `BootstrapResult` handover metadata.
     async fn handle_bootstrap_subscription(
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
-    ) -> Result<Option<BootstrapEventReceiver>> {
+    ) -> Result<
+        Option<(
+            BootstrapEventReceiver,
+            tokio::sync::oneshot::Receiver<anyhow::Result<BootstrapResult>>,
+        )>,
+    > {
         let provider_guard = self.bootstrap_provider.read().await;
         if let Some(provider) = provider_guard.clone() {
             drop(provider_guard); // Release lock before spawning task
@@ -611,6 +625,9 @@ impl SourceBase {
 
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
+
+            // Create oneshot for BootstrapResult handover metadata
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
             // Convert HashSet to Vec for backward compatibility with BootstrapRequest
             let node_labels: Vec<String> = settings.nodes.iter().cloned().collect();
@@ -644,19 +661,20 @@ impl SourceBase {
             );
             tokio::spawn(
                 async move {
-                    match provider
+                    let outcome = provider
                         .bootstrap(request, &context, bootstrap_tx, Some(&settings_clone))
-                        .await
-                    {
+                        .await;
+
+                    match &outcome {
                         Ok(result) => {
                             info!(
-                                "Bootstrap completed successfully for query '{}', sent {} events",
-                                settings_clone.query_id, result.event_count
+                                "Bootstrap completed successfully for query '{}', sent {} events \
+                                 (last_sequence={:?}, sequences_aligned={})",
+                                settings_clone.query_id,
+                                result.event_count,
+                                result.last_sequence,
+                                result.sequences_aligned
                             );
-                            // `result.last_sequence` / `result.sequences_aligned`
-                            // are intentionally unused at this call site — a
-                            // future query-processor integration issue will
-                            // plumb them through to the handover protocol.
                         }
                         Err(e) => {
                             error!(
@@ -665,11 +683,15 @@ impl SourceBase {
                             );
                         }
                     }
+
+                    // Send the result (or error) to the query manager for handover.
+                    // If the receiver was dropped (query stopped), this is a no-op.
+                    let _ = result_tx.send(outcome);
                 }
                 .instrument(span),
             );
 
-            Ok(Some(bootstrap_rx))
+            Ok(Some((bootstrap_rx, result_rx)))
         } else {
             info!(
                 "Bootstrap requested for query '{}' but no bootstrap provider configured for {} source '{}'",

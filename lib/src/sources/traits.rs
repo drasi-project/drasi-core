@@ -167,11 +167,13 @@ pub trait Source: Send + Sync {
 
     /// Whether this source supports positional replay via `resume_from`.
     ///
-    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) should
-    /// override this to return `true`. The orchestration layer uses this to
-    /// validate compatibility with persistent queries and to request position handles.
+    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) return
+    /// `true` (the default). Volatile sources that cannot replay (e.g.,
+    /// in-memory-only or purely push-based) should override this to return
+    /// `false`. The orchestration layer uses this to validate compatibility
+    /// with persistent queries and to request position handles.
     fn supports_replay(&self) -> bool {
-        false
+        true
     }
 
     /// Start the source
@@ -257,6 +259,19 @@ pub trait Source: Send + Sync {
         // Default implementation does nothing - sources that support bootstrap
         // should override this to delegate to their SourceBase
     }
+
+    /// Release the position handle that a query was holding on this source.
+    ///
+    /// Called during query stop to let the source advance its min-watermark.
+    /// Sources that use position handles should delegate to
+    /// `self.base.remove_position_handle(query_id).await`.
+    ///
+    /// The default is a no-op for sources that do not manage position handles.
+    // TODO(#371-followup): This method has no FFI vtable entry yet — plugin
+    // sources silently use the no-op default. A follow-up FFI SDK change is
+    // needed to wire this through the SourceVtable so plugin sources can
+    // release position handles properly.
+    async fn remove_position_handle(&self, _query_id: &str) {}
 }
 
 /// Blanket implementation of Source for `Box<dyn Source>`
@@ -324,5 +339,9 @@ impl Source for Box<dyn Source + 'static> {
         provider: Box<dyn crate::bootstrap::BootstrapProvider + 'static>,
     ) {
         (**self).set_bootstrap_provider(provider).await
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        (**self).remove_position_handle(query_id).await
     }
 }

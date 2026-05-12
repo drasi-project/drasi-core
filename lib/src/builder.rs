@@ -133,6 +133,7 @@ pub struct DrasiLibBuilder {
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
+    default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -155,6 +156,7 @@ impl DrasiLibBuilder {
             index_provider: None,
             state_store_provider: None,
             identity_provider: None,
+            default_recovery_policy: None,
         }
     }
 
@@ -257,6 +259,18 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Set the global default recovery policy for all queries.
+    ///
+    /// Per-query `QueryConfig::recovery_policy` overrides this.
+    /// If neither is set, defaults to [`RecoveryPolicy::Strict`](crate::RecoveryPolicy::Strict).
+    pub fn with_default_recovery_policy(
+        mut self,
+        policy: crate::recovery::RecoveryPolicy,
+    ) -> Self {
+        self.default_recovery_policy = Some(policy);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -354,6 +368,7 @@ impl DrasiLibBuilder {
             self.index_provider,
             self.state_store_provider,
             self.identity_provider,
+            self.default_recovery_policy,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
