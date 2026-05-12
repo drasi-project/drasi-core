@@ -31,6 +31,7 @@ use drasi_plugin_sdk::ffi::{
 };
 use libloading::Library;
 
+use crate::snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 use crate::state_store_bridge::StateStoreVtableBuilder;
 
 /// Wraps a `ReactionVtable` into a DrasiLib `Reaction` trait implementation.
@@ -229,6 +230,15 @@ impl Reaction for ReactionProxy {
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
             .unwrap_or(std::ptr::null());
 
+        let snapshot_fetcher_vtable = context
+            .snapshot_fetcher
+            .as_ref()
+            .map(|sf| SnapshotFetcherVtableBuilder::build(sf.clone()));
+
+        let sf_ptr = snapshot_fetcher_vtable
+            .map(|v| Box::into_raw(Box::new(v)) as *const _)
+            .unwrap_or(std::ptr::null());
+
         let ffi_ctx = FfiRuntimeContext {
             instance_id: instance_id_ffi,
             component_id: component_id_ffi,
@@ -238,6 +248,7 @@ impl Reaction for ReactionProxy {
             log_ctx: ctx_ptr,
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
+            snapshot_fetcher: sf_ptr,
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);

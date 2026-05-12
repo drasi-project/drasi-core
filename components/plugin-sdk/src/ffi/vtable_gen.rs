@@ -163,7 +163,7 @@ impl Drop for FfiSnapshotIterHandle {
 /// Each `.next()` dispatches the FFI `next_fn` via `spawn_blocking`, deserializes
 /// one JSON row, and yields it. When the iterator is exhausted (empty string),
 /// the stream ends and `drop_fn` is called.
-fn make_snapshot_stream(
+pub(crate) fn make_snapshot_stream(
     iter: FfiSnapshotIterator,
 ) -> impl tokio_stream::Stream<Item = serde_json::Value> + Send {
     let handle = FfiSnapshotIterHandle {
@@ -286,7 +286,7 @@ unsafe impl Sync for FfiBootstrapBackend {}
 /// SAFETY: FfiOwnedStr contains *mut c_char which is not Send.
 /// We own the data exclusively after the callback returns, so sending
 /// the struct across thread boundaries is safe.
-struct SendFfiSnapshotIteratorResponse(FfiSnapshotIteratorResponse);
+pub(crate) struct SendFfiSnapshotIteratorResponse(pub(crate) FfiSnapshotIteratorResponse);
 unsafe impl Send for SendFfiSnapshotIteratorResponse {}
 struct SendFfiOutboxIteratorResponse(FfiOutboxIteratorResponse);
 unsafe impl Send for SendFfiOutboxIteratorResponse {}
@@ -2573,6 +2573,14 @@ fn build_reaction_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
+    let snapshot_fetcher: Option<Arc<dyn drasi_lib::SnapshotFetcher>> =
+        if ffi_ctx.snapshot_fetcher.is_null() {
+            None
+        } else {
+            Some(Arc::new(super::snapshot_fetcher_proxy::FfiSnapshotFetcherProxy {
+                vtable: ffi_ctx.snapshot_fetcher,
+            }))
+        };
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
@@ -2581,6 +2589,7 @@ fn build_reaction_runtime_context(
         update_tx,
         state_store,
         identity_provider,
+        snapshot_fetcher,
     };
     (ctx, status_rx)
 }

@@ -16,6 +16,7 @@ pub mod bootstrap_context;
 pub mod checkpoint;
 pub mod common;
 pub mod manager;
+pub mod snapshot_fetcher;
 mod traits;
 
 #[cfg(test)]
@@ -30,3 +31,4 @@ pub use bootstrap_context::BootstrapContext;
 pub use checkpoint::ReactionCheckpoint;
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;
+pub use snapshot_fetcher::SnapshotFetcher;

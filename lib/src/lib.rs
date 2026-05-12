@@ -202,6 +202,8 @@ pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeCont
 
 /// Checkpoint type for durable reaction progress tracking
 pub use reactions::ReactionCheckpoint;
+/// Runtime snapshot fetcher trait for on-demand query access
+pub use reactions::SnapshotFetcher;
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source plugins

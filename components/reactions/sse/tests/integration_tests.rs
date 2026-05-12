@@ -703,3 +703,93 @@ async fn test_sse_multi_path_integration() -> Result<()> {
     core.stop().await?;
     Ok(())
 }
+
+/// Test snapshot endpoint returns current query result set
+#[tokio::test]
+async fn test_sse_snapshot_endpoint() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("snap-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    // Use a unique port to avoid conflicts with other tests
+    let sse_reaction = SseReaction::builder("snap-sse")
+        .with_port(18086)
+        .with_query("snap-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("snap-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert some data
+    let props1 = PropertyMapBuilder::new()
+        .with_string("name", "Alice")
+        .with_integer("age", 30)
+        .build();
+    handle
+        .send_node_insert("person-1", vec!["Person"], props1)
+        .await?;
+
+    let props2 = PropertyMapBuilder::new()
+        .with_string("name", "Bob")
+        .with_integer("age", 25)
+        .build();
+    handle
+        .send_node_insert("person-2", vec!["Person"], props2)
+        .await?;
+
+    // Give the query engine time to process
+    sleep(Duration::from_millis(500)).await;
+
+    // Hit the snapshot endpoint
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18086/snapshot/snap-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert_eq!(rows.len(), 2, "Should have 2 rows in snapshot");
+
+    // Verify the data (order may vary)
+    let names: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"Alice"), "Should contain Alice");
+    assert!(names.contains(&"Bob"), "Should contain Bob");
+
+    // Verify 404 for unknown query
+    let resp_404 = client
+        .get("http://localhost:18086/snapshot/nonexistent")
+        .send()
+        .await?;
+    assert_eq!(resp_404.status(), 404);
+
+    core.stop().await?;
+    Ok(())
+}

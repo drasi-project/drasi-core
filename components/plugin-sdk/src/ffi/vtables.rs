@@ -180,6 +180,8 @@ pub struct FfiRuntimeContext {
     pub lifecycle_ctx: *mut c_void,
     /// Nullable — identity provider for credential injection.
     pub identity_provider: *const super::identity::IdentityProviderVtable,
+    /// Nullable — snapshot fetcher for on-demand query snapshot access.
+    pub snapshot_fetcher: *const SnapshotFetcherVtable,
 }
 
 // Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
@@ -504,6 +506,38 @@ pub struct StateStoreVtable {
 
 unsafe impl Send for StateStoreVtable {}
 unsafe impl Sync for StateStoreVtable {}
+
+// ============================================================================
+// Snapshot fetcher vtable — host creates and provides to plugins for on-demand
+// query snapshot access at runtime (not just during bootstrap).
+// ============================================================================
+
+/// Snapshot fetcher vtable — host creates and provides to plugins.
+///
+/// Plugins call `fetch_snapshot_fn` to get the current result set of a query
+/// as a streaming iterator. The callback accepts a `query_id` parameter
+/// (unlike bootstrap callbacks which are per-query).
+///
+/// Follows the same ownership pattern as [`StateStoreVtable`]:
+/// - Host `Box::into_raw`s an `Arc<dyn SnapshotFetcher>` into `state`
+/// - Plugin calls `fetch_snapshot_fn` with `state` and `query_id`
+/// - `drop_fn` reclaims the `Arc` when the plugin drops the proxy
+#[repr(C)]
+pub struct SnapshotFetcherVtable {
+    /// Opaque host-owned state (Arc<dyn SnapshotFetcher> behind a raw pointer).
+    pub state: *mut c_void,
+    /// Fetch a snapshot for the given query ID.
+    /// Returns an `FfiSnapshotIteratorResponse` with a streaming iterator on success,
+    /// or a non-empty error string on failure.
+    pub fetch_snapshot_fn:
+        extern "C" fn(state: *mut c_void, query_id: FfiStr) -> FfiSnapshotIteratorResponse,
+    /// Drop the host-owned state. Must be called exactly once when the plugin
+    /// no longer needs the fetcher.
+    pub drop_fn: extern "C" fn(state: *mut c_void),
+}
+
+unsafe impl Send for SnapshotFetcherVtable {}
+unsafe impl Sync for SnapshotFetcherVtable {}
 
 // ============================================================================
 // Plugin registration — returned by drasi_plugin_init() for cdylib builds

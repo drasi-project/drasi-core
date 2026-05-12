@@ -30,7 +30,7 @@ use tower_http::cors::{Any, CorsLayer};
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::Reaction;
+use drasi_lib::{Reaction, SnapshotFetcher};
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
@@ -517,6 +517,14 @@ impl Reaction for SseReaction {
         let host = self.config.host.clone();
         let port = self.config.port;
         let broadcasters_server = self.broadcasters.clone();
+
+        // Get snapshot_fetcher from the runtime context for the /snapshot/:query_id endpoint
+        let snapshot_fetcher = self
+            .base
+            .context()
+            .await
+            .and_then(|ctx| ctx.snapshot_fetcher.clone());
+
         let server_handle = tokio::spawn(async move {
             // Configure CORS to allow all origins
             let cors = CorsLayer::new()
@@ -558,7 +566,40 @@ impl Reaction for SseReaction {
                 }
             });
 
-            let app = Router::new().fallback(handler).layer(cors);
+            let app = Router::new()
+                .route(
+                    "/snapshot/:query_id",
+                    get({
+                        let sf = snapshot_fetcher.clone();
+                        move |axum::extract::Path(query_id): axum::extract::Path<String>| {
+                            let sf = sf.clone();
+                            async move {
+                                let fetcher = match sf.as_ref() {
+                                    Some(f) => f,
+                                    None => {
+                                        return (
+                                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                            "Snapshot fetcher not available",
+                                        )
+                                            .into_response();
+                                    }
+                                };
+                                match fetcher.fetch_snapshot(&query_id).await {
+                                    Ok(stream) => {
+                                        let rows = stream.collect_vec().await;
+                                        axum::Json(rows).into_response()
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Failed to fetch snapshot: {e}");
+                                        (axum::http::StatusCode::NOT_FOUND, msg).into_response()
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
+                .fallback(handler)
+                .layer(cors);
 
             info!("Starting SSE server on {host}:{port} with CORS enabled");
             let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {

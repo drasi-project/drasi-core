@@ -29,6 +29,7 @@ use crate::queries::output_state::FetchError;
 use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
 use crate::reactions::checkpoint::ReactionCheckpoint;
+use crate::reactions::snapshot_fetcher::InProcessSnapshotFetcher;
 use crate::reactions::{QueryProvider, Reaction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
@@ -117,6 +118,12 @@ impl ReactionManager {
         let reaction: Arc<dyn Reaction> = Arc::new(reaction);
         let reaction_id = reaction.id().to_string();
 
+        // Build snapshot fetcher scoped to this reaction's query IDs
+        let snapshot_fetcher = Arc::new(InProcessSnapshotFetcher::new(
+            self.query_provider.clone(),
+            reaction.query_ids(),
+        ));
+
         // Construct runtime context for this reaction
         let mut context = ReactionRuntimeContext::new(
             &self.instance_id,
@@ -126,6 +133,7 @@ impl ReactionManager {
             None,
         );
         context.identity_provider = self.identity_provider.read().await.clone();
+        context.snapshot_fetcher = Some(snapshot_fetcher);
 
         // Initialize the reaction with its runtime context
         reaction.initialize(context).await;
@@ -781,13 +789,18 @@ impl ReactionManager {
                 || self.abort_subscription_tasks(&id),
                 || async {
                     let new_reaction: Arc<dyn Reaction> = Arc::new(new_reaction);
-                    let context = ReactionRuntimeContext::new(
+                    let snapshot_fetcher = Arc::new(InProcessSnapshotFetcher::new(
+                        self.query_provider.clone(),
+                        new_reaction.query_ids(),
+                    ));
+                    let mut context = ReactionRuntimeContext::new(
                         instance_id,
                         &id,
                         state_store.read().await.clone(),
                         update_tx.clone(),
                         None,
                     );
+                    context.snapshot_fetcher = Some(snapshot_fetcher);
                     new_reaction.initialize(context).await;
 
                     let mut g = graph.write().await;

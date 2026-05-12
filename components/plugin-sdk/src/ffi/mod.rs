@@ -33,6 +33,7 @@ pub mod callbacks;
 pub mod identity;
 pub mod identity_proxy;
 pub mod metadata;
+pub mod snapshot_fetcher_proxy;
 pub mod state_store_proxy;
 pub mod tracing_bridge;
 pub mod types;
@@ -67,7 +68,7 @@ pub use vtables::{
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
     FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
     FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
-    ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    ReactionVtable, SourcePluginVtable, SourceVtable, SnapshotFetcherVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
@@ -76,4 +77,5 @@ pub use identity::{
     IdentityProviderVtable,
 };
 pub use identity_proxy::FfiIdentityProviderProxy;
+pub use snapshot_fetcher_proxy::FfiSnapshotFetcherProxy;
 pub use state_store_proxy::FfiStateStoreProxy;
