@@ -889,3 +889,174 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
 
     Ok(())
 }
+
+/// Full system stop/restart test — verifies that a change made while the entire
+/// Drasi system is down (including the source) is picked up after restart.
+///
+/// This test covers a different scenario from the query-only restart tests above:
+/// 1. Bootstrap and process some CDC events so checkpoint advances.
+/// 2. Stop ALL components (source + query + reaction) via `core.stop()`.
+/// 3. Insert a row while everything is stopped.
+/// 4. Restart ALL components via `core.start()`.
+/// 5. Verify the row inserted during the outage is delivered to the reaction.
+///
+/// This specifically exercises the CDC polling loop's checkpoint resume path
+/// where the source must re-connect, load its persisted LSN checkpoint, and
+/// correctly poll changes that occurred while it was offline.
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let tmp_dir = tempfile::TempDir::new()?;
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed the table so bootstrap has data
+        let mut client = db_config.connect().await?;
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (400, 'Seed', 1.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(3)).await;
+
+        let bp = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bp)
+            .build()?;
+
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction-full-restart")
+            .with_query(QUERY_ID)
+            .build();
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-full-restart-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        // --- Phase 1: Let bootstrap finish and process one CDC event ---
+        sleep(Duration::from_secs(3)).await;
+
+        // Insert a CDC row to advance the checkpoint beyond bootstrap
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (401, 'PreStop', 2.00);",
+        )
+        .await?;
+
+        wait_for_change(&mut sub, 15, |entry| {
+            matches_change(entry, "ADD", &[("id", "401"), ("name", "PreStop")])
+        })
+        .await
+        .context("Did not observe CDC row before stop")?;
+
+        // Let the checkpoint persist
+        sleep(Duration::from_secs(2)).await;
+
+        // --- Phase 2: Full stop (source + query + reaction) ---
+        core.stop().await.context("Failed to stop DrasiLib")?;
+
+        sleep(Duration::from_millis(500)).await;
+
+        // --- Insert data while everything is stopped ---
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (402, 'WhileStopped', 3.00);",
+        )
+        .await?;
+        // Give CDC agent time to capture the change
+        sleep(Duration::from_secs(3)).await;
+
+        // --- Phase 3: Full restart ---
+        core.start().await.context("Failed to restart DrasiLib")?;
+
+        // The original subscription should continue receiving events after
+        // restart because the reaction instance (and its broadcast channel)
+        // persists in-memory across stop/start cycles.
+
+        // --- Phase 4: Verify the offline change is delivered ---
+        wait_for_change(&mut sub, 20, |entry| {
+            matches_change(entry, "ADD", &[("id", "402"), ("name", "WhileStopped")])
+        })
+        .await
+        .context(
+            "Did not observe the row inserted while stopped — \
+             full restart CDC resume may have skipped the offline change",
+        )?;
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => {
+            anyhow::bail!("test_mssql_full_restart_picks_up_offline_changes timed out")
+        }
+    }
+
+    Ok(())
+}

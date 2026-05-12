@@ -118,11 +118,10 @@ pub struct MsSqlSource {
     /// CDC polling task handle
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
-    /// Shutdown signal sender for graceful shutdown
-    shutdown_tx: watch::Sender<bool>,
-
-    /// Shutdown signal receiver (cloned for each task)
-    shutdown_rx: watch::Receiver<bool>,
+    /// Shutdown signal sender for graceful shutdown.
+    /// Recreated on each `start()` so the CDC task always gets a clean
+    /// receiver without stale shutdown notifications from a prior `stop()`.
+    shutdown_tx: Arc<RwLock<watch::Sender<bool>>>,
 
     /// Per-subscriber resume positions.
     /// When a query subscribes with resume_from bytes, we deserialize to an LSN
@@ -145,7 +144,7 @@ impl MsSqlSource {
         let params = SourceBaseParams::new(&source_id);
 
         // Create shutdown channel (false = running, true = shutdown)
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         Ok(Self {
             source_id,
@@ -153,8 +152,7 @@ impl MsSqlSource {
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx,
-            shutdown_rx,
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -263,11 +261,15 @@ impl Source for MsSqlSource {
         self.base.set_status(ComponentStatus::Starting, None).await;
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
 
+        // Create a brand-new shutdown channel so the CDC task gets a pristine
+        // receiver with no stale notifications from a prior stop() cycle.
+        let (new_tx, shutdown_rx) = watch::channel(false);
+        *self.shutdown_tx.write().await = new_tx;
+
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
-        let shutdown_rx = self.shutdown_rx.clone();
         let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
 
         // Spawn CDC polling task
@@ -301,7 +303,7 @@ impl Source for MsSqlSource {
         log::info!("MS SQL source '{}' stopping", self.base.id);
 
         // Signal the CDC polling loop to stop gracefully
-        if let Err(e) = self.shutdown_tx.send(true) {
+        if let Err(e) = self.shutdown_tx.read().await.send(true) {
             log::warn!("Failed to send shutdown signal: {e}");
         }
 
@@ -521,7 +523,7 @@ impl MsSqlSourceBuilder {
         }
 
         // Create shutdown channel (false = running, true = shutdown)
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         Ok(MsSqlSource {
             source_id,
@@ -529,8 +531,7 @@ impl MsSqlSourceBuilder {
             base: SourceBase::new(params)?,
             state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx,
-            shutdown_rx,
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
         })
     }

@@ -333,10 +333,14 @@ async fn poll_cdc_changes(
         *current_lsn = Some(from_lsn);
     }
 
-    // If from_lsn >= max_lsn, no new changes
-    if from_lsn >= max_lsn {
+    // If from_lsn > max_lsn, no new changes are available.
+    // Note: we use strict `>` rather than `>=` because fn_cdc_get_all_changes
+    // uses inclusive bounds [from_lsn, to_lsn]. When from_lsn == max_lsn there
+    // may still be a change at that exact LSN (e.g. on restart after an offline
+    // update where the new change IS the current max_lsn).
+    if from_lsn > max_lsn {
         debug!(
-            "No new changes: from_lsn {} >= max_lsn {}",
+            "No new changes: from_lsn {} > max_lsn {}",
             from_lsn.to_hex(),
             max_lsn.to_hex()
         );
