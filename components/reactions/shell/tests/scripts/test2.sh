@@ -5,7 +5,7 @@
 ## if FAIL_EXIT is true, exit with status 1 to simulate a failure, else print the stdin input
 
 if [ "$FAIL_EXIT" = "true" ]; then
-    echo "Simulating failure by exiting with status 1."
+    echo "Failing with status 1 as FAIL_EXIT is set to true"
     exit 1
 else
     read -r input
