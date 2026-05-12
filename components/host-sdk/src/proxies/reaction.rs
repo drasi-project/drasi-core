@@ -351,7 +351,12 @@ impl Reaction for ReactionProxy {
             0 => ReactionRecoveryPolicy::Strict,
             1 => ReactionRecoveryPolicy::AutoReset,
             2 => ReactionRecoveryPolicy::AutoSkipGap,
-            _ => ReactionRecoveryPolicy::Strict,
+            _ => {
+                log::warn!(
+                    "Unknown recovery policy ordinal {ordinal} from FFI plugin; defaulting to Strict"
+                );
+                ReactionRecoveryPolicy::Strict
+            }
         }
     }
 
@@ -453,6 +458,14 @@ fn host_dispatch<R: Send + 'static>(
 }
 
 extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotResponse {
+    if ctx.is_null() {
+        return FfiSnapshotResponse {
+            data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+            as_of_sequence: 0,
+            config_hash: 0,
+            error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
+        };
+    }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let result = host_dispatch(host_ctx, {
@@ -493,6 +506,14 @@ extern "C" fn host_bootstrap_fetch_outbox(
     ctx: *mut c_void,
     after_sequence: u64,
 ) -> FfiOutboxResponse {
+    if ctx.is_null() {
+        return FfiOutboxResponse {
+            results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+            latest_sequence: 0,
+            config_hash: 0,
+            error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
+        };
+    }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let result = host_dispatch(host_ctx, {
@@ -514,16 +535,16 @@ extern "C" fn host_bootstrap_fetch_outbox(
                 }
             }
             Err(e) => {
-                let err_msg = match e {
+                let (err_msg, gap_latest, gap_hash) = match e {
                     drasi_lib::queries::output_state::FetchError::OutboxGap(gap) => {
-                        format!("OutboxGap:{}", gap.earliest_available)
+                        (format!("OutboxGap:{}", gap.earliest_available), gap.latest_sequence, gap.config_hash)
                     }
-                    other => format!("{other}"),
+                    other => (format!("{other}"), 0, 0),
                 };
                 FfiOutboxResponse {
                     results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-                    latest_sequence: 0,
-                    config_hash: 0,
+                    latest_sequence: gap_latest,
+                    config_hash: gap_hash,
                     error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(err_msg),
                 }
             }
@@ -540,6 +561,13 @@ extern "C" fn host_bootstrap_fetch_outbox(
 }
 
 extern "C" fn host_bootstrap_read_checkpoint(ctx: *mut c_void) -> FfiCheckpointResult {
+    if ctx.is_null() {
+        return FfiCheckpointResult {
+            found: false,
+            checkpoint: FfiCheckpoint { sequence: 0, config_hash: 0 },
+            error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
+        };
+    }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let result = host_dispatch(host_ctx, {
@@ -589,6 +617,9 @@ extern "C" fn host_bootstrap_write_checkpoint(
     ctx: *mut c_void,
     checkpoint: FfiCheckpoint,
 ) -> FfiResult {
+    if ctx.is_null() {
+        return FfiResult::err("null callback context".into());
+    }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let cp = drasi_lib::reactions::ReactionCheckpoint {

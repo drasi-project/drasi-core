@@ -186,8 +186,10 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             })?
             .0;
 
-        // Check for error.
+        // Consume ALL FfiOwnedStr fields unconditionally to prevent memory leaks.
+        // FfiOwnedStr has no Drop impl — into_string() is the only way to reclaim.
         let err_str = unsafe { resp.error.into_string() };
+        let data_json = unsafe { resp.data_json.into_string() };
         if !err_str.is_empty() {
             return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
                 status: drasi_lib::ComponentStatus::Error,
@@ -195,7 +197,6 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         }
 
         // Deserialize data_json into Vec<serde_json::Value>.
-        let data_json = unsafe { resp.data_json.into_string() };
         let values: Vec<serde_json::Value> =
             serde_json::from_str(&data_json).unwrap_or_default();
 
@@ -223,7 +224,9 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
                 })?
                 .0;
 
+        // Consume ALL FfiOwnedStr fields unconditionally to prevent memory leaks.
         let err_str = unsafe { resp.error.into_string() };
+        let results_json = unsafe { resp.results_json.into_string() };
         if !err_str.is_empty() {
             if err_str.starts_with("OutboxGap:") {
                 let earliest_available = err_str
@@ -244,7 +247,6 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             });
         }
 
-        let results_json = unsafe { resp.results_json.into_string() };
         let results: Vec<drasi_lib::channels::QueryResult> =
             serde_json::from_str(&results_json).unwrap_or_default();
 
