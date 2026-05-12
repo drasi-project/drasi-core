@@ -45,6 +45,7 @@ members = [
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/shell",
 
   # Identity Provider Plugins
   "components/identity/azure",
@@ -130,6 +131,7 @@ drasi-source-application = { version = "0.1.15", path = "components/sources/appl
 drasi-bootstrap-application = { version = "0.1.15", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.1.17", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.2.13", path = "components/reactions/grpc" }
+drasi-reaction-shell = { version = "0.1.0", path = "components/reactions/shell" }
 drasi-mssql-common = { version = "0.1.3", path = "components/mssql-common" }
 
 [workspace.lints.rust]

@@ -42,6 +42,7 @@ Reactions are responsible for:
 | `drasi-reaction-application` | Programmatic/in-memory for embedded use | `application/` |
 | `drasi-reaction-platform` | Redis Streams publisher for platform integration | `platform/` |
 | `drasi-reaction-profiler` | Performance profiling and metrics | `profiler/` |
+| `drasi-reaction-shell` | Execute shell commands/scripts on query result changes (Linux only) | `shell/` |
 
 ## Architecture
 
