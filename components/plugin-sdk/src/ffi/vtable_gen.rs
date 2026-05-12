@@ -1568,7 +1568,7 @@ pub fn build_bootstrap_provider_vtable(
         server_id: FfiStr,
         source_id: FfiStr,
         sender: *mut FfiBootstrapSender,
-    ) -> i64 {
+    ) -> *mut FfiBootstrapResult {
         use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 
         let query_id_str = unsafe { query_id.to_string() };
@@ -1598,6 +1598,10 @@ pub fn build_bootstrap_provider_vtable(
         let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
+        // Channel to carry the BootstrapResult back from the provider thread
+        let (result_tx, result_rx) =
+            std::sync::mpsc::channel::<Option<drasi_lib::bootstrap::BootstrapResult>>();
+
         // Run the actual bootstrap provider in a background thread with its own tokio runtime
         let provider_ptr = SendPtr(state as *const BootstrapProviderWrapper);
         let _bootstrap_handle = std::thread::spawn(move || {
@@ -1614,11 +1618,12 @@ pub fn build_bootstrap_provider_vtable(
                         }
                     }
                 });
-                let _ = inner
+                let bootstrap_result = inner
                     .inner
                     .bootstrap(request, &context, tokio_tx, None)
                     .await;
                 let _ = forward_handle.await;
+                let _ = result_tx.send(bootstrap_result.ok());
             })
         });
 
@@ -1660,7 +1665,45 @@ pub fn build_bootstrap_provider_vtable(
             count += 1;
         }
 
-        count as i64
+        // Collect the BootstrapResult from the provider thread
+        let provider_result = result_rx.recv().ok().flatten();
+
+        // Build the FFI result with full handover metadata
+        let (last_sequence, sequences_aligned, source_position_ptr, source_position_len, source_position_drop_fn) =
+            if let Some(ref br) = provider_result {
+                let last_seq = br.last_sequence.map(|s| s as i64).unwrap_or(-1);
+                let aligned = br.sequences_aligned;
+                if let Some(ref pos) = br.source_position {
+                    let pos_vec = pos.to_vec();
+                    let len = pos_vec.len();
+                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                    (last_seq, aligned, leaked as *const u8, len, Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)))
+                } else {
+                    (last_seq, aligned, std::ptr::null(), 0, None)
+                }
+            } else {
+                (-1i64, false, std::ptr::null(), 0, None)
+            };
+
+        let ffi_result = Box::new(FfiBootstrapResult {
+            event_count: count as i64,
+            last_sequence,
+            sequences_aligned,
+            source_position_ptr,
+            source_position_len,
+            source_position_drop_fn,
+        });
+
+        Box::into_raw(ffi_result)
+    }
+
+    extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                let slice = std::slice::from_raw_parts_mut(ptr, len);
+                drop(Box::from_raw(slice as *mut [u8]));
+            }
+        }
     }
 
     extern "C" fn bootstrap_event_drop(opaque: *mut c_void) {

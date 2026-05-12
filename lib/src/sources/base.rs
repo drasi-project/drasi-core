@@ -812,12 +812,28 @@ impl SourceBase {
             .expect("Failed to create test subscription receiver")
     }
 
-    /// Helper function to dispatch events from spawned tasks
+    /// Helper function to dispatch events from spawned tasks (unstamped).
     ///
     /// This is a static helper that can be used from spawned async tasks that don't
     /// have access to `self`. It manually iterates through dispatchers and sends the event.
     ///
-    /// For code that has access to `&self`, prefer using `dispatch_event()` instead.
+    /// **Important**: This method does NOT stamp a monotonic sequence number and
+    /// does NOT validate `source_position` size. Events dispatched through this
+    /// method will not be checkpoint-tracked. This is acceptable for sources that
+    /// do not support replay (`supports_replay() == false`).
+    ///
+    /// # For recoverable/checkpointed sources
+    ///
+    /// Use [`clone_shared()`](Self::clone_shared) to obtain a `SourceBase` that
+    /// can be moved into spawned tasks, then call [`dispatch_event()`](Self::dispatch_event)
+    /// which stamps sequences and validates positions:
+    ///
+    /// ```ignore
+    /// let base = self.base.clone_shared();
+    /// tokio::spawn(async move {
+    ///     base.dispatch_event(wrapper).await.ok();
+    /// });
+    /// ```
     ///
     /// # Arguments
     /// * `dispatchers` - Arc to the dispatchers list (from `self.base.dispatchers.clone()`)

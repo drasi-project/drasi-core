@@ -158,6 +158,31 @@ pub struct FfiBootstrapSender {
 unsafe impl Send for FfiBootstrapSender {}
 unsafe impl Sync for FfiBootstrapSender {}
 
+/// FFI-safe bootstrap result returned across the plugin boundary.
+///
+/// Heap-allocated by the callee (vtable_gen) and freed by the caller
+/// (host proxy or plugin proxy) using `Box::from_raw`.
+#[repr(C)]
+pub struct FfiBootstrapResult {
+    /// Number of events sent (>= 0), or -1 on error.
+    pub event_count: i64,
+    /// Last sequence number, or -1 if not available.
+    pub last_sequence: i64,
+    /// Whether bootstrap/stream sequences are aligned for dedup.
+    pub sequences_aligned: bool,
+    /// Pointer to source position bytes (null if not available).
+    /// Callee owns the allocation; caller must free via `source_position_drop_fn`.
+    pub source_position_ptr: *const u8,
+    /// Length of source position bytes (0 if ptr is null).
+    pub source_position_len: usize,
+    /// Drop function for the source position allocation.
+    /// Null if `source_position_ptr` is null.
+    pub source_position_drop_fn: Option<extern "C" fn(*mut u8, usize)>,
+}
+
+unsafe impl Send for FfiBootstrapResult {}
+unsafe impl Sync for FfiBootstrapResult {}
+
 // ============================================================================
 // Runtime context — host services provided to plugins during initialization
 // ============================================================================
@@ -268,8 +293,9 @@ drasi_ffi_primitives::ffi_vtable! {
     /// The bootstrap plugin creates this; the host wraps it and passes it to the source plugin.
     pub struct BootstrapProviderVtable {
         /// Perform bootstrap. Sends records via the FfiBootstrapSender.
-        /// Returns the count of records sent (>= 0), or negative on error.
-        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, sender: *mut FfiBootstrapSender) -> i64,
+        /// Returns a heap-allocated FfiBootstrapResult (caller must free via Box::from_raw),
+        /// or null on catastrophic failure.
+        fn bootstrap_fn(state: *mut, query_id: FfiStr, node_labels: *const FfiStr, node_labels_count: usize, relation_labels: *const FfiStr, relation_labels_count: usize, request_id: FfiStr, server_id: FfiStr, source_id: FfiStr, sender: *mut FfiBootstrapSender) -> *mut FfiBootstrapResult,
     }
 }
 

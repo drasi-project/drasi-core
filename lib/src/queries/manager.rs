@@ -1499,14 +1499,25 @@ impl Query for DrasiQuery {
                         }
 
                         // Collect handover checkpoints from BootstrapResults.
-                        // For aligned sources with last_sequence, set the dedup checkpoint
-                        // so buffered streaming events at or below that sequence are filtered.
-                        // For non-aligned sources, leave no entry (accept all events).
+                        //
+                        // Two purposes:
+                        // 1. **Dedup map** (in-memory): For aligned sources with last_sequence,
+                        //    buffered streaming events at or below that sequence are filtered.
+                        //    Only populated when `sequences_aligned == true`.
+                        // 2. **Recovery checkpoint** (persisted): For ANY source that provides
+                        //    a last_sequence, we persist a checkpoint (optionally with
+                        //    source_position bytes) so crash-after-bootstrap can resume
+                        //    from the snapshot boundary without re-bootstrapping.
                         let mut handover_checkpoints: std::collections::HashMap<String, u64> =
+                            std::collections::HashMap::new();
+
+                        // Tracks source positions from bootstrap for persistence
+                        let mut handover_positions: std::collections::HashMap<String, (u64, Option<bytes::Bytes>)> =
                             std::collections::HashMap::new();
 
                         for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
                             if let Some(br) = bootstrap_result {
+                                // Dedup map: only for aligned sources
                                 if br.sequences_aligned {
                                     if let Some(seq) = br.last_sequence {
                                         debug!(
@@ -1520,6 +1531,32 @@ impl Query for DrasiQuery {
                                          no dedup checkpoint (accept all buffered events)"
                                     );
                                 }
+
+                                // Recovery checkpoint: persist whenever we have a sequence
+                                // OR a source_position. source_position enables native
+                                // stream resumption; sequence enables dedup. Bootstrap
+                                // events don't go through dispatch_event(), so sequence
+                                // may be None even when source_position is present. Use
+                                // 0 as the sentinel sequence in that case.
+                                if br.last_sequence.is_some() || br.source_position.is_some() {
+                                    let seq = br.last_sequence.unwrap_or(0);
+                                    // Validate source_position size (same limit as dispatch_event)
+                                    let position = br.source_position.as_ref().and_then(|pos| {
+                                        if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
+                                            warn!(
+                                                "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
+                                                 bootstrap source_position is {} bytes (> {} limit); \
+                                                 dropping position, checkpoint will have sequence only",
+                                                pos.len(),
+                                                crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+                                            );
+                                            None
+                                        } else {
+                                            Some(pos.clone())
+                                        }
+                                    });
+                                    handover_positions.insert(source_id.clone(), (seq, position));
+                                }
                             }
                         }
 
@@ -1528,10 +1565,10 @@ impl Query for DrasiQuery {
                              handover checkpoints: {handover_checkpoints:?}"
                         );
 
-                        // Persist handover checkpoints before opening the gate.
+                        // Persist recovery checkpoints before opening the gate.
                         // This ensures crash-after-bootstrap-before-first-streaming-event
                         // doesn't lose progress and avoids a redundant re-bootstrap.
-                        if !handover_checkpoints.is_empty() {
+                        if !handover_positions.is_empty() {
                             if let Some(sc) = &session_control_for_supervisor {
                                 if let Err(e) = sc.begin().await {
                                     warn!(
@@ -1539,9 +1576,9 @@ impl Query for DrasiQuery {
                                     );
                                 }
                             }
-                            for (source_id, seq) in &handover_checkpoints {
+                            for (source_id, (seq, position)) in &handover_positions {
                                 if let Err(e) = checkpoint_store_for_supervisor
-                                    .stage_checkpoint(source_id, *seq, None)
+                                    .stage_checkpoint(source_id, *seq, position.as_ref())
                                     .await
                                 {
                                     warn!(

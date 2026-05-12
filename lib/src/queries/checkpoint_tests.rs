@@ -2274,6 +2274,7 @@ mod tests {
                 event_count: 1,
                 last_sequence: Some(5),
                 sequences_aligned: true,
+                source_position: None,
             }))
             .unwrap();
 
