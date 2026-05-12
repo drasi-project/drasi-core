@@ -23,7 +23,8 @@ use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
 use anyhow::{anyhow, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ChangeDispatcher, SourceEventWrapper};
+use drasi_lib::channels::SourceEventWrapper;
+use drasi_lib::sources::base::SourceBase;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,9 +50,10 @@ fn classify_error(error: &anyhow::Error) -> MsSqlErrorKind {
 pub async fn run_cdc_stream(
     source_id: String,
     config: MsSqlSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: SourceBase,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
+    subscriber_resume_lsn: Arc<RwLock<Option<Lsn>>>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -68,9 +70,10 @@ pub async fn run_cdc_stream(
         match run_cdc_polling_loop(
             &source_id,
             &config,
-            &dispatchers,
+            &base,
             &state_store,
             &mut shutdown_rx,
+            &subscriber_resume_lsn,
         )
         .await
         {
@@ -135,9 +138,10 @@ pub async fn run_cdc_stream(
 async fn run_cdc_polling_loop(
     source_id: &str,
     config: &MsSqlSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    subscriber_resume_lsn: &Arc<RwLock<Option<Lsn>>>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -158,6 +162,36 @@ async fn run_cdc_polling_loop(
             .map(|l| l.to_hex())
             .unwrap_or_else(|| "NONE (will use current)".to_string())
     );
+
+    // Check if a subscriber has communicated a resume position that's earlier
+    // than our checkpoint. If so, rewind to ensure no events are missed.
+    {
+        let resume_guard = subscriber_resume_lsn.read().await;
+        if let Some(resume_lsn) = *resume_guard {
+            match current_lsn {
+                Some(ref checkpoint_lsn) if resume_lsn < *checkpoint_lsn => {
+                    warn!(
+                        "Subscriber resume LSN {} is earlier than source checkpoint {}; \
+                         rewinding to subscriber position",
+                        resume_lsn, checkpoint_lsn
+                    );
+                    current_lsn = Some(resume_lsn);
+                }
+                None => {
+                    info!(
+                        "No source checkpoint; using subscriber resume LSN {}",
+                        resume_lsn
+                    );
+                    current_lsn = Some(resume_lsn);
+                }
+                _ => {
+                    debug!(
+                        "Source checkpoint is at or before subscriber resume LSN; no rewind needed"
+                    );
+                }
+            }
+        }
+    }
 
     // Track consecutive errors for connection health monitoring
     let mut consecutive_errors = 0u32;
@@ -181,7 +215,7 @@ async fn run_cdc_polling_loop(
             client,
             &pk_cache,
             &mut current_lsn,
-            dispatchers,
+            base,
         )
         .await
         {
@@ -257,7 +291,7 @@ async fn poll_cdc_changes(
     client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
     pk_cache: &PrimaryKeyCache,
     current_lsn: &mut Option<Lsn>,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
 ) -> Result<usize> {
     // Get current max LSN from CDC
     let max_lsn = get_max_lsn(client).await?;
@@ -329,7 +363,6 @@ async fn poll_cdc_changes(
     );
 
     let mut change_count = 0;
-    let mut batch = Vec::new();
 
     // Query each configured table's CDC changes
     for table in &config.tables {
@@ -347,6 +380,7 @@ async fn poll_cdc_changes(
         for row in changes {
             // Extract CDC metadata
             let operation = extract_operation(&row)?;
+            let row_lsn = extract_lsn(&row)?;
 
             // Generate element ID from primary key
             let element_id = pk_cache.generate_element_id(table, &row)?;
@@ -363,7 +397,7 @@ async fn poll_cdc_changes(
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(source_id, &element_id),
                                 labels: Arc::from([Arc::from(label)]),
-                                effective_from: 0, // Will be set by dispatcher
+                                effective_from: 0,
                             },
                             properties,
                         },
@@ -395,7 +429,20 @@ async fn poll_cdc_changes(
                 }
             };
 
-            batch.push(change);
+            // Dispatch each event individually through SourceBase, attaching
+            // the row's LSN as the source_position for checkpoint recovery.
+            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+            let mut wrapper = SourceEventWrapper::with_profiling(
+                source_id.to_string(),
+                drasi_lib::channels::SourceEvent::Change(change),
+                chrono::Utc::now(),
+                profiling,
+            );
+            wrapper.source_position = Some(bytes::Bytes::from(row_lsn.to_bytes()));
+
+            base.dispatch_event(wrapper).await?;
             change_count += 1;
         }
     }
@@ -404,33 +451,6 @@ async fn poll_cdc_changes(
     // This ensures we don't reprocess the same changes
     if change_count > 0 {
         *current_lsn = Some(max_lsn);
-    }
-
-    // Dispatch all changes in batch
-    if !batch.is_empty() {
-        debug!(
-            "Dispatching {} changes to {} dispatchers",
-            batch.len(),
-            dispatchers.read().await.len()
-        );
-        let dispatchers = dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
-            for change in &batch {
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_id.to_string(),
-                    drasi_lib::channels::SourceEvent::Change(change.clone()),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-                dispatcher.dispatch_change(Arc::new(wrapper)).await?;
-            }
-        }
-        debug!("Dispatched all {} changes successfully", batch.len());
-    } else {
-        debug!("No changes to dispatch");
     }
 
     Ok(change_count)

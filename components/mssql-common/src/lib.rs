@@ -22,6 +22,7 @@ pub mod config;
 pub mod connection;
 pub mod error;
 pub mod keys;
+pub mod lsn;
 pub mod types;
 
 // Re-export main types
@@ -32,4 +33,5 @@ pub use config::{
 pub use connection::MsSqlConnection;
 pub use error::{ConnectionError, LsnError, MsSqlError, MsSqlErrorKind, PrimaryKeyError};
 pub use keys::PrimaryKeyCache;
+pub use lsn::Lsn;
 pub use types::{extract_column_value, value_to_string};

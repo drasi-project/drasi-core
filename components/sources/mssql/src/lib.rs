@@ -122,6 +122,12 @@ pub struct MsSqlSource {
 
     /// Shutdown signal receiver (cloned for each task)
     shutdown_rx: watch::Receiver<bool>,
+
+    /// Subscriber-communicated resume position.
+    /// When a query subscribes with resume_from bytes, we deserialize to an LSN
+    /// and store the minimum here. The CDC stream reads this to decide where to
+    /// start polling from.
+    subscriber_resume_lsn: Arc<RwLock<Option<Lsn>>>,
 }
 
 impl MsSqlSource {
@@ -147,6 +153,7 @@ impl MsSqlSource {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            subscriber_resume_lsn: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -256,18 +263,20 @@ impl Source for MsSqlSource {
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
+        let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
         let shutdown_rx = self.shutdown_rx.clone();
+        let subscriber_resume_lsn = self.subscriber_resume_lsn.clone();
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
             if let Err(e) = stream::run_cdc_stream(
                 source_id.clone(),
                 config,
-                dispatchers,
+                base,
                 state_store,
                 shutdown_rx,
+                subscriber_resume_lsn,
             )
             .await
             {
@@ -319,6 +328,34 @@ impl Source for MsSqlSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
+        // If the subscriber has a resume_from position, deserialize it to an
+        // LSN and store the minimum across all subscribers.
+        if let Some(ref resume_bytes) = settings.resume_from {
+            match Lsn::from_bytes(resume_bytes) {
+                Ok(lsn) => {
+                    log::info!(
+                        "Subscriber '{}' requesting resume from LSN {} on source '{}'",
+                        settings.query_id, lsn, self.base.id
+                    );
+                    let mut guard = self.subscriber_resume_lsn.write().await;
+                    match *guard {
+                        Some(existing) if existing <= lsn => {
+                            // Keep existing — it's earlier
+                        }
+                        _ => {
+                            *guard = Some(lsn);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to deserialize resume_from bytes to LSN for subscriber '{}': {e}",
+                        settings.query_id
+                    );
+                }
+            }
+        }
+
         self.base
             .subscribe_with_bootstrap(&settings, "MS SQL")
             .await
@@ -343,6 +380,10 @@ impl Source for MsSqlSource {
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
         self.base.set_bootstrap_provider(provider).await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        self.base.remove_position_handle(query_id).await;
     }
 }
 
@@ -489,6 +530,7 @@ impl MsSqlSourceBuilder {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
+            subscriber_resume_lsn: Arc::new(RwLock::new(None)),
         })
     }
 }
