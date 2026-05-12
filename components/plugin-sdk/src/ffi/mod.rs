@@ -60,16 +60,14 @@ pub use vtable_gen::{
     current_instance_log_ctx, InstanceLogContext,
 };
 pub use vtables::{
-    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext,
-    FfiBootstrapEvent, FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn,
-    FfiBootstrapPushCallbackFn, FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver,
-    FfiBootstrapSender, FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn,
-    FfiChangeReceiver, FfiCheckpoint, FfiCheckpointResult,
-    FfiOutboxIterator, FfiOutboxIteratorResponse,
-    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext,
-    FfiSnapshotIterator, FfiSnapshotIteratorResponse,
-    FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable,
-    ReactionPluginVtable, ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext, FfiBootstrapEvent,
+    FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn, FfiBootstrapPushCallbackFn,
+    FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver, FfiBootstrapSender,
+    FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
+    FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
+    FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
+    FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
+    ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;

@@ -583,12 +583,10 @@ impl ReactionManager {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         match policy {
-            ReactionRecoveryPolicy::Strict => {
-                Err(anyhow::anyhow!(
-                    "Reaction '{reaction_id}': Strict recovery policy — cannot recover from \
+            ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
+                "Reaction '{reaction_id}': Strict recovery policy — cannot recover from \
                      gap/mismatch for query '{query_id}'. Manual intervention required."
-                ))
-            }
+            )),
             ReactionRecoveryPolicy::AutoReset => {
                 info!(
                     "[{reaction_id}] AutoReset for query '{query_id}' — \
@@ -1111,19 +1109,15 @@ impl ReactionManager {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         match policy {
-            ReactionRecoveryPolicy::Strict => {
-                Err(anyhow::anyhow!(
-                    "Strict recovery policy — broadcast lag for query '{query_id}' \
+            ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
+                "Strict recovery policy — broadcast lag for query '{query_id}' \
                      is unrecoverable"
-                ))
-            }
+            )),
             ReactionRecoveryPolicy::AutoReset => {
                 // Serialize bootstrap calls — multiple forwarders may hit gaps concurrently.
                 let _guard = bootstrap_mutex.lock().await;
 
-                log::info!(
-                    "[{reaction_id}] AutoReset on broadcast gap for query '{query_id}'"
-                );
+                log::info!("[{reaction_id}] AutoReset on broadcast gap for query '{query_id}'");
                 let snapshot = query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset broadcast gap: failed to fetch snapshot for '{query_id}': {e}"
@@ -1145,10 +1139,7 @@ impl ReactionManager {
                     .await?;
                 }
 
-                checkpoints
-                    .write()
-                    .await
-                    .insert(query_id.to_string(), cp);
+                checkpoints.write().await.insert(query_id.to_string(), cp);
 
                 // Invoke bootstrap hook for this query.
                 let ctx = BootstrapContext::new(
@@ -1163,9 +1154,7 @@ impl ReactionManager {
                 Ok(())
             }
             ReactionRecoveryPolicy::AutoSkipGap => {
-                log::info!(
-                    "[{reaction_id}] AutoSkipGap on broadcast gap for query '{query_id}'"
-                );
+                log::info!("[{reaction_id}] AutoSkipGap on broadcast gap for query '{query_id}'");
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
@@ -1200,10 +1189,7 @@ impl ReactionManager {
                     .await?;
                 }
 
-                checkpoints
-                    .write()
-                    .await
-                    .insert(query_id.to_string(), cp);
+                checkpoints.write().await.insert(query_id.to_string(), cp);
 
                 Ok(())
             }
@@ -1350,9 +1336,15 @@ mod tests {
         core.add_reaction(reaction).await.unwrap();
 
         let result = core.start_reaction("r1").await;
-        assert!(result.is_err(), "Expected error for durable reaction without durable store");
+        assert!(
+            result.is_err(),
+            "Expected error for durable reaction without durable store"
+        );
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("durable"), "Error should mention 'durable': {msg}");
+        assert!(
+            msg.contains("durable"),
+            "Error should mention 'durable': {msg}"
+        );
     }
 
     #[tokio::test]

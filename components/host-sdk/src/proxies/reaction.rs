@@ -25,11 +25,9 @@ use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use drasi_plugin_sdk::ffi::{
-    FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus,
-    FfiOutboxIterator, FfiOutboxIteratorResponse,
-    FfiResult, FfiRuntimeContext,
-    FfiSnapshotIterator, FfiSnapshotIteratorResponse,
-    FfiStr, ReactionPluginVtable, ReactionVtable,
+    FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus, FfiOutboxIterator,
+    FfiOutboxIteratorResponse, FfiResult, FfiRuntimeContext, FfiSnapshotIterator,
+    FfiSnapshotIteratorResponse, FfiStr, ReactionPluginVtable, ReactionVtable,
 };
 use libloading::Library;
 
@@ -347,8 +345,7 @@ impl Reaction for ReactionProxy {
     }
 
     fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
-        let ordinal =
-            (self.vtable.default_recovery_policy_fn)(self.vtable.state as *const c_void);
+        let ordinal = (self.vtable.default_recovery_policy_fn)(self.vtable.state as *const c_void);
         match ordinal {
             0 => ReactionRecoveryPolicy::Strict,
             1 => ReactionRecoveryPolicy::AutoReset,
@@ -369,10 +366,7 @@ impl Reaction for ReactionProxy {
         // Build the host-side callback context that the plugin's callbacks will
         // use to call back into the host's async BootstrapContext.
         let host_handle = tokio::runtime::Handle::current();
-        let ctx = Arc::new(HostBootstrapCallbackCtx {
-            ctx,
-            host_handle,
-        });
+        let ctx = Arc::new(HostBootstrapCallbackCtx { ctx, host_handle });
 
         let query_id_str = ctx.ctx.query_id.clone();
         let is_reset = ctx.ctx.is_reset;
@@ -403,10 +397,9 @@ impl Reaction for ReactionProxy {
         // The join() blocks a tokio worker thread — this is an accepted
         // trade-off per existing FFI conventions. Requires the runtime to have
         // ≥2 worker threads since host_dispatch spawns back on the same runtime.
-        let join_result = std::thread::spawn(move || {
-            (bootstrap_fn)(state.as_ptr(), ffi_ctx_send.as_ptr())
-        })
-        .join();
+        let join_result =
+            std::thread::spawn(move || (bootstrap_fn)(state.as_ptr(), ffi_ctx_send.as_ptr()))
+                .join();
 
         // Reclaim the leaked Arc reference BEFORE error propagation to prevent
         // memory leaks on thread panic.
@@ -414,8 +407,8 @@ impl Reaction for ReactionProxy {
             Arc::from_raw(ctx_raw as *const HostBootstrapCallbackCtx);
         }
 
-        let result = join_result
-            .map_err(|_| anyhow::anyhow!("Thread panicked during bootstrap"))?;
+        let result =
+            join_result.map_err(|_| anyhow::anyhow!("Thread panicked during bootstrap"))?;
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 }
@@ -509,7 +502,11 @@ extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotIter
                 let as_of_sequence = snapshot.as_of_sequence;
                 let config_hash = snapshot.config_hash;
                 let rows = snapshot.collect_vec().await;
-                Ok::<_, drasi_lib::queries::output_state::FetchError>((rows, as_of_sequence, config_hash))
+                Ok::<_, drasi_lib::queries::output_state::FetchError>((
+                    rows,
+                    as_of_sequence,
+                    config_hash,
+                ))
             }
         });
         match result {
@@ -563,7 +560,11 @@ extern "C" fn outbox_iter_drop(iter_ctx: *mut c_void) {
     }
 }
 
-fn make_error_outbox_response(msg: String, latest_sequence: u64, config_hash: u64) -> FfiOutboxIteratorResponse {
+fn make_error_outbox_response(
+    msg: String,
+    latest_sequence: u64,
+    config_hash: u64,
+) -> FfiOutboxIteratorResponse {
     FfiOutboxIteratorResponse {
         iterator: FfiOutboxIterator {
             iter_ctx: std::ptr::null_mut(),
@@ -592,15 +593,16 @@ extern "C" fn host_bootstrap_fetch_outbox(
                 let latest_sequence = outbox.latest_sequence;
                 let config_hash = outbox.config_hash;
                 let entries = outbox.collect_vec().await;
-                Ok::<_, drasi_lib::queries::output_state::FetchError>((entries, latest_sequence, config_hash))
+                Ok::<_, drasi_lib::queries::output_state::FetchError>((
+                    entries,
+                    latest_sequence,
+                    config_hash,
+                ))
             }
         });
         match result {
             Ok((entries, latest_sequence, config_hash)) => {
-                let iter_state = Box::new(OutboxIteratorState {
-                    entries,
-                    pos: 0,
-                });
+                let iter_state = Box::new(OutboxIteratorState { entries, pos: 0 });
                 let iter_ctx = Box::into_raw(iter_state) as *mut c_void;
 
                 FfiOutboxIteratorResponse {
@@ -616,9 +618,11 @@ extern "C" fn host_bootstrap_fetch_outbox(
             }
             Err(e) => {
                 let (err_msg, gap_latest, gap_hash) = match e {
-                    drasi_lib::queries::output_state::FetchError::OutboxGap(gap) => {
-                        (format!("OutboxGap:{}", gap.earliest_available), gap.latest_sequence, gap.config_hash)
-                    }
+                    drasi_lib::queries::output_state::FetchError::OutboxGap(gap) => (
+                        format!("OutboxGap:{}", gap.earliest_available),
+                        gap.latest_sequence,
+                        gap.config_hash,
+                    ),
                     other => (format!("{other}"), 0, 0),
                 };
                 make_error_outbox_response(err_msg, gap_latest, gap_hash)
@@ -632,7 +636,10 @@ extern "C" fn host_bootstrap_read_checkpoint(ctx: *mut c_void) -> FfiCheckpointR
     if ctx.is_null() {
         return FfiCheckpointResult {
             found: false,
-            checkpoint: FfiCheckpoint { sequence: 0, config_hash: 0 },
+            checkpoint: FfiCheckpoint {
+                sequence: 0,
+                config_hash: 0,
+            },
             error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
         };
     }

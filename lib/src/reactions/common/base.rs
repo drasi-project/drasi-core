@@ -339,10 +339,7 @@ impl ReactionBase {
     ///
     /// Returns `Ok(None)` if no checkpoint exists (fresh start).
     /// Errors propagate from the state store or deserialization.
-    pub async fn read_checkpoint(
-        &self,
-        query_id: &str,
-    ) -> Result<Option<ReactionCheckpoint>> {
+    pub async fn read_checkpoint(&self, query_id: &str) -> Result<Option<ReactionCheckpoint>> {
         let store = self.state_store.read().await;
         match store.as_ref() {
             Some(s) => {
@@ -383,11 +380,16 @@ impl ReactionBase {
         checkpoint: &ReactionCheckpoint,
     ) -> Result<()> {
         let store = self.state_store.read().await;
-        let store = store
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No state store configured — cannot write checkpoint"))?;
-        crate::reactions::checkpoint::write_checkpoint(store.as_ref(), &self.id, query_id, checkpoint)
-            .await
+        let store = store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No state store configured — cannot write checkpoint")
+        })?;
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            &self.id,
+            query_id,
+            checkpoint,
+        )
+        .await
     }
 
     /// Perform common cleanup operations

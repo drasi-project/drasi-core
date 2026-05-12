@@ -200,10 +200,10 @@ pub use wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig, MIN_MA
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
 
-/// Base implementations for reaction plugins
-pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Checkpoint type for durable reaction progress tracking
 pub use reactions::ReactionCheckpoint;
+/// Base implementations for reaction plugins
+pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
 

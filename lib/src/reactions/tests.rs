@@ -866,7 +866,6 @@ pub(crate) mod manager_tests {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-
     // ========================================================================
     // End-to-end bootstrap test — uses the DrasiLib public API with a real
     // query engine and a mock source that feeds bootstrap data.
@@ -981,11 +980,9 @@ pub(crate) mod manager_tests {
 
         // --- Build DrasiLib with a bootstrap mock source, a real query, and the reaction ---
 
-        let (bootstrap_tx, bootstrap_rx) =
-            tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
-        let source =
-            create_test_bootstrap_mock_source("e2e-src".to_string(), bootstrap_rx);
+        let source = create_test_bootstrap_mock_source("e2e-src".to_string(), bootstrap_rx);
 
         let (reaction, captured_snapshot, bootstrap_called) =
             SnapshotTestReaction::new("snap-reaction", vec!["e2e-query".to_string()]);
@@ -1054,7 +1051,11 @@ pub(crate) mod manager_tests {
 
         // Sanity check: the real query should have 3 result rows.
         let results = core.get_query_results("e2e-query").await.unwrap();
-        assert_eq!(results.len(), 3, "Query should have 3 result rows from bootstrap");
+        assert_eq!(
+            results.len(),
+            3,
+            "Query should have 3 result rows from bootstrap"
+        );
 
         // --- Start the reaction — triggers bootstrap → fetch_snapshot ---
         core.start_reaction("snap-reaction").await.unwrap();

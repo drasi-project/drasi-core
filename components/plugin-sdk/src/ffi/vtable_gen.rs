@@ -305,14 +305,15 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
     > {
         let cb = self.fetch_snapshot_fn;
         let ctx = SendMutPtr(self.callback_ctx);
-        let resp = tokio::task::spawn_blocking(move || {
-            SendFfiSnapshotIteratorResponse(cb(ctx.as_ptr()))
-        })
-        .await
-        .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
-            status: drasi_lib::ComponentStatus::Error,
-        })?
-        .0;
+        let resp =
+            tokio::task::spawn_blocking(move || SendFfiSnapshotIteratorResponse(cb(ctx.as_ptr())))
+                .await
+                .map_err(
+                    |_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                        status: drasi_lib::ComponentStatus::Error,
+                    },
+                )?
+                .0;
 
         // Consume error string unconditionally to prevent leaks.
         let err_str = unsafe { resp.error.into_string() };
@@ -329,11 +330,13 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         // Wrap the FFI iterator in an async stream.
         let stream = make_snapshot_stream(resp.iterator);
 
-        Ok(drasi_lib::queries::output_state::SnapshotStream::from_stream(
-            stream,
-            as_of_sequence,
-            config_hash,
-        ))
+        Ok(
+            drasi_lib::queries::output_state::SnapshotStream::from_stream(
+                stream,
+                as_of_sequence,
+                config_hash,
+            ),
+        )
     }
 
     async fn fetch_outbox(
@@ -349,9 +352,11 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             SendFfiOutboxIteratorResponse(cb(ctx.as_ptr(), after_sequence))
         })
         .await
-        .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
-            status: drasi_lib::ComponentStatus::Error,
-        })?
+        .map_err(
+            |_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            },
+        )?
         .0;
 
         // Consume error string unconditionally to prevent leaks.
@@ -430,11 +435,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
             .0;
 
-        unsafe {
-            result
-                .into_result()
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
+        unsafe { result.into_result().map_err(|e| anyhow::anyhow!("{e}")) }
     }
 }
 
@@ -1483,9 +1484,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         w.inner.needs_snapshot_on_fresh_start()
     }
 
-    extern "C" fn default_recovery_policy_fn<T: Reaction + 'static>(
-        state: *const c_void,
-    ) -> u8 {
+    extern "C" fn default_recovery_policy_fn<T: Reaction + 'static>(state: *const c_void) -> u8 {
         let w = unsafe { &*(state as *const ReactionWrapper<T>) };
         w.inner.default_recovery_policy() as u8
     }
@@ -1886,10 +1885,7 @@ pub fn build_reaction_vtable_from_boxed(
         w.inner.default_recovery_policy() as u8
     }
 
-    extern "C" fn bootstrap_fn(
-        state: *mut c_void,
-        ctx: *const FfiBootstrapContext,
-    ) -> FfiResult {
+    extern "C" fn bootstrap_fn(state: *mut c_void, ctx: *const FfiBootstrapContext) -> FfiResult {
         catch_panic_ffi(|| {
             let w = wrapper_ref(state);
             let ffi_ctx = unsafe { &*ctx };

@@ -423,7 +423,6 @@ impl DrasiQuery {
     }
 }
 
-
 #[async_trait]
 impl Query for DrasiQuery {
     async fn start(&self) -> Result<()> {
@@ -1493,10 +1492,12 @@ impl Query for DrasiQuery {
         self.wait_until_running().await?;
 
         let state = self.output_state.read().await;
-        let results = state.fetch_outbox_after(after_sequence).map_err(|mut gap| {
-            gap.config_hash = self.config_hash;
-            gap
-        })?;
+        let results = state
+            .fetch_outbox_after(after_sequence)
+            .map_err(|mut gap| {
+                gap.config_hash = self.config_hash;
+                gap
+            })?;
         Ok(OutboxResponse {
             latest_sequence: state.as_of_sequence(),
             results,

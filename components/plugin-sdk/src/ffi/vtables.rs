@@ -305,10 +305,8 @@ pub struct FfiOutboxIteratorResponse {
 }
 
 /// Callback signatures for FfiBootstrapContext.
-pub type FfiBootstrapFetchSnapshotFn =
-    extern "C" fn(*mut c_void) -> FfiSnapshotIteratorResponse;
-pub type FfiBootstrapFetchOutboxFn =
-    extern "C" fn(*mut c_void, u64) -> FfiOutboxIteratorResponse;
+pub type FfiBootstrapFetchSnapshotFn = extern "C" fn(*mut c_void) -> FfiSnapshotIteratorResponse;
+pub type FfiBootstrapFetchOutboxFn = extern "C" fn(*mut c_void, u64) -> FfiOutboxIteratorResponse;
 pub type FfiBootstrapReadCheckpointFn = extern "C" fn(*mut c_void) -> FfiCheckpointResult;
 pub type FfiBootstrapWriteCheckpointFn = extern "C" fn(*mut c_void, FfiCheckpoint) -> FfiResult;
 

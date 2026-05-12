@@ -75,10 +75,9 @@ impl BootstrapBackend for InProcessBackend {
     }
 
     async fn write_checkpoint(&self, checkpoint: &ReactionCheckpoint) -> anyhow::Result<()> {
-        let store = self
-            .state_store
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No state store configured — cannot write checkpoint"))?;
+        let store = self.state_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No state store configured — cannot write checkpoint")
+        })?;
         crate::reactions::checkpoint::write_checkpoint(
             store.as_ref(),
             &self.reaction_id,
@@ -175,10 +174,7 @@ impl BootstrapContext {
     }
 
     /// Persist a checkpoint for this query subscription.
-    pub async fn write_checkpoint(
-        &self,
-        checkpoint: &ReactionCheckpoint,
-    ) -> anyhow::Result<()> {
+    pub async fn write_checkpoint(&self, checkpoint: &ReactionCheckpoint) -> anyhow::Result<()> {
         self.backend.write_checkpoint(checkpoint).await
     }
 }

@@ -83,10 +83,7 @@ impl BootstrapBackend for MockBootstrapBackend {
         Ok(SnapshotStream::from_snapshot(snapshot))
     }
 
-    async fn fetch_outbox(
-        &self,
-        _after_sequence: u64,
-    ) -> Result<OutboxStream, FetchError> {
+    async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxStream, FetchError> {
         Ok(OutboxStream::from_outbox(
             drasi_lib::queries::output_state::OutboxResponse {
                 results: self.outbox_entries.clone(),
@@ -109,8 +106,6 @@ impl BootstrapBackend for MockBootstrapBackend {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ffi_streaming_bootstrap() {
-    
-
     // --- Load the snapshot-test cdylib ---
     let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
@@ -130,7 +125,11 @@ async fn test_ffi_streaming_bootstrap() {
     )
     .expect("Failed to load snapshot-test plugin");
 
-    assert_eq!(plugin.reaction_plugins.len(), 1, "Expected 1 reaction descriptor");
+    assert_eq!(
+        plugin.reaction_plugins.len(),
+        1,
+        "Expected 1 reaction descriptor"
+    );
 
     let descriptor = &plugin.reaction_plugins[0];
     assert_eq!(descriptor.kind(), "snapshot-test");
@@ -170,17 +169,11 @@ async fn test_ffi_streaming_bootstrap() {
         written_checkpoint: written_checkpoint.clone(),
     };
 
-    let ctx = BootstrapContext::from_backend(
-        "test-query".to_string(),
-        false,
-        Box::new(mock_backend),
-    );
+    let ctx =
+        BootstrapContext::from_backend("test-query".to_string(), false, Box::new(mock_backend));
 
     // --- Call bootstrap() through FFI — exercises the full streaming path ---
-    reaction
-        .bootstrap(ctx)
-        .await
-        .expect("bootstrap() failed");
+    reaction.bootstrap(ctx).await.expect("bootstrap() failed");
 
     // --- Verify checkpoint was written ---
     let cp = written_checkpoint.lock().await;
@@ -191,8 +184,6 @@ async fn test_ffi_streaming_bootstrap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_ffi_streaming_bootstrap_with_outbox() {
-    
-
     // --- Load the snapshot-test cdylib ---
     let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
     if !plugin_path.exists() {
@@ -224,13 +215,10 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
         .expect("Failed to create reaction via FFI");
 
     // --- Set up mock backend with snapshot + outbox data ---
-    let snapshot_rows = vec![
-        serde_json::json!({"x": 1}),
-        serde_json::json!({"x": 2}),
-    ];
+    let snapshot_rows = vec![serde_json::json!({"x": 1}), serde_json::json!({"x": 2})];
 
-    let outbox_entries: Vec<Arc<drasi_lib::channels::QueryResult>> = vec![
-        Arc::new(drasi_lib::channels::QueryResult::new(
+    let outbox_entries: Vec<Arc<drasi_lib::channels::QueryResult>> =
+        vec![Arc::new(drasi_lib::channels::QueryResult::new(
             "test-query".to_string(),
             43,
             chrono::Utc::now(),
@@ -239,8 +227,7 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
                 row_signature: 300,
             }],
             std::collections::HashMap::new(),
-        )),
-    ];
+        ))];
 
     let written_checkpoint = Arc::new(Mutex::new(None));
 
@@ -254,11 +241,8 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
         written_checkpoint: written_checkpoint.clone(),
     };
 
-    let ctx = BootstrapContext::from_backend(
-        "test-query".to_string(),
-        false,
-        Box::new(mock_backend),
-    );
+    let ctx =
+        BootstrapContext::from_backend("test-query".to_string(), false, Box::new(mock_backend));
 
     // --- Call bootstrap() — exercises both snapshot AND outbox streaming ---
     reaction
