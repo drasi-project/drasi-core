@@ -589,11 +589,15 @@ impl Reaction for SseReaction {
                                         // Stream the snapshot as a JSON array using chunked
                                         // transfer encoding. This keeps memory proportional to
                                         // a single row rather than the full result set.
-                                        let is_first = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                                        let is_first = std::sync::Arc::new(
+                                            std::sync::atomic::AtomicBool::new(true),
+                                        );
                                         let row_stream = snapshot.map(move |row| {
                                             let json = serde_json::to_string(&row)
                                                 .unwrap_or_else(|_| "null".into());
-                                            if is_first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                            if is_first
+                                                .swap(false, std::sync::atomic::Ordering::Relaxed)
+                                            {
                                                 json
                                             } else {
                                                 format!(",{json}")

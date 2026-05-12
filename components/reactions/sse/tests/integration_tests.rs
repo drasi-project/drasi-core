@@ -937,8 +937,14 @@ async fn test_sse_snapshot_large_result() -> Result<()> {
 
     // Verify each row has the expected fields
     for row in rows {
-        assert!(row.get("name").is_some(), "Each row should have a name field");
-        assert!(row.get("age").is_some(), "Each row should have an age field");
+        assert!(
+            row.get("name").is_some(),
+            "Each row should have a name field"
+        );
+        assert!(
+            row.get("age").is_some(),
+            "Each row should have an age field"
+        );
     }
 
     core.stop().await?;
