@@ -44,6 +44,7 @@ pub enum RecoveryPolicy {
 /// `RecoveryPolicy`, reactions support an additional `AutoSkipGap` variant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum ReactionRecoveryPolicy {
     /// Fail startup if the outbox cannot satisfy the checkpoint position.
     /// Requires manual intervention. Favors correctness over availability.

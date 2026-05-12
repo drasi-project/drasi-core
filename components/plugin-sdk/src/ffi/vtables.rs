@@ -284,7 +284,8 @@ pub type FfiBootstrapWriteCheckpointFn = extern "C" fn(*mut c_void, FfiCheckpoin
 pub struct FfiBootstrapContext {
     /// Query ID this bootstrap is for.
     pub query_id: FfiStr,
-    /// Whether this is a full reset (true) or gap recovery (false).
+    /// `true` when a prior checkpoint is being discarded (reset/recovery).
+    /// `false` on a fresh start with no prior checkpoint.
     pub is_reset: bool,
     /// Opaque host context passed as first arg to all callbacks.
     pub callback_ctx: *mut c_void,

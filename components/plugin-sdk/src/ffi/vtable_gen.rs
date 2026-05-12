@@ -197,8 +197,11 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         }
 
         // Deserialize data_json into Vec<serde_json::Value>.
-        let values: Vec<serde_json::Value> =
-            serde_json::from_str(&data_json).unwrap_or_default();
+        let values: Vec<serde_json::Value> = serde_json::from_str(&data_json).map_err(|e| {
+            drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            }
+        })?;
 
         Ok(drasi_lib::queries::output_state::SnapshotResponse::from_vec(
             values,
@@ -248,7 +251,11 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         }
 
         let results: Vec<drasi_lib::channels::QueryResult> =
-            serde_json::from_str(&results_json).unwrap_or_default();
+            serde_json::from_str(&results_json).map_err(|e| {
+                drasi_lib::queries::output_state::FetchError::NotRunning {
+                    status: drasi_lib::ComponentStatus::Error,
+                }
+            })?;
 
         Ok(drasi_lib::queries::output_state::OutboxResponse {
             results: results.into_iter().map(Arc::new).collect(),

@@ -360,12 +360,6 @@ impl Reaction for ReactionProxy {
         }
     }
 
-    // TODO(#400): `bootstrap()` FFI bridge deferred.
-    // The async bootstrap hook requires marshaling a `BootstrapContext` (which
-    // carries an `Arc<dyn Query>`) across the FFI boundary. This is complex
-    // and should be implemented alongside the orchestration that invokes it.
-    // Until then, dynamically-loaded reaction plugins use the default no-op.
-
     async fn bootstrap(
         &self,
         ctx: drasi_lib::reactions::bootstrap_context::BootstrapContext,

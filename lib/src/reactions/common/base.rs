@@ -495,8 +495,9 @@ impl ReactionBase {
     /// 2. Checks the event's sequence against the persisted checkpoint —
     ///    events at or before the checkpoint are silently skipped (dedup).
     /// 3. Calls `handler` with the event.
-    /// 4. On success, writes a new checkpoint with the event's sequence and
-    ///    the config hash derived from the query result.
+    /// 4. On success, writes a new checkpoint with the event's sequence,
+    ///    preserving the `config_hash` from the initial checkpoint map
+    ///    (or 0 if no prior checkpoint exists for that query).
     /// 5. Breaks when `shutdown_rx` fires.
     ///
     /// # Arguments

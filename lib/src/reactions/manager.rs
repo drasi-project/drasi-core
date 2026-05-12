@@ -185,6 +185,9 @@ impl ReactionManager {
             .subscribe_and_bootstrap(&id, reaction.clone(), gate_rx)
             .await
         {
+            // Abort any forwarder/supervisor tasks spawned during wire_subscriptions.
+            Self::abort_subscription_tasks_static(&self.subscription_tasks, &id).await;
+
             // Revert to Error since the reaction can't receive data without subscriptions
             let mut graph = self.graph.write().await;
             let _ = graph.validate_and_transition(
@@ -959,7 +962,14 @@ impl ReactionManager {
                 async move {
                     // Wait for the bootstrap gate to open before processing.
                     // watch::wait_for retains the value, so even late subscribers see it.
-                    let _ = gate_rx.wait_for(|v| *v).await;
+                    // If the sender is dropped (bootstrap failed), exit immediately.
+                    if gate_rx.wait_for(|v| *v).await.is_err() {
+                        log::debug!(
+                            "[{reaction_id_owned}] Gate sender dropped for query '{query_id_clone}' \
+                             — exiting forwarder (bootstrap likely failed)"
+                        );
+                        return;
+                    }
 
                     // Read the initial checkpoint sequence so we can skip stale events
                     // that were buffered in the broadcast channel during bootstrap.

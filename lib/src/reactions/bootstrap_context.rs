@@ -104,7 +104,9 @@ impl BootstrapBackend for InProcessBackend {
 pub struct BootstrapContext {
     /// The query ID this bootstrap is for.
     pub query_id: String,
-    /// Whether this is a full reset (true) or a gap recovery (false).
+    /// `true` when the reaction previously had a checkpoint that is being
+    /// discarded (e.g., `AutoReset` recovery or config-hash mismatch).
+    /// `false` on a fresh start when no prior checkpoint existed.
     pub is_reset: bool,
     /// The backend that provides the actual implementations.
     backend: Box<dyn BootstrapBackend>,
