@@ -256,21 +256,32 @@ impl Source for SourceProxy {
         self
     }
 
-    /// Plugin sources do not yet have FFI vtable entries for `supports_replay`
-    /// or `remove_position_handle`. Override the trait default (true) to false
-    /// so the orchestration layer does not assume plugin sources can replay
-    /// from a checkpointed position until the FFI wiring is added.
     fn supports_replay(&self) -> bool {
-        false
+        (self.vtable.supports_replay_fn)(self.vtable.state)
     }
 
-    /// No-op override — plugin sources do not yet have an FFI vtable entry for
-    /// `remove_position_handle`. Log a debug message so the gap is visible.
     async fn remove_position_handle(&self, query_id: &str) {
-        log::debug!(
-            "SourceProxy::remove_position_handle('{query_id}') called but no FFI vtable entry exists; \
-             this is a no-op until the FFI SDK is updated"
-        );
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let remove_fn = self.vtable.remove_position_handle_fn;
+        let qid = query_id.to_string();
+        let result = std::thread::spawn(move || {
+            let ffi_qid = drasi_plugin_sdk::ffi::FfiStr::from_str(&qid);
+            (remove_fn)(state.as_ptr(), ffi_qid)
+        })
+        .join()
+        .map(|r| unsafe { r.into_result() });
+
+        match result {
+            Ok(Ok(())) => {
+                log::debug!("SourceProxy::remove_position_handle('{query_id}') completed via FFI");
+            }
+            Ok(Err(e)) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI error: {e}");
+            }
+            Err(_) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') thread panicked");
+            }
+        }
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {

@@ -247,6 +247,16 @@ drasi_ffi_primitives::ffi_vtable! {
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
+
+        // Recovery / checkpoint support
+        /// Returns true if this source can replay events from a checkpointed
+        /// position, enabling checkpoint-based recovery for persistent queries.
+        fn supports_replay_fn(state: *const) -> bool,
+
+        /// Tells the source that the given query no longer needs its position
+        /// handle. The source can stop tracking the resume position for this
+        /// query.
+        fn remove_position_handle_fn(state: *mut, query_id: FfiStr) -> FfiResult,
     }
 }
 

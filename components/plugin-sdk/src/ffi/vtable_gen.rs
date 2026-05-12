@@ -505,6 +505,28 @@ pub fn build_source_vtable<T: Source + 'static>(
         });
     }
 
+    extern "C" fn supports_replay_fn<T: Source + 'static>(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn<T: Source + 'static>(
+        state: *mut c_void,
+        query_id: FfiStr,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -538,6 +560,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         initialize_fn: initialize_fn::<T>,
         subscribe_fn: subscribe_fn::<T>,
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
+        supports_replay_fn: supports_replay_fn::<T>,
+        remove_position_handle_fn: remove_position_handle_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -854,6 +878,25 @@ pub fn build_source_vtable_from_boxed(
         });
     }
 
+    extern "C" fn supports_replay_fn(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn(state: *mut c_void, query_id: FfiStr) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -887,6 +930,8 @@ pub fn build_source_vtable_from_boxed(
         initialize_fn,
         subscribe_fn,
         set_bootstrap_provider_fn,
+        supports_replay_fn,
+        remove_position_handle_fn,
         drop_fn,
     }
 }
