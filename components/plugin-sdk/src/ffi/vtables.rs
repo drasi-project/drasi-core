@@ -127,7 +127,44 @@ pub struct FfiSubscriptionResponse {
     pub receiver: *mut FfiChangeReceiver,
     /// Null if no bootstrap data available.
     pub bootstrap_receiver: *mut FfiBootstrapReceiver,
+    /// Shared position handle for the query to report its last durably-processed
+    /// sequence. The plugin source allocates this via `SourceBase::create_position_handle()`
+    /// and transfers one `Arc` ref-count across FFI via `Arc::into_raw`. The host
+    /// reconstructs with `Arc::from_raw` and writes to the `AtomicU64` as it commits
+    /// events. Null if position tracking was not requested.
+    pub position_handle_ptr: *const std::ffi::c_void,
+    /// Null if no bootstrap result is expected (no bootstrap active).
+    pub bootstrap_result_receiver: *mut FfiBootstrapResultReceiver,
 }
+
+/// Callback type for delivering a bootstrap result from plugin to host.
+/// The plugin calls this when the bootstrap `oneshot::Receiver` resolves.
+/// `result` is a heap-allocated `FfiBootstrapResult` — the host takes ownership.
+pub type FfiBootstrapResultCallbackFn =
+    extern "C" fn(ctx: *mut std::ffi::c_void, result: *mut FfiBootstrapResult);
+
+/// Push-based receiver for the bootstrap handover result.
+///
+/// The host calls `start_fn` with a callback + context. The plugin spawns an
+/// async task on its runtime that awaits the underlying `oneshot::Receiver`,
+/// converts the `BootstrapResult` to `FfiBootstrapResult`, and calls the
+/// callback. This avoids blocking any thread during long-running bootstraps.
+#[repr(C)]
+pub struct FfiBootstrapResultReceiver {
+    pub state: *mut std::ffi::c_void,
+    /// Start listening for the result. Plugin spawns async task that calls
+    /// `callback(ctx, result)` when the bootstrap result is ready.
+    /// Returns immediately — does not block.
+    pub start_fn: extern "C" fn(
+        state: *mut std::ffi::c_void,
+        callback: FfiBootstrapResultCallbackFn,
+        ctx: *mut std::ffi::c_void,
+    ),
+    pub drop_fn: extern "C" fn(state: *mut std::ffi::c_void),
+}
+
+unsafe impl Send for FfiBootstrapResultReceiver {}
+unsafe impl Sync for FfiBootstrapResultReceiver {}
 
 // ============================================================================
 // Query result events — carries QueryResult across FFI to reactions
@@ -243,7 +280,7 @@ drasi_ffi_primitives::ffi_vtable! {
         /// Subscribe with query_id, node_labels JSON, relation_labels JSON,
         /// optional resume_from position bytes, and optional last_sequence
         /// for sequence counter recovery.
-        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, has_last_sequence: bool, last_sequence: u64) -> *mut FfiSubscriptionResponse,
+        fn subscribe_fn(state: *mut, source_id: FfiStr, enable_bootstrap: bool, query_id: FfiStr, nodes_json: FfiStr, relations_json: FfiStr, resume_from_ptr: *const u8, resume_from_len: u32, has_last_sequence: bool, last_sequence: u64, request_position_handle: bool) -> *mut FfiSubscriptionResponse,
 
         /// Host calls this to inject an external bootstrap provider (from another plugin).
         fn set_bootstrap_provider_fn(state: *mut, provider: *mut BootstrapProviderVtable),
