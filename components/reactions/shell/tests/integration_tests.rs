@@ -495,3 +495,70 @@ async fn test_shell_reaction_concurrent_execution_limit() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the shell reaction accepts the failure of the script and adds it to the invocation details without crashing.
+async fn test_shell_reaction_script_failure() -> Result<()> {
+
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test2");
+    // make the script executable
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([
+            ("FAIL_EXIT".to_string(), "true".to_string()),
+        ]),
+        timeout_s: 20,
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+
+    // 13 secs to wait for the test2 to finish
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    let exit_status = invocations[0]["exit_status"].as_i64().unwrap_or(0);
+    assert_eq!(exit_status, 1, "operations.sh should exit with 1");
+
+    let stdout = invocations[0]["stdout"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    assert!(
+        stdout.contains("Failing with status 1 as FAIL_EXIT is set to true"),
+        "stdout should contain the failure message from the script, got: {stdout}"
+    );
+
+
+    let properties = get_reaction_properties(&core, &shell_reaction_slot_name).await?;
+    let non_zero_exits = properties
+        .get("non_zero_exits")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    assert_eq!(
+        non_zero_exits, 1,
+        "there should be 1 non-zero exit for the script execution, got {non_zero_exits}"
+    );
+    
+    Ok(())
+}
