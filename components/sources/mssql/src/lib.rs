@@ -338,7 +338,9 @@ impl Source for MsSqlSource {
                 Ok(lsn) => {
                     log::info!(
                         "Subscriber '{}' requesting resume from LSN {} on source '{}'",
-                        settings.query_id, lsn, self.base.id
+                        settings.query_id,
+                        lsn,
+                        self.base.id
                     );
                     let mut guard = self.subscriber_resume_lsns.write().await;
                     guard.insert(settings.query_id.clone(), lsn);

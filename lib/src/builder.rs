@@ -263,10 +263,7 @@ impl DrasiLibBuilder {
     ///
     /// Per-query `QueryConfig::recovery_policy` overrides this.
     /// If neither is set, defaults to [`RecoveryPolicy::Strict`](crate::RecoveryPolicy::Strict).
-    pub fn with_default_recovery_policy(
-        mut self,
-        policy: crate::recovery::RecoveryPolicy,
-    ) -> Self {
+    pub fn with_default_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
         self.default_recovery_policy = Some(policy);
         self
     }

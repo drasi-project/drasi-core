@@ -774,10 +774,7 @@ impl SourceBase {
     /// the entire batch. This is more efficient than calling
     /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
     /// processes multiple rows per poll cycle.
-    pub async fn dispatch_events_batch(
-        &self,
-        events: Vec<SourceEventWrapper>,
-    ) -> Result<()> {
+    pub async fn dispatch_events_batch(&self, events: Vec<SourceEventWrapper>) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }

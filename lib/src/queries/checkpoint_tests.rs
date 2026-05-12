@@ -1381,19 +1381,27 @@ mod tests {
             sequence: u64,
             source_position: Option<&Bytes>,
         ) -> Result<(), drasi_core::interface::IndexError> {
-            self.inner.stage_checkpoint(source_id, sequence, source_position).await
+            self.inner
+                .stage_checkpoint(source_id, sequence, source_position)
+                .await
         }
 
         async fn read_checkpoint(
             &self,
             source_id: &str,
-        ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, drasi_core::interface::IndexError> {
+        ) -> Result<
+            Option<drasi_core::interface::SourceCheckpoint>,
+            drasi_core::interface::IndexError,
+        > {
             self.inner.read_checkpoint(source_id).await
         }
 
         async fn read_all_checkpoints(
             &self,
-        ) -> Result<std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>, drasi_core::interface::IndexError> {
+        ) -> Result<
+            std::collections::HashMap<String, drasi_core::interface::SourceCheckpoint>,
+            drasi_core::interface::IndexError,
+        > {
             self.inner.read_all_checkpoints().await
         }
 
@@ -1401,7 +1409,10 @@ mod tests {
             self.inner.clear_checkpoints().await
         }
 
-        async fn write_config_hash(&self, hash: u64) -> Result<(), drasi_core::interface::IndexError> {
+        async fn write_config_hash(
+            &self,
+            hash: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.write_config_hash(hash).await
         }
 
@@ -1431,7 +1442,8 @@ mod tests {
         async fn create_indexes(
             &self,
             query_id: &str,
-        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError> {
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -1550,7 +1562,8 @@ mod tests {
     /// across stop/start and resume_from is populated on restart.
     #[tokio::test]
     async fn test_config_hash_match_preserves_checkpoints() {
-        let (query_manager, source_manager, graph) = create_test_env_with_persistent_backend().await;
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_persistent_backend().await;
         let mut event_rx = graph.read().await.subscribe();
 
         // Add and start source
@@ -1633,7 +1646,10 @@ mod tests {
             .await
             .expect("Should have checkpoint store");
         let cp = cp_store.read_checkpoint("hash-src").await.unwrap();
-        assert!(cp.is_some(), "Checkpoint should exist after processing event");
+        assert!(
+            cp.is_some(),
+            "Checkpoint should exist after processing event"
+        );
         let cp_seq_before = cp.unwrap().sequence;
 
         // Stop query
@@ -1701,7 +1717,8 @@ mod tests {
     /// are cleared and a full bootstrap is triggered.
     #[tokio::test]
     async fn test_config_hash_mismatch_clears_checkpoints() {
-        let (query_manager, source_manager, graph) = create_test_env_with_persistent_backend().await;
+        let (query_manager, source_manager, graph) =
+            create_test_env_with_persistent_backend().await;
         let mut event_rx = graph.read().await.subscribe();
 
         // Add and start source
@@ -1720,10 +1737,8 @@ mod tests {
         .await;
 
         // Create + start query with persistent backend
-        let config = create_persistent_query_config(
-            "mismatch-query",
-            vec!["mismatch-src".to_string()],
-        );
+        let config =
+            create_persistent_query_config("mismatch-query", vec!["mismatch-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
         query_manager
             .start_query("mismatch-query".to_string())
@@ -1791,7 +1806,10 @@ mod tests {
 
         // Also verify the config hash was written
         let hash_before = cp_store.read_config_hash().await.unwrap();
-        assert!(hash_before.is_some(), "Config hash should be written on first start");
+        assert!(
+            hash_before.is_some(),
+            "Config hash should be written on first start"
+        );
 
         // Stop query
         query_manager
@@ -1808,35 +1826,38 @@ mod tests {
 
         // Change the query config by updating the query text
         query_manager
-            .update_query("mismatch-query".to_string(), QueryConfig {
-                id: "mismatch-query".to_string(),
-                query: "MATCH (n:Person) RETURN n.name, n.age".to_string(),
-                query_language: QueryLanguage::Cypher,
-                middleware: vec![],
-                sources: vec![SourceSubscriptionConfig {
-                    nodes: vec![],
-                    relations: vec![],
-                    source_id: "mismatch-src".to_string(),
-                    pipeline: vec![],
-                }],
-                auto_start: true,
-                joins: None,
-                enable_bootstrap: false,
-                bootstrap_buffer_size: 100,
-                priority_queue_capacity: None,
-                dispatch_buffer_capacity: None,
-                dispatch_mode: None,
-                storage_backend: Some(crate::indexes::config::StorageBackendRef::Inline(
-                    crate::indexes::config::StorageBackendSpec::RocksDb {
-                        path: "/tmp/test-drasi".to_string(),
-                        enable_archive: false,
-                        direct_io: false,
-                    },
-                )),
-                recovery_policy: None,
-                outbox_capacity: 1000,
-                bootstrap_timeout_secs: 300,
-            })
+            .update_query(
+                "mismatch-query".to_string(),
+                QueryConfig {
+                    id: "mismatch-query".to_string(),
+                    query: "MATCH (n:Person) RETURN n.name, n.age".to_string(),
+                    query_language: QueryLanguage::Cypher,
+                    middleware: vec![],
+                    sources: vec![SourceSubscriptionConfig {
+                        nodes: vec![],
+                        relations: vec![],
+                        source_id: "mismatch-src".to_string(),
+                        pipeline: vec![],
+                    }],
+                    auto_start: true,
+                    joins: None,
+                    enable_bootstrap: false,
+                    bootstrap_buffer_size: 100,
+                    priority_queue_capacity: None,
+                    dispatch_buffer_capacity: None,
+                    dispatch_mode: None,
+                    storage_backend: Some(crate::indexes::config::StorageBackendRef::Inline(
+                        crate::indexes::config::StorageBackendSpec::RocksDb {
+                            path: "/tmp/test-drasi".to_string(),
+                            enable_archive: false,
+                            direct_io: false,
+                        },
+                    )),
+                    recovery_policy: None,
+                    outbox_capacity: 1000,
+                    bootstrap_timeout_secs: 300,
+                },
+            )
             .await
             .unwrap();
 
@@ -2197,7 +2218,11 @@ mod tests {
     }
 
     /// Helper to create a Person node insert event.
-    fn make_person_insert(source_id: &str, node_id: &str, name: &str) -> drasi_core::models::SourceChange {
+    fn make_person_insert(
+        source_id: &str,
+        node_id: &str,
+        name: &str,
+    ) -> drasi_core::models::SourceChange {
         drasi_core::models::SourceChange::Insert {
             element: drasi_core::models::Element::Node {
                 metadata: drasi_core::models::ElementMetadata {
@@ -2239,8 +2264,7 @@ mod tests {
             tokio::sync::oneshot::channel::<anyhow::Result<crate::bootstrap::BootstrapResult>>();
 
         // Create and register the handover test source
-        let source =
-            HandoverTestSource::new("handover-src", bootstrap_rx, result_rx).unwrap();
+        let source = HandoverTestSource::new("handover-src", bootstrap_rx, result_rx).unwrap();
         add_source(&source_manager, &graph, source).await.unwrap();
         source_manager
             .start_source("handover-src".to_string())
@@ -2343,10 +2367,7 @@ mod tests {
             .await
             .expect("Should have checkpoint store");
 
-        let cp = cp_store
-            .read_checkpoint("handover-src")
-            .await
-            .unwrap();
+        let cp = cp_store.read_checkpoint("handover-src").await.unwrap();
         assert!(
             cp.is_some(),
             "Checkpoint should exist after processing post-handover events"
@@ -2411,8 +2432,10 @@ mod tests {
         async fn read_checkpoint(
             &self,
             source_id: &str,
-        ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, drasi_core::interface::IndexError>
-        {
+        ) -> Result<
+            Option<drasi_core::interface::SourceCheckpoint>,
+            drasi_core::interface::IndexError,
+        > {
             self.inner.read_checkpoint(source_id).await
         }
 
@@ -2440,13 +2463,14 @@ mod tests {
             self.inner.clear_checkpoints().await
         }
 
-        async fn write_config_hash(&self, hash: u64) -> Result<(), drasi_core::interface::IndexError> {
+        async fn write_config_hash(
+            &self,
+            hash: u64,
+        ) -> Result<(), drasi_core::interface::IndexError> {
             self.inner.write_config_hash(hash).await
         }
 
-        async fn read_config_hash(
-            &self,
-        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+        async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             if self
                 .fail_read_config_hash
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -2487,7 +2511,8 @@ mod tests {
         async fn create_indexes(
             &self,
             query_id: &str,
-        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError> {
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -2544,10 +2569,7 @@ mod tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
-            vec![],
-            Some(plugin),
-        ));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], Some(plugin)));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(crate::queries::QueryManager::new(
@@ -2590,10 +2612,7 @@ mod tests {
 
         // Pre-seed a checkpoint to simulate prior state
         let store = plugin.get_store("fail-query").await;
-        store
-            .stage_checkpoint("fail-src", 42, None)
-            .await
-            .unwrap();
+        store.stage_checkpoint("fail-src", 42, None).await.unwrap();
         store.write_config_hash(12345).await.unwrap();
 
         // Make read_config_hash fail
@@ -2682,7 +2701,6 @@ mod tests {
         );
     }
 }
-
 
 // ============================================================================
 // Orchestration & Recovery tests (issue #371)
@@ -2858,11 +2876,15 @@ mod orchestration_tests {
             self.subscribe_count
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 
-            if self.remaining_failures.fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |n| if n > 0 { Some(n - 1) } else { None },
-            ).is_ok() {
+            if self
+                .remaining_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |n| if n > 0 { Some(n - 1) } else { None },
+                )
+                .is_ok()
+            {
                 return Err(crate::sources::SourceError::PositionUnavailable {
                     source_id: self.id().to_string(),
                     requested: settings.resume_from.unwrap_or_default(),
@@ -2927,8 +2949,10 @@ mod orchestration_tests {
         async fn read_checkpoint(
             &self,
             source_id: &str,
-        ) -> Result<Option<drasi_core::interface::SourceCheckpoint>, drasi_core::interface::IndexError>
-        {
+        ) -> Result<
+            Option<drasi_core::interface::SourceCheckpoint>,
+            drasi_core::interface::IndexError,
+        > {
             self.inner.read_checkpoint(source_id).await
         }
         async fn read_all_checkpoints(
@@ -2939,9 +2963,7 @@ mod orchestration_tests {
         > {
             self.inner.read_all_checkpoints().await
         }
-        async fn read_config_hash(
-            &self,
-        ) -> Result<Option<u64>, drasi_core::interface::IndexError> {
+        async fn read_config_hash(&self) -> Result<Option<u64>, drasi_core::interface::IndexError> {
             self.inner.read_config_hash().await
         }
         async fn write_config_hash(
@@ -2972,7 +2994,8 @@ mod orchestration_tests {
         async fn create_indexes(
             &self,
             query_id: &str,
-        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError> {
+        ) -> Result<drasi_core::interface::CreatedIndexes, drasi_core::interface::IndexError>
+        {
             use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
             use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
             use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
@@ -3186,7 +3209,10 @@ mod orchestration_tests {
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager.start_query("vol-query".to_string()).await;
-        assert!(result.is_ok(), "Volatile query + volatile source should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Volatile query + volatile source should succeed: {result:?}"
+        );
 
         wait_for_component_status(
             &mut event_rx,
@@ -3195,15 +3221,17 @@ mod orchestration_tests {
             std::time::Duration::from_secs(5),
         )
         .await;
-        query_manager.stop_query("vol-query".to_string()).await.unwrap();
+        query_manager
+            .stop_query("vol-query".to_string())
+            .await
+            .unwrap();
     }
 
     /// Persistent query + durable source → no compatibility error.
     #[tokio::test]
     async fn test_persistent_query_with_durable_source_ok() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DurableTestSource::new("dur-src").unwrap();
@@ -3216,15 +3244,15 @@ mod orchestration_tests {
         )
         .await;
 
-        let config = create_persistent_query_config(
-            "persist-query",
-            vec!["dur-src".to_string()],
-            None,
-        );
+        let config =
+            create_persistent_query_config("persist-query", vec!["dur-src".to_string()], None);
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager.start_query("persist-query".to_string()).await;
-        assert!(result.is_ok(), "Persistent + durable should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Persistent + durable should succeed: {result:?}"
+        );
 
         wait_for_component_status(
             &mut event_rx,
@@ -3233,15 +3261,17 @@ mod orchestration_tests {
             std::time::Duration::from_secs(5),
         )
         .await;
-        query_manager.stop_query("persist-query".to_string()).await.unwrap();
+        query_manager
+            .stop_query("persist-query".to_string())
+            .await
+            .unwrap();
     }
 
     /// Persistent query + volatile source → IncompatibleSource error.
     #[tokio::test]
     async fn test_persistent_query_with_volatile_source_fails() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = VolatileTestSource::new("vol-src").unwrap();
@@ -3254,14 +3284,13 @@ mod orchestration_tests {
         )
         .await;
 
-        let config = create_persistent_query_config(
-            "incompat-query",
-            vec!["vol-src".to_string()],
-            None,
-        );
+        let config =
+            create_persistent_query_config("incompat-query", vec!["vol-src".to_string()], None);
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("incompat-query".to_string()).await;
+        let result = query_manager
+            .start_query("incompat-query".to_string())
+            .await;
         assert!(result.is_err(), "Persistent + volatile should fail");
 
         let err_msg = result.unwrap_err().to_string();
@@ -3283,8 +3312,7 @@ mod orchestration_tests {
     #[tokio::test]
     async fn test_position_unavailable_strict_policy_fails() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DurableTestSource::new("strict-src").unwrap();
@@ -3327,16 +3355,13 @@ mod orchestration_tests {
     #[tokio::test]
     async fn test_position_unavailable_auto_reset_retries() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DurableTestSource::new("reset-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
-        add_source(&source_manager, &graph, source)
-            .await
-            .unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
             &mut event_rx,
             "reset-src",
@@ -3353,7 +3378,10 @@ mod orchestration_tests {
         add_query(&query_manager, &graph, config).await.unwrap();
 
         let result = query_manager.start_query("reset-query".to_string()).await;
-        assert!(result.is_ok(), "AutoReset should retry and succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "AutoReset should retry and succeed: {result:?}"
+        );
 
         assert_eq!(
             sub_count.load(std::sync::atomic::Ordering::Acquire),
@@ -3368,15 +3396,17 @@ mod orchestration_tests {
             std::time::Duration::from_secs(5),
         )
         .await;
-        query_manager.stop_query("reset-query".to_string()).await.unwrap();
+        query_manager
+            .stop_query("reset-query".to_string())
+            .await
+            .unwrap();
     }
 
     /// Default recovery policy (Strict) applies when neither per-query nor global is set.
     #[tokio::test]
     async fn test_default_strict_policy_when_none_configured() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DurableTestSource::new("default-src").unwrap();
@@ -3400,7 +3430,10 @@ mod orchestration_tests {
         let result = query_manager
             .start_query("default-policy-query".to_string())
             .await;
-        assert!(result.is_err(), "Default Strict + PositionUnavailable should fail");
+        assert!(
+            result.is_err(),
+            "Default Strict + PositionUnavailable should fail"
+        );
     }
 
     /// Global default AutoReset policy applies when per-query is not set.
@@ -3414,9 +3447,7 @@ mod orchestration_tests {
         let source = DurableTestSource::new("global-src").unwrap();
         source.set_fail_count(1); // fail once, succeed on retry
         let sub_count = source.subscribe_count_handle();
-        add_source(&source_manager, &graph, source)
-            .await
-            .unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
             &mut event_rx,
             "global-src",
@@ -3435,7 +3466,10 @@ mod orchestration_tests {
         let result = query_manager
             .start_query("global-policy-query".to_string())
             .await;
-        assert!(result.is_ok(), "Global AutoReset should trigger retry: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Global AutoReset should trigger retry: {result:?}"
+        );
         assert_eq!(sub_count.load(std::sync::atomic::Ordering::Acquire), 2);
 
         wait_for_component_status(
@@ -3478,24 +3512,26 @@ mod orchestration_tests {
         );
         add_query(&query_manager, &graph, config).await.unwrap();
 
-        let result = query_manager.start_query("override-query".to_string()).await;
-        assert!(result.is_err(), "Per-query Strict should override global AutoReset");
+        let result = query_manager
+            .start_query("override-query".to_string())
+            .await;
+        assert!(
+            result.is_err(),
+            "Per-query Strict should override global AutoReset"
+        );
     }
 
     /// AutoReset retry that fails again → Error state.
     #[tokio::test]
     async fn test_auto_reset_double_failure_errors() {
         let plugin = Arc::new(MockPersistentPlugin::new());
-        let (query_manager, source_manager, graph) =
-            create_test_env(Some(plugin), None).await;
+        let (query_manager, source_manager, graph) = create_test_env(Some(plugin), None).await;
         let mut event_rx = graph.read().await.subscribe();
 
         let source = DurableTestSource::new("double-fail-src").unwrap();
         source.set_fail_count(u32::MAX);
         let sub_count = source.subscribe_count_handle();
-        add_source(&source_manager, &graph, source)
-            .await
-            .unwrap();
+        add_source(&source_manager, &graph, source).await.unwrap();
         wait_for_component_status(
             &mut event_rx,
             "double-fail-src",
@@ -3514,7 +3550,10 @@ mod orchestration_tests {
         let result = query_manager
             .start_query("double-fail-query".to_string())
             .await;
-        assert!(result.is_err(), "Double failure should error even with AutoReset");
+        assert!(
+            result.is_err(),
+            "Double failure should error even with AutoReset"
+        );
 
         // Source should have been subscribed exactly twice
         assert_eq!(sub_count.load(std::sync::atomic::Ordering::Acquire), 2);

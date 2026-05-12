@@ -22,7 +22,9 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use super::types::{now_us, FfiStr};
-use super::vtables::{BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapResult, FfiBootstrapSender};
+use super::vtables::{
+    BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapResult, FfiBootstrapSender,
+};
 use drasi_lib::bootstrap::{BootstrapProvider, BootstrapResult};
 
 /// Plugin-side proxy: wraps a `BootstrapProviderVtable` into a local `BootstrapProvider`.

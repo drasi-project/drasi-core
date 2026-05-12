@@ -171,17 +171,13 @@ async fn run_cdc_polling_loop(
             match current_lsn {
                 Some(ref checkpoint_lsn) if resume_lsn < *checkpoint_lsn => {
                     warn!(
-                        "Minimum subscriber resume LSN {} is earlier than source checkpoint {}; \
-                         rewinding to subscriber position",
-                        resume_lsn, checkpoint_lsn
+                        "Minimum subscriber resume LSN {resume_lsn} is earlier than source checkpoint {checkpoint_lsn}; \
+                         rewinding to subscriber position"
                     );
                     current_lsn = Some(resume_lsn);
                 }
                 None => {
-                    info!(
-                        "No source checkpoint; using minimum subscriber resume LSN {}",
-                        resume_lsn
-                    );
+                    info!("No source checkpoint; using minimum subscriber resume LSN {resume_lsn}");
                     current_lsn = Some(resume_lsn);
                 }
                 _ => {
@@ -209,16 +205,7 @@ async fn run_cdc_polling_loop(
 
         let lsn_before = current_lsn;
 
-        match poll_cdc_changes(
-            source_id,
-            config,
-            client,
-            &pk_cache,
-            &mut current_lsn,
-            base,
-        )
-        .await
-        {
+        match poll_cdc_changes(source_id, config, client, &pk_cache, &mut current_lsn, base).await {
             Ok(change_count) => {
                 // Reset error counter on success
                 consecutive_errors = 0;

@@ -723,7 +723,9 @@ impl Query for DrasiQuery {
             let current_hash = super::compute_config_hash(&self.base.config);
 
             if let Some(sc) = &session_control {
-                sc.begin().await.context("Failed to begin session for config hash check")?;
+                sc.begin()
+                    .await
+                    .context("Failed to begin session for config hash check")?;
             }
 
             let config_matches = match checkpoint_store.read_config_hash().await {
@@ -772,7 +774,9 @@ impl Query for DrasiQuery {
                         &archive_index,
                         &result_index,
                         &future_queue,
-                    ).await {
+                    )
+                    .await
+                    {
                         let msg = format!(
                             "Query '{}' failed to clear persistent indexes on config change: {e}",
                             self.base.config.id
@@ -822,7 +826,9 @@ impl Query for DrasiQuery {
                         &archive_index,
                         &result_index,
                         &future_queue,
-                    ).await {
+                    )
+                    .await
+                    {
                         let msg = format!(
                             "Query '{}' failed to clear persistent indexes on hash read failure: {ie}",
                             self.base.config.id
@@ -923,7 +929,9 @@ impl Query for DrasiQuery {
         let mut bootstrap_channels: Vec<(
             String,
             tokio::sync::mpsc::Receiver<crate::channels::BootstrapEvent>,
-            Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
+            Option<
+                tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>,
+            >,
         )> = Vec::new();
         let mut subscription_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -1051,8 +1059,15 @@ impl Query for DrasiQuery {
                                             }
                                             // Release position handles for already-subscribed sources
                                             for (sid, _, _) in &sources_to_subscribe {
-                                                if let Some(src) = self.source_manager.get_source_instance(sid).await {
-                                                    src.remove_position_handle(&self.base.config.id).await;
+                                                if let Some(src) = self
+                                                    .source_manager
+                                                    .get_source_instance(sid)
+                                                    .await
+                                                {
+                                                    src.remove_position_handle(
+                                                        &self.base.config.id,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                             self.base
@@ -1076,8 +1091,15 @@ impl Query for DrasiQuery {
                                                 }
                                                 // Release position handles for already-subscribed sources
                                                 for (sid, _, _) in &sources_to_subscribe {
-                                                    if let Some(src) = self.source_manager.get_source_instance(sid).await {
-                                                        src.remove_position_handle(&self.base.config.id).await;
+                                                    if let Some(src) = self
+                                                        .source_manager
+                                                        .get_source_instance(sid)
+                                                        .await
+                                                    {
+                                                        src.remove_position_handle(
+                                                            &self.base.config.id,
+                                                        )
+                                                        .await;
                                                     }
                                                 }
                                                 self.base
@@ -1112,8 +1134,15 @@ impl Query for DrasiQuery {
                                             // Release position handles for sources that subscribed
                                             // before the failure, so they can advance their watermark.
                                             for (sid, _, _) in &sources_to_subscribe {
-                                                if let Some(src) = self.source_manager.get_source_instance(sid).await {
-                                                    src.remove_position_handle(&self.base.config.id).await;
+                                                if let Some(src) = self
+                                                    .source_manager
+                                                    .get_source_instance(sid)
+                                                    .await
+                                                {
+                                                    src.remove_position_handle(
+                                                        &self.base.config.id,
+                                                    )
+                                                    .await;
                                                 }
                                             }
 
@@ -1130,7 +1159,10 @@ impl Query for DrasiQuery {
                                                         );
                                                         error!("{msg}");
                                                         self.base
-                                                            .set_status(ComponentStatus::Error, Some(msg))
+                                                            .set_status(
+                                                                ComponentStatus::Error,
+                                                                Some(msg),
+                                                            )
                                                             .await;
                                                         return Err(anyhow::anyhow!(
                                                             "AutoReset aborted: failed to begin session for clearing: {e}",
@@ -1145,7 +1177,8 @@ impl Query for DrasiQuery {
                                                     &result_index,
                                                     &future_queue,
                                                 )
-                                                .await {
+                                                .await
+                                                {
                                                     if let Some(sc) = &session_control {
                                                         let _ = sc.rollback();
                                                     }
@@ -1155,13 +1188,18 @@ impl Query for DrasiQuery {
                                                     );
                                                     error!("{msg}");
                                                     self.base
-                                                        .set_status(ComponentStatus::Error, Some(msg))
+                                                        .set_status(
+                                                            ComponentStatus::Error,
+                                                            Some(msg),
+                                                        )
                                                         .await;
                                                     return Err(anyhow::anyhow!(
                                                         "AutoReset aborted: failed to clear persistent indexes: {ie}",
                                                     ));
                                                 }
-                                                if let Err(ce) = checkpoint_store.clear_checkpoints().await {
+                                                if let Err(ce) =
+                                                    checkpoint_store.clear_checkpoints().await
+                                                {
                                                     // Rollback on failure
                                                     if let Some(sc) = &session_control {
                                                         let _ = sc.rollback();
@@ -1172,15 +1210,22 @@ impl Query for DrasiQuery {
                                                     );
                                                     error!("{msg}");
                                                     self.base
-                                                        .set_status(ComponentStatus::Error, Some(msg))
+                                                        .set_status(
+                                                            ComponentStatus::Error,
+                                                            Some(msg),
+                                                        )
                                                         .await;
                                                     return Err(anyhow::anyhow!(
                                                         "AutoReset aborted: failed to clear checkpoints: {ce}",
                                                     ));
                                                 }
                                                 // Write current config hash so next normal restart resumes correctly
-                                                let current_hash = super::compute_config_hash(&self.base.config);
-                                                if let Err(he) = checkpoint_store.write_config_hash(current_hash).await {
+                                                let current_hash =
+                                                    super::compute_config_hash(&self.base.config);
+                                                if let Err(he) = checkpoint_store
+                                                    .write_config_hash(current_hash)
+                                                    .await
+                                                {
                                                     warn!(
                                                         "Query '{}' failed to write config hash during auto-reset: {he}",
                                                         self.base.config.id
@@ -1340,9 +1385,8 @@ impl Query for DrasiQuery {
 
         // Channel for the bootstrap supervisor to send handover checkpoints
         // to the processor task after all bootstrap tasks complete.
-        let (handover_tx, handover_rx) = tokio::sync::oneshot::channel::<
-            std::collections::HashMap<String, u64>,
-        >();
+        let (handover_tx, handover_rx) =
+            tokio::sync::oneshot::channel::<std::collections::HashMap<String, u64>>();
 
         // NEW: Handle bootstrap channels
         if !bootstrap_channels.is_empty() {
@@ -2422,9 +2466,7 @@ impl QueryManager {
         if let Some(config) = query_config {
             if let Some(backend_ref) = &config.storage_backend {
                 if !self.index_factory.is_volatile(backend_ref) {
-                    info!(
-                        "Query '{id}' removed — clearing persistent indexes and checkpoints"
-                    );
+                    info!("Query '{id}' removed — clearing persistent indexes and checkpoints");
                     match self.index_factory.build(backend_ref, &id).await {
                         Ok(created) => {
                             // Wrap clearing in a session for transactional backends
@@ -2440,7 +2482,8 @@ impl QueryManager {
                                     &Some(created.set.result_index),
                                     &Some(created.set.future_queue),
                                 )
-                                .await {
+                                .await
+                                {
                                     warn!(
                                         "Query '{id}' failed to clear persistent indexes on removal: {e}"
                                     );

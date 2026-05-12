@@ -261,7 +261,9 @@ async fn send_event(
     sequence: u64,
     position: &[u8],
 ) {
-    use drasi_core::models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange};
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+    };
 
     let node_id = format!("node-{sequence}");
     let mut props = ElementPropertyMap::new();
@@ -341,7 +343,10 @@ async fn test_e2e_checkpoint_round_trip() {
     wait_for_status(&core, "e2e-q", ComponentStatus::Running).await;
 
     // First subscribe: no resume_from (first start)
-    assert!(resume_from.read().await.is_none(), "First start should have no resume_from");
+    assert!(
+        resume_from.read().await.is_none(),
+        "First start should have no resume_from"
+    );
     assert_eq!(sub_count.load(Ordering::Acquire), 1);
 
     // Feed events with positions
@@ -361,7 +366,11 @@ async fn test_e2e_checkpoint_round_trip() {
     wait_for_status(&core, "e2e-q", ComponentStatus::Running).await;
 
     // Second subscribe: should have resume_from with the last checkpointed position
-    assert_eq!(sub_count.load(Ordering::Acquire), 2, "Should have subscribed twice");
+    assert_eq!(
+        sub_count.load(Ordering::Acquire),
+        2,
+        "Should have subscribed twice"
+    );
 
     let resumed = resume_from.read().await;
     assert!(
@@ -498,9 +507,7 @@ async fn test_e2e_auto_reset_position_unavailable() {
 #[tokio::test]
 async fn test_e2e_remove_query_clears_persistent_state() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
-    let core = build_e2e_lib("e2e-remove", &tmp_dir, None)
-        .await
-        .unwrap();
+    let core = build_e2e_lib("e2e-remove", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("rm-src", true).unwrap();
     let resume_from = source.last_resume_from();
@@ -577,9 +584,7 @@ async fn test_e2e_stop_releases_position_handles() {
 #[tokio::test]
 async fn test_e2e_config_change_triggers_rebootstrap() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
-    let core = build_e2e_lib("e2e-cfghash", &tmp_dir, None)
-        .await
-        .unwrap();
+    let core = build_e2e_lib("e2e-cfghash", &tmp_dir, None).await.unwrap();
 
     let source = E2eTestSource::new("cfg-src", true).unwrap();
     let resume_from = source.last_resume_from();

@@ -666,9 +666,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .await
             .context("Failed to build DrasiLib")?;
 
-        core.start()
-            .await
-            .context("Failed to start DrasiLib")?;
+        core.start().await.context("Failed to start DrasiLib")?;
 
         let mut sub = handle
             .subscribe_with_options(
@@ -730,9 +728,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         .await
         .context("Did not observe post-restart CDC row — checkpoint recovery may have failed")?;
 
-        core.stop()
-            .await
-            .context("Failed to stop DrasiLib")?;
+        core.stop().await.context("Failed to stop DrasiLib")?;
         mssql.cleanup().await;
         Ok::<(), anyhow::Error>(())
     })
@@ -886,7 +882,9 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
 
     match result {
         Ok(inner) => inner?,
-        Err(_) => anyhow::bail!("test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn timed out"),
+        Err(_) => {
+            anyhow::bail!("test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn timed out")
+        }
     }
 
     Ok(())
