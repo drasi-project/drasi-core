@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         added: Some(TemplateSpec {
             template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}".to_string(),
             extension: ShellExtension{
-                envs: {
+                env: {
                     let mut e = HashMap::new();
                     e.insert("SENSOR_ID".to_string(), "from {{after.id}}".to_string());
                     e
