@@ -585,9 +585,38 @@ impl Reaction for SseReaction {
                                     }
                                 };
                                 match fetcher.fetch_snapshot(&query_id).await {
-                                    Ok(stream) => {
-                                        let rows = stream.collect_vec().await;
-                                        axum::Json(rows).into_response()
+                                    Ok(snapshot) => {
+                                        // Stream the snapshot as a JSON array using chunked
+                                        // transfer encoding. This keeps memory proportional to
+                                        // a single row rather than the full result set.
+                                        let is_first = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                                        let row_stream = snapshot.map(move |row| {
+                                            let json = serde_json::to_string(&row)
+                                                .unwrap_or_else(|_| "null".into());
+                                            if is_first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                                                json
+                                            } else {
+                                                format!(",{json}")
+                                            }
+                                        });
+
+                                        let full_stream = tokio_stream::once("[".to_string())
+                                            .chain(row_stream)
+                                            .chain(tokio_stream::once("]".to_string()))
+                                            .map(Ok::<_, std::convert::Infallible>);
+
+                                        let body = axum::body::Body::from_stream(full_stream);
+                                        match axum::response::Response::builder()
+                                            .header("content-type", "application/json")
+                                            .body(body)
+                                        {
+                                            Ok(resp) => resp.into_response(),
+                                            Err(_) => (
+                                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                "Failed to build response",
+                                            )
+                                                .into_response(),
+                                        }
                                     }
                                     Err(e) => {
                                         let msg = format!("Failed to fetch snapshot: {e}");

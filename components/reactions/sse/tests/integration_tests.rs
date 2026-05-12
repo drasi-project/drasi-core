@@ -793,3 +793,154 @@ async fn test_sse_snapshot_endpoint() -> Result<()> {
     core.stop().await?;
     Ok(())
 }
+
+/// Test snapshot endpoint returns empty array when query has no results
+#[tokio::test]
+async fn test_sse_snapshot_empty_result() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("empty-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    let sse_reaction = SseReaction::builder("empty-sse")
+        .with_port(18087)
+        .with_query("empty-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("empty-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // No data inserted — snapshot should return empty JSON array
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18087/snapshot/empty-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert!(rows.is_empty(), "Empty query should return empty array");
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test snapshot endpoint with large result set streams correctly
+#[tokio::test]
+async fn test_sse_snapshot_large_result() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("large-query")
+        .query(
+            r#"
+            MATCH (p:Person)
+            RETURN p.name AS name, p.age AS age
+        "#,
+        )
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    let sse_reaction = SseReaction::builder("large-sse")
+        .with_port(18088)
+        .with_query("large-query")
+        .build()?;
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("large-core")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(sse_reaction)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Insert 100 rows
+    for i in 0..100 {
+        let props = PropertyMapBuilder::new()
+            .with_string("name", &format!("Person-{i}"))
+            .with_integer("age", 20 + (i % 50))
+            .build();
+        let id = format!("person-{i}");
+        handle
+            .send_node_insert(id.as_str(), vec!["Person"], props)
+            .await?;
+    }
+
+    // Give the query engine time to process all inserts
+    sleep(Duration::from_millis(1000)).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get("http://localhost:18088/snapshot/large-query")
+        .send()
+        .await?;
+    assert_eq!(response.status(), 200);
+
+    // Verify the response is streamed (chunked transfer encoding)
+    assert_eq!(
+        response
+            .headers()
+            .get("transfer-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("chunked"),
+        "Snapshot response should use chunked transfer encoding"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "Snapshot response should have application/json content type"
+    );
+    // Verify content-length is absent (streaming responses don't know size upfront)
+    assert!(
+        response.headers().get("content-length").is_none(),
+        "Streaming response should not have content-length header"
+    );
+
+    let body: serde_json::Value = response.json().await?;
+    let rows = body.as_array().expect("snapshot should be a JSON array");
+    assert_eq!(rows.len(), 100, "Should have 100 rows in snapshot");
+
+    // Verify each row has the expected fields
+    for row in rows {
+        assert!(row.get("name").is_some(), "Each row should have a name field");
+        assert!(row.get("age").is_some(), "Each row should have an age field");
+    }
+
+    core.stop().await?;
+    Ok(())
+}

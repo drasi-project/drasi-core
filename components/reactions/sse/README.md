@@ -295,7 +295,7 @@ GET /snapshot/:query_id
 ]
 ```
 
-The response is a JSON array containing all rows currently in the query's result set. Each element is a JSON object whose shape matches the query's `RETURN` clause.
+The response is a JSON array containing all rows currently in the query's result set. Each element is a JSON object whose shape matches the query's `RETURN` clause. The response is streamed using chunked transfer encoding, so memory usage remains proportional to a single row regardless of result set size. An empty result set returns `[]`.
 
 **Error Responses:**
 
