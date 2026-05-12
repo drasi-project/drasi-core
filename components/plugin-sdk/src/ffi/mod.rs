@@ -64,8 +64,10 @@ pub use vtables::{
     FfiBootstrapEvent, FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn,
     FfiBootstrapPushCallbackFn, FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver,
     FfiBootstrapSender, FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn,
-    FfiChangeReceiver, FfiCheckpoint, FfiCheckpointResult, FfiOutboxResponse,
-    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotResponse,
+    FfiChangeReceiver, FfiCheckpoint, FfiCheckpointResult,
+    FfiOutboxIterator, FfiOutboxIteratorResponse,
+    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext,
+    FfiSnapshotIterator, FfiSnapshotIteratorResponse,
     FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable,
     ReactionPluginVtable, ReactionVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
 };

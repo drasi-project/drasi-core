@@ -248,31 +248,67 @@ pub struct FfiCheckpointResult {
     pub error: FfiOwnedStr,
 }
 
-/// FFI-safe snapshot response.
-/// `data_json` is JSON-serialized `Vec<serde_json::Value>`.
+/// FFI-safe iterator for streaming snapshot rows one at a time.
+///
+/// The host creates this iterator and the plugin pulls rows via `next_fn`.
+/// Each `next_fn` call returns one JSON-serialized row, or an empty string
+/// when the iterator is exhausted.
+///
+/// **Ownership:** The plugin MUST call `drop_fn` when done — even if it
+/// doesn't exhaust the iterator. The host allocates the iterator state
+/// and `drop_fn` is the only way to reclaim it.
 #[repr(C)]
-pub struct FfiSnapshotResponse {
-    pub data_json: FfiOwnedStr,
+pub struct FfiSnapshotIterator {
+    /// Opaque host-allocated iterator state.
+    pub iter_ctx: *mut c_void,
+    /// Returns the next row as JSON, or an empty string when exhausted.
+    pub next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    /// Drops the iterator state. Must be called exactly once.
+    pub drop_fn: extern "C" fn(*mut c_void),
+}
+
+/// FFI-safe response from a snapshot fetch — streaming variant.
+///
+/// On success (`error` is empty): `iterator` is valid and the plugin
+/// pulls rows via `iterator.next_fn`. On error: `error` is non-empty
+/// and `iterator` fields are invalid (must not be called).
+#[repr(C)]
+pub struct FfiSnapshotIteratorResponse {
+    pub iterator: FfiSnapshotIterator,
     pub as_of_sequence: u64,
     pub config_hash: u64,
-    /// Non-null on error.
+    /// Non-empty on error — iterator fields are invalid in that case.
     pub error: FfiOwnedStr,
 }
 
-/// FFI-safe outbox response.
-/// `results_json` is JSON-serialized `Vec<QueryResult>`.
+/// FFI-safe iterator for streaming outbox entries one at a time.
+///
+/// Same ownership model as `FfiSnapshotIterator`.
 #[repr(C)]
-pub struct FfiOutboxResponse {
-    pub results_json: FfiOwnedStr,
+pub struct FfiOutboxIterator {
+    /// Opaque host-allocated iterator state.
+    pub iter_ctx: *mut c_void,
+    /// Returns the next `QueryResult` as JSON, or an empty string when exhausted.
+    pub next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    /// Drops the iterator state. Must be called exactly once.
+    pub drop_fn: extern "C" fn(*mut c_void),
+}
+
+/// FFI-safe response from an outbox fetch — streaming variant.
+#[repr(C)]
+pub struct FfiOutboxIteratorResponse {
+    pub iterator: FfiOutboxIterator,
     pub latest_sequence: u64,
     pub config_hash: u64,
-    /// Non-null on error.
+    /// Non-empty on error — iterator fields are invalid in that case.
     pub error: FfiOwnedStr,
 }
 
 /// Callback signatures for FfiBootstrapContext.
-pub type FfiBootstrapFetchSnapshotFn = extern "C" fn(*mut c_void) -> FfiSnapshotResponse;
-pub type FfiBootstrapFetchOutboxFn = extern "C" fn(*mut c_void, u64) -> FfiOutboxResponse;
+pub type FfiBootstrapFetchSnapshotFn =
+    extern "C" fn(*mut c_void) -> FfiSnapshotIteratorResponse;
+pub type FfiBootstrapFetchOutboxFn =
+    extern "C" fn(*mut c_void, u64) -> FfiOutboxIteratorResponse;
 pub type FfiBootstrapReadCheckpointFn = extern "C" fn(*mut c_void) -> FfiCheckpointResult;
 pub type FfiBootstrapWriteCheckpointFn = extern "C" fn(*mut c_void, FfiCheckpoint) -> FfiResult;
 

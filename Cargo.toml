@@ -45,6 +45,7 @@ members = [
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
+  "components/reactions/snapshot-test",
 
   # Identity Provider Plugins
   "components/identity/azure",

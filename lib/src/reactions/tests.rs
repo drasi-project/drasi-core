@@ -963,7 +963,7 @@ pub(crate) mod manager_tests {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let data = snapshot.to_vec();
+            let data = snapshot.collect_vec().await;
             let mut guard = self.captured_snapshot.lock().await;
             *guard = data;
 

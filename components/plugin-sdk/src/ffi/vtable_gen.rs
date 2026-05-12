@@ -136,6 +136,132 @@ fn dispatch_mode_to_ffi(m: DispatchMode) -> FfiDispatchMode {
 }
 
 // ============================================================================
+// FFI iterator → async Stream wrappers
+// ============================================================================
+
+/// Send-safe wrapper around FFI snapshot iterator state.
+/// Calls `drop_fn` when dropped — the host allocates the iterator state and
+/// this is the only way to reclaim it.
+struct FfiSnapshotIterHandle {
+    iter_ctx: *mut c_void,
+    next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    drop_fn: extern "C" fn(*mut c_void),
+}
+
+// SAFETY: The iter_ctx pointer is exclusively owned by this handle after
+// the host returns it. The next_fn/drop_fn callbacks are thread-safe.
+unsafe impl Send for FfiSnapshotIterHandle {}
+
+impl Drop for FfiSnapshotIterHandle {
+    fn drop(&mut self) {
+        (self.drop_fn)(self.iter_ctx);
+    }
+}
+
+/// Create an async `Stream<Item = serde_json::Value>` from an FFI snapshot iterator.
+///
+/// Each `.next()` dispatches the FFI `next_fn` via `spawn_blocking`, deserializes
+/// one JSON row, and yields it. When the iterator is exhausted (empty string),
+/// the stream ends and `drop_fn` is called.
+fn make_snapshot_stream(
+    iter: FfiSnapshotIterator,
+) -> impl tokio_stream::Stream<Item = serde_json::Value> + Send {
+    let handle = FfiSnapshotIterHandle {
+        iter_ctx: iter.iter_ctx,
+        next_fn: iter.next_fn,
+        drop_fn: iter.drop_fn,
+    };
+
+    async_stream::stream! {
+        let _guard = handle; // ensure drop_fn is called when stream is dropped
+        loop {
+            let next_fn = _guard.next_fn;
+            let ctx = SendMutPtr(_guard.iter_ctx);
+
+            let row = tokio::task::spawn_blocking(move || {
+                let owned_str = next_fn(ctx.as_ptr());
+                let json_str = unsafe { owned_str.into_string() };
+                if json_str.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(&json_str) {
+                        Ok(val) => Some(val),
+                        Err(e) => {
+                            log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
+                            None
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or(None);
+
+            match row {
+                Some(val) => yield val,
+                None => break,
+            }
+        }
+    }
+}
+
+/// Send-safe wrapper around FFI outbox iterator state.
+struct FfiOutboxIterHandle {
+    iter_ctx: *mut c_void,
+    next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    drop_fn: extern "C" fn(*mut c_void),
+}
+
+unsafe impl Send for FfiOutboxIterHandle {}
+
+impl Drop for FfiOutboxIterHandle {
+    fn drop(&mut self) {
+        (self.drop_fn)(self.iter_ctx);
+    }
+}
+
+/// Create an async `Stream<Item = Arc<QueryResult>>` from an FFI outbox iterator.
+fn make_outbox_stream(
+    iter: FfiOutboxIterator,
+) -> impl tokio_stream::Stream<Item = Arc<drasi_lib::channels::QueryResult>> + Send {
+    let handle = FfiOutboxIterHandle {
+        iter_ctx: iter.iter_ctx,
+        next_fn: iter.next_fn,
+        drop_fn: iter.drop_fn,
+    };
+
+    async_stream::stream! {
+        let _guard = handle;
+        loop {
+            let next_fn = _guard.next_fn;
+            let ctx = SendMutPtr(_guard.iter_ctx);
+
+            let entry = tokio::task::spawn_blocking(move || {
+                let owned_str = next_fn(ctx.as_ptr());
+                let json_str = unsafe { owned_str.into_string() };
+                if json_str.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<drasi_lib::channels::QueryResult>(&json_str) {
+                        Ok(qr) => Some(Arc::new(qr)),
+                        Err(e) => {
+                            log::error!("[FFI outbox stream] failed to deserialize entry: {e}");
+                            None
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or(None);
+
+            match entry {
+                Some(val) => yield val,
+                None => break,
+            }
+        }
+    }
+}
+
+// ============================================================================
 // FFI bootstrap backend
 // ============================================================================
 
@@ -160,10 +286,10 @@ unsafe impl Sync for FfiBootstrapBackend {}
 /// SAFETY: FfiOwnedStr contains *mut c_char which is not Send.
 /// We own the data exclusively after the callback returns, so sending
 /// the struct across thread boundaries is safe.
-struct SendFfiSnapshotResponse(FfiSnapshotResponse);
-unsafe impl Send for SendFfiSnapshotResponse {}
-struct SendFfiOutboxResponse(FfiOutboxResponse);
-unsafe impl Send for SendFfiOutboxResponse {}
+struct SendFfiSnapshotIteratorResponse(FfiSnapshotIteratorResponse);
+unsafe impl Send for SendFfiSnapshotIteratorResponse {}
+struct SendFfiOutboxIteratorResponse(FfiOutboxIteratorResponse);
+unsafe impl Send for SendFfiOutboxIteratorResponse {}
 struct SendFfiCheckpointResult(FfiCheckpointResult);
 unsafe impl Send for SendFfiCheckpointResult {}
 struct SendFfiResult(FfiResult);
@@ -174,22 +300,22 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
     async fn fetch_snapshot(
         &self,
     ) -> Result<
-        drasi_lib::queries::output_state::SnapshotResponse,
+        drasi_lib::queries::output_state::SnapshotStream,
         drasi_lib::queries::output_state::FetchError,
     > {
         let cb = self.fetch_snapshot_fn;
         let ctx = SendMutPtr(self.callback_ctx);
-        let resp = tokio::task::spawn_blocking(move || SendFfiSnapshotResponse(cb(ctx.as_ptr())))
-            .await
-            .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
-                status: drasi_lib::ComponentStatus::Error,
-            })?
-            .0;
+        let resp = tokio::task::spawn_blocking(move || {
+            SendFfiSnapshotIteratorResponse(cb(ctx.as_ptr()))
+        })
+        .await
+        .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
+            status: drasi_lib::ComponentStatus::Error,
+        })?
+        .0;
 
-        // Consume ALL FfiOwnedStr fields unconditionally to prevent memory leaks.
-        // FfiOwnedStr has no Drop impl — into_string() is the only way to reclaim.
+        // Consume error string unconditionally to prevent leaks.
         let err_str = unsafe { resp.error.into_string() };
-        let data_json = unsafe { resp.data_json.into_string() };
         if !err_str.is_empty() {
             log::error!("[FFI fetch_snapshot] host returned error: {err_str}");
             return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
@@ -197,18 +323,16 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             });
         }
 
-        // Deserialize data_json into Vec<serde_json::Value>.
-        let values: Vec<serde_json::Value> = serde_json::from_str(&data_json).map_err(|e| {
-            log::error!("[FFI fetch_snapshot] failed to deserialize snapshot JSON: {e}");
-            drasi_lib::queries::output_state::FetchError::NotRunning {
-                status: drasi_lib::ComponentStatus::Error,
-            }
-        })?;
+        let as_of_sequence = resp.as_of_sequence;
+        let config_hash = resp.config_hash;
 
-        Ok(drasi_lib::queries::output_state::SnapshotResponse::from_vec(
-            values,
-            resp.as_of_sequence,
-            resp.config_hash,
+        // Wrap the FFI iterator in an async stream.
+        let stream = make_snapshot_stream(resp.iterator);
+
+        Ok(drasi_lib::queries::output_state::SnapshotStream::from_stream(
+            stream,
+            as_of_sequence,
+            config_hash,
         ))
     }
 
@@ -216,22 +340,22 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         &self,
         after_sequence: u64,
     ) -> Result<
-        drasi_lib::queries::output_state::OutboxResponse,
+        drasi_lib::queries::output_state::OutboxStream,
         drasi_lib::queries::output_state::FetchError,
     > {
         let cb = self.fetch_outbox_fn;
         let ctx = SendMutPtr(self.callback_ctx);
-        let resp =
-            tokio::task::spawn_blocking(move || SendFfiOutboxResponse(cb(ctx.as_ptr(), after_sequence)))
-                .await
-                .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
-                    status: drasi_lib::ComponentStatus::Error,
-                })?
-                .0;
+        let resp = tokio::task::spawn_blocking(move || {
+            SendFfiOutboxIteratorResponse(cb(ctx.as_ptr(), after_sequence))
+        })
+        .await
+        .map_err(|_| drasi_lib::queries::output_state::FetchError::NotRunning {
+            status: drasi_lib::ComponentStatus::Error,
+        })?
+        .0;
 
-        // Consume ALL FfiOwnedStr fields unconditionally to prevent memory leaks.
+        // Consume error string unconditionally to prevent leaks.
         let err_str = unsafe { resp.error.into_string() };
-        let results_json = unsafe { resp.results_json.into_string() };
         if !err_str.is_empty() {
             if err_str.starts_with("OutboxGap:") {
                 let earliest_available = err_str
@@ -253,19 +377,17 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
             });
         }
 
-        let results: Vec<drasi_lib::channels::QueryResult> =
-            serde_json::from_str(&results_json).map_err(|e| {
-                log::error!("[FFI fetch_outbox] failed to deserialize outbox JSON: {e}");
-                drasi_lib::queries::output_state::FetchError::NotRunning {
-                    status: drasi_lib::ComponentStatus::Error,
-                }
-            })?;
+        let latest_sequence = resp.latest_sequence;
+        let config_hash = resp.config_hash;
 
-        Ok(drasi_lib::queries::output_state::OutboxResponse {
-            results: results.into_iter().map(Arc::new).collect(),
-            latest_sequence: resp.latest_sequence,
-            config_hash: resp.config_hash,
-        })
+        // Wrap the FFI iterator in an async stream.
+        let stream = make_outbox_stream(resp.iterator);
+
+        Ok(drasi_lib::queries::output_state::OutboxStream::from_stream(
+            stream,
+            latest_sequence,
+            config_hash,
+        ))
     }
 
     async fn read_checkpoint(

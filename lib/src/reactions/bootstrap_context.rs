@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::queries::output_state::{FetchError, OutboxResponse, SnapshotResponse};
+use crate::queries::output_state::{FetchError, OutboxStream, SnapshotStream};
 use crate::queries::Query;
 use crate::reactions::checkpoint::ReactionCheckpoint;
 use crate::state_store::StateStoreProvider;
@@ -34,8 +34,8 @@ use crate::state_store::StateStoreProvider;
 #[async_trait]
 #[doc(hidden)]
 pub trait BootstrapBackend: Send + Sync {
-    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError>;
-    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
+    async fn fetch_snapshot(&self) -> Result<SnapshotStream, FetchError>;
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxStream, FetchError>;
     async fn read_checkpoint(&self) -> anyhow::Result<Option<ReactionCheckpoint>>;
     async fn write_checkpoint(&self, checkpoint: &ReactionCheckpoint) -> anyhow::Result<()>;
 }
@@ -50,12 +50,14 @@ struct InProcessBackend {
 
 #[async_trait]
 impl BootstrapBackend for InProcessBackend {
-    async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
-        self.query.fetch_snapshot().await
+    async fn fetch_snapshot(&self) -> Result<SnapshotStream, FetchError> {
+        let snapshot = self.query.fetch_snapshot().await?;
+        Ok(SnapshotStream::from_snapshot(snapshot))
     }
 
-    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
-        self.query.fetch_outbox(after_sequence).await
+    async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxStream, FetchError> {
+        let outbox = self.query.fetch_outbox(after_sequence).await?;
+        Ok(OutboxStream::from_outbox(outbox))
     }
 
     async fn read_checkpoint(&self) -> anyhow::Result<Option<ReactionCheckpoint>> {
@@ -150,13 +152,17 @@ impl BootstrapContext {
         }
     }
 
-    /// Fetch a snapshot of the query's live result set.
-    pub async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+    /// Fetch a streaming snapshot of the query's live result set.
+    ///
+    /// Returns a `SnapshotStream` that yields rows one at a time.
+    pub async fn fetch_snapshot(&self) -> Result<SnapshotStream, FetchError> {
         self.backend.fetch_snapshot().await
     }
 
-    /// Fetch outbox entries after the given sequence number.
-    pub async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+    /// Fetch a streaming outbox after the given sequence number.
+    ///
+    /// Returns an `OutboxStream` that yields `QueryResult` entries one at a time.
+    pub async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxStream, FetchError> {
         self.backend.fetch_outbox(after_sequence).await
     }
 

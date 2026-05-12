@@ -26,8 +26,10 @@ use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use drasi_plugin_sdk::ffi::{
     FfiBootstrapContext, FfiCheckpoint, FfiCheckpointResult, FfiComponentStatus,
-    FfiOutboxResponse, FfiResult, FfiRuntimeContext, FfiSnapshotResponse, FfiStr,
-    ReactionPluginVtable, ReactionVtable,
+    FfiOutboxIterator, FfiOutboxIteratorResponse,
+    FfiResult, FfiRuntimeContext,
+    FfiSnapshotIterator, FfiSnapshotIteratorResponse,
+    FfiStr, ReactionPluginVtable, ReactionVtable,
 };
 use libloading::Library;
 
@@ -451,80 +453,164 @@ fn host_dispatch<R: Send + 'static>(
     rx.recv().expect("host bootstrap dispatch channel dropped")
 }
 
-extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotResponse {
+// ---- Snapshot iterator callbacks ----
+
+/// Host-allocated snapshot iterator state.
+struct SnapshotIteratorState {
+    rows: Vec<serde_json::Value>,
+    pos: usize,
+}
+
+extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi::FfiOwnedStr {
+    if iter_ctx.is_null() {
+        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    }
+    let state = unsafe { &mut *(iter_ctx as *mut SnapshotIteratorState) };
+    if state.pos >= state.rows.len() {
+        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    }
+    let row = &state.rows[state.pos];
+    state.pos += 1;
+    let json = serde_json::to_string(row).unwrap_or_else(|_| "null".into());
+    drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
+}
+
+extern "C" fn snapshot_iter_drop(iter_ctx: *mut c_void) {
+    if !iter_ctx.is_null() {
+        unsafe {
+            drop(Box::from_raw(iter_ctx as *mut SnapshotIteratorState));
+        }
+    }
+}
+
+fn make_error_snapshot_response(msg: String) -> FfiSnapshotIteratorResponse {
+    FfiSnapshotIteratorResponse {
+        iterator: FfiSnapshotIterator {
+            iter_ctx: std::ptr::null_mut(),
+            next_fn: snapshot_iter_next,
+            drop_fn: snapshot_iter_drop,
+        },
+        as_of_sequence: 0,
+        config_hash: 0,
+        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(msg),
+    }
+}
+
+extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotIteratorResponse {
     if ctx.is_null() {
-        return FfiSnapshotResponse {
-            data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-            as_of_sequence: 0,
-            config_hash: 0,
-            error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
-        };
+        return make_error_snapshot_response("null callback context".into());
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let result = host_dispatch(host_ctx, {
-            // SAFETY: we hold an Arc reference for the lifetime of the FFI call.
             let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
-            async move { ctx_ref.ctx.fetch_snapshot().await }
+            async move {
+                let snapshot = ctx_ref.ctx.fetch_snapshot().await?;
+                let as_of_sequence = snapshot.as_of_sequence;
+                let config_hash = snapshot.config_hash;
+                let rows = snapshot.collect_vec().await;
+                Ok::<_, drasi_lib::queries::output_state::FetchError>((rows, as_of_sequence, config_hash))
+            }
         });
         match result {
-            Ok(snapshot) => {
-                let data = snapshot.to_vec();
-                let data_json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".into());
-                FfiSnapshotResponse {
-                    data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(data_json),
-                    as_of_sequence: snapshot.as_of_sequence,
-                    config_hash: snapshot.config_hash,
+            Ok((rows, as_of_sequence, config_hash)) => {
+                let iter_state = Box::new(SnapshotIteratorState { rows, pos: 0 });
+                let iter_ctx = Box::into_raw(iter_state) as *mut c_void;
+
+                FfiSnapshotIteratorResponse {
+                    iterator: FfiSnapshotIterator {
+                        iter_ctx,
+                        next_fn: snapshot_iter_next,
+                        drop_fn: snapshot_iter_drop,
+                    },
+                    as_of_sequence,
+                    config_hash,
                     error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
                 }
             }
-            Err(e) => FfiSnapshotResponse {
-                data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-                as_of_sequence: 0,
-                config_hash: 0,
-                error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(format!("{e}")),
-            },
+            Err(e) => make_error_snapshot_response(format!("{e}")),
         }
     }))
-    .unwrap_or_else(|_| FfiSnapshotResponse {
-        data_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-        as_of_sequence: 0,
-        config_hash: 0,
-        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(
-            "panic in host bootstrap callback".into(),
-        ),
-    })
+    .unwrap_or_else(|_| make_error_snapshot_response("panic in host bootstrap callback".into()))
+}
+
+// ---- Outbox iterator callbacks ----
+
+struct OutboxIteratorState {
+    entries: Vec<std::sync::Arc<drasi_lib::channels::QueryResult>>,
+    pos: usize,
+}
+
+extern "C" fn outbox_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi::FfiOwnedStr {
+    if iter_ctx.is_null() {
+        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    }
+    let state = unsafe { &mut *(iter_ctx as *mut OutboxIteratorState) };
+    if state.pos >= state.entries.len() {
+        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    }
+    let entry = &state.entries[state.pos];
+    state.pos += 1;
+    let json = serde_json::to_string(entry.as_ref()).unwrap_or_else(|_| "null".into());
+    drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
+}
+
+extern "C" fn outbox_iter_drop(iter_ctx: *mut c_void) {
+    if !iter_ctx.is_null() {
+        unsafe {
+            drop(Box::from_raw(iter_ctx as *mut OutboxIteratorState));
+        }
+    }
+}
+
+fn make_error_outbox_response(msg: String, latest_sequence: u64, config_hash: u64) -> FfiOutboxIteratorResponse {
+    FfiOutboxIteratorResponse {
+        iterator: FfiOutboxIterator {
+            iter_ctx: std::ptr::null_mut(),
+            next_fn: outbox_iter_next,
+            drop_fn: outbox_iter_drop,
+        },
+        latest_sequence,
+        config_hash,
+        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(msg),
+    }
 }
 
 extern "C" fn host_bootstrap_fetch_outbox(
     ctx: *mut c_void,
     after_sequence: u64,
-) -> FfiOutboxResponse {
+) -> FfiOutboxIteratorResponse {
     if ctx.is_null() {
-        return FfiOutboxResponse {
-            results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-            latest_sequence: 0,
-            config_hash: 0,
-            error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string("null callback context".into()),
-        };
+        return make_error_outbox_response("null callback context".into(), 0, 0);
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
         let result = host_dispatch(host_ctx, {
             let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
-            async move { ctx_ref.ctx.fetch_outbox(after_sequence).await }
+            async move {
+                let outbox = ctx_ref.ctx.fetch_outbox(after_sequence).await?;
+                let latest_sequence = outbox.latest_sequence;
+                let config_hash = outbox.config_hash;
+                let entries = outbox.collect_vec().await;
+                Ok::<_, drasi_lib::queries::output_state::FetchError>((entries, latest_sequence, config_hash))
+            }
         });
         match result {
-            Ok(outbox) => {
-                // Deref Arc<QueryResult> to &QueryResult for serialization.
-                let results_ref: Vec<&drasi_lib::channels::QueryResult> =
-                    outbox.results.iter().map(|r| r.as_ref()).collect();
-                let results_json =
-                    serde_json::to_string(&results_ref).unwrap_or_else(|_| "[]".into());
-                FfiOutboxResponse {
-                    results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(results_json),
-                    latest_sequence: outbox.latest_sequence,
-                    config_hash: outbox.config_hash,
+            Ok((entries, latest_sequence, config_hash)) => {
+                let iter_state = Box::new(OutboxIteratorState {
+                    entries,
+                    pos: 0,
+                });
+                let iter_ctx = Box::into_raw(iter_state) as *mut c_void;
+
+                FfiOutboxIteratorResponse {
+                    iterator: FfiOutboxIterator {
+                        iter_ctx,
+                        next_fn: outbox_iter_next,
+                        drop_fn: outbox_iter_drop,
+                    },
+                    latest_sequence,
+                    config_hash,
                     error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
                 }
             }
@@ -535,23 +621,11 @@ extern "C" fn host_bootstrap_fetch_outbox(
                     }
                     other => (format!("{other}"), 0, 0),
                 };
-                FfiOutboxResponse {
-                    results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-                    latest_sequence: gap_latest,
-                    config_hash: gap_hash,
-                    error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(err_msg),
-                }
+                make_error_outbox_response(err_msg, gap_latest, gap_hash)
             }
         }
     }))
-    .unwrap_or_else(|_| FfiOutboxResponse {
-        results_json: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
-        latest_sequence: 0,
-        config_hash: 0,
-        error: drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(
-            "panic in host bootstrap callback".into(),
-        ),
-    })
+    .unwrap_or_else(|_| make_error_outbox_response("panic in host bootstrap callback".into(), 0, 0))
 }
 
 extern "C" fn host_bootstrap_read_checkpoint(ctx: *mut c_void) -> FfiCheckpointResult {

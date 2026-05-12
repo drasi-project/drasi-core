@@ -21,6 +21,7 @@
 //! - A bounded ring buffer (`outbox`) of recent `QueryResult` emissions
 
 use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio_stream::Stream;
@@ -269,38 +270,6 @@ impl SnapshotResponse {
         }
     }
 
-    /// Create a `SnapshotResponse` from a `Vec<serde_json::Value>`.
-    ///
-    /// Used by the FFI layer when deserializing snapshot data. The hash key
-    /// for each value is computed from its JSON string representation using
-    /// `DefaultHasher`.
-    ///
-    /// **Note:** These keys differ from the `row_signature` values used by the
-    /// live query engine (which computes signatures from solution bindings, not
-    /// JSON strings). This is safe for iteration (`to_vec()`, `stream()`) and
-    /// equality checks on values, but the keys should NOT be used for
-    /// cross-snapshot comparison or incremental diff operations.
-    pub fn from_vec(
-        values: Vec<serde_json::Value>,
-        as_of_sequence: u64,
-        config_hash: u64,
-    ) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut results = im::HashMap::new();
-        for v in values {
-            let mut hasher = DefaultHasher::new();
-            v.to_string().hash(&mut hasher);
-            let key = hasher.finish();
-            results.insert(key, v);
-        }
-        Self {
-            results,
-            as_of_sequence,
-            config_hash,
-        }
-    }
-
     /// Return an async stream of the result values.
     ///
     /// The stream yields each `serde_json::Value` from the underlying `im::HashMap`
@@ -334,6 +303,119 @@ pub struct OutboxResponse {
     pub latest_sequence: u64,
     /// The query's configuration hash.
     pub config_hash: u64,
+}
+
+/// Streaming snapshot response for the bootstrap path.
+///
+/// Wraps a `Stream` of `serde_json::Value` rows plus snapshot metadata.
+/// Created from either an in-process `SnapshotResponse` (via `from_snapshot()`)
+/// or an FFI iterator (via the plugin SDK).
+///
+/// Consumers iterate with `while let Some(row) = stream.next().await { ... }`
+/// or call `collect_vec()` to drain all rows into a `Vec`.
+pub struct SnapshotStream {
+    inner: Pin<Box<dyn Stream<Item = serde_json::Value> + Send>>,
+    /// The sequence number this snapshot reflects.
+    pub as_of_sequence: u64,
+    /// The query's configuration hash at the time of the snapshot.
+    pub config_hash: u64,
+}
+
+impl SnapshotStream {
+    /// Create a `SnapshotStream` from an in-process `SnapshotResponse`.
+    pub fn from_snapshot(snapshot: SnapshotResponse) -> Self {
+        let as_of_sequence = snapshot.as_of_sequence;
+        let config_hash = snapshot.config_hash;
+        Self {
+            inner: Box::pin(snapshot.stream()),
+            as_of_sequence,
+            config_hash,
+        }
+    }
+
+    /// Create a `SnapshotStream` from an arbitrary `Stream` implementation.
+    pub fn from_stream(
+        stream: impl Stream<Item = serde_json::Value> + Send + 'static,
+        as_of_sequence: u64,
+        config_hash: u64,
+    ) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            as_of_sequence,
+            config_hash,
+        }
+    }
+
+    /// Collect all rows from the stream into a `Vec`.
+    pub async fn collect_vec(self) -> Vec<serde_json::Value> {
+        use tokio_stream::StreamExt;
+        self.inner.collect().await
+    }
+}
+
+impl Stream for SnapshotStream {
+    type Item = serde_json::Value;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+/// Streaming outbox response for the bootstrap path.
+///
+/// Wraps a `Stream` of `Arc<QueryResult>` entries plus outbox metadata.
+pub struct OutboxStream {
+    inner: Pin<Box<dyn Stream<Item = Arc<QueryResult>> + Send>>,
+    /// The latest sequence number in the query's output state.
+    pub latest_sequence: u64,
+    /// The query's configuration hash.
+    pub config_hash: u64,
+}
+
+impl OutboxStream {
+    /// Create an `OutboxStream` from an in-process `OutboxResponse`.
+    pub fn from_outbox(outbox: OutboxResponse) -> Self {
+        let latest_sequence = outbox.latest_sequence;
+        let config_hash = outbox.config_hash;
+        Self {
+            inner: Box::pin(tokio_stream::iter(outbox.results)),
+            latest_sequence,
+            config_hash,
+        }
+    }
+
+    /// Create an `OutboxStream` from an arbitrary `Stream` implementation.
+    pub fn from_stream(
+        stream: impl Stream<Item = Arc<QueryResult>> + Send + 'static,
+        latest_sequence: u64,
+        config_hash: u64,
+    ) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            latest_sequence,
+            config_hash,
+        }
+    }
+
+    /// Collect all entries from the stream into a `Vec`.
+    pub async fn collect_vec(self) -> Vec<Arc<QueryResult>> {
+        use tokio_stream::StreamExt;
+        self.inner.collect().await
+    }
+}
+
+impl Stream for OutboxStream {
+    type Item = Arc<QueryResult>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
 }
 
 #[cfg(test)]
