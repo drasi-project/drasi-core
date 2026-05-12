@@ -17,7 +17,7 @@ use bytes::Bytes;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::channels::events::SourceEventWrapper;
-use crate::channels::{ComponentStatus, SubscriptionResponse};
+use crate::channels::{ChannelChangeReceiver, ComponentStatus, SubscriptionResponse};
 use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
 use crate::indexes::{IndexBackendPlugin, StorageBackendRef, StorageBackendSpec};
@@ -25,27 +25,6 @@ use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
 use drasi_index_rocksdb::RocksDbIndexProvider;
-
-// ============================================================================
-// Mpsc-based ChangeReceiver for test event injection
-// ============================================================================
-
-struct MpscChangeReceiver<T: Clone + Send + Sync + 'static> {
-    rx: tokio::sync::Mutex<mpsc::Receiver<T>>,
-}
-
-#[async_trait]
-impl<T: Clone + Send + Sync + 'static> crate::channels::ChangeReceiver<T>
-    for MpscChangeReceiver<T>
-{
-    async fn recv(&mut self) -> anyhow::Result<Arc<T>> {
-        let mut rx = self.rx.lock().await;
-        match rx.recv().await {
-            Some(val) => Ok(Arc::new(val)),
-            None => Err(anyhow::anyhow!("Mpsc channel closed")),
-        }
-    }
-}
 
 // ============================================================================
 // E2E test source
@@ -64,15 +43,12 @@ struct E2eTestSource {
     remaining_failures: Arc<AtomicU32>,
     /// Number of times remove_position_handle was called.
     position_handle_removed: Arc<AtomicU32>,
-    /// Sender for injecting events. Cloned in subscribe() for the receiver.
-    event_tx: Arc<RwLock<Option<mpsc::Sender<SourceEventWrapper>>>>,
-    /// Receiver handed to query on subscribe. Only consumed once.
-    event_rx: Arc<RwLock<Option<mpsc::Receiver<SourceEventWrapper>>>>,
+    /// Sender for injecting events. Recreated in subscribe() for each subscription.
+    event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
 }
 
 impl E2eTestSource {
     fn new(id: &str, replay_capable: bool) -> anyhow::Result<Self> {
-        let (tx, rx) = mpsc::channel(1000);
         Ok(Self {
             base: SourceBase::new(SourceBaseParams::new(id))?,
             replay_capable,
@@ -81,8 +57,7 @@ impl E2eTestSource {
             subscribe_count: Arc::new(AtomicU32::new(0)),
             remaining_failures: Arc::new(AtomicU32::new(0)),
             position_handle_removed: Arc::new(AtomicU32::new(0)),
-            event_tx: Arc::new(RwLock::new(Some(tx))),
-            event_rx: Arc::new(RwLock::new(Some(rx))),
+            event_tx: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -106,7 +81,7 @@ impl E2eTestSource {
         self.remaining_failures.clone()
     }
 
-    fn event_sender(&self) -> Arc<RwLock<Option<mpsc::Sender<SourceEventWrapper>>>> {
+    fn event_sender(&self) -> Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>> {
         self.event_tx.clone()
     }
 
@@ -209,7 +184,7 @@ impl Source for E2eTestSource {
         Ok(SubscriptionResponse {
             query_id: settings.query_id,
             source_id: self.id().to_string(),
-            receiver: Box::new(MpscChangeReceiver { rx: tokio::sync::Mutex::new(rx) }),
+            receiver: Box::new(ChannelChangeReceiver::new(rx)),
             bootstrap_receiver: None,
             position_handle,
             bootstrap_result_receiver: None,
@@ -281,7 +256,7 @@ fn make_volatile_query(id: &str, source_id: &str) -> QueryConfig {
 
 /// Send a source change event and wait briefly for processing.
 async fn send_event(
-    tx: &Arc<RwLock<Option<mpsc::Sender<SourceEventWrapper>>>>,
+    tx: &Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
     source_id: &str,
     sequence: u64,
     position: &[u8],
@@ -319,7 +294,7 @@ async fn send_event(
     event.source_position = Some(Bytes::from(position.to_vec()));
 
     if let Some(sender) = tx.read().await.as_ref() {
-        sender.send(event).await.unwrap();
+        sender.send(Arc::new(event)).await.unwrap();
     }
     // Brief pause for processing
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

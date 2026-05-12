@@ -321,6 +321,16 @@ where
     rx: mpsc::Receiver<Arc<T>>,
 }
 
+impl<T> ChannelChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Creates a new `ChannelChangeReceiver` wrapping the given mpsc receiver.
+    pub fn new(rx: mpsc::Receiver<Arc<T>>) -> Self {
+        Self { rx }
+    }
+}
+
 #[async_trait]
 impl<T> ChangeReceiver<T> for ChannelChangeReceiver<T>
 where
