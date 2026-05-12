@@ -28,7 +28,7 @@ use crate::state::{
 use chrono::{DateTime, Utc};
 use drasi_lib::reactions::common::OperationType;
 use handlebars::Handlebars;
-use serde_json::{json, Map};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
 use std::process;
 use std::sync::Arc;
@@ -225,6 +225,16 @@ impl ShellExecutor {
                 ));
             } // unreachable due to the enum match in process_single_result
         }
+
+        // insert query metadata into the context
+        context.insert(
+            "query_name".to_string(),
+            Value::String(query_id.to_string()),
+        );
+        context.insert(
+            "operation".to_string(),
+            Value::String(result_type.to_string()),
+        );
 
         // create the env vars for the command and render the global env values.
         let mut command_env = HashMap::new();

@@ -42,6 +42,36 @@
 //!   -H "Content-Type: application/json" \
 //!   -d '{"operation":"delete","element":{"type":"node","id":"sensor_01","labels":["sensors"]}}'
 //! ```
+//!
+//! ## Configuration Files (drasi-server)
+//!
+//! ### `http.yaml`
+//!
+//! ```yaml
+//! host: "0.0.0.0"
+//! port: 9000
+//! ```
+//!
+//! ### `shell.yaml`
+//!
+//! ```yaml
+//! maxConcurrent: 3
+//! timeoutS: 10
+//! commands:
+//!   sensor-monitor:
+//!     executable: /usr/bin/python3
+//!     args:
+//!       - main.py
+//! defaultTemplate:
+//!   added:
+//!     template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}"
+//!     env:
+//!       SENSOR_ID: "from {{after.id}}"
+//!   updated:
+//!     template: "[UPDATE] sensor={{after.id}} temp={{before.temperature}} -> {{after.temperature}}"
+//!   deleted:
+//!     template: "[DELETE] sensor={{before.id}}"
+//! ```
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -99,17 +129,16 @@ async fn main() -> Result<()> {
     //   - {{before.*}} — old values (DELETE / UPDATE)
 
     let default_template = QueryConfig {
-        // added: Some(TemplateSpec {
-        //     template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}".to_string(),
-        //     extension: ShellExtension{
-        //         envs: {
-        //             let mut e = HashMap::new();
-        //             e.insert("SENSOR_ID".to_string(), "from {{after.id}}".to_string());
-        //             e
-        //         },
-        //     }
-        // }),
-        added: None,
+        added: Some(TemplateSpec {
+            template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}".to_string(),
+            extension: ShellExtension{
+                envs: {
+                    let mut e = HashMap::new();
+                    e.insert("SENSOR_ID".to_string(), "from {{after.id}}".to_string());
+                    e
+                },
+            }
+        }),
         updated: Some(TemplateSpec {
             template: "[UPDATE] sensor={{after.id}} temp={{before.temperature}} -> {{after.temperature}}".to_string(),
             extension: ShellExtension::default(),

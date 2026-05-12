@@ -25,16 +25,20 @@
 //!
 //! The tests are ignored by default.
 
+mod shell_helpers;
+
 use anyhow::Result;
 use drasi_lib::channels::ResultDiff;
 use drasi_lib::identity::{self, IdentityProvider};
 use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query, Source};
+use shell_helpers::*;
 
 use drasi_reaction_shell::{ShellCommand, ShellReactionBuilder, ShellReactionConfig};
 use drasi_source_http::{HttpSource, HttpSourceConfig};
 use log::info;
 use serial_test::serial;
 use std::collections::HashMap;
+use std::num;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::{thread::sleep, time::Duration};
@@ -50,176 +54,10 @@ macro_rules! wait_for_startup {
     };
 }
 
-fn init_logging() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
-}
-
-fn slot_name() -> String {
-    format!("drasi_slot_{}", uuid::Uuid::new_v4().simple())
-}
-
-async fn wait_for_reaction_status(
-    core: &Arc<DrasiLib>,
-    reaction_id: &str,
-    expected_status: drasi_lib::ComponentStatus,
-) -> Result<()> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(60);
-
-    loop {
-        let status = core.get_reaction_status(reaction_id).await?;
-        if status == expected_status {
-            info!("Reaction {reaction_id} reached expected status: {status:?}");
-            return Ok(());
-        }
-
-        if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Timed out waiting for reaction `{reaction_id}` to reach status {expected_status:?}; current status: {status:?}"
-            )
-        }
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-async fn wait_for_source_status(
-    core: &Arc<DrasiLib>,
-    source_id: &str,
-    expected_status: drasi_lib::ComponentStatus,
-) -> Result<()> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(60);
-
-    loop {
-        let status = core.get_source_status(source_id).await?;
-        if status == expected_status {
-            info!("Source {source_id} reached expected status: {status:?}");
-            return Ok(());
-        }
-
-        if start.elapsed() > timeout {
-            anyhow::bail!(
-                "Timed out waiting for source `{source_id}` to reach status {expected_status:?}; current status: {status:?}"
-            )
-        }
-
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-pub async fn build_core(
-    reaction_config: ShellReactionConfig,
-    slot_name: String,
-) -> Result<Arc<DrasiLib>> {
-    let http_source = HttpSource::builder("test-source")
-        .with_host("0.0.0.0")
-        .with_port(9000)
-        .build()?;
-
-    let query = Query::cypher("test-query")
-        .query(
-            r#"
-            MATCH (d:devices)
-            RETURN d.id AS id,
-                   d.temperature AS temperature,
-                   d.location AS location
-        "#,
-        )
-        .from_source("test-source")
-        .auto_start(true)
-        .build();
-
-    let shell_reaction = ShellReactionBuilder::new(slot_name)
-        .with_queries(vec!["test-query".to_string()])
-        .with_config(reaction_config)
-        .build()?;
-
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_id("mqtt-test-core")
-            .with_query(query)
-            .with_source(http_source)
-            .with_reaction(shell_reaction)
-            .build()
-            .await?,
-    );
-    Ok(core)
-}
-
-fn operations_script_path() -> String {
-    format!("{}/tests/operations.sh", env!("CARGO_MANIFEST_DIR"))
-}
-
-async fn send_device_event(
-    port: u16,
-    source_id: &str,
-    device_id: &str,
-    temperature: f64,
-    location: &str,
-) -> Result<()> {
-    let client = reqwest::Client::new();
-    let payload = serde_json::json!({
-        "operation": "insert",
-        "element": {
-            "type": "node",
-            "id": device_id,
-            "labels": ["devices"],
-            "properties": {
-                "id": device_id,
-                "temperature": temperature,
-                "location": location
-            }
-        }
-    });
-
-    let response = client
-        .post(format!(
-            "http://127.0.0.1:{port}/sources/{source_id}/events"
-        ))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await?;
-
-    anyhow::ensure!(
-        response.status().is_success(),
-        "HTTP source rejected event: status {}",
-        response.status()
-    );
-    Ok(())
-}
-
-async fn wait_for_invocation(
-    core: &Arc<DrasiLib>,
-    reaction_id: &str,
-    timeout_duration: Duration,
-) -> Result<serde_json::Value> {
-    let start = Instant::now();
-    loop {
-        let info = core.get_reaction_info(reaction_id).await?;
-        if let Some(arr) = info
-            .properties
-            .get("recent_invocations")
-            .and_then(|v| v.as_array())
-        {
-            if !arr.is_empty() {
-                return Ok(arr[0].clone());
-            }
-        }
-
-        if start.elapsed() > timeout_duration {
-            anyhow::bail!("Timed out waiting for an invocation on reaction `{reaction_id}`");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 #[tokio::test]
 #[serial]
 #[ignore]
+/// Validates that the shell reaction starts up correctly.
 async fn test_shell_reaction_startup() -> Result<()> {
     init_logging();
 
@@ -245,13 +83,14 @@ async fn test_shell_reaction_startup() -> Result<()> {
 #[tokio::test]
 #[serial]
 #[ignore]
+/// Validates that the shell reaction processes events correctly.
 async fn test_shell_reaction_processing() -> Result<()> {
     init_logging();
 
     let shell_reaction_slot_name = slot_name();
 
     // get the script path
-    let script_path = operations_script_path();
+    let script_path = operations_script_path("test1");
     // make the script executable
     std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
 
@@ -272,16 +111,16 @@ async fn test_shell_reaction_processing() -> Result<()> {
     wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
 
     // send a device event to drasi via the http source.
-    send_device_event(9000, "test-source", "device-1", 72.5, "room-1").await?;
+    send_device_insert_event(9000, "test-source", "device-1", 72.5, "room-1").await?;
 
     // get the invocation details
-    let invocation =
-        wait_for_invocation(&core, &shell_reaction_slot_name, Duration::from_secs(10)).await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let invocation = get_invocation_details(&core, &shell_reaction_slot_name).await?;
 
-    let exit_status = invocation["exit_status"].as_i64().unwrap_or(-1);
+    let exit_status = invocation[0]["exit_status"].as_i64().unwrap_or(-1);
     assert_eq!(exit_status, 0, "operations.sh should exit with 0");
 
-    let stdout = invocation["stdout"]
+    let stdout = invocation[0]["stdout"]
         .as_str()
         .unwrap_or("")
         .trim()
@@ -302,45 +141,357 @@ async fn test_shell_reaction_processing() -> Result<()> {
 #[tokio::test]
 #[serial]
 #[ignore]
-async fn test_shell_script_without_stdin_env() -> Result<()> {
+// validate that the shell reaction fails on unexecutable script.
+async fn test_shell_reaction_unexecutable_script() -> Result<()> {
     init_logging();
 
     let shell_reaction_slot_name = slot_name();
+    let script_path = operations_script_path("test2");
 
-    let script_path = operations_script_path();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o644))?; // unexecutable
+
     let reaction_config = ShellReactionConfig {
         commands: HashMap::from([(
             "test-query".to_string(),
             ShellCommand {
-                executable: "/bin/sh".to_string(),
-                args: vec![script_path],
+                executable: script_path.clone(),
+                args: vec![],
             },
         )]),
-        env: HashMap::from([("STDIN_ENV_VAR".to_string(), "false".to_string())]),
+        ..Default::default()
+    };
+
+    let result = build_core(reaction_config, shell_reaction_slot_name.clone()).await;
+
+    // check the error message
+    assert!(
+        result.is_err()
+            && result
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("Unknown error"))
+                .to_string()
+                .contains("test2.sh' is not executable"),
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the shell reaction can read multiple writes from the same script
+async fn test_shell_reaction_script_multiple_writes() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test3");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([
+            ("RUN_TIMEOUT_TEST".to_string(), "true".to_string()),
+            ("SENSOR_ID".to_string(), "{{after.id}}".to_string()),
+            ("SENSOR_TEMP".to_string(), "{{after.temp}}".to_string()),
+            ("SENSOR_LOCATION".to_string(), "{{after.loc}}".to_string()),
+            ("SENSOR_STDIN".to_string(), "true".to_string()),
+        ]),
+        timeout_s: 20,
         ..Default::default()
     };
 
     let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
     wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
 
-    send_device_event(9000, "test-source", "device-2", 20.0, "garage").await?;
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
 
-    let invocation =
-        wait_for_invocation(&core, &shell_reaction_slot_name, Duration::from_secs(10)).await?;
+    // 13 secs to wait for the test3 to finish
+    tokio::time::sleep(Duration::from_secs(13)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
 
-    let exit_status = invocation["exit_status"].as_i64().unwrap_or(-1);
-    assert_eq!(exit_status, 0, "operations.sh should exit with 0");
+    let stdout = invocations[0]["stdout"].as_str().unwrap_or("").to_string();
 
-    let stdout = invocation["stdout"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    assert!(
-        stdout.contains("No input received"),
-        "stdout should contain the fallback message, got: {stdout}"
+    let exit_status = invocations[0]["exit_status"].as_i64().unwrap_or(-1);
+
+    assert_eq!(
+        stdout, "device-1\n30.0\ntrue\nroom-34\n",
+        "stdout should match the expected output"
     );
 
-    core.stop().await?;
+    assert_eq!(exit_status, 0, "operations.sh should exit with 0");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the shell reaction respects the max_recent_invocations limit and only keeps the most recent invocations
+async fn test_shell_reaction_limited_invocations_size() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test3");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([
+            ("RUN_TIMEOUT_TEST".to_string(), "true".to_string()),
+            ("SENSOR_ID".to_string(), "{{after.id}}".to_string()),
+            ("SENSOR_TEMP".to_string(), "{{after.temp}}".to_string()),
+            ("SENSOR_LOCATION".to_string(), "{{after.loc}}".to_string()),
+            ("SENSOR_STDIN".to_string(), "true".to_string()),
+        ]),
+        timeout_s: 20,
+        max_recent_invocations: 2,
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+    send_device_insert_event(9000, "test-source", "device-2", 31.0, "room-35").await?;
+    send_device_insert_event(9000, "test-source", "device-3", 32.0, "room-36").await?;
+    send_device_insert_event(9000, "test-source", "device-4", 33.0, "room-37").await?;
+
+    tokio::time::sleep(Duration::from_secs(13)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    let length_of_invocations = invocations.len();
+    assert_eq!(
+        length_of_invocations, 2,
+        "there should be 2 invocations of the script, got {length_of_invocations}"
+    );
+
+    let stdout_1 = invocations[0]["stdout"].as_str().unwrap_or("").to_string();
+    let stdout_2 = invocations[1]["stdout"].as_str().unwrap_or("").to_string();
+
+    assert_eq!(
+        stdout_1, "device-4\n33.0\ntrue\nroom-37\n",
+        "stdout of invocation 1 should match the expected output"
+    );
+
+    assert_eq!(
+        stdout_2, "device-3\n32.0\ntrue\nroom-36\n",
+        "stdout of invocation 2 should match the expected output"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the shell reaction kills executions that exceed the timeout duration.
+async fn test_shell_reaction_execution_timeout() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test3");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([
+            ("RUN_TIMEOUT_TEST".to_string(), "false".to_string()),
+            ("SENSOR_ID".to_string(), "{{after.id}}".to_string()),
+            ("SENSOR_TEMP".to_string(), "{{after.temp}}".to_string()),
+            ("SENSOR_LOCATION".to_string(), "{{after.loc}}".to_string()),
+            ("SENSOR_STDIN".to_string(), "true".to_string()),
+        ]),
+        timeout_s: 20,
+        max_recent_invocations: 2,
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+    send_device_insert_event(9000, "test-source", "device-2", 31.0, "room-35").await?;
+    send_device_insert_event(9000, "test-source", "device-3", 32.0, "room-36").await?;
+    send_device_insert_event(9000, "test-source", "device-4", 33.0, "room-37").await?;
+
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    let len = invocations.len();
+    assert_eq!(
+        len, 0,
+        "there should be 0 invocations of the script, got {len}"
+    );
+
+    let properties = get_reaction_properties(&core, &shell_reaction_slot_name).await?;
+    let number_of_timeouts = properties
+        .get("timeout_firings")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    assert_eq!(
+        number_of_timeouts, 4,
+        "there should be 4 timeouts for the 4 script executions, got {number_of_timeouts}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the shell reaction respects the concurrent execution limit.
+async fn test_shell_reaction_concurrent_execution_limit() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test3");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([
+            ("RUN_TIMEOUT_TEST".to_string(), "true".to_string()),
+            ("SENSOR_ID".to_string(), "{{after.id}}".to_string()),
+            ("SENSOR_TEMP".to_string(), "{{after.temp}}".to_string()),
+            ("SENSOR_LOCATION".to_string(), "{{after.loc}}".to_string()),
+            ("SENSOR_STDIN".to_string(), "true".to_string()),
+        ]),
+        timeout_s: 20,
+        max_recent_invocations: 3,
+        max_concurrent: 2,
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+    send_device_insert_event(9000, "test-source", "device-2", 31.0, "room-35").await?;
+    send_device_insert_event(9000, "test-source", "device-3", 32.0, "room-36").await?;
+    send_device_insert_event(9000, "test-source", "device-4", 33.0, "room-37").await?;
+
+    tokio::time::sleep(Duration::from_secs(9)).await; // wait for the first two executions to start
+
+    let properties = get_reaction_properties(&core, &shell_reaction_slot_name).await?;
+    let number_of_active_processes = properties
+        .get("active_processes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    assert_eq!(
+        number_of_active_processes, 2,
+        "there should be 2 active processes for the 4 script executions, got {number_of_active_processes}"
+    );
+
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+    let len = invocations.len();
+    assert_eq!(
+        len, 0,
+        "there should be 0 invocations of the script, got {len}"
+    );
+
+    tokio::time::sleep(Duration::from_secs(12)).await; // wait for the first two executions to finish and the next two to start
+    let number_of_active_processes_after =
+        get_reaction_properties(&core, &shell_reaction_slot_name)
+            .await?
+            .get("active_processes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+    assert_eq!(
+        number_of_active_processes_after, 2,
+        "there should be 2 active processes for the 4 script executions after the first two finish, got {number_of_active_processes_after}"
+    );
+
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+    let len = invocations.len();
+    assert_eq!(
+        len, 2,
+        "there should be 2 invocations of the script, got {len}"
+    );
+
+    let first_stdout = invocations[0]["stdout"].as_str().unwrap_or("").to_string();
+    let second_stdout = invocations[1]["stdout"].as_str().unwrap_or("").to_string();
+
+    assert_eq!(
+        first_stdout, "device-2\n31.0\ntrue\nroom-35\n",
+        "stdout of invocation 1 should match the expected output"
+    );
+
+    assert_eq!(
+        second_stdout, "device-1\n30.0\ntrue\nroom-34\n",
+        "stdout of invocation 2 should match the expected output"
+    );
+
+    // wait for all executions to finish
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let number_of_active_processes_end = get_reaction_properties(&core, &shell_reaction_slot_name)
+        .await?
+        .get("active_processes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert_eq!(
+        number_of_active_processes_end, 0,
+        "there should be 0 active processes after all executions finish, got {number_of_active_processes_end}"
+    );
+
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+    let len = invocations.len();
+    assert_eq!(
+        len, 3,
+        "there should be 3 invocations of the script, got {len}"
+    );
+
+    let stdout_1 = invocations[0]["stdout"].as_str().unwrap_or("").to_string();
+    let stdout_2 = invocations[1]["stdout"].as_str().unwrap_or("").to_string();
+    let stdout_3 = invocations[2]["stdout"].as_str().unwrap_or("").to_string();
+
+    assert_eq!(
+        stdout_1, "device-4\n33.0\ntrue\nroom-37\n",
+        "stdout of invocation 1 should match the expected output"
+    );
+    assert_eq!(
+        stdout_2, "device-3\n32.0\ntrue\nroom-36\n",
+        "stdout of invocation 2 should match the expected output"
+    );
+    assert_eq!(
+        stdout_3, "device-2\n31.0\ntrue\nroom-35\n",
+        "stdout of invocation 3 should match the expected output"
+    );
     Ok(())
 }
