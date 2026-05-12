@@ -501,23 +501,26 @@ impl ReactionManager {
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
                 // Replay outbox entries by enqueuing them.
+                // Track the last successfully enqueued sequence to avoid
+                // advancing the checkpoint past failed entries.
+                let mut last_ok_seq = checkpoint.sequence;
                 for entry in &outbox_resp.results {
                     let result = (*entry).as_ref().clone();
-                    if let Err(e) = reaction.enqueue_query_result(result).await {
-                        warn!(
-                            "[{reaction_id}] Failed to replay outbox entry for query \
-                             '{query_id}' seq={}: {e}",
-                            entry.sequence
-                        );
+                    match reaction.enqueue_query_result(result).await {
+                        Ok(()) => last_ok_seq = entry.sequence,
+                        Err(e) => {
+                            warn!(
+                                "[{reaction_id}] Failed to replay outbox entry for query \
+                                 '{query_id}' seq={}: {e}",
+                                entry.sequence
+                            );
+                            break;
+                        }
                     }
                 }
 
-                // Update checkpoint to the latest replayed sequence.
-                let new_seq = outbox_resp
-                    .results
-                    .last()
-                    .map(|r| r.sequence)
-                    .unwrap_or(checkpoint.sequence);
+                // Update checkpoint to the latest SUCCESSFULLY replayed sequence.
+                let new_seq = last_ok_seq;
 
                 let cp = ReactionCheckpoint {
                     sequence: new_seq,

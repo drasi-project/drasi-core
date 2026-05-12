@@ -191,6 +191,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
         let err_str = unsafe { resp.error.into_string() };
         let data_json = unsafe { resp.data_json.into_string() };
         if !err_str.is_empty() {
+            log::error!("[FFI fetch_snapshot] host returned error: {err_str}");
             return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
                 status: drasi_lib::ComponentStatus::Error,
             });
@@ -198,6 +199,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
 
         // Deserialize data_json into Vec<serde_json::Value>.
         let values: Vec<serde_json::Value> = serde_json::from_str(&data_json).map_err(|e| {
+            log::error!("[FFI fetch_snapshot] failed to deserialize snapshot JSON: {e}");
             drasi_lib::queries::output_state::FetchError::NotRunning {
                 status: drasi_lib::ComponentStatus::Error,
             }
@@ -245,6 +247,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
                     },
                 ));
             }
+            log::error!("[FFI fetch_outbox] host returned error: {err_str}");
             return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
                 status: drasi_lib::ComponentStatus::Error,
             });
@@ -252,6 +255,7 @@ impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
 
         let results: Vec<drasi_lib::channels::QueryResult> =
             serde_json::from_str(&results_json).map_err(|e| {
+                log::error!("[FFI fetch_outbox] failed to deserialize outbox JSON: {e}");
                 drasi_lib::queries::output_state::FetchError::NotRunning {
                     status: drasi_lib::ComponentStatus::Error,
                 }
