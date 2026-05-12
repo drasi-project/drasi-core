@@ -53,7 +53,7 @@ pub async fn run_cdc_stream(
     base: SourceBase,
     state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
-    subscriber_resume_lsn: Arc<RwLock<Option<Lsn>>>,
+    subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -73,7 +73,7 @@ pub async fn run_cdc_stream(
             &base,
             &state_store,
             &mut shutdown_rx,
-            &subscriber_resume_lsn,
+            &subscriber_resume_lsns,
         )
         .await
         {
@@ -141,7 +141,7 @@ async fn run_cdc_polling_loop(
     base: &SourceBase,
     state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    subscriber_resume_lsn: &Arc<RwLock<Option<Lsn>>>,
+    subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -163,15 +163,15 @@ async fn run_cdc_polling_loop(
             .unwrap_or_else(|| "NONE (will use current)".to_string())
     );
 
-    // Check if a subscriber has communicated a resume position that's earlier
-    // than our checkpoint. If so, rewind to ensure no events are missed.
+    // Check if any subscriber has communicated a resume position that's earlier
+    // than our checkpoint. If so, rewind to the minimum to ensure no events are missed.
     {
-        let resume_guard = subscriber_resume_lsn.read().await;
-        if let Some(resume_lsn) = *resume_guard {
+        let resume_guard = subscriber_resume_lsns.read().await;
+        if let Some(resume_lsn) = resume_guard.values().copied().min() {
             match current_lsn {
                 Some(ref checkpoint_lsn) if resume_lsn < *checkpoint_lsn => {
                     warn!(
-                        "Subscriber resume LSN {} is earlier than source checkpoint {}; \
+                        "Minimum subscriber resume LSN {} is earlier than source checkpoint {}; \
                          rewinding to subscriber position",
                         resume_lsn, checkpoint_lsn
                     );
@@ -179,7 +179,7 @@ async fn run_cdc_polling_loop(
                 }
                 None => {
                     info!(
-                        "No source checkpoint; using subscriber resume LSN {}",
+                        "No source checkpoint; using minimum subscriber resume LSN {}",
                         resume_lsn
                     );
                     current_lsn = Some(resume_lsn);
@@ -362,7 +362,7 @@ async fn poll_cdc_changes(
         max_lsn.to_hex()
     );
 
-    let mut change_count = 0;
+    let mut batch: Vec<SourceEventWrapper> = Vec::new();
 
     // Query each configured table's CDC changes
     for table in &config.tables {
@@ -429,8 +429,6 @@ async fn poll_cdc_changes(
                 }
             };
 
-            // Dispatch each event individually through SourceBase, attaching
-            // the row's LSN as the source_position for checkpoint recovery.
             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
@@ -442,15 +440,21 @@ async fn poll_cdc_changes(
             );
             wrapper.source_position = Some(bytes::Bytes::from(row_lsn.to_bytes()));
 
-            base.dispatch_event(wrapper).await?;
-            change_count += 1;
+            batch.push(wrapper);
         }
     }
 
-    // After processing all changes, update checkpoint to max_lsn
-    // This ensures we don't reprocess the same changes
+    let change_count = batch.len();
+
+    // Dispatch the entire poll cycle's events in one batch to acquire the
+    // dispatchers lock only once, avoiding per-row lock overhead.
+    base.dispatch_events_batch(batch).await?;
+
+    // After processing all changes, advance checkpoint past max_lsn.
+    // fn_cdc_get_all_changes uses inclusive bounds ([from_lsn, to_lsn]),
+    // so we must increment to avoid re-fetching the last processed LSN.
     if change_count > 0 {
-        *current_lsn = Some(max_lsn);
+        *current_lsn = Some(max_lsn.increment().unwrap_or(max_lsn));
     }
 
     Ok(change_count)

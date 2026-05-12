@@ -174,7 +174,9 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             };
             (last_seq, r.sequences_aligned, pos)
         } else {
-            (None, false, None)
+            return Err(anyhow::anyhow!(
+                "Bootstrap provider returned null result (plugin-side bootstrap failed)"
+            ));
         };
 
         Ok(BootstrapResult {

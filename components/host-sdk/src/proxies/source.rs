@@ -256,10 +256,22 @@ impl Source for SourceProxy {
         self
     }
 
-    // TODO(#371-followup): `remove_position_handle` and `supports_replay` use
-    // trait defaults (no-op / true). A follow-up FFI SDK change should add
-    // vtable entries so plugin sources can participate in position-handle
-    // cleanup and declare replay capability.
+    /// Plugin sources do not yet have FFI vtable entries for `supports_replay`
+    /// or `remove_position_handle`. Override the trait default (true) to false
+    /// so the orchestration layer does not assume plugin sources can replay
+    /// from a checkpointed position until the FFI wiring is added.
+    fn supports_replay(&self) -> bool {
+        false
+    }
+
+    /// No-op override — plugin sources do not yet have an FFI vtable entry for
+    /// `remove_position_handle`. Log a debug message so the gap is visible.
+    async fn remove_position_handle(&self, query_id: &str) {
+        log::debug!(
+            "SourceProxy::remove_position_handle('{query_id}') called but no FFI vtable entry exists; \
+             this is a no-op until the FFI SDK is updated"
+        );
+    }
 
     async fn deprovision(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);

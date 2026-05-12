@@ -770,6 +770,48 @@ impl SourceBase {
         Ok(())
     }
 
+    /// Dispatch a batch of events, acquiring the dispatchers lock once for
+    /// the entire batch. This is more efficient than calling
+    /// [`dispatch_event()`](Self::dispatch_event) per-event when the source
+    /// processes multiple rows per poll cycle.
+    pub async fn dispatch_events_batch(
+        &self,
+        events: Vec<SourceEventWrapper>,
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let dispatchers = self.dispatchers.read().await;
+
+        for mut wrapper in events {
+            if let Some(ref pos) = wrapper.source_position {
+                if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
+                    warn!(
+                        "[{}] Source position is large ({} bytes > {} limit); \
+                         checkpoint staging will preserve the previous good position",
+                        self.id,
+                        pos.len(),
+                        Self::MAX_SOURCE_POSITION_BYTES
+                    );
+                }
+            }
+
+            wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+
+            debug!("[{}] Dispatching event (batch): {:?}", self.id, &wrapper);
+
+            let arc_wrapper = Arc::new(wrapper);
+            for dispatcher in dispatchers.iter() {
+                if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
+                    debug!("[{}] Failed to dispatch event: {}", self.id, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Broadcast SourceControl events
     pub async fn broadcast_control(&self, control: SourceControl) -> Result<()> {
         let wrapper = SourceEventWrapper::new(

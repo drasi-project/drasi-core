@@ -2660,25 +2660,20 @@ mod tests {
         store.set_fail_clear_checkpoints(true);
 
         // Start query — config hash mismatch should try to clear, fail,
-        // and NOT write the new hash
+        // and fail startup rather than proceeding with stale checkpoint data
         let config =
             create_persistent_query_config("clear-fail-query", vec!["clear-fail-src".to_string()]);
         add_query(&query_manager, &graph, config).await.unwrap();
-        query_manager
+        let result = query_manager
             .start_query("clear-fail-query".to_string())
-            .await
-            .unwrap();
-        wait_for_component_status(
-            &mut event_rx,
-            "clear-fail-query",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            .await;
+        assert!(
+            result.is_err(),
+            "start_query should fail when clear_checkpoints fails on config hash mismatch"
+        );
 
         // The old hash should still be in place (new hash was NOT written
-        // because clear_checkpoints failed)
+        // because clear_checkpoints failed and startup was aborted)
         let stored_hash = store.read_config_hash().await.unwrap();
         assert_eq!(
             stored_hash,

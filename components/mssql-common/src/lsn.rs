@@ -111,6 +111,22 @@ impl Lsn {
     pub fn as_bytes(&self) -> &[u8; 10] {
         &self.0
     }
+
+    /// Return the next LSN (current value + 1), treating the 10-byte value
+    /// as a big-endian unsigned integer.
+    ///
+    /// Returns `None` if the LSN is already at its maximum value (all 0xFF).
+    pub fn increment(&self) -> Option<Self> {
+        let mut result = self.0;
+        for byte in result.iter_mut().rev() {
+            let (val, overflow) = byte.overflowing_add(1);
+            *byte = val;
+            if !overflow {
+                return Some(Lsn(result));
+            }
+        }
+        None // all bytes were 0xFF
+    }
 }
 
 impl PartialOrd for Lsn {
@@ -222,5 +238,32 @@ mod tests {
     fn test_lsn_display() {
         let lsn = Lsn::from_hex("0x00000027000000680004").unwrap();
         assert_eq!(format!("{lsn}"), "0x00000027000000680004");
+    }
+
+    #[test]
+    fn test_lsn_increment_simple() {
+        let lsn = Lsn::from_hex("0x00000027000000680004").unwrap();
+        let next = lsn.increment().unwrap();
+        assert_eq!(next.to_hex(), "0x00000027000000680005");
+    }
+
+    #[test]
+    fn test_lsn_increment_carry() {
+        let lsn = Lsn::from_hex("0x000000270000006800ff").unwrap();
+        let next = lsn.increment().unwrap();
+        assert_eq!(next.to_hex(), "0x00000027000000680100");
+    }
+
+    #[test]
+    fn test_lsn_increment_multi_byte_carry() {
+        let lsn = Lsn::from_hex("0x0000002700000068ffff").unwrap();
+        let next = lsn.increment().unwrap();
+        assert_eq!(next.to_hex(), "0x00000027000000690000");
+    }
+
+    #[test]
+    fn test_lsn_increment_max_returns_none() {
+        let lsn = Lsn::from_hex("0xffffffffffffffffffff").unwrap();
+        assert!(lsn.increment().is_none());
     }
 }

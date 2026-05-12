@@ -1600,7 +1600,7 @@ pub fn build_bootstrap_provider_vtable(
 
         // Channel to carry the BootstrapResult back from the provider thread
         let (result_tx, result_rx) =
-            std::sync::mpsc::channel::<Option<drasi_lib::bootstrap::BootstrapResult>>();
+            std::sync::mpsc::channel::<Result<drasi_lib::bootstrap::BootstrapResult, String>>();
 
         // Run the actual bootstrap provider in a background thread with its own tokio runtime
         let provider_ptr = SendPtr(state as *const BootstrapProviderWrapper);
@@ -1623,7 +1623,9 @@ pub fn build_bootstrap_provider_vtable(
                     .bootstrap(request, &context, tokio_tx, None)
                     .await;
                 let _ = forward_handle.await;
-                let _ = result_tx.send(bootstrap_result.ok());
+                let _ = result_tx.send(
+                    bootstrap_result.map_err(|e| format!("{e:#}"))
+                );
             })
         });
 
@@ -1665,8 +1667,24 @@ pub fn build_bootstrap_provider_vtable(
             count += 1;
         }
 
-        // Collect the BootstrapResult from the provider thread
-        let provider_result = result_rx.recv().ok().flatten();
+        // Collect the BootstrapResult from the provider thread.
+        // If the provider failed, return a null pointer so the host can
+        // detect the error instead of treating it as a successful bootstrap.
+        let provider_result = match result_rx.recv() {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(e)) => {
+                log::error!(
+                    "Bootstrap provider failed for source '{source_id_str}': {e}"
+                );
+                return std::ptr::null_mut();
+            }
+            Err(_) => {
+                log::error!(
+                    "Bootstrap provider thread exited without sending result for source '{source_id_str}'"
+                );
+                return std::ptr::null_mut();
+            }
+        };
 
         // Build the FFI result with full handover metadata
         let (last_sequence, sequences_aligned, source_position_ptr, source_position_len, source_position_drop_fn) =

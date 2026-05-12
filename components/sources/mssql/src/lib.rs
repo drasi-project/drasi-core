@@ -94,6 +94,7 @@ use async_trait::async_trait;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use drasi_lib::state_store::StateStoreProvider;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
@@ -123,11 +124,12 @@ pub struct MsSqlSource {
     /// Shutdown signal receiver (cloned for each task)
     shutdown_rx: watch::Receiver<bool>,
 
-    /// Subscriber-communicated resume position.
+    /// Per-subscriber resume positions.
     /// When a query subscribes with resume_from bytes, we deserialize to an LSN
-    /// and store the minimum here. The CDC stream reads this to decide where to
-    /// start polling from.
-    subscriber_resume_lsn: Arc<RwLock<Option<Lsn>>>,
+    /// and store it keyed by query_id. The CDC stream reads the minimum to
+    /// decide where to start polling from. Entries are removed when a query
+    /// calls `remove_position_handle`.
+    subscriber_resume_lsns: Arc<RwLock<HashMap<String, Lsn>>>,
 }
 
 impl MsSqlSource {
@@ -153,7 +155,7 @@ impl MsSqlSource {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
-            subscriber_resume_lsn: Arc::new(RwLock::new(None)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -266,7 +268,7 @@ impl Source for MsSqlSource {
         let base = self.base.clone_shared();
         let state_store = self.state_store.read().await.clone();
         let shutdown_rx = self.shutdown_rx.clone();
-        let subscriber_resume_lsn = self.subscriber_resume_lsn.clone();
+        let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
@@ -276,7 +278,7 @@ impl Source for MsSqlSource {
                 base,
                 state_store,
                 shutdown_rx,
-                subscriber_resume_lsn,
+                subscriber_resume_lsns,
             )
             .await
             {
@@ -329,7 +331,8 @@ impl Source for MsSqlSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
         // If the subscriber has a resume_from position, deserialize it to an
-        // LSN and store the minimum across all subscribers.
+        // LSN and store it keyed by query_id. The CDC stream computes the min
+        // across all active subscribers to decide where to start polling from.
         if let Some(ref resume_bytes) = settings.resume_from {
             match Lsn::from_bytes(resume_bytes) {
                 Ok(lsn) => {
@@ -337,15 +340,8 @@ impl Source for MsSqlSource {
                         "Subscriber '{}' requesting resume from LSN {} on source '{}'",
                         settings.query_id, lsn, self.base.id
                     );
-                    let mut guard = self.subscriber_resume_lsn.write().await;
-                    match *guard {
-                        Some(existing) if existing <= lsn => {
-                            // Keep existing — it's earlier
-                        }
-                        _ => {
-                            *guard = Some(lsn);
-                        }
-                    }
+                    let mut guard = self.subscriber_resume_lsns.write().await;
+                    guard.insert(settings.query_id.clone(), lsn);
                 }
                 Err(e) => {
                     log::warn!(
@@ -383,6 +379,9 @@ impl Source for MsSqlSource {
     }
 
     async fn remove_position_handle(&self, query_id: &str) {
+        // Remove the per-subscriber resume LSN so the CDC stream no longer
+        // pins its start position on behalf of this query.
+        self.subscriber_resume_lsns.write().await.remove(query_id);
         self.base.remove_position_handle(query_id).await;
     }
 }
@@ -530,7 +529,7 @@ impl MsSqlSourceBuilder {
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx,
             shutdown_rx,
-            subscriber_resume_lsn: Arc::new(RwLock::new(None)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }

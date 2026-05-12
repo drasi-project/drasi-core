@@ -437,27 +437,54 @@ async fn clear_persistent_indexes(
     archive_index: &Option<Arc<dyn drasi_core::interface::ElementArchiveIndex>>,
     result_index: &Option<Arc<dyn drasi_core::interface::ResultIndex>>,
     future_queue: &Option<Arc<dyn drasi_core::interface::FutureQueue>>,
-) {
+) -> anyhow::Result<()> {
+    use drasi_core::interface::IndexError;
+
     if let Some(ei) = element_index {
-        if let Err(e) = ei.clear().await {
-            warn!("Query '{query_id}' failed to clear element index: {e}");
+        match ei.clear().await {
+            Ok(()) | Err(IndexError::NotSupported) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Query '{query_id}' failed to clear element index"
+                ))
+                .context(format!("{e:?}"));
+            }
         }
     }
     if let Some(ai) = archive_index {
-        if let Err(e) = ai.clear().await {
-            warn!("Query '{query_id}' failed to clear archive index: {e}");
+        match ai.clear().await {
+            Ok(()) | Err(IndexError::NotSupported) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Query '{query_id}' failed to clear archive index"
+                ))
+                .context(format!("{e:?}"));
+            }
         }
     }
     if let Some(ri) = result_index {
-        if let Err(e) = ri.clear().await {
-            warn!("Query '{query_id}' failed to clear result index: {e}");
+        match ri.clear().await {
+            Ok(()) | Err(IndexError::NotSupported) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Query '{query_id}' failed to clear result index"
+                ))
+                .context(format!("{e:?}"));
+            }
         }
     }
     if let Some(fq) = future_queue {
-        if let Err(e) = fq.clear().await {
-            warn!("Query '{query_id}' failed to clear future queue: {e}");
+        match fq.clear().await {
+            Ok(()) | Err(IndexError::NotSupported) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Query '{query_id}' failed to clear future queue"
+                ))
+                .context(format!("{e:?}"));
+            }
         }
     }
+    Ok(())
 }
 
 #[async_trait]
@@ -725,22 +752,37 @@ impl Query for DrasiQuery {
                             }
                         }
                         Err(e) => {
-                            error!(
+                            let msg = format!(
                                 "Query '{}' failed to clear checkpoints on config change: {e}. \
-                                 Not writing new config hash to prevent stale resume on next restart.",
+                                 Cannot start with stale checkpoint data from a different config.",
                                 self.base.config.id
                             );
+                            error!("{msg}");
+                            self.base
+                                .set_status(ComponentStatus::Error, Some(msg.clone()))
+                                .await;
+                            return Err(anyhow::anyhow!(msg));
                         }
                     }
                     // Also clear persistent element/result/archive/future indexes
                     // so stale data from the old config cannot be read during bootstrap.
-                    clear_persistent_indexes(
+                    if let Err(e) = clear_persistent_indexes(
                         &self.base.config.id,
                         &element_index,
                         &archive_index,
                         &result_index,
                         &future_queue,
-                    ).await;
+                    ).await {
+                        let msg = format!(
+                            "Query '{}' failed to clear persistent indexes on config change: {e}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     false
                 }
                 Ok(None) => {
@@ -764,18 +806,33 @@ impl Query for DrasiQuery {
                     // Cannot trust persistent state if config hash is unreadable —
                     // clear indexes and checkpoints to ensure a clean bootstrap.
                     if let Err(ce) = checkpoint_store.clear_checkpoints().await {
-                        warn!(
+                        let msg = format!(
                             "Query '{}' failed to clear checkpoints on hash read failure: {ce}",
                             self.base.config.id
                         );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
                     }
-                    clear_persistent_indexes(
+                    if let Err(ie) = clear_persistent_indexes(
                         &self.base.config.id,
                         &element_index,
                         &archive_index,
                         &result_index,
                         &future_queue,
-                    ).await;
+                    ).await {
+                        let msg = format!(
+                            "Query '{}' failed to clear persistent indexes on hash read failure: {ie}",
+                            self.base.config.id
+                        );
+                        error!("{msg}");
+                        self.base
+                            .set_status(ComponentStatus::Error, Some(msg.clone()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
                     false
                 }
             };
@@ -1081,14 +1138,29 @@ impl Query for DrasiQuery {
                                                     }
                                                 }
 
-                                                clear_persistent_indexes(
+                                                if let Err(ie) = clear_persistent_indexes(
                                                     &self.base.config.id,
                                                     &element_index,
                                                     &archive_index,
                                                     &result_index,
                                                     &future_queue,
                                                 )
-                                                .await;
+                                                .await {
+                                                    if let Some(sc) = &session_control {
+                                                        let _ = sc.rollback();
+                                                    }
+                                                    let msg = format!(
+                                                        "Query '{}' auto-reset failed: could not clear persistent indexes: {ie}",
+                                                        self.base.config.id
+                                                    );
+                                                    error!("{msg}");
+                                                    self.base
+                                                        .set_status(ComponentStatus::Error, Some(msg))
+                                                        .await;
+                                                    return Err(anyhow::anyhow!(
+                                                        "AutoReset aborted: failed to clear persistent indexes: {ie}",
+                                                    ));
+                                                }
                                                 if let Err(ce) = checkpoint_store.clear_checkpoints().await {
                                                     // Rollback on failure
                                                     if let Some(sc) = &session_control {
@@ -1569,28 +1641,41 @@ impl Query for DrasiQuery {
                         // This ensures crash-after-bootstrap-before-first-streaming-event
                         // doesn't lose progress and avoids a redundant re-bootstrap.
                         if !handover_positions.is_empty() {
-                            if let Some(sc) = &session_control_for_supervisor {
-                                if let Err(e) = sc.begin().await {
-                                    warn!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' failed to begin session for handover persistence: {e}"
-                                    );
+                            let session_ok = if let Some(sc) = &session_control_for_supervisor {
+                                match sc.begin().await {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to begin session \
+                                             for handover persistence: {e}; checkpoints will not be \
+                                             persisted until the first streaming event"
+                                        );
+                                        false
+                                    }
                                 }
-                            }
-                            for (source_id, (seq, position)) in &handover_positions {
-                                if let Err(e) = checkpoint_store_for_supervisor
-                                    .stage_checkpoint(source_id, *seq, position.as_ref())
-                                    .await
-                                {
-                                    warn!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' failed to persist handover checkpoint for '{source_id}': {e}"
-                                    );
+                            } else {
+                                true // no session control needed (e.g. in-memory store)
+                            };
+
+                            if session_ok {
+                                for (source_id, (seq, position)) in &handover_positions {
+                                    if let Err(e) = checkpoint_store_for_supervisor
+                                        .stage_checkpoint(source_id, *seq, position.as_ref())
+                                        .await
+                                    {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to persist \
+                                             handover checkpoint for '{source_id}': {e}"
+                                        );
+                                    }
                                 }
-                            }
-                            if let Some(sc) = &session_control_for_supervisor {
-                                if let Err(e) = sc.commit().await {
-                                    warn!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' failed to commit handover checkpoints: {e}"
-                                    );
+                                if let Some(sc) = &session_control_for_supervisor {
+                                    if let Err(e) = sc.commit().await {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' failed to commit \
+                                             handover checkpoints: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -2348,14 +2433,18 @@ impl QueryManager {
                                     "Query '{id}' failed to begin session for removal cleanup: {e}"
                                 );
                             } else {
-                                clear_persistent_indexes(
+                                if let Err(e) = clear_persistent_indexes(
                                     &id,
                                     &Some(created.set.element_index),
                                     &Some(created.set.archive_index),
                                     &Some(created.set.result_index),
                                     &Some(created.set.future_queue),
                                 )
-                                .await;
+                                .await {
+                                    warn!(
+                                        "Query '{id}' failed to clear persistent indexes on removal: {e}"
+                                    );
+                                }
 
                                 if let Some(checkpoint_store) = created.checkpoint_store {
                                     if let Err(e) = checkpoint_store.clear_checkpoints().await {
