@@ -163,6 +163,8 @@ impl IndexBackendPlugin for GarnetIndexProvider {
                 session_control,
             },
             checkpoint_store: Some(checkpoint_store),
+            outbox_writer: None,
+            live_results_writer: None,
         })
     }
 

@@ -184,6 +184,8 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
                 session_control,
             },
             checkpoint_store: Some(checkpoint_store),
+            outbox_writer: None,
+            live_results_writer: None,
         })
     }
 

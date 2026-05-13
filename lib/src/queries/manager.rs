@@ -26,7 +26,7 @@ use drasi_core::{
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
-    interface::CheckpointStore,
+    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter},
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -181,6 +181,8 @@ async fn dispatch_query_results(
     query_id: &str,
     output_state: &RwLock<QueryOutputState>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
     // Convert Drasi results to our QueryResult format, filtering out Noops
@@ -272,6 +274,84 @@ async fn dispatch_query_results(
         state.advance_sequence_and_push(query_result)
     };
 
+    // Persist to outbox and live results writers if available (best-effort).
+    // These writes are NOT transactional with the index updates — on crash between
+    // index commit and outbox write, reactions will re-read from checkpoint sequence.
+    if let Some(writer) = outbox_writer {
+        // Serialize the QueryResult for the outbox
+        match serde_json::to_vec(arc_result.as_ref()) {
+            Ok(data) => {
+                if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
+                    warn!(
+                        "Query '{query_id}' failed to persist result seq={} to outbox: {e}",
+                        arc_result.sequence
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Query '{query_id}' failed to serialize result seq={} for outbox: {e}",
+                    arc_result.sequence
+                );
+            }
+        }
+    }
+
+    if let Some(writer) = live_results_writer {
+        use drasi_core::interface::RowMutation;
+
+        // Build serialized row data from the QueryResult's results (the diffs were moved
+        // into arc_result, so we read from there).
+        let serialized_data: Vec<(u64, Option<Vec<u8>>)> = arc_result
+            .results
+            .iter()
+            .filter_map(|diff| match diff {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => {
+                    let serialized = serde_json::to_vec(data).ok()?;
+                    Some((*row_signature, Some(serialized)))
+                }
+                ResultDiff::Update {
+                    after,
+                    row_signature,
+                    ..
+                } => {
+                    let serialized = serde_json::to_vec(after).ok()?;
+                    Some((*row_signature, Some(serialized)))
+                }
+                ResultDiff::Aggregation {
+                    after,
+                    row_signature,
+                    ..
+                } => {
+                    let serialized = serde_json::to_vec(after).ok()?;
+                    Some((*row_signature, Some(serialized)))
+                }
+                ResultDiff::Delete { row_signature, .. } => Some((*row_signature, None)),
+                ResultDiff::Noop => None,
+            })
+            .collect();
+
+        let row_mutations: Vec<RowMutation<'_>> = serialized_data
+            .iter()
+            .map(|(sig, data)| RowMutation {
+                row_signature: *sig,
+                data: data.as_deref(),
+            })
+            .collect();
+
+        if !row_mutations.is_empty() {
+            if let Err(e) = writer.apply_mutations(query_id, &row_mutations).await {
+                warn!(
+                    "Query '{query_id}' failed to persist live results for seq={}: {e}",
+                    arc_result.sequence
+                );
+            }
+        }
+    }
+
     debug!(
         "Query '{query_id}' sending {} results to reactions (seq={})",
         arc_result.results.len(),
@@ -313,6 +393,10 @@ pub struct DrasiQuery {
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
     // Persisted checkpoint_store across stop/start cycles for checkpoint recovery
     checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
+    // Persistent outbox writer for reaction replay (from index backend)
+    outbox_writer: Arc<RwLock<Option<Arc<dyn OutboxWriter>>>>,
+    // Persistent live results writer for snapshot recovery (from index backend)
+    live_results_writer: Arc<RwLock<Option<Arc<dyn LiveResultsWriter>>>>,
     // Configurable bootstrap timeout for fetch APIs
     bootstrap_timeout: std::time::Duration,
 }
@@ -349,6 +433,8 @@ impl DrasiQuery {
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
             checkpoint_store: Arc::new(RwLock::new(None)),
+            outbox_writer: Arc::new(RwLock::new(None)),
+            live_results_writer: Arc::new(RwLock::new(None)),
             bootstrap_timeout,
         })
     }
@@ -536,6 +622,10 @@ impl Query for DrasiQuery {
                     existing.unwrap_or_else(|| Arc::new(InMemoryCheckpointStore::new()))
                 }
             };
+
+            // Store persistent writers if provided by the backend
+            *self.outbox_writer.write().await = created.outbox_writer;
+            *self.live_results_writer.write().await = created.live_results_writer;
 
             builder = builder
                 .with_element_index(created.set.element_index)
@@ -1133,6 +1223,8 @@ impl Query for DrasiQuery {
         let reporter_for_processor = self.base.status_handle();
         let fq_source_for_processor = Arc::clone(&future_queue_source);
         let position_handles_for_processor = position_handles;
+        let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
+        let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
         let source_ids_for_processor: Vec<String> = self
             .base
             .config
@@ -1282,6 +1374,8 @@ impl Query for DrasiQuery {
                                                         &query_id,
                                                         &output_state,
                                                         &base_dispatchers,
+                                                        &outbox_writer_for_processor,
+                                                        &live_results_writer_for_processor,
                                                         profiling,
                                                     )
                                                     .await;
@@ -1350,6 +1444,8 @@ impl Query for DrasiQuery {
                                                     &query_id,
                                                     &output_state,
                                                     &base_dispatchers,
+                                                    &outbox_writer_for_processor,
+                                                    &live_results_writer_for_processor,
                                                     profiling,
                                                 )
                                                 .await;

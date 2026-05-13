@@ -31,8 +31,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, ResultIndex,
-    SessionControl,
+    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError,
+    LiveResultsWriter, OutboxWriter, ResultIndex, SessionControl,
 };
 
 /// Set of indexes for a query.
@@ -82,6 +82,12 @@ pub struct CreatedIndexes {
     /// Atomic checkpoint store paired with the set's session state.
     /// `None` for volatile backends (no persistent storage to checkpoint into).
     pub checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    /// Outbox writer for persisting query results for reaction replay.
+    /// `None` for volatile backends or when outbox persistence is not needed.
+    pub outbox_writer: Option<Arc<dyn OutboxWriter>>,
+    /// Live results writer for persisting the current result snapshot.
+    /// `None` for volatile backends or when live result persistence is not needed.
+    pub live_results_writer: Option<Arc<dyn LiveResultsWriter>>,
 }
 
 impl fmt::Debug for CreatedIndexes {
@@ -91,6 +97,14 @@ impl fmt::Debug for CreatedIndexes {
             .field(
                 "checkpoint_store",
                 &self.checkpoint_store.as_ref().map(|_| "<trait object>"),
+            )
+            .field(
+                "outbox_writer",
+                &self.outbox_writer.as_ref().map(|_| "<trait object>"),
+            )
+            .field(
+                "live_results_writer",
+                &self.live_results_writer.as_ref().map(|_| "<trait object>"),
             )
             .finish()
     }
