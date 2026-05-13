@@ -1425,8 +1425,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_stamps_monotonic_sequences() {
-        let params =
-            SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         // Create a receiver so events are actually captured
@@ -1454,8 +1453,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_multi_dispatcher_fanout() {
-        let params = SourceBaseParams::new("batch-fanout")
-            .with_dispatch_mode(DispatchMode::Channel);
+        let params =
+            SourceBaseParams::new("batch-fanout").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         // Create two receivers (two dispatchers in channel mode)
@@ -1482,8 +1481,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_events_batch_oversized_position_still_dispatches() {
-        let params = SourceBaseParams::new("batch-oversize")
-            .with_dispatch_mode(DispatchMode::Channel);
+        let params =
+            SourceBaseParams::new("batch-oversize").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
