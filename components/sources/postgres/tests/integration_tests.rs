@@ -14,7 +14,7 @@
 
 mod postgres_helpers;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
@@ -637,7 +637,6 @@ fn build_source(
     PostgresReplicationSource::builder("pg-direct-source")
         .with_config(build_source_config(config, slot_name))
         .build()
-        .map_err(Into::into)
 }
 
 fn subscription_settings(
@@ -887,6 +886,285 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     );
 
     source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+// ============================================================================
+// Multi-query replay filtering test.
+//
+// Verifies that when two queries have different checkpoints and the source
+// rewinds to the earlier checkpoint on restart, per-subscriber position
+// filtering prevents the more-advanced query from seeing duplicate events.
+// ============================================================================
+
+/// Wait for a specific change event on a reaction subscription.
+async fn wait_for_subscription_change<F>(
+    sub: &mut drasi_reaction_application::subscription::Subscription,
+    attempts: usize,
+    mut matcher: F,
+) -> Result<drasi_lib::channels::ResultDiff>
+where
+    F: FnMut(&drasi_lib::channels::ResultDiff) -> bool,
+{
+    for _ in 0..attempts {
+        if let Some(result) = sub.recv().await {
+            for entry in &result.results {
+                if matcher(entry) {
+                    return Ok(entry.clone());
+                }
+            }
+        }
+    }
+    anyhow::bail!("Timed out waiting for expected change event");
+}
+
+fn pg_matches_change(
+    entry: &drasi_lib::channels::ResultDiff,
+    change_type: &str,
+    fields: &[(&str, &str)],
+) -> bool {
+    let data = match (change_type, entry) {
+        ("ADD", drasi_lib::channels::ResultDiff::Add { data, .. })
+        | ("DELETE", drasi_lib::channels::ResultDiff::Delete { data, .. })
+        | ("UPDATE", drasi_lib::channels::ResultDiff::Update { data, .. }) => data,
+        _ => return false,
+    };
+    fields
+        .iter()
+        .all(|(field, expected)| match data.get(*field) {
+            Some(serde_json::Value::String(s)) => s == expected,
+            Some(serde_json::Value::Number(n)) => n.to_string() == *expected,
+            _ => false,
+        })
+}
+
+/// Two queries subscribe to the same Postgres source. After both process WAL
+/// events, query2 is stopped and query1 advances further. On full restart the
+/// source rewinds to query2's earlier checkpoint. Position filtering suppresses
+/// replayed events for query1 while delivering them to query2.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_reaction_application::subscription::SubscriptionOptions;
+
+    init_logging();
+
+    let tmp_dir = tempfile::TempDir::new()?;
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    // Seed so bootstrap has data
+    insert_test_row(&client, TEST_TABLE, 600, "Seed").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TEST_TABLE.to_string()],
+        slot_name: slot.clone(),
+        publication_name: TEST_PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+
+    let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
+
+    let source = PostgresReplicationSource::builder("pg-mq-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()?;
+
+    let q1_id = "mq-query1";
+    let q2_id = "mq-query2";
+    let q1_dir = tmp_dir.path().join("q1");
+    let q2_dir = tmp_dir.path().join("q2");
+    std::fs::create_dir_all(&q1_dir)?;
+    std::fs::create_dir_all(&q2_dir)?;
+
+    let query1 = Query::cypher(q1_id)
+        .query(
+            r#"
+            MATCH (u:users)
+            RETURN u.id AS id, u.name AS name
+            "#,
+        )
+        .from_source("pg-mq-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+            path: q1_dir.to_string_lossy().to_string(),
+            enable_archive: false,
+            direct_io: false,
+        }))
+        .build();
+
+    let query2 = Query::cypher(q2_id)
+        .query(
+            r#"
+            MATCH (u:users)
+            RETURN u.id AS id, u.name AS name
+            "#,
+        )
+        .from_source("pg-mq-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+            path: q2_dir.to_string_lossy().to_string(),
+            enable_archive: false,
+            direct_io: false,
+        }))
+        .build();
+
+    let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
+        .with_query(q1_id)
+        .build();
+    let (reaction2, handle2) = ApplicationReaction::builder("mq-reaction2")
+        .with_query(q2_id)
+        .build();
+
+    let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("pg-multi-query-test")
+            .with_source(source)
+            .with_query(query1)
+            .with_query(query2)
+            .with_reaction(reaction1)
+            .with_reaction(reaction2)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    let sub_opts = SubscriptionOptions::default().with_timeout(Duration::from_secs(5));
+    let mut sub1 = handle1.subscribe_with_options(sub_opts.clone()).await?;
+    let mut sub2 = handle2.subscribe_with_options(sub_opts.clone()).await?;
+
+    // --- Phase 1: Both queries observe a WAL event ---
+    insert_test_row(&client, TEST_TABLE, 601, "Both").await?;
+
+    wait_for_subscription_change(&mut sub1, 15, |e| {
+        pg_matches_change(e, "ADD", &[("id", "601"), ("name", "Both")])
+    })
+    .await?;
+
+    wait_for_subscription_change(&mut sub2, 15, |e| {
+        pg_matches_change(e, "ADD", &[("id", "601"), ("name", "Both")])
+    })
+    .await?;
+
+    // Let checkpoints persist
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Phase 2: Stop query2, advance query1 further ---
+    core.stop_query(q2_id).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    insert_test_row(&client, TEST_TABLE, 602, "OnlyQ1").await?;
+
+    wait_for_subscription_change(&mut sub1, 15, |e| {
+        pg_matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
+    })
+    .await?;
+
+    // Let query1 checkpoint persist
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Phase 3: Full stop ---
+    core.stop().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Insert while stopped
+    insert_test_row(&client, TEST_TABLE, 603, "WhileStopped").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Phase 4: Full restart ---
+    // Source rewinds to min(query1_cp, query2_cp) = query2's earlier checkpoint.
+    // Row 602 replays but should be filtered for query1.
+    core.start().await?;
+
+    let mut sub2_new = handle2.subscribe_with_options(sub_opts.clone()).await?;
+
+    // query2 should see rows 602 and 603
+    wait_for_subscription_change(&mut sub2_new, 20, |e| {
+        pg_matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
+    })
+    .await
+    .context("query2 did not see replayed row 602")?;
+
+    wait_for_subscription_change(&mut sub2_new, 20, |e| {
+        pg_matches_change(e, "ADD", &[("id", "603"), ("name", "WhileStopped")])
+    })
+    .await
+    .context("query2 did not see row 603")?;
+
+    // query1 should see row 603 but NOT a duplicate of 602
+    let mut saw_602_duplicate = false;
+    let mut saw_603 = false;
+    for _ in 0..20 {
+        if let Some(result) = sub1.recv().await {
+            for entry in &result.results {
+                if pg_matches_change(entry, "ADD", &[("id", "602")]) {
+                    saw_602_duplicate = true;
+                }
+                if pg_matches_change(entry, "ADD", &[("id", "603"), ("name", "WhileStopped")]) {
+                    saw_603 = true;
+                }
+            }
+            if saw_603 {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_603,
+        "query1 should see the new row 603 inserted while stopped"
+    );
+    assert!(
+        !saw_602_duplicate,
+        "query1 should NOT see row 602 again — position filtering must suppress it"
+    );
+
+    core.stop().await?;
     pg.cleanup().await;
 
     Ok(())

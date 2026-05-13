@@ -783,6 +783,10 @@ impl Source for PostgresReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
+        // Postgres WAL LSN is an 8-byte big-endian u64 — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
     }
 
     async fn set_bootstrap_provider(
