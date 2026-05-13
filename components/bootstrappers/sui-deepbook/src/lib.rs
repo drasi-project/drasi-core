@@ -28,7 +28,9 @@ pub use config::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use drasi_core::models::SourceChange;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use drasi_source_sui_deepbook::mapping::{
     build_order_node, build_pool_node, build_relationship, build_trader_node, derive_entity_id_pub,
@@ -67,7 +69,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let source_id = if context.source_id.is_empty() {
             self.source_id.as_str()
         } else {
@@ -80,7 +82,7 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
 
         if matches!(self.config.start_position, StartPosition::Now) {
             info!("Bootstrap start_position=Now, skipping historical load");
-            return Ok(0);
+            return Ok(BootstrapResult::default());
         }
 
         let rpc_client = SuiRpcClient::new(self.config.rpc_endpoint.clone())?;
@@ -297,7 +299,10 @@ impl BootstrapProvider for SuiDeepBookBootstrapProvider {
         info!(
             "Completed Sui DeepBook bootstrap for source '{source_id}': sent {sent_events} records in {page_count} pages"
         );
-        Ok(sent_events)
+        Ok(BootstrapResult {
+            event_count: sent_events,
+            ..Default::default()
+        })
     }
 }
 

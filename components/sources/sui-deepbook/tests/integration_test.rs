@@ -30,11 +30,11 @@ const QUERY_ID: &str = "deepbook-query";
 
 fn diff_matches(diff: &ResultDiff, expected_kind: &str, expected_id: &str) -> bool {
     match (expected_kind, diff) {
-        ("ADD", ResultDiff::Add { data }) => data
+        ("ADD", ResultDiff::Add { data, .. }) => data
             .get("entity_id")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == expected_id),
-        ("DELETE", ResultDiff::Delete { data }) => data
+        ("DELETE", ResultDiff::Delete { data, .. }) => data
             .get("entity_id")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == expected_id),
@@ -85,8 +85,8 @@ where
 
 fn extract_entity_id(diff: &ResultDiff) -> Option<String> {
     let data = match diff {
-        ResultDiff::Add { data } => Some(data),
-        ResultDiff::Delete { data } => Some(data),
+        ResultDiff::Add { data, .. } => Some(data),
+        ResultDiff::Delete { data, .. } => Some(data),
         ResultDiff::Update { after, .. } => Some(after),
         _ => None,
     };
@@ -380,7 +380,7 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
             Some(result) => {
                 for diff in &result.results {
                     match diff {
-                        ResultDiff::Add { data } | ResultDiff::Update { data, .. } => {
+                        ResultDiff::Add { data, .. } | ResultDiff::Update { data, .. } => {
                             if let Some(entity_id) = data.get("entity_id") {
                                 log::info!(
                                     "gRPC event #{}: entity_id={entity_id}",
