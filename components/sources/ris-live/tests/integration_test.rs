@@ -231,7 +231,7 @@ async fn test_change_detection_with_websocket_harness() {
             return false;
         }
         result.results.iter().any(|diff| match diff {
-            ResultDiff::Add { data } => routes_contains_value(data, "198.51.100.1"),
+            ResultDiff::Add { data, .. } => routes_contains_value(data, "198.51.100.1"),
             _ => false,
         })
     })
@@ -272,7 +272,7 @@ async fn test_change_detection_with_websocket_harness() {
             return false;
         }
         result.results.iter().any(|diff| match diff {
-            ResultDiff::Delete { data } => data["prefix"] == "203.0.113.0/24",
+            ResultDiff::Delete { data, .. } => data["prefix"] == "203.0.113.0/24",
             _ => false,
         })
     })
@@ -294,7 +294,7 @@ async fn test_change_detection_with_websocket_harness() {
         }
         result.results.iter().any(|diff| match diff {
             ResultDiff::Update { after, .. } => after["state"] == "down",
-            ResultDiff::Add { data } => data["state"] == "down",
+            ResultDiff::Add { data, .. } => data["state"] == "down",
             _ => false,
         })
     })
