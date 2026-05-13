@@ -570,12 +570,11 @@ impl ReplicationConnection {
     }
 }
 
-fn format_lsn(lsn: u64) -> String {
+pub(crate) fn format_lsn(lsn: u64) -> String {
     format!("{:X}/{:X}", lsn >> 32, lsn & 0xFFFFFFFF)
 }
 
-#[allow(dead_code)]
-fn parse_lsn(lsn_str: &str) -> Result<u64> {
+pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {
         return Err(anyhow!("Invalid LSN format: {lsn_str}"));

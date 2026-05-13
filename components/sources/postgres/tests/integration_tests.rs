@@ -15,11 +15,12 @@
 mod postgres_helpers;
 
 use anyhow::Result;
+use bytes::Bytes;
 use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
 use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
@@ -31,6 +32,7 @@ use postgres_helpers::{
     setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -600,6 +602,291 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
     .await?;
 
     core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+// --- Replay / Resume support tests ---
+
+fn build_source_config(
+    config: &postgres_helpers::ReplicationPostgresConfig,
+    slot_name: String,
+) -> PostgresSourceConfig {
+    PostgresSourceConfig {
+        host: config.host.clone(),
+        port: config.port,
+        database: config.database.clone(),
+        user: config.user.clone(),
+        password: config.password.clone(),
+        tables: vec![TEST_TABLE.to_string()],
+        slot_name,
+        publication_name: TEST_PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    }
+}
+
+fn build_source(
+    config: &postgres_helpers::ReplicationPostgresConfig,
+    slot_name: String,
+) -> Result<PostgresReplicationSource> {
+    PostgresReplicationSource::builder("pg-direct-source")
+        .with_config(build_source_config(config, slot_name))
+        .build()
+        .map_err(Into::into)
+}
+
+fn subscription_settings(
+    source_id: &str,
+    query_id: &str,
+    resume_from: Option<Bytes>,
+    request_position_handle: bool,
+) -> SourceSubscriptionSettings {
+    SourceSubscriptionSettings {
+        source_id: source_id.to_string(),
+        enable_bootstrap: false,
+        query_id: query_id.to_string(),
+        nodes: HashSet::new(),
+        relations: HashSet::new(),
+        resume_from,
+        request_position_handle,
+        last_sequence: None,
+    }
+}
+
+/// Encode a Postgres LSN (u64) as 8-byte big-endian Bytes for `resume_from`.
+fn lsn_to_bytes(lsn: u64) -> Bytes {
+    Bytes::from(lsn.to_be_bytes().to_vec())
+}
+
+/// Test that subscribing with a resume position before the slot watermark
+/// returns SourceError::PositionUnavailable.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source = build_source(pg.config(), slot)?;
+    source.start().await?;
+
+    // Wait for source to become running
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Try to resume from LSN 1 — which is definitely before the slot's consistent_point
+    let settings = subscription_settings(
+        "pg-direct-source",
+        "q-unavailable",
+        Some(lsn_to_bytes(1)),
+        false,
+    );
+    let result = source.subscribe(settings).await;
+
+    assert!(result.is_err(), "Expected PositionUnavailable error");
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => unreachable!("already asserted is_err"),
+    };
+    let source_err: &SourceError = err.downcast_ref().expect("should be SourceError");
+    match source_err {
+        SourceError::PositionUnavailable {
+            source_id,
+            requested,
+            earliest_available,
+        } => {
+            assert_eq!(source_id, "pg-direct-source");
+            assert_eq!(requested, &lsn_to_bytes(1));
+            assert!(earliest_available.is_some());
+        }
+    }
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+/// Test that the source dispatches events with source_position set to WAL LSN bytes.
+/// After subscribing and inserting data, verify the received events carry source_position.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_events_carry_source_position_bytes() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source = build_source(pg.config(), slot)?;
+    source.start().await?;
+
+    // Wait for source to become running
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Subscribe without resume (fresh subscriber)
+    let settings = subscription_settings("pg-direct-source", "q-position-test", None, true);
+    let response = source.subscribe(settings).await?;
+
+    // Insert a row
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+
+    // Read from the change receiver
+    let mut rx = response.receiver;
+    let start = Instant::now();
+    let timeout = Duration::from_secs(15);
+    let mut found_event = false;
+
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(event)) => {
+                // Verify source_position is set and is 8 bytes
+                assert!(
+                    event.source_position.is_some(),
+                    "Event should have source_position set"
+                );
+                let pos = event.source_position.as_ref().expect("already checked");
+                assert_eq!(pos.len(), 8, "source_position should be 8 bytes (LSN)");
+
+                // Verify it's a valid LSN (non-zero)
+                let lsn = u64::from_be_bytes(pos[..8].try_into().expect("8 bytes"));
+                assert!(lsn > 0, "LSN should be non-zero");
+
+                // Verify the event has a sequence number stamped by dispatch_event
+                assert!(
+                    event.sequence.is_some(),
+                    "Event should have a sequence number"
+                );
+
+                found_event = true;
+                break;
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+
+    assert!(found_event, "Should have received at least one event");
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+/// Test that the source resumes from a WAL LSN and replays events from that point.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    let source = build_source(pg.config(), slot)?;
+    source.start().await?;
+
+    // Wait for source to become running
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Subscribe (first subscriber) to capture the initial LSN
+    let settings = subscription_settings("pg-direct-source", "q-first", None, true);
+    let response = source.subscribe(settings).await?;
+    let mut rx = response.receiver;
+
+    // Insert rows
+    insert_test_row(&client, TEST_TABLE, 1, "Alice").await?;
+    insert_test_row(&client, TEST_TABLE, 2, "Bob").await?;
+
+    // Collect both events and their source_positions
+    let mut positions: Vec<Bytes> = Vec::new();
+    let start = Instant::now();
+    let timeout = Duration::from_secs(15);
+    while positions.len() < 2 && start.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+            Ok(Ok(event)) => {
+                if let Some(pos) = event.source_position.clone() {
+                    positions.push(pos);
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+    assert_eq!(
+        positions.len(),
+        2,
+        "Should receive 2 events with positions"
+    );
+
+    // The first position is the LSN of the first event. Try resuming from it.
+    // This should replay all events from that LSN onwards (i.e., both events).
+    let resume_lsn = positions[0].clone();
+    source.stop().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Restart and subscribe with resume_from
+    source.start().await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let settings =
+        subscription_settings("pg-direct-source", "q-resumed", Some(resume_lsn), true);
+    let response = source.subscribe(settings).await?;
+    let mut rx2 = response.receiver;
+
+    // Should receive at least the events from that LSN onwards
+    let mut replay_count = 0;
+    let start2 = Instant::now();
+    while start2.elapsed() < Duration::from_secs(15) {
+        match tokio::time::timeout(Duration::from_millis(500), rx2.recv()).await {
+            Ok(Ok(_event)) => {
+                replay_count += 1;
+                if replay_count >= 2 {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => continue,
+        }
+    }
+
+    assert!(
+        replay_count >= 1,
+        "Should replay at least 1 event from the resumed LSN, got {replay_count}"
+    );
+
+    source.stop().await?;
     pg.cleanup().await;
 
     Ok(())
