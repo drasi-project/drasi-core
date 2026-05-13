@@ -205,10 +205,7 @@ impl Source for OracleSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
-        let query_id = settings.query_id.clone();
-        let source_id = self.base.id.clone();
         let mut bootstrap_properties = HashMap::new();
-        let receiver = self.base.create_streaming_receiver().await?;
 
         // resume_from overrides bootstrap: a resuming query already has base
         // state in its persistent index and just needs replay from the
@@ -231,27 +228,9 @@ impl Source for OracleSource {
             );
         }
 
-        let bootstrap_receiver = if should_bootstrap {
-            self.base
-                .create_bootstrap_receiver(&settings, "Oracle", bootstrap_properties)
-                .await?
-        } else {
-            None
-        };
-
-        let position_handle = if settings.request_position_handle {
-            Some(self.base.create_position_handle(&settings.query_id).await)
-        } else {
-            None
-        };
-
-        Ok(drasi_lib::channels::SubscriptionResponse {
-            query_id,
-            source_id,
-            receiver,
-            bootstrap_receiver,
-            position_handle,
-        })
+        self.base
+            .subscribe_with_bootstrap_context(&settings, "Oracle", bootstrap_properties)
+            .await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

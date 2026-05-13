@@ -78,6 +78,7 @@ impl BootstrapProvider for OracleBootstrapProvider {
             event_count: count,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: snapshot_scn.map(|scn| scn.to_bytes().into()),
         })
     }
 }
