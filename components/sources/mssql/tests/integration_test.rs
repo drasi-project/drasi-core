@@ -1062,6 +1062,269 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 }
 
 // ============================================================================
+// Multi-query replay filtering test.
+//
+// Verifies that when two queries have different checkpoints and the source
+// rewinds to the earlier checkpoint, per-subscriber position filtering
+// prevents the more-advanced query from seeing duplicate events.
+// ============================================================================
+
+/// Two queries subscribe to the same source. After both process some CDC events,
+/// query2 is stopped and query1 advances further. On full restart the source
+/// rewinds to query2's (earlier) checkpoint. Position filtering must suppress
+/// the replayed events for query1 while delivering them to query2.
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let tmp_dir = tempfile::TempDir::new()?;
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        let mut client = db_config.connect().await?;
+
+        // Seed so bootstrap has data
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (600, 'Seed', 1.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(3)).await;
+
+        let bp = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bp)
+            .build()?;
+
+        let q1_id = "query1";
+        let q2_id = "query2";
+
+        let q1_dir = tmp_dir.path().join("q1");
+        let q2_dir = tmp_dir.path().join("q2");
+        std::fs::create_dir_all(&q1_dir)?;
+        std::fs::create_dir_all(&q2_dir)?;
+
+        let query1 = Query::cypher(q1_id)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: q1_dir.to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+
+        let query2 = Query::cypher(q2_id)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: q2_dir.to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+
+        let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
+            .with_query(q1_id)
+            .build();
+        let (reaction2, handle2) = ApplicationReaction::builder("mq-reaction2")
+            .with_query(q2_id)
+            .build();
+
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-multi-query-test")
+            .with_source(source)
+            .with_query(query1)
+            .with_query(query2)
+            .with_reaction(reaction1)
+            .with_reaction(reaction2)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let sub_opts =
+            SubscriptionOptions::default().with_timeout(Duration::from_secs(5));
+        let mut sub1 = handle1
+            .subscribe_with_options(sub_opts.clone())
+            .await
+            .context("subscribe query1")?;
+        let mut sub2 = handle2
+            .subscribe_with_options(sub_opts.clone())
+            .await
+            .context("subscribe query2")?;
+
+        // --- Phase 1: Both queries observe a CDC event ---
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (601, 'Both', 2.00);",
+        )
+        .await?;
+
+        wait_for_change(&mut sub1, 15, |e| {
+            matches_change(e, "ADD", &[("id", "601"), ("name", "Both")])
+        })
+        .await
+        .context("query1 did not see row 601")?;
+
+        wait_for_change(&mut sub2, 15, |e| {
+            matches_change(e, "ADD", &[("id", "601"), ("name", "Both")])
+        })
+        .await
+        .context("query2 did not see row 601")?;
+
+        // Let checkpoints persist
+        sleep(Duration::from_secs(2)).await;
+
+        // --- Phase 2: Stop query2, advance query1 further ---
+        core.stop_query(q2_id)
+            .await
+            .context("Failed to stop query2")?;
+        sleep(Duration::from_millis(500)).await;
+
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (602, 'OnlyQ1', 3.00);",
+        )
+        .await?;
+
+        wait_for_change(&mut sub1, 15, |e| {
+            matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
+        })
+        .await
+        .context("query1 did not see row 602")?;
+
+        // Let checkpoint persist for query1
+        sleep(Duration::from_secs(2)).await;
+
+        // --- Phase 3: Full stop ---
+        core.stop().await.context("Failed to stop")?;
+        sleep(Duration::from_millis(500)).await;
+
+        // Insert while everything is stopped
+        execute_sql(
+            &mut client,
+            "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (603, 'WhileStopped', 4.00);",
+        )
+        .await?;
+        sleep(Duration::from_secs(3)).await;
+
+        // --- Phase 4: Full restart ---
+        // Source rewinds to min(query1_cp, query2_cp) = query2's earlier checkpoint.
+        // Row 602 will be replayed but should be filtered for query1 (already committed).
+        core.start().await.context("Failed to restart")?;
+
+        // Resubscribe for query2's reaction (it was stopped and restarted)
+        let mut sub2_new = handle2
+            .subscribe_with_options(sub_opts.clone())
+            .await
+            .context("resubscribe query2")?;
+
+        // query2 should now see rows 602 and 603 (it missed 602 while stopped)
+        wait_for_change(&mut sub2_new, 20, |e| {
+            matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
+        })
+        .await
+        .context("query2 did not see replayed row 602")?;
+
+        wait_for_change(&mut sub2_new, 20, |e| {
+            matches_change(e, "ADD", &[("id", "603"), ("name", "WhileStopped")])
+        })
+        .await
+        .context("query2 did not see row 603")?;
+
+        // query1 should see row 603 but NOT a duplicate of 602
+        // We wait for 603 and check that 602 doesn't appear again.
+        let mut saw_602_duplicate = false;
+        let mut saw_603 = false;
+        for _ in 0..20 {
+            if let Some(result) = sub1.recv().await {
+                for entry in &result.results {
+                    if matches_change(entry, "ADD", &[("id", "602")]) {
+                        saw_602_duplicate = true;
+                    }
+                    if matches_change(entry, "ADD", &[("id", "603"), ("name", "WhileStopped")]) {
+                        saw_603 = true;
+                    }
+                }
+                if saw_603 {
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            saw_603,
+            "query1 should see the new row 603 inserted while stopped"
+        );
+        assert!(
+            !saw_602_duplicate,
+            "query1 should NOT see row 602 again — position filtering must suppress it"
+        );
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        mssql.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_multi_query_no_duplicate_on_restart timed out"),
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // FFI boundary test — verifies checkpoint/recovery through cdylib plugins.
 //
 // This is the same stop/insert/restart scenario as the test above, but the
