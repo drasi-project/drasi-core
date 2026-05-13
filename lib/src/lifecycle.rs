@@ -131,9 +131,7 @@ impl LifecycleManager {
         // queries continue running.
         info!("Starting auto-start queries");
         if let Err(e) = self.query_manager.start_all().await {
-            log::warn!(
-                "Some queries failed to start (they are now in Error state): {e}"
-            );
+            log::warn!("Some queries failed to start (they are now in Error state): {e}");
         } else {
             info!("All auto-start queries started successfully");
         }

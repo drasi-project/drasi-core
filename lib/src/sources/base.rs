@@ -1935,8 +1935,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_position_map_populated_on_dispatch() {
-        let params =
-            SourceBaseParams::new("spm-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("spm-1").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -1954,8 +1953,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_position_map_not_populated_without_position() {
-        let params =
-            SourceBaseParams::new("spm-none").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("spm-none").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -1969,8 +1967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_basic() {
-        let params =
-            SourceBaseParams::new("cssp-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("cssp-1").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -1990,10 +1987,7 @@ mod tests {
         let confirmed = base.compute_confirmed_source_position().await;
         assert!(confirmed.is_some());
         let lsn_bytes = confirmed.unwrap();
-        assert_eq!(
-            u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()),
-            200
-        );
+        assert_eq!(u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()), 200);
     }
 
     #[tokio::test]
@@ -2012,8 +2006,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compute_confirmed_source_position_min_of_two_queries() {
-        let params =
-            SourceBaseParams::new("cssp-2q").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("cssp-2q").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -2035,16 +2028,12 @@ mod tests {
         assert!(confirmed.is_some());
         let lsn_bytes = confirmed.unwrap();
         // min is seq 1 → LSN 100
-        assert_eq!(
-            u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()),
-            100
-        );
+        assert_eq!(u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()), 100);
     }
 
     #[tokio::test]
     async fn test_prune_position_map() {
-        let params =
-            SourceBaseParams::new("prune-1").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("prune-1").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -2065,8 +2054,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_position_map_all() {
-        let params =
-            SourceBaseParams::new("prune-all").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("prune-all").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
@@ -2083,8 +2071,7 @@ mod tests {
     async fn test_position_handle_initialized_to_last_sequence() {
         use crate::config::SourceSubscriptionSettings;
 
-        let params =
-            SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         let settings = SourceSubscriptionSettings {
@@ -2098,7 +2085,10 @@ mod tests {
             relations: Default::default(),
         };
 
-        let response = base.subscribe_with_bootstrap(&settings, "test").await.unwrap();
+        let response = base
+            .subscribe_with_bootstrap(&settings, "test")
+            .await
+            .unwrap();
         let handle = response.position_handle.expect("should have handle");
         // Handle should be initialized to last_sequence, not u64::MAX
         assert_eq!(handle.load(Ordering::Relaxed), 42);
@@ -2108,8 +2098,7 @@ mod tests {
     async fn test_position_handle_stays_max_without_last_sequence() {
         use crate::config::SourceSubscriptionSettings;
 
-        let params =
-            SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
 
         let settings = SourceSubscriptionSettings {
@@ -2123,7 +2112,10 @@ mod tests {
             relations: Default::default(),
         };
 
-        let response = base.subscribe_with_bootstrap(&settings, "test").await.unwrap();
+        let response = base
+            .subscribe_with_bootstrap(&settings, "test")
+            .await
+            .unwrap();
         let handle = response.position_handle.expect("should have handle");
         // No last_sequence → handle stays at u64::MAX
         assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
@@ -2131,8 +2123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_dispatch_populates_sequence_position_map() {
-        let params =
-            SourceBaseParams::new("spm-batch").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("spm-batch").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         let _rx = base.create_streaming_receiver().await.unwrap();
 
