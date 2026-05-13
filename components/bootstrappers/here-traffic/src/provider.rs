@@ -21,7 +21,9 @@ use log::info;
 use std::collections::HashSet;
 
 use drasi_core::models::SourceChange;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEvent;
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_source_here_traffic::mapping::{
@@ -63,7 +65,7 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
         settings: Option<&SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "HERE Traffic bootstrap starting for query '{}' (source '{}')",
             request.query_id, self.source_id
@@ -142,7 +144,10 @@ impl BootstrapProvider for HereTrafficBootstrapProvider {
             request.query_id
         );
 
-        Ok(total_sent)
+        Ok(BootstrapResult {
+            event_count: total_sent,
+            ..Default::default()
+        })
     }
 }
 

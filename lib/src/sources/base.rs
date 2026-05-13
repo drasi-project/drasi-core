@@ -76,8 +76,6 @@ pub struct SourceBaseParams {
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
-    /// Optional state store provider to use when running standalone
-    pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Whether this source should auto-start - defaults to true
     pub auto_start: bool,
 }
@@ -96,10 +94,6 @@ impl std::fmt::Debug for SourceBaseParams {
                 "bootstrap_provider",
                 &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
             )
-            .field(
-                "state_store",
-                &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
-            )
             .field("auto_start", &self.auto_start)
             .finish()
     }
@@ -114,7 +108,6 @@ impl SourceBaseParams {
             dispatch_buffer_capacity: None,
             state_store: None,
             bootstrap_provider: None,
-            state_store: None,
             auto_start: true,
         }
     }
@@ -146,12 +139,6 @@ impl SourceBaseParams {
     /// initial data to queries that request bootstrap.
     pub fn with_bootstrap_provider(mut self, provider: impl BootstrapProvider + 'static) -> Self {
         self.bootstrap_provider = Some(Box::new(provider));
-        self
-    }
-
-    /// Set the state store provider for standalone usage.
-    pub fn with_state_store(mut self, store: Arc<dyn StateStoreProvider>) -> Self {
-        self.state_store = Some(store);
         self
     }
 

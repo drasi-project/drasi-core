@@ -323,7 +323,7 @@ fn build_segment_properties(segment: &TrafficSegmentSnapshot) -> ElementProperty
     map.insert("longitude".to_string(), json!(segment.longitude));
     map.insert("last_updated".to_string(), json!(segment.last_updated));
 
-    convert_json_to_element_properties(&map).unwrap_or_else(|_| ElementPropertyMap::new())
+    convert_json_to_element_properties(&map)
 }
 
 fn build_incident_properties(incident: &TrafficIncidentSnapshot) -> ElementPropertyMap {
@@ -338,7 +338,7 @@ fn build_incident_properties(incident: &TrafficIncidentSnapshot) -> ElementPrope
     map.insert("latitude".to_string(), json!(incident.latitude));
     map.insert("longitude".to_string(), json!(incident.longitude));
 
-    convert_json_to_element_properties(&map).unwrap_or_else(|_| ElementPropertyMap::new())
+    convert_json_to_element_properties(&map)
 }
 
 fn build_relation_properties(relation: &RelationSnapshot) -> ElementPropertyMap {
@@ -347,7 +347,7 @@ fn build_relation_properties(relation: &RelationSnapshot) -> ElementPropertyMap 
         "distance_meters".to_string(),
         json!(relation.distance_meters),
     );
-    convert_json_to_element_properties(&map).unwrap_or_else(|_| ElementPropertyMap::new())
+    convert_json_to_element_properties(&map)
 }
 
 fn insert_optional_number(map: &mut Map<String, Value>, key: &str, value: Option<f64>) {
