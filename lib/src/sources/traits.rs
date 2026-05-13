@@ -69,6 +69,44 @@ pub enum SourceError {
     },
 }
 
+/// Trait for comparing source positions during per-subscriber replay filtering.
+///
+/// When a source rewinds to serve a late-joining subscriber, events that a
+/// subscriber has already committed must be suppressed. Since `source_position`
+/// is opaque bytes, the framework cannot compare them directly — the source
+/// must provide the comparison logic.
+///
+/// # Contract
+///
+/// `position_reached(event_pos, resume_pos)` returns `true` when the event at
+/// `event_pos` is **strictly after** `resume_pos` (i.e., it is new for a
+/// subscriber that last committed at `resume_pos`). Events at or before the
+/// resume position are filtered out.
+///
+/// # Default
+///
+/// [`ByteLexPositionComparator`] provides a byte-lexicographic comparison that
+/// works for any position encoded in big-endian (e.g., Postgres u64 LSN,
+/// MSSQL 20-byte LSN).
+pub trait PositionComparator: Send + Sync {
+    /// Returns `true` if `event_pos` is strictly after `resume_pos`.
+    fn position_reached(&self, event_pos: &Bytes, resume_pos: &Bytes) -> bool;
+}
+
+/// Default byte-lexicographic position comparator.
+///
+/// Works correctly for any position encoded as big-endian bytes of equal length.
+/// For positions of unequal length, shorter bytes compare as less than longer ones
+/// with the same prefix.
+#[derive(Debug, Clone, Default)]
+pub struct ByteLexPositionComparator;
+
+impl PositionComparator for ByteLexPositionComparator {
+    fn position_reached(&self, event_pos: &Bytes, resume_pos: &Bytes) -> bool {
+        event_pos.as_ref() > resume_pos.as_ref()
+    }
+}
+
 /// Trait defining the interface for all source implementations.
 ///
 /// This is the core abstraction that all source plugins must implement.

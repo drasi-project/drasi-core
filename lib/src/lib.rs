@@ -204,6 +204,8 @@ pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeCont
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
+/// Position comparison trait for per-subscriber replay filtering
+pub use sources::{ByteLexPositionComparator, PositionComparator};
 
 // ============================================================================
 // Builder Types (for fluent configuration)

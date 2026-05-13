@@ -369,6 +369,10 @@ impl Source for MsSqlSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context.clone()).await;
+        // MSSQL LSNs are 10-byte big-endian — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
     }
 
     async fn set_bootstrap_provider(

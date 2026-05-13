@@ -43,7 +43,9 @@ use crate::component_graph::ComponentStatusHandle;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::profiling;
+use crate::sources::PositionComparator;
 use crate::state_store::StateStoreProvider;
+use bytes::Bytes;
 use drasi_core::models::SourceChange;
 
 /// Parameters for creating a SourceBase instance.
@@ -185,6 +187,20 @@ pub struct SourceBase {
     /// Sources can await `wait_for_subscribers()` before starting their polling
     /// loop to avoid dispatching events before any subscriber exists.
     subscriber_notify: Arc<Notify>,
+    /// Per-subscriber resume positions for replay filtering.
+    ///
+    /// Keyed by dispatcher index in the `dispatchers` Vec. When an event's
+    /// `source_position` has not yet passed the resume position, the event is
+    /// not delivered to that subscriber's dispatcher. Once `position_reached()`
+    /// returns true, the entry is removed and all subsequent events flow through.
+    ///
+    /// Only populated in Channel dispatch mode (Broadcast cannot filter per-subscriber).
+    subscriber_resume_positions: Arc<RwLock<HashMap<usize, Bytes>>>,
+    /// Optional position comparator for per-subscriber replay filtering.
+    ///
+    /// Set by sources that support replay. Without a comparator, position
+    /// filtering is disabled (all events are delivered to all subscribers).
+    position_comparator: Arc<RwLock<Option<Arc<dyn PositionComparator>>>>,
 }
 
 impl SourceBase {
@@ -234,6 +250,8 @@ impl SourceBase {
             next_sequence: Arc::new(AtomicU64::new(1)),
             raw_config: None,
             subscriber_notify: Arc::new(Notify::new()),
+            subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
+            position_comparator: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -470,6 +488,8 @@ impl SourceBase {
             next_sequence: self.next_sequence.clone(),
             raw_config: self.raw_config.clone(),
             subscriber_notify: self.subscriber_notify.clone(),
+            subscriber_resume_positions: self.subscriber_resume_positions.clone(),
+            position_comparator: self.position_comparator.clone(),
         }
     }
 
@@ -485,6 +505,15 @@ impl SourceBase {
     /// ```
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));
+    }
+
+    /// Set the position comparator for per-subscriber replay filtering.
+    ///
+    /// Sources that support replay should call this during construction to
+    /// enable per-subscriber position gating. Without a comparator, all events
+    /// are delivered to all subscribers regardless of their `resume_from` position.
+    pub async fn set_position_comparator(&self, comparator: impl PositionComparator + 'static) {
+        *self.position_comparator.write().await = Some(Arc::new(comparator));
     }
 
     /// Get the source ID
@@ -583,6 +612,25 @@ impl SourceBase {
 
         // Create streaming receiver using helper method
         let receiver = self.create_streaming_receiver().await?;
+
+        // Register per-subscriber position filter for replay dedup.
+        // In Channel mode, the new dispatcher is the last entry in the vec.
+        // In Broadcast mode, per-subscriber filtering is not supported.
+        if self.dispatch_mode == DispatchMode::Channel {
+            if let Some(ref resume_pos) = settings.resume_from {
+                let dispatchers = self.dispatchers.read().await;
+                let dispatcher_idx = dispatchers.len().saturating_sub(1);
+                drop(dispatchers);
+                self.subscriber_resume_positions
+                    .write()
+                    .await
+                    .insert(dispatcher_idx, resume_pos.clone());
+                debug!(
+                    "[{}] Registered resume position filter for subscriber '{}' at dispatcher index {}",
+                    self.id, settings.query_id, dispatcher_idx
+                );
+            }
+        }
 
         let query_id_for_response = settings.query_id.clone();
 
@@ -791,11 +839,40 @@ impl SourceBase {
         // Arc-wrap for zero-copy sharing across dispatchers
         let arc_wrapper = Arc::new(wrapper);
 
-        // Send to all dispatchers
+        // Send to all dispatchers, filtering by per-subscriber resume position
         let dispatchers = self.dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
+        let comparator = self.position_comparator.read().await;
+        let mut cleared_indices: Vec<usize> = Vec::new();
+
+        for (idx, dispatcher) in dispatchers.iter().enumerate() {
+            // Check per-subscriber position gate
+            if let Some(ref cmp) = *comparator {
+                let resume_positions = self.subscriber_resume_positions.read().await;
+                if let Some(resume_pos) = resume_positions.get(&idx) {
+                    if let Some(ref event_pos) = arc_wrapper.source_position {
+                        if !cmp.position_reached(event_pos, resume_pos) {
+                            // Event hasn't passed resume point — suppress for this subscriber
+                            continue;
+                        }
+                        // Position reached — mark for removal after dispatch
+                        cleared_indices.push(idx);
+                    }
+                    // No source_position on event — cannot filter, deliver it
+                }
+            }
+
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
                 debug!("[{}] Failed to dispatch event: {}", self.id, e);
+            }
+        }
+        drop(comparator);
+        drop(dispatchers);
+
+        // Clear resume entries for dispatchers that have caught up
+        if !cleared_indices.is_empty() {
+            let mut resume_positions = self.subscriber_resume_positions.write().await;
+            for idx in cleared_indices {
+                resume_positions.remove(&idx);
             }
         }
 
@@ -812,6 +889,7 @@ impl SourceBase {
         }
 
         let dispatchers = self.dispatchers.read().await;
+        let comparator = self.position_comparator.read().await;
 
         for mut wrapper in events {
             if let Some(ref pos) = wrapper.source_position {
@@ -831,12 +909,38 @@ impl SourceBase {
             debug!("[{}] Dispatching event (batch): {:?}", self.id, &wrapper);
 
             let arc_wrapper = Arc::new(wrapper);
-            for dispatcher in dispatchers.iter() {
+            let mut cleared_indices: Vec<usize> = Vec::new();
+
+            for (idx, dispatcher) in dispatchers.iter().enumerate() {
+                // Check per-subscriber position gate
+                if let Some(ref cmp) = *comparator {
+                    let resume_positions = self.subscriber_resume_positions.read().await;
+                    if let Some(resume_pos) = resume_positions.get(&idx) {
+                        if let Some(ref event_pos) = arc_wrapper.source_position {
+                            if !cmp.position_reached(event_pos, resume_pos) {
+                                continue;
+                            }
+                            cleared_indices.push(idx);
+                        }
+                    }
+                }
+
                 if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
                     debug!("[{}] Failed to dispatch event: {}", self.id, e);
                 }
             }
+
+            // Clear resume entries for dispatchers that have caught up
+            if !cleared_indices.is_empty() {
+                let mut resume_positions = self.subscriber_resume_positions.write().await;
+                for idx in cleared_indices {
+                    resume_positions.remove(&idx);
+                }
+            }
         }
+
+        drop(comparator);
+        drop(dispatchers);
 
         Ok(())
     }
@@ -1051,6 +1155,7 @@ impl SourceBase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::ByteLexPositionComparator;
 
     // =========================================================================
     // SourceBaseParams tests
@@ -1500,5 +1605,246 @@ mod tests {
             Some(SourceBase::MAX_SOURCE_POSITION_BYTES + 1),
             "oversized position must still be delivered (checkpoint layer enforces the limit)"
         );
+    }
+
+    // =========================================================================
+    // Per-subscriber position filtering tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_position_filter_suppresses_events_before_resume() {
+        let params =
+            SourceBaseParams::new("pos-filter").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        // Create two subscribers
+        let mut rx1 = base.create_streaming_receiver().await.unwrap();
+        let mut rx2 = base.create_streaming_receiver().await.unwrap();
+
+        // rx1 (dispatcher 0): resume_from = position [0x00, 0x05]
+        // rx2 (dispatcher 1): no resume position (gets everything)
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x05]));
+
+        // Dispatch event at position [0x00, 0x03] — before rx1's resume
+        let event = make_event("pos-filter", Some(&[0x00, 0x03]));
+        base.dispatch_event(event).await.unwrap();
+
+        // rx2 should receive it (no filter)
+        let r2 = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x03]);
+
+        // rx1 should NOT receive it (position not reached)
+        let r1 = tokio::time::timeout(std::time::Duration::from_millis(50), rx1.recv()).await;
+        assert!(r1.is_err(), "rx1 should timeout — event was suppressed");
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_delivers_events_past_resume() {
+        let params =
+            SourceBaseParams::new("pos-filter2").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx1 = base.create_streaming_receiver().await.unwrap();
+
+        // resume_from = [0x00, 0x05]
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x05]));
+
+        // Event at [0x00, 0x06] — past resume
+        let event = make_event("pos-filter2", Some(&[0x00, 0x06]));
+        base.dispatch_event(event).await.unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x06]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_clears_after_reached() {
+        let params =
+            SourceBaseParams::new("pos-clear").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        // resume_from = [0x00, 0x03]
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x03]));
+
+        // First event at [0x00, 0x04] — past resume, clears the gate
+        base.dispatch_event(make_event("pos-clear", Some(&[0x00, 0x04])))
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap();
+
+        // Gate should be cleared
+        assert!(
+            base.subscriber_resume_positions.read().await.is_empty(),
+            "resume position should be cleared after position reached"
+        );
+
+        // Subsequent events at any position should flow through (even lower)
+        base.dispatch_event(make_event("pos-clear", Some(&[0x00, 0x01])))
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x01]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_equal_position_is_suppressed() {
+        // resume_from is the LAST committed position, so an event at exactly
+        // that position has already been processed — it should be suppressed.
+        let params =
+            SourceBaseParams::new("pos-equal").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x05]));
+
+        // Event at exactly [0x00, 0x05] — should be suppressed
+        base.dispatch_event(make_event("pos-equal", Some(&[0x00, 0x05])))
+            .await
+            .unwrap();
+
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(r.is_err(), "event at exactly resume position should be suppressed");
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_no_comparator_delivers_all() {
+        // Without a position comparator set, all events should be delivered
+        // even if there's a resume position entry.
+        let params =
+            SourceBaseParams::new("no-cmp").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        // Deliberately NOT setting a position comparator
+
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x05]));
+
+        // Event at [0x00, 0x03] — normally suppressed, but no comparator
+        base.dispatch_event(make_event("no-cmp", Some(&[0x00, 0x03])))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x03]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_batch_mode() {
+        let params =
+            SourceBaseParams::new("pos-batch").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx1 = base.create_streaming_receiver().await.unwrap();
+        let mut rx2 = base.create_streaming_receiver().await.unwrap();
+
+        // rx1 (idx 0): resume_from = [0x00, 0x05]
+        // rx2 (idx 1): resume_from = [0x00, 0x02]
+        {
+            let mut positions = base.subscriber_resume_positions.write().await;
+            positions.insert(0, Bytes::from_static(&[0x00, 0x05]));
+            positions.insert(1, Bytes::from_static(&[0x00, 0x02]));
+        }
+
+        let events = vec![
+            make_event("pos-batch", Some(&[0x00, 0x01])), // before both
+            make_event("pos-batch", Some(&[0x00, 0x03])), // past rx2, before rx1
+            make_event("pos-batch", Some(&[0x00, 0x06])), // past both
+        ];
+        base.dispatch_events_batch(events).await.unwrap();
+
+        // rx2 should receive events at [0x03] and [0x06] (skipping [0x01])
+        let r2_1 = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2_1.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x03]);
+
+        let r2_2 = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2_2.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x06]);
+
+        // rx1 should only receive event at [0x06] (skipping [0x01] and [0x03])
+        let r1_1 = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r1_1.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x06]);
+
+        // No more events for rx1
+        let r1_extra = tokio::time::timeout(std::time::Duration::from_millis(50), rx1.recv()).await;
+        assert!(r1_extra.is_err(), "rx1 should have no more events");
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_events_without_position_delivered() {
+        // Events with no source_position cannot be filtered — they pass through.
+        let params =
+            SourceBaseParams::new("pos-none").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x00, 0x05]));
+
+        // Event with no source_position
+        base.dispatch_event(make_event("pos-none", None))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(received.source_position.is_none());
     }
 }
