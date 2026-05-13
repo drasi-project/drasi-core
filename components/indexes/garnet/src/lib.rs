@@ -36,6 +36,8 @@ use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 pub mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
+pub mod live_results;
+pub mod outbox;
 mod plugin;
 pub mod result_index;
 pub(crate) mod session_state;
@@ -43,6 +45,8 @@ mod storage_models;
 
 // Re-export the plugin provider for easy access
 pub use checkpoint::GarnetCheckpointStore;
+pub use live_results::GarnetLiveResultsWriter;
+pub use outbox::GarnetOutboxWriter;
 pub use plugin::GarnetIndexProvider;
 pub use session_state::{GarnetSessionControl, GarnetSessionState};
 

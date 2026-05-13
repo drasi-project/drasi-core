@@ -134,27 +134,27 @@ impl OutboxWriter for RocksDbOutboxWriter {
     async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
-        // Seek to the end of this prefix range by using prefix + 0xFF...
+        // Seek to the end of this prefix range by using prefix with last byte = 0xFF
         let mut end_seek = prefix.clone();
-        // Replace last byte (0x00) with 0xFF to seek past all entries, then reverse iterate
-        *end_seek.last_mut().unwrap() = 0xFF;
+        if let Some(last) = end_seek.last_mut() {
+            *last = 0xFF;
+        }
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
             // Use reverse iterator from end of prefix range
-            let iter = db.iterator_cf(
+            let mut iter = db.iterator_cf(
                 &cf,
                 IteratorMode::From(&end_seek, rocksdb::Direction::Reverse),
             );
 
-            for item in iter {
+            // Only need the first item (highest sequence in this prefix)
+            if let Some(item) = iter.next() {
                 match item {
                     Ok((key, _)) => {
                         if key.starts_with(&prefix) {
                             return Ok(sequence_from_key(&key, prefix.len()));
                         }
-                        // Went past our prefix range
-                        break;
                     }
                     Err(e) => return Err(IndexError::other(e)),
                 }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::unwrap_used)]
+
 //! Integration tests for RocksDB OutboxWriter and LiveResultsWriter implementations.
 //!
 //! These tests verify correct persistence, crash recovery (re-open), and boundary
