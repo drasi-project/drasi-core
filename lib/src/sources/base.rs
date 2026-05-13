@@ -1391,4 +1391,115 @@ mod tests {
         assert!(response.bootstrap_receiver.is_none());
         assert!(response.position_handle.is_none());
     }
+
+    // =========================================================================
+    // dispatch_events_batch tests
+    // =========================================================================
+
+    fn make_event(source_id: &str, position: Option<&[u8]>) -> SourceEventWrapper {
+        let change = drasi_core::models::SourceChange::Insert {
+            element: drasi_core::models::Element::Node {
+                metadata: drasi_core::models::ElementMetadata {
+                    reference: drasi_core::models::ElementReference::new(source_id, "n1"),
+                    labels: Arc::from([Arc::from("Label")]),
+                    effective_from: 0,
+                },
+                properties: drasi_core::models::ElementPropertyMap::new(),
+            },
+        };
+        let mut wrapper = SourceEventWrapper::new(
+            source_id.to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+        wrapper.source_position = position.map(|p| bytes::Bytes::from(p.to_vec()));
+        wrapper
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_empty_returns_ok() {
+        let base = SourceBase::new(SourceBaseParams::new("batch-empty")).unwrap();
+        let result = base.dispatch_events_batch(Vec::new()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_stamps_monotonic_sequences() {
+        let params =
+            SourceBaseParams::new("batch-seq").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // Create a receiver so events are actually captured
+        let mut receiver = base.create_streaming_receiver().await.unwrap();
+
+        let events = vec![
+            make_event("batch-seq", Some(b"\x01")),
+            make_event("batch-seq", Some(b"\x02")),
+            make_event("batch-seq", Some(b"\x03")),
+        ];
+
+        base.dispatch_events_batch(events).await.unwrap();
+
+        let e1 = receiver.recv().await.unwrap();
+        let e2 = receiver.recv().await.unwrap();
+        let e3 = receiver.recv().await.unwrap();
+
+        let s1 = e1.sequence.expect("event 1 must have sequence");
+        let s2 = e2.sequence.expect("event 2 must have sequence");
+        let s3 = e3.sequence.expect("event 3 must have sequence");
+
+        assert_eq!(s2, s1 + 1, "sequences must be monotonically increasing");
+        assert_eq!(s3, s2 + 1, "sequences must be monotonically increasing");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_multi_dispatcher_fanout() {
+        let params = SourceBaseParams::new("batch-fanout")
+            .with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        // Create two receivers (two dispatchers in channel mode)
+        let mut rx1 = base.create_streaming_receiver().await.unwrap();
+        let mut rx2 = base.create_streaming_receiver().await.unwrap();
+
+        let events = vec![
+            make_event("batch-fanout", Some(b"\x01")),
+            make_event("batch-fanout", Some(b"\x02")),
+        ];
+
+        base.dispatch_events_batch(events).await.unwrap();
+
+        // Both receivers should get both events
+        let r1_e1 = rx1.recv().await.unwrap();
+        let r1_e2 = rx1.recv().await.unwrap();
+        let r2_e1 = rx2.recv().await.unwrap();
+        let r2_e2 = rx2.recv().await.unwrap();
+
+        // Same sequences across both receivers
+        assert_eq!(r1_e1.sequence, r2_e1.sequence);
+        assert_eq!(r1_e2.sequence, r2_e2.sequence);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_events_batch_oversized_position_still_dispatches() {
+        let params = SourceBaseParams::new("batch-oversize")
+            .with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+
+        // Create an event with a position larger than MAX_SOURCE_POSITION_BYTES
+        let big_pos = vec![0xAA; SourceBase::MAX_SOURCE_POSITION_BYTES + 1];
+        let events = vec![make_event("batch-oversize", Some(&big_pos))];
+
+        // Should succeed (warn but not error)
+        base.dispatch_events_batch(events).await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert!(received.sequence.is_some(), "event must still be stamped");
+        assert_eq!(
+            received.source_position.as_ref().map(|p| p.len()),
+            Some(SourceBase::MAX_SOURCE_POSITION_BYTES + 1),
+            "oversized position must still be delivered (checkpoint layer enforces the limit)"
+        );
+    }
 }
