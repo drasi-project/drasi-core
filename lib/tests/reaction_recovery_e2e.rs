@@ -112,10 +112,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
         self.inner.delete_many(store_id, keys).await
     }
 
-    async fn clear_store(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn clear_store(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
 
@@ -126,17 +123,11 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
         self.inner.list_keys(store_id).await
     }
 
-    async fn store_exists(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<bool> {
+    async fn store_exists(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
 
-    async fn key_count(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn key_count(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
 
@@ -246,14 +237,20 @@ impl Reaction for RecordingReaction {
 
     async fn start(&self) -> Result<()> {
         self.base
-            .set_status(ComponentStatus::Running, Some("Recording reaction started".into()))
+            .set_status(
+                ComponentStatus::Running,
+                Some("Recording reaction started".into()),
+            )
             .await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.base
-            .set_status(ComponentStatus::Stopped, Some("Recording reaction stopped".into()))
+            .set_status(
+                ComponentStatus::Stopped,
+                Some("Recording reaction stopped".into()),
+            )
             .await;
         Ok(())
     }
@@ -442,10 +439,7 @@ async fn test_reaction_restart_no_missed_events() -> Result<()> {
     let live = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(live.len(), 1, "Should receive 1 live event after restart");
 
-    eprintln!(
-        "Spurious replays after clean restart: {}",
-        spurious.len()
-    );
+    eprintln!("Spurious replays after clean restart: {}", spurious.len());
 
     core.stop().await?;
     Ok(())
