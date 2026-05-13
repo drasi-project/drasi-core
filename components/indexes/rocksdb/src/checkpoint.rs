@@ -119,7 +119,10 @@ fn read_all_checkpoints_impl(
 
                 result.insert(
                     source_id,
-                    SourceCheckpoint { sequence, source_position },
+                    SourceCheckpoint {
+                        sequence,
+                        source_position,
+                    },
                 );
             }
             Err(e) => return Err(IndexError::other(e)),
@@ -230,19 +233,15 @@ impl CheckpointStore for RocksDbCheckpointStore {
             session_state.with_txn_or_db(
                 |txn| {
                     let iter = txn.prefix_iterator_cf(&cf, prefix);
-                    read_all_checkpoints_impl(
-                        &cf,
-                        iter,
-                        |k| txn.get_cf(&cf, k).map_err(IndexError::other),
-                    )
+                    read_all_checkpoints_impl(&cf, iter, |k| {
+                        txn.get_cf(&cf, k).map_err(IndexError::other)
+                    })
                 },
                 |db| {
                     let iter = db.prefix_iterator_cf(&cf, prefix);
-                    read_all_checkpoints_impl(
-                        &cf,
-                        iter,
-                        |k| db.get_cf(&cf, k).map_err(IndexError::other),
-                    )
+                    read_all_checkpoints_impl(&cf, iter, |k| {
+                        db.get_cf(&cf, k).map_err(IndexError::other)
+                    })
                 },
             )
         });
@@ -333,9 +332,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
                 .cf_handle(STREAM_STATE_CF)
                 .expect("stream_state cf not found");
 
-            let data = db
-                .get_cf(&cf, CONFIG_HASH_KEY)
-                .map_err(IndexError::other)?;
+            let data = db.get_cf(&cf, CONFIG_HASH_KEY).map_err(IndexError::other)?;
             match data {
                 Some(v) => {
                     let bytes: [u8; 8] = v.try_into().map_err(|_| IndexError::CorruptedData)?;

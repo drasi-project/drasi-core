@@ -1295,9 +1295,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
         // checkpoint, passes resume_from to the source, and the source
         // rewinds its CDC position. The RocksDB fix (with_txn_or_db) ensures
         // checkpoint reads work outside an active session transaction.
-        core.start()
-            .await
-            .context("Failed to restart DrasiLib")?;
+        core.start().await.context("Failed to restart DrasiLib")?;
 
         // --- Phase 5: Verify the offline change is delivered ---
         wait_for_change(&mut sub, 30, |entry| {

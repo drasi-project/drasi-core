@@ -740,10 +740,7 @@ mod checkpoint_tests {
             .expect("read_all_checkpoints should succeed without a session");
         assert_eq!(all.len(), 2);
         assert_eq!(all["source-pg"].sequence, 10);
-        assert_eq!(
-            all["source-pg"].source_position.as_ref(),
-            Some(&pos_pg)
-        );
+        assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_pg));
         assert_eq!(all["source-mssql"].sequence, 20);
         assert_eq!(
             all["source-mssql"].source_position.as_ref(),
