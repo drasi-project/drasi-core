@@ -31,7 +31,7 @@
 
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
@@ -201,6 +201,18 @@ pub struct SourceBase {
     /// Set by sources that support replay. Without a comparator, position
     /// filtering is disabled (all events are delivered to all subscribers).
     position_comparator: Arc<RwLock<Option<Arc<dyn PositionComparator>>>>,
+    /// Maps framework sequence numbers to source positions (`source_position`
+    /// bytes from the dispatched event).
+    ///
+    /// Populated during `dispatch_event()` / `dispatch_events_batch()` for
+    /// events that carry a `source_position`.  Used by
+    /// `compute_confirmed_source_position()` to convert the confirmed
+    /// sequence (from position handles) back to a source-native position
+    /// (e.g. Postgres WAL LSN) for upstream cursor advancement.
+    ///
+    /// Pruned explicitly via `prune_position_map()` after the source has
+    /// successfully acknowledged the confirmed position to its upstream.
+    sequence_position_map: Arc<RwLock<BTreeMap<u64, Bytes>>>,
 }
 
 impl SourceBase {
@@ -252,6 +264,7 @@ impl SourceBase {
             subscriber_notify: Arc::new(Notify::new()),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
             position_comparator: Arc::new(RwLock::new(None)),
+            sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
@@ -427,6 +440,37 @@ impl SourceBase {
         handles.retain(|_, handle| Arc::strong_count(handle) > 1);
     }
 
+    /// Translate the confirmed framework sequence into the corresponding
+    /// source-native position (e.g. Postgres WAL LSN, Kafka offset).
+    ///
+    /// Returns `None` when no confirmed position exists (no subscribers, all
+    /// at `u64::MAX`, or the sequence map has been pruned past the confirmed
+    /// point).
+    ///
+    /// This does **not** prune the internal map — call
+    /// [`prune_position_map()`](Self::prune_position_map) after the source
+    /// has successfully acknowledged the position to its upstream.
+    pub async fn compute_confirmed_source_position(&self) -> Option<Bytes> {
+        let confirmed_seq = self.compute_confirmed_position().await?;
+        let map = self.sequence_position_map.read().await;
+        // Find the entry with the largest sequence ≤ confirmed_seq.
+        map.range(..=confirmed_seq)
+            .next_back()
+            .map(|(_, pos)| pos.clone())
+    }
+
+    /// Prune sequence→position entries that are no longer needed.
+    ///
+    /// Removes all entries with sequence ≤ `up_to_seq`. Call this after the
+    /// source has successfully sent feedback/committed the confirmed position
+    /// to its upstream, so re-send on failure is still possible.
+    pub async fn prune_position_map(&self, up_to_seq: u64) {
+        let mut map = self.sequence_position_map.write().await;
+        // BTreeMap::split_off returns entries >= key; we keep those.
+        let keep = map.split_off(&(up_to_seq.saturating_add(1)));
+        *map = keep;
+    }
+
     /// Reset the sequence counter, typically after recovering from a checkpoint.
     /// The next dispatched event will receive `sequence + 1`.
     pub fn set_next_sequence(&self, sequence: u64) {
@@ -490,6 +534,7 @@ impl SourceBase {
             subscriber_notify: self.subscriber_notify.clone(),
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
             position_comparator: self.position_comparator.clone(),
+            sequence_position_map: self.sequence_position_map.clone(),
         }
     }
 
@@ -659,7 +704,16 @@ impl SourceBase {
         // queries are deliberately excluded from the min-watermark so they
         // cannot pin upstream advancement.
         let position_handle = if settings.request_position_handle {
-            Some(self.create_position_handle(&settings.query_id).await)
+            let handle = self.create_position_handle(&settings.query_id).await;
+            // Initialize the handle to the query's checkpoint sequence so that
+            // compute_confirmed_position() includes this subscriber from the
+            // start. Without this, a resuming query whose handle stays at
+            // u64::MAX would be invisible to the min-watermark, letting
+            // flush_lsn advance past its checkpoint.
+            if let Some(last_seq) = settings.last_sequence {
+                handle.store(last_seq, Ordering::Release);
+            }
+            Some(handle)
         } else {
             None
         };
@@ -834,6 +888,14 @@ impl SourceBase {
         // Framework assigns the monotonic sequence
         wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
 
+        // Record sequence→source_position mapping for confirmed-position lookups.
+        if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+            self.sequence_position_map
+                .write()
+                .await
+                .insert(seq, pos.clone());
+        }
+
         debug!("[{}] Dispatching event: {:?}", self.id, &wrapper);
 
         // Arc-wrap for zero-copy sharing across dispatchers
@@ -905,6 +967,14 @@ impl SourceBase {
             }
 
             wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+
+            // Record sequence→source_position mapping for confirmed-position lookups.
+            if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
+                self.sequence_position_map
+                    .write()
+                    .await
+                    .insert(seq, pos.clone());
+            }
 
             debug!("[{}] Dispatching event (batch): {:?}", self.id, &wrapper);
 
@@ -1857,5 +1927,227 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(received.source_position.is_none());
+    }
+
+    // =========================================================================
+    // Sequence → source position mapping tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_sequence_position_map_populated_on_dispatch() {
+        let params =
+            SourceBaseParams::new("spm-1").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        let lsn: u64 = 0x1234;
+        base.dispatch_event(make_event("spm-1", Some(&lsn.to_be_bytes())))
+            .await
+            .unwrap();
+
+        let map = base.sequence_position_map.read().await;
+        assert_eq!(map.len(), 1);
+        let (seq, pos) = map.iter().next().unwrap();
+        assert_eq!(*seq, 1); // first sequence
+        assert_eq!(pos.as_ref(), &lsn.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_sequence_position_map_not_populated_without_position() {
+        let params =
+            SourceBaseParams::new("spm-none").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        base.dispatch_event(make_event("spm-none", None))
+            .await
+            .unwrap();
+
+        let map = base.sequence_position_map.read().await;
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_source_position_basic() {
+        let params =
+            SourceBaseParams::new("cssp-1").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        // Create position handle and set confirmed sequence
+        let handle = base.create_position_handle("q1").await;
+
+        // Dispatch 3 events with known LSNs
+        for lsn in [100u64, 200, 300] {
+            base.dispatch_event(make_event("cssp-1", Some(&lsn.to_be_bytes())))
+                .await
+                .unwrap();
+        }
+
+        // Confirm up to sequence 2 (second event, LSN=200)
+        handle.store(2, Ordering::Relaxed);
+
+        let confirmed = base.compute_confirmed_source_position().await;
+        assert!(confirmed.is_some());
+        let lsn_bytes = confirmed.unwrap();
+        assert_eq!(
+            u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()),
+            200
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_source_position_returns_none_when_no_handles() {
+        let base = SourceBase::new(SourceBaseParams::new("cssp-none")).unwrap();
+        assert!(base.compute_confirmed_source_position().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_source_position_returns_none_when_all_max() {
+        let base = SourceBase::new(SourceBaseParams::new("cssp-max")).unwrap();
+        let _h = base.create_position_handle("q1").await;
+        // h stays at u64::MAX
+        assert!(base.compute_confirmed_source_position().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compute_confirmed_source_position_min_of_two_queries() {
+        let params =
+            SourceBaseParams::new("cssp-2q").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        let h1 = base.create_position_handle("q1").await;
+        let h2 = base.create_position_handle("q2").await;
+
+        // Dispatch 3 events
+        for lsn in [100u64, 200, 300] {
+            base.dispatch_event(make_event("cssp-2q", Some(&lsn.to_be_bytes())))
+                .await
+                .unwrap();
+        }
+
+        // q1 confirmed seq 3 (LSN=300), q2 confirmed seq 1 (LSN=100)
+        h1.store(3, Ordering::Relaxed);
+        h2.store(1, Ordering::Relaxed);
+
+        let confirmed = base.compute_confirmed_source_position().await;
+        assert!(confirmed.is_some());
+        let lsn_bytes = confirmed.unwrap();
+        // min is seq 1 → LSN 100
+        assert_eq!(
+            u64::from_be_bytes(lsn_bytes[..8].try_into().unwrap()),
+            100
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_position_map() {
+        let params =
+            SourceBaseParams::new("prune-1").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        for lsn in [10u64, 20, 30, 40, 50] {
+            base.dispatch_event(make_event("prune-1", Some(&lsn.to_be_bytes())))
+                .await
+                .unwrap();
+        }
+        // Sequences are 1..=5
+        assert_eq!(base.sequence_position_map.read().await.len(), 5);
+
+        base.prune_position_map(3).await;
+        let map = base.sequence_position_map.read().await;
+        assert_eq!(map.len(), 2); // sequences 4 and 5 remain
+        assert!(map.contains_key(&4));
+        assert!(map.contains_key(&5));
+    }
+
+    #[tokio::test]
+    async fn test_prune_position_map_all() {
+        let params =
+            SourceBaseParams::new("prune-all").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        for lsn in [10u64, 20] {
+            base.dispatch_event(make_event("prune-all", Some(&lsn.to_be_bytes())))
+                .await
+                .unwrap();
+        }
+        base.prune_position_map(100).await; // prune beyond last seq
+        assert!(base.sequence_position_map.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_position_handle_initialized_to_last_sequence() {
+        use crate::config::SourceSubscriptionSettings;
+
+        let params =
+            SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        let settings = SourceSubscriptionSettings {
+            query_id: "q1".to_string(),
+            source_id: "ph-init".to_string(),
+            enable_bootstrap: false,
+            resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
+            last_sequence: Some(42),
+            request_position_handle: true,
+            nodes: Default::default(),
+            relations: Default::default(),
+        };
+
+        let response = base.subscribe_with_bootstrap(&settings, "test").await.unwrap();
+        let handle = response.position_handle.expect("should have handle");
+        // Handle should be initialized to last_sequence, not u64::MAX
+        assert_eq!(handle.load(Ordering::Relaxed), 42);
+    }
+
+    #[tokio::test]
+    async fn test_position_handle_stays_max_without_last_sequence() {
+        use crate::config::SourceSubscriptionSettings;
+
+        let params =
+            SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+
+        let settings = SourceSubscriptionSettings {
+            query_id: "q1".to_string(),
+            source_id: "ph-no-ls".to_string(),
+            enable_bootstrap: true,
+            resume_from: None,
+            last_sequence: None,
+            request_position_handle: true,
+            nodes: Default::default(),
+            relations: Default::default(),
+        };
+
+        let response = base.subscribe_with_bootstrap(&settings, "test").await.unwrap();
+        let handle = response.position_handle.expect("should have handle");
+        // No last_sequence → handle stays at u64::MAX
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_batch_dispatch_populates_sequence_position_map() {
+        let params =
+            SourceBaseParams::new("spm-batch").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        let _rx = base.create_streaming_receiver().await.unwrap();
+
+        let events = vec![
+            make_event("spm-batch", Some(&100u64.to_be_bytes())),
+            make_event("spm-batch", Some(&200u64.to_be_bytes())),
+            make_event("spm-batch", None), // no position
+        ];
+
+        base.dispatch_events_batch(events).await.unwrap();
+
+        let map = base.sequence_position_map.read().await;
+        // Only 2 entries (the one without position is skipped)
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key(&1));
+        assert!(map.contains_key(&2));
     }
 }

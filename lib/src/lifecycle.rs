@@ -124,9 +124,19 @@ impl LifecycleManager {
 
         // Start queries last — by this point reaction dispatchers are in place,
         // so replayed CDC changes will reach reactions immediately.
+        //
+        // Query startup is best-effort: individual queries that fail to start
+        // (e.g., PositionUnavailable after a gap) are placed in Error state by
+        // `start_all_components` but must NOT crash the server. Other healthy
+        // queries continue running.
         info!("Starting auto-start queries");
-        self.query_manager.start_all().await?;
-        info!("All auto-start queries started successfully");
+        if let Err(e) = self.query_manager.start_all().await {
+            log::warn!(
+                "Some queries failed to start (they are now in Error state): {e}"
+            );
+        } else {
+            info!("All auto-start queries started successfully");
+        }
 
         info!("All auto-start components started in sequence: Sources → Reactions → Queries");
         info!("[STARTUP-COMPLETE] DrasiLib.start() is now returning - all components and subscriptions should be active");
