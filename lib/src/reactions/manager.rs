@@ -992,6 +992,9 @@ impl ReactionManager {
                         cps.get(&query_id_clone).map(|cp| cp.sequence).unwrap_or(0)
                     };
 
+                    // Track the last forwarded sequence for gap detection.
+                    let mut last_forwarded_seq = initial_seq;
+
                     log::debug!(
                         "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
                          (initial_seq={initial_seq})"
@@ -1004,6 +1007,55 @@ impl ReactionManager {
                                 if query_result.sequence <= initial_seq {
                                     continue;
                                 }
+
+                                // §6: Detect sequence gaps (incoming seq > expected next).
+                                // This catches drops that don't manifest as broadcast lag
+                                // (e.g., outbox overflow while reaction was stopping).
+                                if last_forwarded_seq > 0
+                                    && query_result.sequence > last_forwarded_seq + 1
+                                {
+                                    log::warn!(
+                                        "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
+                                         expected seq={}, got seq={}",
+                                        last_forwarded_seq + 1,
+                                        query_result.sequence
+                                    );
+                                    match Self::handle_broadcast_gap(
+                                        &reaction_id_owned,
+                                        &query_id_clone,
+                                        &reaction,
+                                        &query_clone,
+                                        policy,
+                                        &state_store_clone,
+                                        &checkpoints,
+                                        &bootstrap_mutex,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            // After gap recovery, update checkpoint from the shared map
+                                            // (handle_broadcast_gap updates it).
+                                            let cps = checkpoints.read().await;
+                                            last_forwarded_seq = cps
+                                                .get(&query_id_clone)
+                                                .map(|cp| cp.sequence)
+                                                .unwrap_or(last_forwarded_seq);
+                                            // Re-evaluate this event against the updated checkpoint.
+                                            if query_result.sequence <= last_forwarded_seq {
+                                                continue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "[{reaction_id_owned}] Recovery failed for sequence gap \
+                                                 on query '{query_id_clone}': {e}"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                last_forwarded_seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
                                 if let Err(e) = reaction.enqueue_query_result(result).await {

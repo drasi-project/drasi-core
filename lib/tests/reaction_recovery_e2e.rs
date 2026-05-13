@@ -25,7 +25,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{DrasiLib, DispatchMode, MemoryStateStoreProvider, Query, Reaction};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -649,6 +649,151 @@ async fn test_reaction_live_delivery_after_restart() -> Result<()> {
         assert_eq!(r.query_id, "q1");
         assert!(!r.results.is_empty(), "Result should have diff entries");
     }
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test 6: Runtime sequence-gap detection via broadcast lag.
+///
+/// Uses a tiny broadcast buffer (capacity=2) so that flooding events while
+/// the reaction is slow causes a lag — the forwarder detects a sequence gap
+/// and applies the AutoSkipGap policy (skips the gap, resumes live delivery).
+#[tokio::test]
+async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    // Use broadcast mode with a very small buffer to induce lag.
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .with_dispatch_buffer_capacity(2)
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::AutoSkipGap,
+        true,
+        false,
+    );
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("runtime-gap-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    // Insert one event to confirm the pipeline works initially.
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(initial.len(), 1, "Should receive initial event");
+
+    // Flood the broadcast channel to cause lag (buffer=2, send many fast).
+    // The forwarder will detect a sequence gap when it catches up.
+    for i in 0..20 {
+        insert_person(
+            &handle,
+            &format!("p-flood-{i}"),
+            &format!("Flood-{i}"),
+            i,
+        )
+        .await?;
+    }
+
+    // Wait for the forwarder to process what it can.
+    // With AutoSkipGap, it should skip the gap and continue.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Verify that live delivery still works after the gap.
+    insert_person(&handle, "p-after-gap", "AfterGap", 99).await?;
+    let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(
+        after.len(),
+        1,
+        "Should receive live event after gap recovery"
+    );
+
+    core.stop().await?;
+    Ok(())
+}
+
+/// Test 7: Runtime gap with Strict policy — reaction should stop on gap.
+#[tokio::test]
+async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
+    let (mock_source, handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_dispatch_mode(DispatchMode::Broadcast)
+        .with_dispatch_buffer_capacity(2)
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+
+    let (reaction, mut receiver) = recording_reaction(
+        "rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::Strict,
+        true,
+        false,
+    );
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("strict-gap-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    // Confirm initial delivery works.
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    let initial = receiver.wait_for_count(1, Duration::from_secs(5)).await;
+    assert_eq!(initial.len(), 1);
+
+    // Flood to cause broadcast lag — Strict policy should stop the forwarder.
+    for i in 0..20 {
+        insert_person(
+            &handle,
+            &format!("p-flood-{i}"),
+            &format!("Flood-{i}"),
+            i,
+        )
+        .await?;
+    }
+
+    // Give time for the forwarder to detect the gap and exit.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // After strict gap failure, new events should NOT be delivered.
+    insert_person(&handle, "p-after", "After", 99).await?;
+    let after = receiver.wait_for_count(1, Duration::from_millis(1000)).await;
+    assert_eq!(
+        after.len(),
+        0,
+        "Strict policy: no events should be delivered after gap"
+    );
 
     core.stop().await?;
     Ok(())
