@@ -905,18 +905,25 @@ impl SourceBase {
         let dispatchers = self.dispatchers.read().await;
         let comparator = self.position_comparator.read().await;
         let mut cleared_indices: Vec<usize> = Vec::new();
+        // Collect (dispatcher_index, new_high_water) updates for after dispatch.
+        let mut hwm_updates: Vec<(usize, Bytes)> = Vec::new();
 
         for (idx, dispatcher) in dispatchers.iter().enumerate() {
-            // Check per-subscriber position gate
+            // Check per-subscriber position high-water mark.
+            // Events at or before the subscriber's high-water mark are
+            // suppressed.  When the event passes the mark, we deliver it
+            // and advance the mark (instead of removing it) so that future
+            // rewinds (caused by later subscribers triggering a stream
+            // restart) are still caught.
             if let Some(ref cmp) = *comparator {
                 let resume_positions = self.subscriber_resume_positions.read().await;
                 if let Some(resume_pos) = resume_positions.get(&idx) {
                     if let Some(ref event_pos) = arc_wrapper.source_position {
                         if !cmp.position_reached(event_pos, resume_pos) {
-                            // Event hasn't passed resume point — suppress for this subscriber
+                            // Event hasn't passed high-water mark — suppress
                             continue;
                         }
-                        // Position reached — mark for removal after dispatch
+                        // Position reached — will update high-water after dispatch
                         cleared_indices.push(idx);
                     }
                     // No source_position on event — cannot filter, deliver it
@@ -925,16 +932,22 @@ impl SourceBase {
 
             if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
                 debug!("[{}] Failed to dispatch event: {}", self.id, e);
+            } else if let Some(ref event_pos) = arc_wrapper.source_position {
+                // Track high-water mark so future rewinds are caught
+                hwm_updates.push((idx, event_pos.clone()));
             }
         }
         drop(comparator);
         drop(dispatchers);
 
-        // Clear resume entries for dispatchers that have caught up
-        if !cleared_indices.is_empty() {
+        // Advance high-water marks for dispatchers that received this event.
+        // For dispatchers that already had an entry (cleared_indices), this
+        // updates their mark.  For dispatchers that had no entry yet, this
+        // establishes one — protecting them from future rewinds.
+        if !hwm_updates.is_empty() {
             let mut resume_positions = self.subscriber_resume_positions.write().await;
-            for idx in cleared_indices {
-                resume_positions.remove(&idx);
+            for (idx, pos) in hwm_updates {
+                resume_positions.insert(idx, pos);
             }
         }
 
@@ -980,9 +993,10 @@ impl SourceBase {
 
             let arc_wrapper = Arc::new(wrapper);
             let mut cleared_indices: Vec<usize> = Vec::new();
+            let mut hwm_updates: Vec<(usize, Bytes)> = Vec::new();
 
             for (idx, dispatcher) in dispatchers.iter().enumerate() {
-                // Check per-subscriber position gate
+                // Check per-subscriber position high-water mark
                 if let Some(ref cmp) = *comparator {
                     let resume_positions = self.subscriber_resume_positions.read().await;
                     if let Some(resume_pos) = resume_positions.get(&idx) {
@@ -997,14 +1011,16 @@ impl SourceBase {
 
                 if let Err(e) = dispatcher.dispatch_change(arc_wrapper.clone()).await {
                     debug!("[{}] Failed to dispatch event: {}", self.id, e);
+                } else if let Some(ref event_pos) = arc_wrapper.source_position {
+                    hwm_updates.push((idx, event_pos.clone()));
                 }
             }
 
-            // Clear resume entries for dispatchers that have caught up
-            if !cleared_indices.is_empty() {
+            // Advance high-water marks for dispatchers that received this event
+            if !hwm_updates.is_empty() {
                 let mut resume_positions = self.subscriber_resume_positions.write().await;
-                for idx in cleared_indices {
-                    resume_positions.remove(&idx);
+                for (idx, pos) in hwm_updates {
+                    resume_positions.insert(idx, pos);
                 }
             }
         }
@@ -1745,8 +1761,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_position_filter_clears_after_reached() {
-        let params = SourceBaseParams::new("pos-clear").with_dispatch_mode(DispatchMode::Channel);
+    async fn test_position_filter_advances_high_water_mark() {
+        let params = SourceBaseParams::new("pos-hwm").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         base.set_position_comparator(ByteLexPositionComparator)
             .await;
@@ -1759,20 +1775,31 @@ mod tests {
             .await
             .insert(0, Bytes::from_static(&[0x00, 0x03]));
 
-        // First event at [0x00, 0x04] — past resume, clears the gate
-        base.dispatch_event(make_event("pos-clear", Some(&[0x00, 0x04])))
+        // First event at [0x00, 0x04] — past resume, advances high-water mark
+        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x04])))
             .await
             .unwrap();
         let _ = rx.recv().await.unwrap();
 
-        // Gate should be cleared
-        assert!(
-            base.subscriber_resume_positions.read().await.is_empty(),
-            "resume position should be cleared after position reached"
-        );
+        // High-water mark should be updated (not cleared)
+        {
+            let positions = base.subscriber_resume_positions.read().await;
+            assert_eq!(
+                positions.get(&0).map(|b| b.as_ref()),
+                Some([0x00, 0x04].as_slice()),
+                "high-water mark should be advanced to dispatched position"
+            );
+        }
 
-        // Subsequent events at any position should flow through (even lower)
-        base.dispatch_event(make_event("pos-clear", Some(&[0x00, 0x01])))
+        // Subsequent event at LOWER position should be suppressed (rewind protection)
+        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x01])))
+            .await
+            .unwrap();
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(r.is_err(), "event below high-water mark should be suppressed after rewind");
+
+        // Event at HIGHER position should flow through
+        base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x06])))
             .await
             .unwrap();
         let received = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -1781,7 +1808,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             received.source_position.as_ref().unwrap().as_ref(),
-            &[0x00, 0x01]
+            &[0x00, 0x06]
         );
     }
 
@@ -2140,5 +2167,112 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert!(map.contains_key(&1));
         assert!(map.contains_key(&2));
+    }
+
+    #[tokio::test]
+    async fn test_position_filter_rewind_protection_multi_subscriber() {
+        // Simulates the Postgres scenario: subscriber A joins, processes events,
+        // then subscriber B joins and the source rewinds the stream.
+        // Subscriber A should NOT see replayed events thanks to the
+        // persistent high-water mark.
+        let params = SourceBaseParams::new("rewind").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        // Subscriber A joins with resume_from at [0x10]
+        let mut rx_a = base.create_streaming_receiver().await.unwrap();
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(0, Bytes::from_static(&[0x10]));
+
+        // Source dispatches events at [0x20] and [0x30] — both past A's resume
+        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+            .await.unwrap();
+        let ev = rx_a.recv().await.unwrap();
+        assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
+
+        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+            .await.unwrap();
+        let ev = rx_a.recv().await.unwrap();
+        assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
+
+        // Subscriber B joins with resume_from at [0x10]
+        let mut rx_b = base.create_streaming_receiver().await.unwrap();
+        base.subscriber_resume_positions
+            .write()
+            .await
+            .insert(1, Bytes::from_static(&[0x10]));
+
+        // Source REWINDS — replays from [0x20] again
+        // A should NOT see these (high-water is at [0x30])
+        // B should see [0x20] (past its resume_from [0x10])
+        base.dispatch_event(make_event("rewind", Some(&[0x20])))
+            .await.unwrap();
+
+        // A should NOT receive the replayed event
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx_a.recv()).await;
+        assert!(r.is_err(), "subscriber A should not see replayed event at [0x20]");
+
+        // B SHOULD receive it (it's past B's resume_from)
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
+            .await.unwrap().unwrap();
+        assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
+
+        // Replay [0x30] — A should NOT see it, B should
+        base.dispatch_event(make_event("rewind", Some(&[0x30])))
+            .await.unwrap();
+
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx_a.recv()).await;
+        assert!(r.is_err(), "subscriber A should not see replayed event at [0x30]");
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
+            .await.unwrap().unwrap();
+        assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
+
+        // New event [0x40] — BOTH should see it
+        base.dispatch_event(make_event("rewind", Some(&[0x40])))
+            .await.unwrap();
+
+        let ev_a = tokio::time::timeout(std::time::Duration::from_millis(100), rx_a.recv())
+            .await.unwrap().unwrap();
+        assert_eq!(ev_a.source_position.as_ref().unwrap().as_ref(), &[0x40]);
+
+        let ev_b = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
+            .await.unwrap().unwrap();
+        assert_eq!(ev_b.source_position.as_ref().unwrap().as_ref(), &[0x40]);
+    }
+
+    #[tokio::test]
+    async fn test_high_water_mark_set_for_new_subscriber_without_resume() {
+        // A subscriber without initial resume_from should get a high-water
+        // mark after its first event, protecting it from future rewinds.
+        let params = SourceBaseParams::new("hwm-new").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator).await;
+
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+        // No resume_from set
+
+        // Dispatch event — should be delivered (no filter)
+        base.dispatch_event(make_event("hwm-new", Some(&[0x10])))
+            .await.unwrap();
+        let _ = rx.recv().await.unwrap();
+
+        // Now the high-water mark should be set at [0x10]
+        {
+            let positions = base.subscriber_resume_positions.read().await;
+            assert_eq!(
+                positions.get(&0).map(|b| b.as_ref()),
+                Some([0x10].as_slice()),
+                "high-water mark should be set after first dispatch"
+            );
+        }
+
+        // Rewind: event at [0x05] should be suppressed
+        base.dispatch_event(make_event("hwm-new", Some(&[0x05])))
+            .await.unwrap();
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(r.is_err(), "event below high-water mark should be suppressed");
     }
 }
