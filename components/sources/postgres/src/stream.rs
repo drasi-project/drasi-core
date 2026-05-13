@@ -648,16 +648,58 @@ impl ReplicationStream {
 
     async fn send_feedback(&mut self, reply_requested: bool) -> Result<()> {
         if let Some(conn) = &mut self.connection {
+            // Use the confirmed source position (min LSN across all query
+            // position handles) for flush_lsn / apply_lsn.  This tells
+            // Postgres that WAL up to this LSN has been durably processed
+            // by all subscribers.  Using read_lsn here would advance the
+            // slot watermark past un-checkpointed query positions, causing
+            // PositionUnavailable on crash+restart.
+            let confirmed_lsn =
+                match self.base.compute_confirmed_source_position().await {
+                    Some(bytes) if bytes.len() == 8 => {
+                        let arr: [u8; 8] = bytes[..8]
+                            .try_into()
+                            .expect("length already checked");
+                        u64::from_be_bytes(arr)
+                    }
+                    Some(bytes) => {
+                        warn!(
+                            "[{}] Confirmed source position has unexpected length {} (expected 8); \
+                             not advancing flush_lsn",
+                            self.source_id,
+                            bytes.len()
+                        );
+                        0
+                    }
+                    None => 0, // No confirmed position yet — don't advance
+                };
+
             let status = StandbyStatusUpdate {
                 write_lsn: self.read_lsn,
-                flush_lsn: self.read_lsn,
-                apply_lsn: self.read_lsn,
+                flush_lsn: confirmed_lsn,
+                apply_lsn: confirmed_lsn,
                 reply_requested,
             };
 
             conn.send_standby_status(status).await?;
             self.last_feedback_time = std::time::Instant::now();
-            trace!("Sent feedback with read_lsn {:x}", self.read_lsn);
+
+            // Prune the sequence→position map up to the confirmed sequence
+            // now that feedback was successfully sent.
+            if confirmed_lsn > 0 {
+                if let Some(confirmed_seq) =
+                    self.base.compute_confirmed_position().await
+                {
+                    self.base.prune_position_map(confirmed_seq).await;
+                }
+            }
+
+            trace!(
+                "[{}] Sent feedback: write_lsn={:x}, flush_lsn={:x}",
+                self.source_id,
+                self.read_lsn,
+                confirmed_lsn
+            );
         }
 
         Ok(())
