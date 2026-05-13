@@ -51,7 +51,6 @@ pub async fn run_cdc_stream(
     source_id: String,
     config: MsSqlSourceConfig,
     base: SourceBase,
-    state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     mut shutdown_rx: watch::Receiver<bool>,
     subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
@@ -71,7 +70,6 @@ pub async fn run_cdc_stream(
             &source_id,
             &config,
             &base,
-            &state_store,
             &mut shutdown_rx,
             &subscriber_resume_lsns,
         )
@@ -139,7 +137,6 @@ async fn run_cdc_polling_loop(
     source_id: &str,
     config: &MsSqlSourceConfig,
     base: &SourceBase,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
     shutdown_rx: &mut watch::Receiver<bool>,
     subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
@@ -153,15 +150,11 @@ async fn run_cdc_polling_loop(
     pk_cache.discover_keys(client, config).await?;
     info!("Discovered primary keys for {} tables", config.tables.len());
 
-    // Load last LSN checkpoint from StateStore
-    let mut current_lsn = load_checkpoint(source_id, state_store).await?;
-    info!(
-        "Starting CDC from LSN: {}",
-        current_lsn
-            .as_ref()
-            .map(|l| l.to_hex())
-            .unwrap_or_else(|| "NONE (will use current)".to_string())
-    );
+    // CDC start position is determined entirely by subscriber checkpoints.
+    // The framework checkpoint store (RocksDB/Garnet) persists per-query
+    // source positions; on restart each subscriber communicates its resume
+    // position via subscribe(). We use the minimum across all subscribers.
+    let mut current_lsn: Option<Lsn> = None;
 
     // Track consecutive errors for connection health monitoring
     let mut consecutive_errors = 0u32;
@@ -181,31 +174,16 @@ async fn run_cdc_polling_loop(
         }
     }
 
-    // Check if any subscriber has communicated a resume position that's earlier
-    // than our checkpoint. If so, rewind to the minimum to ensure no events are missed.
+    // Use the minimum subscriber resume position as the CDC start point.
     // This must happen AFTER wait_for_subscribers because subscriber_resume_lsns is
     // populated during subscribe(), which triggers the subscriber notification.
     {
         let resume_guard = subscriber_resume_lsns.read().await;
         if let Some(resume_lsn) = resume_guard.values().copied().min() {
-            match current_lsn {
-                Some(ref checkpoint_lsn) if resume_lsn < *checkpoint_lsn => {
-                    warn!(
-                        "Minimum subscriber resume LSN {resume_lsn} is earlier than source checkpoint {checkpoint_lsn}; \
-                         rewinding to subscriber position"
-                    );
-                    current_lsn = Some(resume_lsn);
-                }
-                None => {
-                    info!("No source checkpoint; using minimum subscriber resume LSN {resume_lsn}");
-                    current_lsn = Some(resume_lsn);
-                }
-                _ => {
-                    debug!(
-                        "Source checkpoint is at or before subscriber resume LSN; no rewind needed"
-                    );
-                }
-            }
+            info!("Using minimum subscriber resume LSN {resume_lsn} as CDC start position");
+            current_lsn = Some(resume_lsn);
+        } else {
+            debug!("No subscriber resume positions; will use configured start_position");
         }
     }
 
@@ -219,26 +197,13 @@ async fn run_cdc_polling_loop(
             return Ok(());
         }
 
-        let lsn_before = current_lsn;
-
         match poll_cdc_changes(source_id, config, client, &pk_cache, &mut current_lsn, base).await {
             Ok(change_count) => {
                 // Reset error counter on success
                 consecutive_errors = 0;
 
-                // Save checkpoint if LSN was initialized or if we processed changes
-                let lsn_changed = current_lsn != lsn_before;
-                if change_count > 0 || lsn_changed {
-                    if change_count > 0 {
-                        debug!("Processed {change_count} CDC changes");
-                    }
-                    if lsn_changed && change_count == 0 {
-                        debug!("Initialized LSN checkpoint");
-                    }
-
-                    if let Some(ref lsn) = current_lsn {
-                        save_checkpoint(source_id, lsn, state_store).await?;
-                    }
+                if change_count > 0 {
+                    debug!("Processed {change_count} CDC changes");
                 }
             }
             Err(e) => {
@@ -251,8 +216,7 @@ async fn run_cdc_polling_loop(
                         return Err(e);
                     }
                     MsSqlErrorKind::RecoverableLsn => {
-                        warn!("LSN error detected, clearing checkpoint and restarting from current position");
-                        clear_checkpoint(source_id, state_store).await?;
+                        warn!("LSN error detected, restarting from current position");
                         current_lsn = None;
                         consecutive_errors = 0; // Reset since we handled this
                     }
@@ -616,56 +580,6 @@ fn extract_lsn(row: &tiberius::Row) -> Result<Lsn> {
     Lsn::from_bytes(lsn_bytes)
 }
 
-/// Load LSN checkpoint from StateStore
-async fn load_checkpoint(
-    source_id: &str,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<Option<Lsn>> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        if let Some(bytes) = store.get(source_id, key).await? {
-            match Lsn::from_bytes(&bytes) {
-                Ok(lsn) => {
-                    info!("Loaded checkpoint LSN: {}", lsn.to_hex());
-                    return Ok(Some(lsn));
-                }
-                Err(e) => {
-                    warn!("Failed to parse stored LSN: {e}, starting fresh");
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Save LSN checkpoint to StateStore
-async fn save_checkpoint(
-    source_id: &str,
-    lsn: &Lsn,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        let bytes = lsn.to_bytes();
-        store.set(source_id, key, bytes).await?;
-        debug!("Saved checkpoint LSN: {}", lsn.to_hex());
-    }
-    Ok(())
-}
-
-/// Clear LSN checkpoint from StateStore
-async fn clear_checkpoint(
-    source_id: &str,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        store.delete(source_id, key).await?;
-        info!("Cleared checkpoint LSN");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,12 +589,6 @@ mod tests {
         let table = "orders";
         let capture_instance = format!("dbo_{table}");
         assert_eq!(capture_instance, "dbo_orders");
-    }
-
-    #[test]
-    fn test_checkpoint_key_format() {
-        let key = "checkpoint.lsn";
-        assert_eq!(key, "checkpoint.lsn");
     }
 
     #[test]

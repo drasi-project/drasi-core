@@ -93,7 +93,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
-use drasi_lib::state_store::StateStoreProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -111,9 +110,6 @@ pub struct MsSqlSource {
 
     /// Base source implementation (handles dispatching, status, etc.)
     base: SourceBase,
-
-    /// State store for LSN persistence
-    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
 
     /// CDC polling task handle
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
@@ -150,7 +146,6 @@ impl MsSqlSource {
             source_id,
             config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
@@ -269,7 +264,6 @@ impl Source for MsSqlSource {
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let base = self.base.clone_shared();
-        let state_store = self.state_store.read().await.clone();
         let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
 
         // Spawn CDC polling task
@@ -278,7 +272,6 @@ impl Source for MsSqlSource {
                 source_id.clone(),
                 config,
                 base,
-                state_store,
                 shutdown_rx,
                 subscriber_resume_lsns,
             )
@@ -376,12 +369,6 @@ impl Source for MsSqlSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context.clone()).await;
-
-        // Store state store if provided
-        if let Some(state_store) = context.state_store {
-            *self.state_store.write().await = Some(state_store);
-            log::debug!("State store injected into MS SQL source '{}'", self.base.id);
-        }
     }
 
     async fn set_bootstrap_provider(
@@ -538,7 +525,6 @@ impl MsSqlSourceBuilder {
             source_id,
             config: self.config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
