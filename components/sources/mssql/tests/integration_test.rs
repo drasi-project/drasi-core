@@ -1191,8 +1191,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
 
         core.start().await.context("Failed to start DrasiLib")?;
 
-        let sub_opts =
-            SubscriptionOptions::default().with_timeout(Duration::from_secs(5));
+        let sub_opts = SubscriptionOptions::default().with_timeout(Duration::from_secs(5));
         let mut sub1 = handle1
             .subscribe_with_options(sub_opts.clone())
             .await

@@ -1613,10 +1613,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_suppresses_events_before_resume() {
-        let params =
-            SourceBaseParams::new("pos-filter").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-filter").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         // Create two subscribers
         let mut rx1 = base.create_streaming_receiver().await.unwrap();
@@ -1647,10 +1647,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_delivers_events_past_resume() {
-        let params =
-            SourceBaseParams::new("pos-filter2").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-filter2").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx1 = base.create_streaming_receiver().await.unwrap();
 
@@ -1676,10 +1676,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_clears_after_reached() {
-        let params =
-            SourceBaseParams::new("pos-clear").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-clear").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
@@ -1719,10 +1719,10 @@ mod tests {
     async fn test_position_filter_equal_position_is_suppressed() {
         // resume_from is the LAST committed position, so an event at exactly
         // that position has already been processed — it should be suppressed.
-        let params =
-            SourceBaseParams::new("pos-equal").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-equal").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
@@ -1737,15 +1737,17 @@ mod tests {
             .unwrap();
 
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(r.is_err(), "event at exactly resume position should be suppressed");
+        assert!(
+            r.is_err(),
+            "event at exactly resume position should be suppressed"
+        );
     }
 
     #[tokio::test]
     async fn test_position_filter_no_comparator_delivers_all() {
         // Without a position comparator set, all events should be delivered
         // even if there's a resume position entry.
-        let params =
-            SourceBaseParams::new("no-cmp").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("no-cmp").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
         // Deliberately NOT setting a position comparator
 
@@ -1773,10 +1775,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_position_filter_batch_mode() {
-        let params =
-            SourceBaseParams::new("pos-batch").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-batch").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx1 = base.create_streaming_receiver().await.unwrap();
         let mut rx2 = base.create_streaming_receiver().await.unwrap();
@@ -1801,20 +1803,29 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(r2_1.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x03]);
+        assert_eq!(
+            r2_1.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x03]
+        );
 
         let r2_2 = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(r2_2.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x06]);
+        assert_eq!(
+            r2_2.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x06]
+        );
 
         // rx1 should only receive event at [0x06] (skipping [0x01] and [0x03])
         let r1_1 = tokio::time::timeout(std::time::Duration::from_millis(100), rx1.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(r1_1.source_position.as_ref().unwrap().as_ref(), &[0x00, 0x06]);
+        assert_eq!(
+            r1_1.source_position.as_ref().unwrap().as_ref(),
+            &[0x00, 0x06]
+        );
 
         // No more events for rx1
         let r1_extra = tokio::time::timeout(std::time::Duration::from_millis(50), rx1.recv()).await;
@@ -1824,10 +1835,10 @@ mod tests {
     #[tokio::test]
     async fn test_position_filter_events_without_position_delivered() {
         // Events with no source_position cannot be filtered — they pass through.
-        let params =
-            SourceBaseParams::new("pos-none").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("pos-none").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx = base.create_streaming_receiver().await.unwrap();
 
