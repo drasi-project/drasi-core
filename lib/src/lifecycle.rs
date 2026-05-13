@@ -97,29 +97,38 @@ impl LifecycleManager {
 
     /// Start all components with auto_start enabled
     ///
-    /// Components are started in dependency order: Sources → Queries → Reactions
+    /// Components are started in dependency order: Sources → Reactions → Queries.
+    ///
+    /// Reactions are started (and subscribed to query outputs) **before** queries
+    /// so that on a checkpoint-based restart the reaction dispatchers are already
+    /// in place when queries resume CDC processing. Without this ordering, the
+    /// queries can process replayed offline changes and dispatch results into an
+    /// empty dispatcher list, silently dropping them.
+    ///
     /// Only components with auto_start=true will be started.
     pub async fn start_components(&self) -> Result<()> {
-        info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
+        info!("Starting all auto-start components in sequence: Sources → Reactions → Queries");
 
         // Start sources first (SourceManager.start_all() checks auto_start internally)
         info!("Starting auto-start sources");
         self.source_manager.start_all().await?;
         info!("All auto-start sources started successfully");
 
-        // Start queries after sources
-        // QueryManager.start_all() reads from graph and checks auto_start internally
-        info!("Starting auto-start queries");
-        self.query_manager.start_all().await?;
-        info!("All auto-start queries started successfully");
-
-        // Start reactions after queries
-        // ReactionManager.start_all() handles auto_start logic internally
+        // Start reactions before queries so their dispatchers are wired up
+        // before the queries begin processing CDC events. Reaction.subscribe()
+        // only adds a dispatcher to the query's output channel list — it does
+        // not require the query to be running.
         info!("Starting auto-start reactions");
         self.reaction_manager.start_all().await?;
         info!("All auto-start reactions started successfully");
 
-        info!("All auto-start components started in sequence: Sources → Queries → Reactions");
+        // Start queries last — by this point reaction dispatchers are in place,
+        // so replayed CDC changes will reach reactions immediately.
+        info!("Starting auto-start queries");
+        self.query_manager.start_all().await?;
+        info!("All auto-start queries started successfully");
+
+        info!("All auto-start components started in sequence: Sources → Reactions → Queries");
         info!("[STARTUP-COMPLETE] DrasiLib.start() is now returning - all components and subscriptions should be active");
         Ok(())
     }
