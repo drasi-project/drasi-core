@@ -676,8 +676,37 @@ impl ReactionManager {
                     ))
                 })?;
 
-        // Abort subscription forwarder tasks before stopping
+        // Abort subscription forwarder tasks before stopping.
+        // This races with the supervisor task which may have already
+        // transitioned the reaction to Error (e.g. during orderly shutdown
+        // when queries are stopped before the reaction's stop is called).
         self.abort_subscription_tasks(&id).await;
+
+        // If the supervisor already moved the reaction to Error, the normal
+        // stop_component path (Running → Stopping) will be rejected.
+        // In that case, still call stop() on the plugin and transition to Stopped.
+        let current_status = {
+            let graph = self.graph.read().await;
+            graph
+                .get_component(&id)
+                .map(|n| n.status)
+                .unwrap_or(ComponentStatus::Stopped)
+        };
+
+        if current_status == ComponentStatus::Error {
+            log::info!(
+                "Reaction '{id}' is in Error state (likely from subscription loss during shutdown); \
+                 stopping plugin and transitioning to Stopped"
+            );
+            let _ = reaction.stop().await;
+            let mut graph = self.graph.write().await;
+            // Error → Stopping is intentionally blocked for user commands,
+            // so directly set to Stopped for orderly shutdown cleanup.
+            if let Some(node) = graph.get_component_mut(&id) {
+                node.status = ComponentStatus::Stopped;
+            }
+            return Ok(());
+        }
 
         crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "reaction", &reaction)
             .await
