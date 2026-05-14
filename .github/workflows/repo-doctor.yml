@@ -1,6 +1,9 @@
 name: repo-doctor
 
 on:
+  push:
+    branches: 
+      - repo-doctor-test
   workflow_dispatch:
 
 permissions:
