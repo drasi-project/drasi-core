@@ -129,16 +129,17 @@ pub trait CheckpointStore: Send + Sync {
     /// any session transaction begins.
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError>;
 
-    /// Stage the result sequence number into the active session transaction.
+    /// Write the last persisted result sequence for a query.
     ///
-    /// Called alongside `stage_checkpoint` within the same transaction scope
-    /// so that source position and result sequence advance atomically.
+    /// Called after outbox and live-results writes succeed, outside any session
+    /// transaction. Records the highest sequence that was durably persisted so
+    /// that recovery can detect outbox gaps (compare with the index's committed
+    /// sequence from `stage_checkpoint`).
     ///
-    /// For persistent backends, must be called inside an open session.
-    /// For volatile backends, applies immediately.
+    /// Standalone commit — does not require an active session.
     ///
     /// Default: no-op (volatile backends that don't track result sequences).
-    async fn stage_result_sequence(
+    async fn write_result_sequence(
         &self,
         _query_id: &str,
         _sequence: u64,
