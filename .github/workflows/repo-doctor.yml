@@ -1,0 +1,18 @@
+name: repo-doctor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ruokun-niu/repo-doctor@v0.2.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          preset: standard
+          fail-on: never
