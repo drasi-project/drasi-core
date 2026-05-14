@@ -1169,3 +1169,170 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     Ok(())
 }
+
+/// Stop → insert while stopped → restart (same instance).  Verifies:
+/// 1. The slot watermark was not advanced past query checkpoints
+///    (flush_lsn fix), so PositionUnavailable does NOT occur on restart.
+/// 2. Queries resume from their checkpoints and receive the missed events.
+///
+/// Note: In-process we cannot fully simulate a crash (tokio tasks and
+/// RocksDB locks survive `drop()`), so we use stop/start on the same
+/// DrasiLib instance.  This still exercises the critical code paths:
+/// periodic standby feedback uses the corrected flush_lsn, checkpoint
+/// persistence, and replication slot resume from checkpoint position.
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_postgres_stop_restart_recovers() -> Result<()> {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_reaction_application::subscription::SubscriptionOptions;
+
+    init_logging();
+
+    let tmp_dir = tempfile::TempDir::new()?;
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    // Seed data
+    insert_test_row(&client, TEST_TABLE, 700, "Seed").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let q_id = "kr-query";
+    let q_dir = tmp_dir.path().join("kr-q");
+    std::fs::create_dir_all(&q_dir)?;
+
+    let source_config = PostgresSourceConfig {
+        host: pg.config().host.clone(),
+        port: pg.config().port,
+        database: pg.config().database.clone(),
+        user: pg.config().user.clone(),
+        password: pg.config().password.clone(),
+        tables: vec![TEST_TABLE.to_string()],
+        slot_name: slot.clone(),
+        publication_name: TEST_PUBLICATION.to_string(),
+        ssl_mode: SslMode::Disable,
+        table_keys: vec![TableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let bootstrap_provider = PostgresBootstrapProvider::new(bootstrap_config);
+
+    let source = PostgresReplicationSource::builder("kr-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(bootstrap_provider)
+        .build()?;
+
+    let query = Query::cypher(q_id)
+        .query(
+            r#"
+            MATCH (u:users)
+            RETURN u.id AS id, u.name AS name
+            "#,
+        )
+        .from_source("kr-source")
+        .auto_start(true)
+        .enable_bootstrap(true)
+        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+            path: q_dir.to_string_lossy().to_string(),
+            enable_archive: false,
+            direct_io: false,
+        }))
+        .build();
+
+    let (reaction, handle) = ApplicationReaction::builder("kr-reaction")
+        .with_query(q_id)
+        .build();
+
+    let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("pg-stop-restart")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await?,
+    );
+
+    // --- Phase 1: First run — bootstrap, process events, let checkpoints persist ---
+    core.start().await?;
+
+    let sub_opts = SubscriptionOptions::default().with_timeout(Duration::from_secs(5));
+    let mut sub1 = handle.subscribe_with_options(sub_opts.clone()).await?;
+
+    // Insert a row and wait for the query to process it
+    insert_test_row(&client, TEST_TABLE, 701, "BeforeStop").await?;
+
+    wait_for_subscription_change(&mut sub1, 15, |e| {
+        pg_matches_change(e, "ADD", &[("id", "701"), ("name", "BeforeStop")])
+    })
+    .await
+    .context("query did not see row 701")?;
+
+    // Let checkpoint persist
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // --- Phase 2: Stop ---
+    // The key invariant: periodic standby feedback sent during Phase 1
+    // used the corrected flush_lsn derived from query checkpoints, so the
+    // slot watermark has NOT advanced past the query's checkpoint.
+    core.stop().await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // --- Phase 3: Insert rows while stopped ---
+    insert_test_row(&client, TEST_TABLE, 702, "WhileStopped1").await?;
+    insert_test_row(&client, TEST_TABLE, 703, "WhileStopped2").await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Phase 4: Restart the same instance ---
+    // This should NOT fail with PositionUnavailable.
+    // Before the flush_lsn fix, the slot watermark would have been
+    // advanced past the query's checkpoint, making restart impossible.
+    core.start().await?;
+
+    // Reuse the original subscription — the mpsc channel persists across
+    // stop/start since the reaction and handle share the same sender/receiver.
+    wait_for_subscription_change(&mut sub1, 20, |e| {
+        pg_matches_change(e, "ADD", &[("id", "702"), ("name", "WhileStopped1")])
+    })
+    .await
+    .context("query did not see row 702 after restart")?;
+
+    wait_for_subscription_change(&mut sub1, 20, |e| {
+        pg_matches_change(e, "ADD", &[("id", "703"), ("name", "WhileStopped2")])
+    })
+    .await
+    .context("query did not see row 703 after restart")?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
