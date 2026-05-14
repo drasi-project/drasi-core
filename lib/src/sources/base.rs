@@ -1796,7 +1796,10 @@ mod tests {
             .await
             .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(r.is_err(), "event below high-water mark should be suppressed after rewind");
+        assert!(
+            r.is_err(),
+            "event below high-water mark should be suppressed after rewind"
+        );
 
         // Event at HIGHER position should flow through
         base.dispatch_event(make_event("pos-hwm", Some(&[0x00, 0x06])))
@@ -2177,7 +2180,8 @@ mod tests {
         // persistent high-water mark.
         let params = SourceBaseParams::new("rewind").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         // Subscriber A joins with resume_from at [0x10]
         let mut rx_a = base.create_streaming_receiver().await.unwrap();
@@ -2188,12 +2192,14 @@ mod tests {
 
         // Source dispatches events at [0x20] and [0x30] — both past A's resume
         base.dispatch_event(make_event("rewind", Some(&[0x20])))
-            .await.unwrap();
+            .await
+            .unwrap();
         let ev = rx_a.recv().await.unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
         base.dispatch_event(make_event("rewind", Some(&[0x30])))
-            .await.unwrap();
+            .await
+            .unwrap();
         let ev = rx_a.recv().await.unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
 
@@ -2208,38 +2214,55 @@ mod tests {
         // A should NOT see these (high-water is at [0x30])
         // B should see [0x20] (past its resume_from [0x10])
         base.dispatch_event(make_event("rewind", Some(&[0x20])))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // A should NOT receive the replayed event
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx_a.recv()).await;
-        assert!(r.is_err(), "subscriber A should not see replayed event at [0x20]");
+        assert!(
+            r.is_err(),
+            "subscriber A should not see replayed event at [0x20]"
+        );
 
         // B SHOULD receive it (it's past B's resume_from)
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
 
         // Replay [0x30] — A should NOT see it, B should
         base.dispatch_event(make_event("rewind", Some(&[0x30])))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx_a.recv()).await;
-        assert!(r.is_err(), "subscriber A should not see replayed event at [0x30]");
+        assert!(
+            r.is_err(),
+            "subscriber A should not see replayed event at [0x30]"
+        );
 
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x30]);
 
         // New event [0x40] — BOTH should see it
         base.dispatch_event(make_event("rewind", Some(&[0x40])))
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let ev_a = tokio::time::timeout(std::time::Duration::from_millis(100), rx_a.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(ev_a.source_position.as_ref().unwrap().as_ref(), &[0x40]);
 
         let ev_b = tokio::time::timeout(std::time::Duration::from_millis(100), rx_b.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(ev_b.source_position.as_ref().unwrap().as_ref(), &[0x40]);
     }
 
@@ -2249,14 +2272,16 @@ mod tests {
         // mark after its first event, protecting it from future rewinds.
         let params = SourceBaseParams::new("hwm-new").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).unwrap();
-        base.set_position_comparator(ByteLexPositionComparator).await;
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
 
         let mut rx = base.create_streaming_receiver().await.unwrap();
         // No resume_from set
 
         // Dispatch event — should be delivered (no filter)
         base.dispatch_event(make_event("hwm-new", Some(&[0x10])))
-            .await.unwrap();
+            .await
+            .unwrap();
         let _ = rx.recv().await.unwrap();
 
         // Now the high-water mark should be set at [0x10]
@@ -2271,8 +2296,12 @@ mod tests {
 
         // Rewind: event at [0x05] should be suppressed
         base.dispatch_event(make_event("hwm-new", Some(&[0x05])))
-            .await.unwrap();
+            .await
+            .unwrap();
         let r = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
-        assert!(r.is_err(), "event below high-water mark should be suppressed");
+        assert!(
+            r.is_err(),
+            "event below high-water mark should be suppressed"
+        );
     }
 }
