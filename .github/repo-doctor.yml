@@ -1,0 +1,8 @@
+version: 1
+preset: standard
+
+# Also evaluate branch.* checks against the test branch, not just the
+# default branch. An empty `checks:` map means "use the preset defaults".
+branches:
+  - name: repo-doctor-test
+    checks: {}
