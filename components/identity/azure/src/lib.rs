@@ -133,6 +133,7 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
 }
 
 // Dynamic plugin entry point
+#[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "identity-azure",
     core_version = "0.4.0",
