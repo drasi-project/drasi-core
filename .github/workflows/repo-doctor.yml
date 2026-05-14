@@ -13,7 +13,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: ruokun-niu/repo-doctor@v0.2.0
+      - uses: ruokun-niu/repo-doctor@v0.2.1
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
