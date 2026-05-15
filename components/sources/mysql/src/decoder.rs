@@ -263,14 +263,14 @@ mod tests {
 
     #[test]
     fn test_float() {
-        let v = mysql_value_to_element_value(&Value::Float(3.14), None);
-        assert_eq!(v, ElementValue::Float(OrderedFloat(f64::from(3.14_f32))));
+        let v = mysql_value_to_element_value(&Value::Float(1.23), None);
+        assert_eq!(v, ElementValue::Float(OrderedFloat(f64::from(1.23_f32))));
     }
 
     #[test]
     fn test_double() {
-        let v = mysql_value_to_element_value(&Value::Double(2.718281828), None);
-        assert_eq!(v, ElementValue::Float(OrderedFloat(2.718281828)));
+        let v = mysql_value_to_element_value(&Value::Double(1.23456789), None);
+        assert_eq!(v, ElementValue::Float(OrderedFloat(1.23456789)));
     }
 
     #[test]
