@@ -1065,7 +1065,11 @@ impl ReactionManager {
         let supervisor = tokio::spawn(async move {
             // Wait for all forwarder tasks to complete.
             for handle in join_handles {
-                let _ = handle.await;
+                if let Err(e) = handle.await {
+                    log::warn!(
+                        "[{supervisor_reaction_id}] Forwarder task failed: {e}"
+                    );
+                }
             }
 
             // Only transition to Error if the reaction is still Running.
