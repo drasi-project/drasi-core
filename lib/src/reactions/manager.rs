@@ -1066,9 +1066,7 @@ impl ReactionManager {
             // Wait for all forwarder tasks to complete.
             for handle in join_handles {
                 if let Err(e) = handle.await {
-                    log::warn!(
-                        "[{supervisor_reaction_id}] Forwarder task failed: {e}"
-                    );
+                    log::warn!("[{supervisor_reaction_id}] Forwarder task failed: {e}");
                 }
             }
 
