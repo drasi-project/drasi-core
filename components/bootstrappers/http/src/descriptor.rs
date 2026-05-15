@@ -48,6 +48,10 @@ pub struct HttpBootstrapConfigDto {
     /// Retry delay in milliseconds.
     #[serde(default = "default_retry_delay")]
     pub retry_delay_ms: ConfigValue<u64>,
+
+    /// Maximum number of pages to fetch per endpoint (default: 10,000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pages: Option<ConfigValue<u64>>,
 }
 
 fn default_timeout() -> ConfigValue<u64> {
@@ -513,6 +517,11 @@ fn map_config(
         timeout_seconds: resolver.resolve_typed(&dto.timeout_seconds)?,
         max_retries: resolver.resolve_typed(&dto.max_retries)?,
         retry_delay_ms: resolver.resolve_typed(&dto.retry_delay_ms)?,
+        max_pages: dto
+            .max_pages
+            .as_ref()
+            .map(|v| resolver.resolve_typed(v))
+            .transpose()?,
     })
 }
 

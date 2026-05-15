@@ -38,11 +38,24 @@ use crate::pagination::{self, NextPage, Paginator};
 use crate::response;
 use crate::template_engine::TemplateEngine;
 
-/// Maximum number of pages to fetch per endpoint to prevent infinite loops.
-const MAX_PAGES: u64 = 10_000;
+/// Default maximum number of pages to fetch per endpoint to prevent infinite loops.
+const DEFAULT_MAX_PAGES: u64 = 10_000;
 
 /// Maximum backoff delay (60 seconds) to prevent unbounded sleep.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// Safely truncate a string to at most `max_chars` characters without panicking
+/// on multi-byte UTF-8 boundaries.
+fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    if s.len() <= max_chars {
+        return s;
+    }
+    let mut end = max_chars;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// A resolved endpoint bundling config with its resolved auth.
 struct ResolvedEndpoint {
@@ -137,9 +150,11 @@ impl HttpBootstrapProvider {
             page_num += 1;
 
             // Prevent infinite loops
-            if page_num > MAX_PAGES {
-                warn!(
-                    "Reached maximum page limit ({MAX_PAGES}) for endpoint '{}', stopping pagination",
+            let max_pages = self.config.max_pages.unwrap_or(DEFAULT_MAX_PAGES);
+            if page_num > max_pages {
+                error!(
+                    "Reached maximum page limit ({max_pages}) for endpoint '{}', stopping pagination. \
+                     Configure 'maxPages' to increase this limit.",
                     endpoint.url
                 );
                 break;
@@ -184,7 +199,7 @@ impl HttpBootstrapProvider {
                         "Failed to parse response from '{}' as {ct:?}. Body length: {}, first 200 chars: {:?}",
                         endpoint.url,
                         response_text.len(),
-                        &response_text[..response_text.len().min(200)]
+                        safe_truncate(&response_text, 200)
                     );
                     return Err(e.context(format!(
                         "Failed to parse response from '{}' as {ct:?}",
@@ -358,7 +373,7 @@ impl HttpBootstrapProvider {
                 .await
                 .unwrap_or_else(|_| "Unable to read error response".to_string());
             let truncated = if body.len() > 256 {
-                format!("{}... (truncated)", &body[..256])
+                format!("{}... (truncated)", safe_truncate(&body, 256))
             } else {
                 body
             };

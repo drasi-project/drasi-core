@@ -35,6 +35,11 @@ pub struct HttpBootstrapConfig {
     /// Delay between retries in milliseconds (default: 1000).
     #[serde(default = "default_retry_delay_ms")]
     pub retry_delay_ms: u64,
+
+    /// Maximum number of pages to fetch per endpoint (default: 10,000).
+    /// Set a higher value for very large initial loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pages: Option<u64>,
 }
 
 fn default_timeout_seconds() -> u64 {
@@ -563,6 +568,7 @@ mod tests {
             timeout_seconds: 30,
             max_retries: 3,
             retry_delay_ms: 1000,
+            max_pages: None,
         }
     }
 

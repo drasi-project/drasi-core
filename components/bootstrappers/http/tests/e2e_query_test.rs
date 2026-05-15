@@ -175,6 +175,7 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -309,6 +310,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -452,6 +454,7 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();

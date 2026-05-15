@@ -120,6 +120,7 @@ async fn test_simple_json_endpoint() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -218,6 +219,7 @@ async fn test_offset_limit_pagination() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -313,6 +315,7 @@ async fn test_cursor_pagination_stripe_style() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -415,6 +418,7 @@ async fn test_link_header_pagination_github_style() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -551,6 +555,7 @@ async fn test_next_url_pagination_salesforce_style() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -620,6 +625,7 @@ async fn test_bearer_auth() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -693,6 +699,7 @@ async fn test_api_key_header_auth() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -774,6 +781,7 @@ async fn test_basic_auth() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -872,6 +880,7 @@ async fn test_oauth2_client_credentials() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -972,6 +981,7 @@ async fn test_multi_endpoint_bootstrap() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1043,6 +1053,7 @@ async fn test_retry_on_failure() {
         timeout_seconds: 10,
         max_retries: 3,
         retry_delay_ms: 50, // Short delay for tests
+        max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1108,6 +1119,7 @@ async fn test_retries_exhausted_returns_error() {
         timeout_seconds: 10,
         max_retries: 2,
         retry_delay_ms: 10, // Very short for testing
+        max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1175,6 +1187,7 @@ async fn test_relations_mapping() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1278,6 +1291,7 @@ async fn test_page_number_pagination() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1338,6 +1352,7 @@ async fn test_label_filtering() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1541,6 +1556,7 @@ async fn test_xml_response_parsing() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1619,6 +1635,7 @@ async fn test_yaml_response_parsing() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();
@@ -1700,6 +1717,7 @@ async fn test_type_preservation_in_properties() {
         timeout_seconds: 10,
         max_retries: 0,
         retry_delay_ms: 100,
+    max_pages: None,
     };
 
     let provider = HttpBootstrapProvider::new(config).unwrap();

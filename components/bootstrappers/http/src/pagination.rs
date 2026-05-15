@@ -482,14 +482,15 @@ fn navigate_segment<'a>(value: &'a JsonValue, segment: &str) -> Option<&'a JsonV
 
 /// Parse the Link header to find the URL with rel="next".
 /// Uses bracket-aware splitting to handle commas inside URL angle brackets.
+/// Parses parameters per RFC 5988 (split on `;`, trim, exact-match `rel="next"`).
 fn parse_link_header_next(headers: &HeaderMap) -> Option<String> {
     let link_header = headers.get("link")?.to_str().ok()?;
 
     // Split on commas that are outside angle brackets
     for part in split_link_header(link_header) {
         let part = part.trim();
-        // Check if this part has rel="next"
-        if part.contains("rel=\"next\"") || part.contains("rel='next'") {
+        // Parse parameters per RFC 5988: split on ';' and check each param
+        if has_rel_next(part) {
             // Extract URL between < and >
             if let Some(start) = part.find('<') {
                 if let Some(end) = part.find('>') {
@@ -500,6 +501,18 @@ fn parse_link_header_next(headers: &HeaderMap) -> Option<String> {
     }
 
     None
+}
+
+/// Check if a Link header part has an exact `rel="next"` or `rel='next'` parameter.
+/// Splits on `;` per RFC 5988 and performs exact-match on each parameter value.
+fn has_rel_next(part: &str) -> bool {
+    for param in part.split(';') {
+        let param = param.trim();
+        if param.eq_ignore_ascii_case("rel=\"next\"") || param.eq_ignore_ascii_case("rel='next'") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Split a Link header value on commas that are outside angle brackets.

@@ -24,6 +24,18 @@ use tokio::sync::RwLock;
 
 use crate::config::{ApiKeyLocation, AuthConfig};
 
+/// Find the largest byte index <= `max` that is a valid UTF-8 char boundary.
+fn find_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// Resolved authentication that can be applied to requests.
 pub enum ResolvedAuth {
     Bearer {
@@ -144,7 +156,8 @@ impl OAuth2TokenProvider {
                 .await
                 .unwrap_or_else(|_| "Unable to read response".to_string());
             let truncated = if body.len() > 256 {
-                format!("{}... (truncated)", &body[..256])
+                let end = find_char_boundary(&body, 256);
+                format!("{}... (truncated)", &body[..end])
             } else {
                 body
             };
