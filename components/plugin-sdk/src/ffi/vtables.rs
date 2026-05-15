@@ -204,6 +204,8 @@ drasi_ffi_primitives::ffi_vtable! {
         // Configuration inspection
         /// Returns the source's configuration properties as a JSON string.
         fn properties_fn(state: *const) -> FfiOwnedStr,
+        /// Returns the source's best-effort graph schema as JSON, or `null`.
+        fn describe_schema_fn(state: *const) -> FfiOwnedStr,
 
         // Lifecycle
         fn start_fn(state: *mut) -> FfiResult,
