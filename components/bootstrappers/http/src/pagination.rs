@@ -49,26 +49,22 @@ pub trait Paginator: Send + Sync {
 /// original endpoint URL (SSRF prevention).
 fn validate_pagination_url(next_url: &str, origin_host: &str) -> Result<String> {
     let parsed = Url::parse(next_url)
-        .map_err(|e| anyhow!("Invalid pagination URL '{}': {}", next_url, e))?;
+        .map_err(|e| anyhow!("Invalid pagination URL '{next_url}': {e}"))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(anyhow!(
-            "Pagination URL has disallowed scheme '{}': {}",
-            scheme,
-            next_url
+            "Pagination URL has disallowed scheme '{scheme}': {next_url}"
         ));
     }
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow!("Pagination URL has no host: {}", next_url))?;
+        .ok_or_else(|| anyhow!("Pagination URL has no host: {next_url}"))?;
 
     if host != origin_host {
         return Err(anyhow!(
-            "Pagination URL host '{}' does not match origin host '{}' (SSRF protection)",
-            host,
-            origin_host
+            "Pagination URL host '{host}' does not match origin host '{origin_host}' (SSRF protection)"
         ));
     }
 
