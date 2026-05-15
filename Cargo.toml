@@ -21,6 +21,7 @@ members = [
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
   "components/bootstrappers/dataverse",
+  "components/bootstrappers/http",
 
   # Source Plugins
   "components/sources/postgres",
@@ -38,6 +39,7 @@ members = [
   "components/reactions/grpc",
   "components/reactions/grpc-adaptive",
   "components/reactions/sse",
+  "components/reactions/dashboard",
   "components/reactions/platform",
   "components/reactions/profiler",
   "components/reactions/application",
