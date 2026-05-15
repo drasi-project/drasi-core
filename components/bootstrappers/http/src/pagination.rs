@@ -48,8 +48,8 @@ pub trait Paginator: Send + Sync {
 /// Validate that a pagination-followed URL shares the same scheme+host as the
 /// original endpoint URL (SSRF prevention).
 fn validate_pagination_url(next_url: &str, origin_host: &str) -> Result<String> {
-    let parsed = Url::parse(next_url)
-        .map_err(|e| anyhow!("Invalid pagination URL '{next_url}': {e}"))?;
+    let parsed =
+        Url::parse(next_url).map_err(|e| anyhow!("Invalid pagination URL '{next_url}': {e}"))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
