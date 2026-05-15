@@ -101,6 +101,7 @@ impl IdentityProviderPluginDescriptor for AwsIdentityProviderDescriptor {
 }
 
 // Dynamic plugin entry point
+#[cfg(feature = "dynamic-plugin")]
 drasi_plugin_sdk::export_plugin!(
     plugin_id = "identity-aws",
     core_version = "0.4.0",
