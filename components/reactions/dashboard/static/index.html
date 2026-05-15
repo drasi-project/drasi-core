@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Drasi Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/js/vendor/gridstack.min.css" />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+</head>
+<body>
+  <!-- ─── Header ─────────────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-brand">
+      <svg width="28" height="28" viewBox="254.75 254.81 400 440" aria-label="Drasi logo"><polygon fill="#c3fb3b" points="395.05 463.28 380.35 367.2 527.12 463.28 649.07 463.28 319.08 254.81 317.08 463.28 395.05 463.28"/><polygon fill="#48e263" points="526.58 482.88 351.77 564.1 392.83 482.88 314.86 482.88 254.75 692.31 648.56 482.88 526.58 482.88"/></svg>
+      <h1>Drasi Dashboard</h1>
+    </div>
+    <div class="header-right">
+      <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+      <div id="socket-status" class="status-indicator">
+        <span class="status-dot"></span>
+        <span class="status-text">Disconnected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── Main Content ───────────────────────────────────── -->
+  <main class="app-main">
+
+    <!-- Dashboard List View -->
+    <section id="dashboard-list-view" class="view active">
+      <div class="toolbar">
+        <h2>Dashboards</h2>
+        <div class="toolbar-spacer"></div>
+        <button id="new-dashboard-btn" type="button" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Dashboard
+        </button>
+      </div>
+      <div id="dashboard-list" class="dashboard-list"></div>
+    </section>
+
+    <!-- Dashboard Editor View -->
+    <section id="dashboard-editor-view" class="view">
+      <div class="toolbar">
+        <button id="back-btn" type="button" class="btn btn-ghost">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+          Back
+        </button>
+        <div class="toolbar-spacer"></div>
+        <button id="add-widget-btn" type="button" class="btn btn-ghost">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Widget
+        </button>
+        <button id="save-dashboard-btn" type="button" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          Save
+        </button>
+      </div>
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <div>
+            <input
+              type="text"
+              id="editor-title"
+              class="dashboard-name-editable"
+              placeholder="Dashboard name"
+              value="Dashboard"
+            />
+          </div>
+          <div>
+            <div class="sidebar-section-title">Available Queries</div>
+            <div id="query-list"></div>
+          </div>
+          <p class="hint">
+            Drag and resize widgets on the grid. Click the
+            <strong>⚙</strong> icon on any widget to configure it.
+          </p>
+        </aside>
+        <div class="editor-canvas">
+          <div class="grid-stack" id="dashboard-grid"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─── Toast Container ────────────────────────────────── -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- ─── Scripts ────────────────────────────────────────── -->
+  <script src="/assets/js/vendor/gridstack.min.js"></script>
+  <script src="/assets/js/vendor/echarts.min.js"></script>
+  <script src="/assets/js/vendor/handlebars.min.js"></script>
+  <script src="/assets/js/vendor/marked.min.js"></script>
+  <script src="/assets/js/vendor/dompurify.min.js"></script>
+  <script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>
