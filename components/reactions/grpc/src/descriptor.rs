@@ -135,7 +135,9 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
             builder = builder.with_metadata(key, value);
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

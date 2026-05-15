@@ -87,6 +87,9 @@ pub struct ComponentStatusHandle {
     component_id: String,
     status: Arc<RwLock<ComponentStatus>>,
     update_tx: Arc<tokio::sync::OnceCell<ComponentUpdateSender>>,
+    /// Watch channel for event-driven status observation.
+    /// Updated on every `set_status` call, enabling zero-latency `wait_for` patterns.
+    status_watch_tx: Arc<tokio::sync::watch::Sender<ComponentStatus>>,
 }
 
 impl ComponentStatusHandle {
@@ -95,10 +98,12 @@ impl ComponentStatusHandle {
     /// The handle is fully functional for local status reads/writes immediately.
     /// Call [`wire`] later to connect to the graph update loop.
     pub fn new(component_id: impl Into<String>) -> Self {
+        let (watch_tx, _) = tokio::sync::watch::channel(ComponentStatus::Stopped);
         Self {
             component_id: component_id.into(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             update_tx: Arc::new(tokio::sync::OnceCell::new()),
+            status_watch_tx: Arc::new(watch_tx),
         }
     }
 
@@ -109,10 +114,12 @@ impl ComponentStatusHandle {
     pub fn new_wired(component_id: impl Into<String>, update_tx: ComponentUpdateSender) -> Self {
         let cell = tokio::sync::OnceCell::new();
         let _ = cell.set(update_tx);
+        let (watch_tx, _) = tokio::sync::watch::channel(ComponentStatus::Stopped);
         Self {
             component_id: component_id.into(),
             status: Arc::new(RwLock::new(ComponentStatus::Stopped)),
             update_tx: Arc::new(cell),
+            status_watch_tx: Arc::new(watch_tx),
         }
     }
 
@@ -137,6 +144,11 @@ impl ComponentStatusHandle {
             *self.status.write().await = status;
         }
 
+        // Notify watch subscribers — send_modify always updates the stored value
+        // even when no receivers currently exist (unlike send() which is a no-op
+        // without receivers).
+        self.status_watch_tx.send_modify(|s| *s = status);
+
         if let Some(tx) = self.update_tx.get() {
             if let Err(e) = tx
                 .send(ComponentUpdate::Status {
@@ -157,6 +169,15 @@ impl ComponentStatusHandle {
     /// Read the current status.
     pub async fn get_status(&self) -> ComponentStatus {
         *self.status.read().await
+    }
+
+    /// Subscribe to status changes via a `tokio::sync::watch::Receiver`.
+    ///
+    /// The receiver can be used with `wait_for()` for event-driven waiting
+    /// without polling. Each call returns a fresh receiver; multiple
+    /// subscribers are supported.
+    pub fn subscribe_status(&self) -> tokio::sync::watch::Receiver<ComponentStatus> {
+        self.status_watch_tx.subscribe()
     }
 }
 

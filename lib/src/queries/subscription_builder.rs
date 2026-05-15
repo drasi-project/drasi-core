@@ -38,6 +38,7 @@ impl SubscriptionSettingsBuilder {
                 relations: source_config.relations.iter().cloned().collect(),
                 resume_from: None,
                 request_position_handle: false,
+                last_sequence: None,
             })
             .collect();
 
@@ -185,6 +186,8 @@ mod tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 

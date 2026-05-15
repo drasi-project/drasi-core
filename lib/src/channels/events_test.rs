@@ -94,6 +94,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             profiling: None,
             sequence: None,
+            source_position: None,
         };
 
         assert_eq!(wrapper.source_id, "test-source");
@@ -106,6 +107,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,
@@ -125,6 +127,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: metadata.clone(),
             profiling: None,
@@ -205,6 +208,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,

@@ -19,7 +19,7 @@ use crate::registry::types::{
     media_types, PluginMetadataJson, PluginReference, RegistryAuth, RegistryConfig,
 };
 use anyhow::{bail, Context, Result};
-use log::{info, warn};
+use log::{debug, info, warn};
 use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::Reference;
 use std::path::{Path, PathBuf};
@@ -104,11 +104,28 @@ impl OciRegistryClient {
         let mut last: Option<String> = None;
 
         loop {
-            let response = self
+            let response = match self
                 .client
                 .list_tags(oci_ref, &self.auth(), Some(PAGE_SIZE), last.as_deref())
                 .await
-                .context("failed to list tags")?;
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // GHCR returns {"tags": null} instead of {"tags": []} on the
+                    // page after the last real page. The oci-client crate
+                    // deserializes `tags` as Vec<String> which rejects null.
+                    // This is normal end-of-pagination behavior.
+                    let err_str = format!("{e:#}");
+                    if err_str.contains("invalid type: null") {
+                        debug!(
+                            "Registry returned null tags for {}; end of pagination",
+                            oci_ref
+                        );
+                        break;
+                    }
+                    return Err(e).context("failed to list tags");
+                }
+            };
 
             let page = response.tags;
             if page.is_empty() {
