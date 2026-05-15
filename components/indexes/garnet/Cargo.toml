@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-index-garnet"
-version = "0.1.10"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Drasi Core Garnet/Redis Index Plugin"
@@ -31,6 +31,7 @@ drasi-core.workspace = true
 drasi-query-ast.workspace = true
 redis = { version = "0.25", features = ["tokio-comp"] }
 async-trait = "0.1.68"
+bytes = "1"
 hashers = "1.0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

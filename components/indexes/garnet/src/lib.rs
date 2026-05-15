@@ -33,6 +33,7 @@
 use drasi_core::interface::IndexError;
 use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
+pub mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
 mod plugin;
@@ -41,6 +42,7 @@ pub(crate) mod session_state;
 mod storage_models;
 
 // Re-export the plugin provider for easy access
+pub use checkpoint::GarnetCheckpointStore;
 pub use plugin::GarnetIndexProvider;
 pub use session_state::{GarnetSessionControl, GarnetSessionState};
 

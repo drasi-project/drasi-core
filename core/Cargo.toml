@@ -1,6 +1,6 @@
 [package]
 name = "drasi-core"
-version = "0.4.3"
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 description = "Drasi Core"
@@ -20,6 +20,7 @@ parallel_solver = []
 
 [dependencies]
 async-trait = "0.1.68"
+bytes = "1"
 drasi-query-ast.workspace = true
 drasi-query-cypher.workspace = true
 hashers = "1.0.1"

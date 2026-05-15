@@ -38,6 +38,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use thiserror::Error;
 
 use crate::channels::*;
@@ -58,11 +59,13 @@ use crate::context::SourceRuntimeContext;
 pub enum SourceError {
     /// The requested resume position is no longer available.
     /// The caller should consult its recovery_policy to decide next steps.
-    #[error("Source '{source_id}' cannot resume from position {requested}: position unavailable (earliest available: {earliest_available:?})")]
+    #[error("Source '{source_id}' cannot resume from requested position: position unavailable (earliest available: {earliest_available:?})")]
     PositionUnavailable {
         source_id: String,
-        requested: u64,
-        earliest_available: Option<u64>,
+        /// The position that was requested (opaque bytes from a previous checkpoint)
+        requested: Bytes,
+        /// The earliest position the source can provide, if known
+        earliest_available: Option<Bytes>,
     },
 }
 
@@ -125,11 +128,26 @@ pub trait Source: Send + Sync {
     /// Get the source type name (e.g., "postgres", "http", "mock")
     fn type_name(&self) -> &str;
 
-    /// Get the source's configuration properties for inspection
+    /// Return **all** configuration properties for this source, including secrets.
     ///
-    /// This returns a HashMap representation of the source's configuration
-    /// for use in APIs and inspection. The actual typed configuration is
-    /// owned by the plugin - this is just for external visibility.
+    /// # Persistence contract
+    ///
+    /// This method is the **serialization hook** used by the host to persist
+    /// configuration to disk. When the server saves its config file it calls
+    /// `snapshot_configuration()`, which in turn calls `properties()` on every
+    /// source. The returned map is written to the YAML config so the component
+    /// can be recreated on the next startup.
+    ///
+    /// Because there is no separate config cache — the live component is the
+    /// single source of truth — any key/value omitted here will be **lost** on
+    /// the next save and the component will fail to start after a restart.
+    ///
+    /// # ⚠ Do not filter secrets
+    ///
+    /// Implementations **must** include sensitive values (passwords, tokens,
+    /// connection strings, etc.). Removing them makes the persistence round-trip
+    /// lossy and breaks restart. The host is responsible for protecting the
+    /// config file on disk; this method is not an external-facing API.
     fn properties(&self) -> std::collections::HashMap<String, serde_json::Value>;
 
     /// Get the dispatch mode for this source (Channel or Broadcast)
@@ -169,11 +187,19 @@ pub trait Source: Send + Sync {
     /// Get the current status of the source
     async fn status(&self) -> ComponentStatus;
 
-    /// Subscribe to this source for change events
+    /// Subscribe to this source for change events.
     ///
     /// This is called by queries to receive data changes from this source.
     /// The source should return a receiver for streaming events and optionally
     /// a bootstrap receiver for initial data.
+    ///
+    /// # Important
+    /// Implementations **must** call
+    /// [`SourceBase::apply_subscription_settings(&settings)`](crate::sources::base::SourceBase::apply_subscription_settings)
+    /// at the start of their implementation (or delegate to
+    /// [`SourceBase::subscribe_with_bootstrap()`](crate::sources::base::SourceBase::subscribe_with_bootstrap)
+    /// which does it automatically). Failing to do so will break sequence
+    /// monotonicity after restarts.
     ///
     /// # Arguments
     /// * `settings` - Subscription settings including query ID, text, and labels of interest

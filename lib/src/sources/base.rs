@@ -175,6 +175,9 @@ pub struct SourceBase {
     /// ("no position confirmed yet"). Only populated when
     /// `request_position_handle == true`.
     position_handles: Arc<RwLock<HashMap<String, Arc<AtomicU64>>>>,
+    /// Monotonically increasing counter for assigning event sequences.
+    /// The framework stamps every dispatched event with this sequence.
+    next_sequence: Arc<AtomicU64>,
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
     raw_config: Option<serde_json::Value>,
@@ -224,6 +227,7 @@ impl SourceBase {
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
             identity_provider: Arc::new(RwLock::new(None)),
             position_handles: Arc::new(RwLock::new(HashMap::new())),
+            next_sequence: Arc::new(AtomicU64::new(1)),
             raw_config: None,
         })
     }
@@ -400,6 +404,37 @@ impl SourceBase {
         handles.retain(|_, handle| Arc::strong_count(handle) > 1);
     }
 
+    /// Reset the sequence counter, typically after recovering from a checkpoint.
+    /// The next dispatched event will receive `sequence + 1`.
+    pub fn set_next_sequence(&self, sequence: u64) {
+        self.next_sequence
+            .store(sequence.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// Apply subscription settings that affect the source base.
+    ///
+    /// Should be called at the start of `Source::subscribe()` implementations.
+    /// Handles:
+    /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
+    ///   across restarts.
+    pub fn apply_subscription_settings(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+    ) {
+        if let Some(last_seq) = settings.last_sequence {
+            // Atomically advance to last_seq+1, never go backwards.
+            // fetch_max is safe under concurrent subscriptions.
+            let next = last_seq.saturating_add(1);
+            let prev = self.next_sequence.fetch_max(next, Ordering::Relaxed);
+            if next > prev {
+                info!(
+                    "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
+                    self.id, next, last_seq
+                );
+            }
+        }
+    }
+
     /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
     /// The handle can both read and write the component's status and automatically
@@ -427,6 +462,7 @@ impl SourceBase {
             bootstrap_provider: self.bootstrap_provider.clone(),
             identity_provider: self.identity_provider.clone(),
             position_handles: self.position_handles.clone(),
+            next_sequence: self.next_sequence.clone(),
             raw_config: self.raw_config.clone(),
         }
     }
@@ -500,6 +536,9 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
+        // Recover sequence counter from checkpoint before anything else
+        self.apply_subscription_settings(settings);
+
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
             settings.query_id,
@@ -664,12 +703,35 @@ impl SourceBase {
         self.dispatch_event(wrapper).await
     }
 
-    /// Dispatch a SourceEventWrapper to all subscribers
+    /// Maximum allowed size for source position bytes (64KB).
+    /// Positions exceeding this limit are skipped at checkpoint time
+    /// to prevent memory issues, preserving the last good position.
+    pub const MAX_SOURCE_POSITION_BYTES: usize = 65_536;
+
+    /// Dispatch a SourceEventWrapper to all subscribers.
     ///
     /// This is a generic method for dispatching any SourceEvent.
     /// It handles Arc-wrapping for zero-copy sharing and logs
     /// when there are no subscribers.
-    pub async fn dispatch_event(&self, wrapper: SourceEventWrapper) -> Result<()> {
+    /// The framework stamps every event with a monotonic sequence number.
+    pub async fn dispatch_event(&self, mut wrapper: SourceEventWrapper) -> Result<()> {
+        // Warn about oversized source positions; the checkpoint layer will
+        // enforce the limit and preserve the last good position.
+        if let Some(ref pos) = wrapper.source_position {
+            if pos.len() > Self::MAX_SOURCE_POSITION_BYTES {
+                warn!(
+                    "[{}] Source position is large ({} bytes > {} limit); \
+                     checkpoint staging will preserve the previous good position",
+                    self.id,
+                    pos.len(),
+                    Self::MAX_SOURCE_POSITION_BYTES
+                );
+            }
+        }
+
+        // Framework assigns the monotonic sequence
+        wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+
         debug!("[{}] Dispatching event: {:?}", self.id, &wrapper);
 
         // Arc-wrap for zero-copy sharing across dispatchers
@@ -969,7 +1031,7 @@ mod tests {
     fn make_settings(
         query_id: &str,
         enable_bootstrap: bool,
-        resume_from: Option<u64>,
+        resume_from: Option<bytes::Bytes>,
         request_position_handle: bool,
     ) -> crate::config::SourceSubscriptionSettings {
         use std::collections::HashSet;
@@ -981,6 +1043,7 @@ mod tests {
             relations: HashSet::new(),
             resume_from,
             request_position_handle,
+            last_sequence: None,
         }
     }
 
@@ -1143,8 +1206,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_with_resume_from_skips_bootstrap() {
         let base = make_base_with_bootstrap("sub-resume");
+        let position = bytes::Bytes::copy_from_slice(&100u64.to_le_bytes());
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", true, Some(100), false), "test")
+            .subscribe_with_bootstrap(&make_settings("q1", true, Some(position), false), "test")
             .await
             .unwrap();
         assert!(
@@ -1156,8 +1220,9 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_resume_without_bootstrap_still_none() {
         let base = make_base_with_bootstrap("sub-resume-no-bs");
+        let position = bytes::Bytes::copy_from_slice(&100u64.to_le_bytes());
         let response = base
-            .subscribe_with_bootstrap(&make_settings("q1", false, Some(100), false), "test")
+            .subscribe_with_bootstrap(&make_settings("q1", false, Some(position), false), "test")
             .await
             .unwrap();
         assert!(response.bootstrap_receiver.is_none());

@@ -160,6 +160,8 @@ impl LazySortedSetStore for CachedResultIndex {
     }
 }
 
+impl ResultIndex for CachedResultIndex {}
+
 #[async_trait]
 impl ResultSequenceCounter for CachedResultIndex {
     async fn apply_sequence(
@@ -174,8 +176,6 @@ impl ResultSequenceCounter for CachedResultIndex {
         self.inner.get_sequence().await
     }
 }
-
-impl ResultIndex for CachedResultIndex {}
 
 fn get_hash_key(owner: &ResultOwner, key: &ResultKey) -> u64 {
     let mut hasher = DefaultHasher::new();

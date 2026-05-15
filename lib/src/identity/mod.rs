@@ -186,7 +186,9 @@ impl Credentials {
     }
 }
 
+mod application;
 mod password;
+pub use application::ApplicationIdentityProvider;
 pub use password::PasswordIdentityProvider;
 
 #[cfg(test)]

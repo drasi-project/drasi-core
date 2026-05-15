@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -152,6 +153,7 @@ pub struct SourceSubscriptionConfig {
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
 ///     request_position_handle: false,
+///     last_sequence: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -161,12 +163,17 @@ pub struct SourceSubscriptionSettings {
     pub query_id: String,
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
-    /// If set, the subscribing query requests events replayed from this sequence position.
+    /// If set, the subscribing query requests events replayed from this source position.
+    /// Contains the opaque position bytes that the source interprets to seek its change stream.
     /// Only meaningful when the source returns `supports_replay() == true`.
-    pub resume_from: Option<u64>,
+    pub resume_from: Option<Bytes>,
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
+    /// The last sequence number processed by this query before shutdown.
+    /// Sources use this to ensure their sequence counter continues from where it left off,
+    /// maintaining monotonicity across restarts.
+    pub last_sequence: Option<u64>,
 }
 
 /// Root configuration for drasi-lib
@@ -434,6 +441,19 @@ pub struct QueryConfig {
         rename = "recoveryPolicy"
     )]
     pub recovery_policy: Option<RecoveryPolicy>,
+    /// Maximum number of recent QueryResult emissions retained in the outbox ring buffer.
+    /// Reactions use this buffer for gap recovery via `fetch_outbox`.
+    /// Default: 1000. Minimum: 1 (values below 1 are clamped to 1).
+    #[serde(default = "default_outbox_capacity", rename = "outboxCapacity")]
+    pub outbox_capacity: usize,
+    /// Maximum time in seconds that `fetch_snapshot` / `fetch_outbox` will wait for
+    /// the query to finish bootstrapping before returning `FetchError::TimedOut`.
+    /// Default: 300 (5 minutes).
+    #[serde(
+        default = "default_bootstrap_timeout_secs",
+        rename = "bootstrapTimeoutSecs"
+    )]
+    pub bootstrap_timeout_secs: u64,
 }
 
 /// Synthetic join configuration for queries
@@ -594,6 +614,14 @@ fn default_enable_bootstrap() -> bool {
 
 fn default_bootstrap_buffer_size() -> usize {
     10000
+}
+
+fn default_outbox_capacity() -> usize {
+    crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY
+}
+
+fn default_bootstrap_timeout_secs() -> u64 {
+    300
 }
 
 // Conversion implementations for QueryJoin types
