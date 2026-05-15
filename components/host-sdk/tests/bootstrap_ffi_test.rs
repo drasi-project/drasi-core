@@ -26,6 +26,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,6 +37,7 @@ use drasi_lib::queries::output_state::{
 };
 use drasi_lib::reactions::bootstrap_context::{BootstrapBackend, BootstrapContext};
 use drasi_lib::reactions::checkpoint::ReactionCheckpoint;
+use drasi_lib::reactions::SnapshotFetcher;
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use tokio::sync::Mutex;
 
@@ -257,4 +259,135 @@ async fn test_ffi_streaming_bootstrap_with_outbox() {
     let cp = cp.as_ref().expect("Checkpoint should have been written");
     assert_eq!(cp.sequence, 42, "Checkpoint should match snapshot sequence");
     assert_eq!(cp.config_hash, 99999, "Checkpoint config_hash mismatch");
+}
+
+// ============================================================================
+// SnapshotFetcher vtable path tests (Site 1)
+// ============================================================================
+
+/// Mock SnapshotFetcher that lives on the host side and tracks calls.
+struct MockSnapshotFetcher {
+    rows: Vec<serde_json::Value>,
+    sequence: u64,
+    config_hash: u64,
+    fetch_count: AtomicUsize,
+    rows_yielded: Arc<AtomicUsize>,
+    captured_query_id: Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl SnapshotFetcher for MockSnapshotFetcher {
+    async fn fetch_snapshot(&self, query_id: &str) -> Result<SnapshotStream, FetchError> {
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut guard = self.captured_query_id.lock().await;
+            *guard = Some(query_id.to_string());
+        }
+
+        let rows_yielded = self.rows_yielded.clone();
+        let rows = self.rows.clone();
+        let sequence = self.sequence;
+        let config_hash = self.config_hash;
+
+        let stream = async_stream::stream! {
+            for row in rows {
+                rows_yielded.fetch_add(1, Ordering::SeqCst);
+                yield row;
+            }
+        };
+
+        Ok(SnapshotStream::from_stream(stream, sequence, config_hash))
+    }
+}
+
+/// Test the SnapshotFetcher vtable path end-to-end across a real cdylib FFI boundary.
+///
+/// This exercises Site 1 (snapshot_fetcher_bridge.rs): the host builds a
+/// SnapshotFetcherVtable from the mock, passes it to the plugin during
+/// initialize(), and the plugin calls fetch_snapshot() during start().
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_ffi_snapshot_fetcher_vtable() {
+    // --- Load the snapshot-test cdylib ---
+    let plugin_path = target_debug_dir().join(plugin_filename("drasi-reaction-snapshot-test"));
+    if !plugin_path.exists() {
+        eprintln!(
+            "SKIP: snapshot-test plugin not found at {}",
+            plugin_path.display()
+        );
+        return;
+    }
+
+    let plugin = load_plugin_from_path(
+        &plugin_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Failed to load snapshot-test plugin");
+
+    let descriptor = &plugin.reaction_plugins[0];
+
+    let reaction = descriptor
+        .create_reaction(
+            "vtable-test-1",
+            vec!["test-query".to_string()],
+            &serde_json::json!({}),
+            false,
+        )
+        .await
+        .expect("Failed to create reaction via FFI");
+
+    // --- Set up mock fetcher with canned data ---
+    let mock_fetcher = Arc::new(MockSnapshotFetcher {
+        rows: vec![
+            serde_json::json!({"id": 1, "name": "Alice"}),
+            serde_json::json!({"id": 2, "name": "Bob"}),
+            serde_json::json!({"id": 3, "name": "Charlie"}),
+            serde_json::json!({"id": 4, "name": "Diana"}),
+            serde_json::json!({"id": 5, "name": "Eve"}),
+        ],
+        sequence: 100,
+        config_hash: 55555,
+        fetch_count: AtomicUsize::new(0),
+        rows_yielded: Arc::new(AtomicUsize::new(0)),
+        captured_query_id: Mutex::new(None),
+    });
+
+    // --- Initialize with the mock fetcher ---
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    let context = drasi_lib::ReactionRuntimeContext {
+        instance_id: "vtable-test-instance".to_string(),
+        reaction_id: "vtable-test-1".to_string(),
+        update_tx,
+        state_store: None,
+        identity_provider: None,
+        snapshot_fetcher: Some(mock_fetcher.clone()),
+    };
+    reaction.initialize(context).await;
+
+    // --- Start the reaction — this triggers vtable fetch_snapshot ---
+    reaction.start().await.expect("Reaction start() failed");
+
+    // --- Verify host-side observables ---
+    assert_eq!(
+        mock_fetcher.fetch_count.load(Ordering::SeqCst),
+        1,
+        "fetch_snapshot should have been called exactly once"
+    );
+    assert_eq!(
+        mock_fetcher.rows_yielded.load(Ordering::SeqCst),
+        5,
+        "All 5 rows should have been streamed through the FFI boundary"
+    );
+    let captured_qid = mock_fetcher.captured_query_id.lock().await;
+    assert_eq!(
+        captured_qid.as_deref(),
+        Some("test-query"),
+        "Plugin should have fetched snapshot for 'test-query'"
+    );
+
+    // Clean up
+    reaction.stop().await.expect("Reaction stop() failed");
 }
