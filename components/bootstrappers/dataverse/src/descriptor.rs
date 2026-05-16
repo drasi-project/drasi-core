@@ -116,18 +116,21 @@ impl BootstrapPluginDescriptor for DataverseBootstrapDescriptor {
         let dto: DataverseBootstrapConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let environment_url = mapper.resolve_string(&dto.environment_url)?;
+        let environment_url = mapper.resolve_string(&dto.environment_url).await?;
         let tenant_id = mapper
-            .resolve_optional_string(&dto.tenant_id)?
+            .resolve_optional_string(&dto.tenant_id)
+            .await?
             .unwrap_or_default();
         let client_id = mapper
-            .resolve_optional_string(&dto.client_id)?
+            .resolve_optional_string(&dto.client_id)
+            .await?
             .unwrap_or_default();
         let client_secret = mapper
-            .resolve_optional_string(&dto.client_secret)?
+            .resolve_optional_string(&dto.client_secret)
+            .await?
             .unwrap_or_default();
-        let api_version = mapper.resolve_string(&dto.api_version)?;
-        let page_size = mapper.resolve_typed(&dto.page_size)? as usize;
+        let api_version = mapper.resolve_string(&dto.api_version).await?;
+        let page_size = mapper.resolve_typed(&dto.page_size).await? as usize;
 
         let config = DataverseBootstrapConfig {
             environment_url,

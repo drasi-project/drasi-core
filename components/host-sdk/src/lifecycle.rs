@@ -35,6 +35,7 @@ use crate::plugin_types::{PluginCategory, PluginEvent, PluginKindEntry, PluginSt
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
 };
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 
 /// Tracks the runtime state of a single loaded plugin library.
 #[derive(Debug)]
@@ -95,6 +96,7 @@ impl PluginLifecycleManager {
         let sources = std::mem::take(&mut loaded.source_plugins);
         let reactions = std::mem::take(&mut loaded.reaction_plugins);
         let bootstraps = std::mem::take(&mut loaded.bootstrap_plugins);
+        let secret_stores = std::mem::take(&mut loaded.secret_store_plugins);
 
         let mut reg = self.registry.write().await;
 
@@ -128,6 +130,18 @@ impl PluginLifecycleManager {
                     .to_string(),
             });
             reg.register_bootstrapper_with_metadata(Arc::new(bootstrap), plugin_id);
+        }
+
+        for secret_store in secret_stores {
+            kinds.push(PluginKindEntry {
+                category: PluginCategory::SecretStore,
+                kind: SecretStorePluginDescriptor::kind(&secret_store).to_string(),
+                config_version: SecretStorePluginDescriptor::config_version(&secret_store)
+                    .to_string(),
+                config_schema_name: SecretStorePluginDescriptor::config_schema_name(&secret_store)
+                    .to_string(),
+            });
+            reg.register_secret_store_with_metadata(Arc::new(secret_store), plugin_id);
         }
 
         drop(reg);

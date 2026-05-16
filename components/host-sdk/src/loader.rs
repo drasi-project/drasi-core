@@ -22,12 +22,13 @@ use indexmap::IndexMap;
 use libloading::{Library, Symbol};
 
 use drasi_plugin_sdk::ffi::{
-    FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn, PluginMetadata,
+    ConfigResolverFn, FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn, PluginMetadata,
 };
 
 use crate::proxies::bootstrap_provider::BootstrapPluginProxy;
 use crate::proxies::identity_provider::IdentityProviderPluginProxy;
 use crate::proxies::reaction::ReactionPluginProxy;
+use crate::proxies::secret_store::SecretStorePluginProxy;
 use crate::proxies::source::SourcePluginProxy;
 
 /// Configuration for the plugin loader.
@@ -49,12 +50,37 @@ pub struct LoadedPlugin {
     pub bootstrap_plugins: Vec<BootstrapPluginProxy>,
     /// Identity provider plugin factories (descriptor proxies).
     pub identity_provider_plugins: Vec<IdentityProviderPluginProxy>,
+    /// Secret store plugin factories (descriptor proxies).
+    pub secret_store_plugins: Vec<SecretStorePluginProxy>,
     /// Plugin metadata string for diagnostics.
     pub metadata_info: Option<String>,
     /// Path to the loaded plugin file.
     pub file_path: PathBuf,
+    /// Config resolver injection function pointer (saved from FfiPluginRegistration).
+    set_config_resolver_fn: extern "C" fn(*mut c_void, ConfigResolverFn),
     /// Keep the library loaded.
     _library: Arc<Library>,
+}
+
+impl LoadedPlugin {
+    /// Inject a config value resolver callback into this plugin.
+    ///
+    /// The plugin will use this callback (via `DtoMapper`) to resolve
+    /// `ConfigValue::Secret` and other reference types back through the host.
+    /// The `ctx` pointer is an opaque host-owned context passed back to the
+    /// callback on every invocation.
+    pub fn inject_config_resolver(&self, ctx: *mut c_void, callback: ConfigResolverFn) {
+        (self.set_config_resolver_fn)(ctx, callback);
+    }
+
+    /// Return the raw config resolver injection function pointer.
+    ///
+    /// This is the `set_config_resolver` extern "C" function from the plugin's
+    /// `FfiPluginRegistration`. Callers can save this fn ptr and invoke it later
+    /// even after the `LoadedPlugin` is consumed.
+    pub fn config_resolver_injection_fn(&self) -> extern "C" fn(*mut c_void, ConfigResolverFn) {
+        self.set_config_resolver_fn
+    }
 }
 
 impl Drop for LoadedPlugin {
@@ -240,6 +266,9 @@ pub fn load_plugin_from_path(
     (registration.set_log_callback)(log_ctx, log_callback);
     (registration.set_lifecycle_callback)(lifecycle_ctx, lifecycle_callback);
 
+    // Save config resolver injection fn ptr for later use
+    let set_config_resolver_fn = registration.set_config_resolver;
+
     // Step 4: Extract factory vtables into proxies
     // Take ownership of ALL arrays upfront before processing, so if any
     // proxy construction panics, remaining arrays are still dropped correctly.
@@ -282,16 +311,37 @@ pub fn load_plugin_from_path(
             None
         };
 
-    // NOTE: We intentionally do not read `identity_provider_plugins` /
-    // `identity_provider_plugin_count` from `FfiPluginRegistration` here.
-    // Those fields were added in a later SDK version, and older plugins built
-    // against the previous ABI may provide a smaller `FfiPluginRegistration`
-    // allocation. Accessing the new fields in that case would read beyond the
-    // end of the struct, causing undefined behavior. Until ABI/SDK versioning
-    // guarantees are tightened, we treat identity provider plugins as absent.
-    let identity_provider_vtables: Option<
-        Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
-    > = None;
+    // Read identity provider vtables from the registration.
+    // These fields were added after the initial ABI layout. Plugins built with
+    // the current SDK version always include them.
+    let identity_provider_vtables = if !registration.identity_provider_plugins.is_null()
+        && registration.identity_provider_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.identity_provider_plugins,
+                registration.identity_provider_plugin_count,
+                registration.identity_provider_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
+
+    // Read secret store vtables from the registration.
+    let secret_store_vtables = if !registration.secret_store_plugins.is_null()
+        && registration.secret_store_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.secret_store_plugins,
+                registration.secret_store_plugin_count,
+                registration.secret_store_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
@@ -301,6 +351,7 @@ pub fn load_plugin_from_path(
     let mut reaction_plugins = Vec::new();
     let mut bootstrap_plugins = Vec::new();
     let mut identity_provider_plugins = Vec::new();
+    let mut secret_store_plugins = Vec::new();
 
     for v in source_vtables.into_iter().flatten() {
         source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
@@ -318,13 +369,19 @@ pub fn load_plugin_from_path(
         identity_provider_plugins.push(IdentityProviderPluginProxy::new(v, lib.clone()));
     }
 
+    for v in secret_store_vtables.into_iter().flatten() {
+        secret_store_plugins.push(SecretStorePluginProxy::new(v, lib.clone()));
+    }
+
     Ok(LoadedPlugin {
         source_plugins,
         reaction_plugins,
         bootstrap_plugins,
         identity_provider_plugins,
+        secret_store_plugins,
         metadata_info,
         file_path: path.to_path_buf(),
+        set_config_resolver_fn,
         _library: lib,
     })
 }

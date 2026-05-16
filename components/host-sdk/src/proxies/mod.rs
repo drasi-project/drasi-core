@@ -18,4 +18,5 @@ pub mod bootstrap_provider;
 pub mod change_receiver;
 pub mod identity_provider;
 pub mod reaction;
+pub mod secret_store;
 pub mod source;

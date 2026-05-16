@@ -145,14 +145,14 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
         let mut builder = HttpReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_base_url(mapper.resolve_string(&dto.base_url)?);
+            .with_base_url(mapper.resolve_string(&dto.base_url).await?);
 
         if let Some(ref token) = dto.token {
-            builder = builder.with_token(mapper.resolve_string(token)?);
+            builder = builder.with_token(mapper.resolve_string(token).await?);
         }
 
         if let Some(ref timeout_ms) = dto.timeout_ms {
-            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms)?);
+            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms).await?);
         }
 
         for (query_id, config) in &dto.routes {

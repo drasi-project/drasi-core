@@ -89,12 +89,12 @@ impl SourcePluginDescriptor for PlatformSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let config = PlatformSourceConfig {
-            redis_url: mapper.resolve_string(&dto.redis_url)?,
-            stream_key: mapper.resolve_string(&dto.stream_key)?,
-            consumer_group: mapper.resolve_string(&dto.consumer_group)?,
-            consumer_name: mapper.resolve_optional(&dto.consumer_name)?,
-            batch_size: mapper.resolve_typed(&dto.batch_size)?,
-            block_ms: mapper.resolve_typed(&dto.block_ms)?,
+            redis_url: mapper.resolve_string(&dto.redis_url).await?,
+            stream_key: mapper.resolve_string(&dto.stream_key).await?,
+            consumer_group: mapper.resolve_string(&dto.consumer_group).await?,
+            consumer_name: mapper.resolve_optional(&dto.consumer_name).await?,
+            batch_size: mapper.resolve_typed(&dto.batch_size).await?,
+            block_ms: mapper.resolve_typed(&dto.block_ms).await?,
         };
 
         let source = PlatformSourceBuilder::new(id)

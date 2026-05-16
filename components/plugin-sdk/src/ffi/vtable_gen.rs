@@ -47,7 +47,7 @@ use super::types::*;
 use super::vtables::*;
 use crate::descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SourcePluginDescriptor,
+    SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
@@ -2715,6 +2715,179 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
         config_schema_json_fn: config_schema_json_fn::<T>,
         config_schema_name_fn: config_schema_name_fn::<T>,
         create_identity_provider_fn: create_identity_provider_fn::<T>,
+        drop_fn: drop_fn::<T>,
+    }
+}
+
+// ============================================================================
+// Secret store provider instance vtable generation
+// ============================================================================
+
+/// Build a `SecretStoreProviderVtable` from a `Box<dyn SecretStoreProvider>`.
+///
+/// This is used by secret store plugins to wrap their provider instance
+/// into an FFI-safe vtable that the host can call to resolve secrets.
+pub fn build_secret_store_vtable_from_boxed(
+    provider: Box<dyn drasi_lib::secret_store::SecretStoreProvider>,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::secret_store::SecretStoreProviderVtable {
+    use super::secret_store::{FfiGetSecretResult, SecretStoreProviderVtable};
+
+    struct SecretStoreWrapper {
+        inner: Arc<dyn drasi_lib::secret_store::SecretStoreProvider>,
+        runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+    }
+
+    extern "C" fn get_secret_fn(state: *const c_void, name: FfiStr) -> FfiGetSecretResult {
+        let w = unsafe { &*(state as *const SecretStoreWrapper) };
+        let provider = w.inner.clone();
+        let name_owned = unsafe { name.to_string() };
+
+        let handle = (w.runtime_handle)().handle().clone();
+        let result = dispatch_to_runtime(
+            &handle,
+            async move { provider.get_secret(&name_owned).await },
+        );
+
+        match result {
+            Ok(value) => FfiGetSecretResult::ok(value),
+            Err(e) => FfiGetSecretResult::err(e.to_string()),
+        }
+    }
+
+    extern "C" fn drop_fn(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SecretStoreWrapper)) };
+            }
+        });
+    }
+
+    let wrapper = Box::new(SecretStoreWrapper {
+        inner: Arc::from(provider),
+        runtime_handle: runtime,
+    });
+
+    SecretStoreProviderVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        get_secret_fn,
+        drop_fn,
+    }
+}
+
+// ============================================================================
+// Secret store plugin descriptor vtable generation
+// ============================================================================
+
+struct SecretStorePluginWrapper<T: SecretStorePluginDescriptor + 'static> {
+    inner: T,
+    cached_kind: String,
+    cached_config_version: String,
+    cached_schema_name: String,
+    runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+}
+
+/// Build a `SecretStorePluginVtable` from a type implementing
+/// `SecretStorePluginDescriptor`.
+pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static>(
+    descriptor: T,
+    executor: AsyncExecutorFn,
+    _lifecycle_emitter: LifecycleEmitterFn,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::vtables::SecretStorePluginVtable {
+    extern "C" fn kind_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_kind)
+    }
+
+    extern "C" fn config_version_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_config_version)
+    }
+
+    extern "C" fn config_schema_json_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiOwnedStr::from_string(w.inner.config_schema_json())
+    }
+
+    extern "C" fn config_schema_name_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_schema_name)
+    }
+
+    extern "C" fn create_secret_store_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *mut c_void,
+        config_json: FfiStr,
+    ) -> *mut super::secret_store::SecretStoreProviderVtable {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        let config_str = unsafe { config_json.to_string() };
+
+        let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!(
+                    "Failed to parse config JSON for secret store '{}': {e}",
+                    w.cached_kind
+                );
+                return std::ptr::null_mut();
+            }
+        };
+
+        let handle = (w.runtime_handle)().handle().clone();
+        let ptr = SendPtr(state as *const SecretStorePluginWrapper<T>);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_secret_store(&config_value).await
+        });
+
+        match result {
+            Ok(provider) => {
+                let vtable = build_secret_store_vtable_from_boxed(provider, w.runtime_handle);
+                Box::into_raw(Box::new(vtable))
+            }
+            Err(e) => {
+                log::error!("Failed to create secret store '{}': {e}", w.cached_kind);
+                std::ptr::null_mut()
+            }
+        }
+    }
+
+    extern "C" fn drop_fn<T: SecretStorePluginDescriptor + 'static>(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SecretStorePluginWrapper<T>)) };
+            }
+        });
+    }
+
+    let cached_kind = descriptor.kind().to_string();
+    let cached_config_version = descriptor.config_version().to_string();
+    let cached_schema_name = descriptor.config_schema_name().to_string();
+
+    let wrapper = Box::new(SecretStorePluginWrapper {
+        inner: descriptor,
+        cached_kind,
+        cached_config_version,
+        cached_schema_name,
+        runtime_handle: runtime,
+    });
+
+    super::vtables::SecretStorePluginVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        executor,
+        kind_fn: kind_fn::<T>,
+        config_version_fn: config_version_fn::<T>,
+        config_schema_json_fn: config_schema_json_fn::<T>,
+        config_schema_name_fn: config_schema_name_fn::<T>,
+        create_secret_store_fn: create_secret_store_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }

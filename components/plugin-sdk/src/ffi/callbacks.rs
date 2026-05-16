@@ -90,3 +90,20 @@ pub struct FfiLifecycleEvent {
 ///
 /// The `ctx` pointer is an opaque host-owned context (same as for `LogCallbackFn`).
 pub type LifecycleCallbackFn = extern "C" fn(ctx: *mut c_void, event: *const FfiLifecycleEvent);
+
+// ============================================================================
+// Config value resolver — host resolves ConfigValue references for plugins
+// ============================================================================
+
+/// Callback function the host provides for resolving `ConfigValue` references
+/// (secrets, environment variables) in plugin configs.
+///
+/// The plugin serializes the `ConfigValue` to JSON (e.g.,
+/// `{"kind":"Secret","name":"DB_PASSWORD"}`) and calls this function.
+/// The host resolves the value using the appropriate store and returns the
+/// resolved string via [`super::secret_store::FfiGetSecretResult`].
+///
+/// The `ctx` pointer is an opaque host-owned context containing the secret
+/// store provider and any other resolution context.
+pub type ConfigResolverFn =
+    extern "C" fn(ctx: *const c_void, config_value_json: FfiStr) -> super::secret_store::FfiGetSecretResult;

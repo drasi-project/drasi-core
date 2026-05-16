@@ -191,16 +191,16 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {
-            builder = builder.with_host(mapper.resolve_string(host)?);
+            builder = builder.with_host(mapper.resolve_string(host).await?);
         }
         if let Some(ref port) = dto.port {
-            builder = builder.with_port(mapper.resolve_typed(port)?);
+            builder = builder.with_port(mapper.resolve_typed(port).await?);
         }
         if let Some(ref sse_path) = dto.sse_path {
-            builder = builder.with_sse_path(mapper.resolve_string(sse_path)?);
+            builder = builder.with_sse_path(mapper.resolve_string(sse_path).await?);
         }
         if let Some(ref heartbeat) = dto.heartbeat_interval_ms {
-            builder = builder.with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat)?);
+            builder = builder.with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat).await?);
         }
 
         if let Some(ref default_template) = dto.default_template {

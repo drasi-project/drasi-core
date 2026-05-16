@@ -72,6 +72,7 @@ use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction as ReactionTrait;
+use crate::secret_store::SecretStoreProvider;
 use crate::sources::Source as SourceTrait;
 use crate::state_store::StateStoreProvider;
 use drasi_core::models::SourceMiddlewareConfig;
@@ -140,6 +141,7 @@ pub struct DrasiLibBuilder {
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
+    secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -163,6 +165,7 @@ impl DrasiLibBuilder {
             index_provider: None,
             state_store_provider: None,
             identity_provider: None,
+            secret_store_provider: None,
         }
     }
 
@@ -262,6 +265,35 @@ impl DrasiLibBuilder {
     /// ```
     pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
         self.identity_provider = Some(provider);
+        self
+    }
+
+    /// Set the secret store provider for resolving `ConfigValue::Secret` references.
+    ///
+    /// Secret store providers resolve named secret references (e.g., database passwords,
+    /// API keys) from external secret management systems like Azure Key Vault, OS keyrings,
+    /// or local secret files.
+    ///
+    /// The secret store provider is initialized **before** any source/reaction/bootstrap
+    /// plugins, and its resolved values are injected into `DtoMapper` via the global
+    /// secret resolver registry.
+    ///
+    /// If no secret store provider is set, `ConfigValue::Secret` references will fail
+    /// with a "not implemented" error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_secret_store_file::FileSecretStoreProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let secrets = FileSecretStoreProvider::new("/etc/drasi/secrets.json").await?;
+    /// let core = DrasiLib::builder()
+    ///     .with_secret_store_provider(Arc::new(secrets))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_secret_store_provider(mut self, provider: Arc<dyn SecretStoreProvider>) -> Self {
+        self.secret_store_provider = Some(provider);
         self
     }
 
@@ -391,6 +423,7 @@ impl DrasiLibBuilder {
             self.index_provider,
             self.state_store_provider,
             self.identity_provider,
+            self.secret_store_provider,
         ));
         let mut core = DrasiLib::new(runtime_config);
 

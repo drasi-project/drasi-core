@@ -335,20 +335,20 @@ impl ReactionPluginDescriptor for DashboardReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {
-            builder = builder.with_host(mapper.resolve_string(host)?);
+            builder = builder.with_host(mapper.resolve_string(host).await?);
         }
         if let Some(ref port) = dto.port {
-            builder = builder.with_port(mapper.resolve_typed(port)?);
+            builder = builder.with_port(mapper.resolve_typed(port).await?);
         }
         if let Some(ref heartbeat_interval_ms) = dto.heartbeat_interval_ms {
-            builder =
-                builder.with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat_interval_ms)?);
+            builder = builder
+                .with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat_interval_ms).await?);
         }
         if let Some(ref results_api_url) = dto.results_api_url {
-            builder = builder.with_results_api_url(mapper.resolve_string(results_api_url)?);
+            builder = builder.with_results_api_url(mapper.resolve_string(results_api_url).await?);
         }
         if let Some(ref priority_queue_capacity) = dto.priority_queue_capacity {
-            let capacity: u64 = mapper.resolve_typed(priority_queue_capacity)?;
+            let capacity: u64 = mapper.resolve_typed(priority_queue_capacity).await?;
             builder = builder.with_priority_queue_capacity(capacity as usize);
         }
         for dashboard_dto in &dto.predefined_dashboards {
