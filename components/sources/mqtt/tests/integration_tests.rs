@@ -29,8 +29,7 @@ mod mosquitto_helpers;
 use crate::mosquitto_helpers::{generate_test_certs, MosquittoConfig, MosquittoGuard};
 use anyhow::Result;
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::identity::{self, IdentityProvider};
-use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query, Source};
+use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_reaction_application::ApplicationReactionHandle;
@@ -41,14 +40,12 @@ use drasi_source_mqtt::MqttSource;
 use drasi_source_mqtt::{
     config::{MqttSourceConfig, MqttTransportMode},
     connection::MqttConnection,
-    MqttSourceBuilder,
 };
 use log::info;
-use rumqttc::QoS;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{thread::sleep, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 fn init_rustls_crypto_provider() {

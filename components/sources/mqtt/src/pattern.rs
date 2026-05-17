@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use matchit::{Params, Router};
 
 use crate::schema::MqttSourceChange;
 use crate::utils::MqttPacket;
-use crate::FROM_TO_STARTS_WITH;
 use crate::{
     config::{InjectId, MappingMode, MappingNode, MappingRelation, TopicMapping},
     MqttElement,
