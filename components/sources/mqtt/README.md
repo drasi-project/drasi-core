@@ -275,6 +275,7 @@ topic_mappings:
       inject:
         - site: "{site}"
         - device: "{device}"
+```
 
 ### Payload-Referenced Relation Endpoints
 
@@ -316,7 +317,6 @@ topic_mappings:
         id: "{room}:{device}_located_in_gateway_$.gateway_id"
         from: { label: Device, id: "{room}:{device}" }
         to: { label: Gateway, id: "$.gateway_id" }
-```
 ```
 
 ### Multiple options together

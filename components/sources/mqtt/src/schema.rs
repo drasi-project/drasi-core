@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
-use core::time;
-use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+use drasi_core::models::SourceChange;
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

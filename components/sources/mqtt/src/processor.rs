@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub struct MqttProcessor {
     mapper: Arc<PatternMatcher>,
-    adaptive: bool,
 }
 
 impl MqttProcessor {
@@ -37,7 +36,6 @@ impl MqttProcessor {
     pub fn new(config: &MqttSourceConfig) -> Self {
         Self {
             mapper: Arc::new(PatternMatcher::new(&config.topic_mappings)),
-            adaptive: config.adaptive_enabled.unwrap_or(false),
         }
     }
 
