@@ -17,11 +17,10 @@
 //! Provides utilities to start and manage a Mosquitto MQTT broker using testcontainers.
 
 use anyhow::{anyhow, Result};
-use drasi_source_mqtt::config::{MqttQoS, MqttSourceConfig, MqttTopicConfig, MqttTransportMode};
 use log::{debug, info};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, SanType};
 use rumqttc::v5::{AsyncClient as AsyncClientV5, MqttOptions as MqttOptionsV5};
-use rumqttc::{AsyncClient, MqttOptions, QoS};
+use rumqttc::{AsyncClient, MqttOptions};
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};

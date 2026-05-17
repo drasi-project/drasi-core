@@ -22,18 +22,13 @@ use config::{
     default_max_retries, default_port, default_qos, MqttConnectProperties, MqttSourceConfig,
     MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
 };
-use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 
 use anyhow::Result;
 use drasi_batching_common::AdaptiveBatchConfig;
-use log::error;
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
-use drasi_lib::channels::{ComponentType, *};
-use drasi_lib::{Source, SourceRuntimeContext};
+use drasi_lib::channels::*;
 mod mqtt;
 mod pattern;
 mod processor;

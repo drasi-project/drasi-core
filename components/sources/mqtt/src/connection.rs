@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use core::error;
 use std::time::Duration;
 
 use crate::config::{
-    self, default_base_retry_delay_secs, default_max_retries, MqttQoS, MqttSourceConfig,
+    default_base_retry_delay_secs, default_max_retries, MqttQoS, MqttSourceConfig,
     MqttTransportMode,
 };
 use crate::utils::MqttPacket;

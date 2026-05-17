@@ -17,10 +17,8 @@ use crate::connection::MqttConnection;
 use crate::processor::MqttProcessor;
 use crate::MqttSourceBuilder;
 use drasi_core::evaluation::functions::async_trait;
-use drasi_lib::config::SourceSubscriptionSettings;
-use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::Source;
-use drasi_lib::{identity, ComponentStatus};
+use drasi_lib::sources::base::SourceBase;
+use drasi_lib::ComponentStatus;
 use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
 
@@ -29,11 +27,11 @@ use drasi_batching_common::AdaptiveBatchConfig;
 use log::{error, info};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::channels::*;
 use drasi_lib::SourceRuntimeContext;
 use tracing::Instrument;
 
