@@ -3,7 +3,7 @@ name = "mqtt-source-example"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "DrasiLib example demonstrating stock price monitoring with 3 queries"
+description = "DrasiLib MQTT source example with temperature monitoring"
 
 [workspace]
 
