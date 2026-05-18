@@ -268,6 +268,80 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(500)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-schema-test")
+            .with_source(source)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let schema = core
+            .get_source_schema(SOURCE_ID)
+            .await
+            .context("Failed to fetch MSSQL source schema")?
+            .expect("MSSQL source should report schema");
+
+        assert!(schema.nodes.iter().any(|node| node.label == "Products"));
+        let products = schema
+            .nodes
+            .iter()
+            .find(|node| node.label == "Products")
+            .expect("Products schema should exist");
+        assert!(products
+            .properties
+            .iter()
+            .any(|property| property.name == "ProductId"));
+        assert!(products
+            .properties
+            .iter()
+            .any(|property| property.name == "Name"));
+        assert!(products
+            .properties
+            .iter()
+            .any(|property| property.name == "Price"));
+
+        core.stop().await.ok();
+        mssql.cleanup().await;
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    result??;
+    Ok(())
+}
+
 async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
     let mut client = config.connect().await?;
     execute_sql(

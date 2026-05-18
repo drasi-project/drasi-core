@@ -181,6 +181,52 @@ async fn test_source_connects_and_starts() -> Result<()> {
 #[tokio::test]
 #[serial]
 #[ignore]
+async fn test_schema_discovery_reports_columns_end_to_end() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let (core, _handle) = build_core(pg.config(), slot_name).await?;
+    core.start().await?;
+
+    let schema = core
+        .get_source_schema("pg-test-source")
+        .await?
+        .expect("postgres source should report schema");
+
+    assert!(schema.nodes.iter().any(|node| node.label == TEST_TABLE));
+    let users = schema
+        .nodes
+        .iter()
+        .find(|node| node.label == TEST_TABLE)
+        .expect("users schema should be present");
+    assert!(users
+        .properties
+        .iter()
+        .any(|property| property.name == "id"));
+    assert!(users
+        .properties
+        .iter()
+        .any(|property| property.name == "name"));
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
 async fn test_insert_detection() -> Result<()> {
     init_logging();
 

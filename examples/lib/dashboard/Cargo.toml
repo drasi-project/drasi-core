@@ -1,0 +1,24 @@
+[package]
+name = "dashboard-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example demonstrating a real-time IoT sensor dashboard with MockSource"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-mock = { path = "../../../components/sources/mock" }
+drasi-reaction-dashboard = { path = "../../../components/reactions/dashboard" }
+
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+env_logger = "0.10.0"
+log = "0.4"
+serde_json = "1.0"
+
+[[bin]]
+name = "dashboard-example"
+path = "main.rs"
