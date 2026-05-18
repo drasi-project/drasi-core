@@ -50,7 +50,9 @@ impl FfiGetSecretResult {
     /// Create an error result.
     pub fn err(msg: String) -> Self {
         let c_msg = std::ffi::CString::new(msg).unwrap_or_else(|_| {
-            std::ffi::CString::new("(error message contained null bytes)").unwrap()
+            // Safety: This literal contains no null bytes.
+            std::ffi::CString::new("(error message contained null bytes)")
+                .expect("static fallback message has no null bytes")
         });
         Self {
             error_code: 1,
