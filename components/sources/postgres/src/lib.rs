@@ -1089,8 +1089,9 @@ mod tests {
         /// A test secret resolver that returns a fixed value for any secret name.
         struct TestSecretResolver;
 
+        #[async_trait::async_trait]
         impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
-            fn resolve_to_string(
+            async fn resolve_to_string(
                 &self,
                 value: &drasi_plugin_sdk::ConfigValue<String>,
             ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
