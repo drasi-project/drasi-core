@@ -20,3 +20,5 @@ pub mod identity_provider;
 pub mod reaction;
 pub mod secret_store;
 pub mod source;
+
+pub use secret_store::SecretStoreValueResolverAdapter;

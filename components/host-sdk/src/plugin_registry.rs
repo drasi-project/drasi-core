@@ -21,10 +21,10 @@
 //! should be wrapped in `Arc<RwLock<PluginRegistry>>` for concurrent access.
 
 use chrono::{DateTime, Utc};
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
 };
-use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 use std::collections::HashMap;
 use std::sync::Arc;
 

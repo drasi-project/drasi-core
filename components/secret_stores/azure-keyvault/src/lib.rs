@@ -20,6 +20,7 @@
 //! the azure_core 0.31 track used by the rest of the workspace).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -93,9 +94,12 @@ pub struct AzureKeyVaultSecretStoreProvider {
 
 impl AzureKeyVaultSecretStoreProvider {
     pub fn new(config: &AzureKeyVaultConfigDto) -> anyhow::Result<Self> {
+        let vault_url = validate_vault_url(&config.vault_url)?;
         let credential = create_credential(config)?;
-        let vault_url = config.vault_url.trim_end_matches('/').to_string();
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| anyhow!("Failed to create HTTP client: {e}"))?;
 
         Ok(Self {
             credential,
@@ -103,6 +107,38 @@ impl AzureKeyVaultSecretStoreProvider {
             http_client,
         })
     }
+}
+
+fn validate_vault_url(vault_url: &str) -> anyhow::Result<String> {
+    const ALLOWED_HOST_SUFFIXES: [&str; 4] = [
+        ".vault.azure.net",
+        ".vault.azure.cn",
+        ".vault.usgovcloudapi.net",
+        ".vault.microsoftazure.de",
+    ];
+
+    let parsed = url::Url::parse(vault_url)
+        .map_err(|e| anyhow!("Invalid Azure Key Vault URL '{vault_url}': {e}"))?;
+
+    if parsed.scheme() != "https" {
+        return Err(anyhow!("Azure Key Vault URL must use HTTPS: '{vault_url}'"));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("Azure Key Vault URL must include a host: '{vault_url}'"))?;
+
+    if !ALLOWED_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix))
+    {
+        return Err(anyhow!(
+            "Azure Key Vault host '{host}' is not allowed; expected one of: {}",
+            ALLOWED_HOST_SUFFIXES.join(", ")
+        ));
+    }
+
+    Ok(vault_url.trim_end_matches('/').to_string())
 }
 
 fn create_credential(config: &AzureKeyVaultConfigDto) -> anyhow::Result<Arc<dyn TokenCredential>> {
@@ -161,9 +197,10 @@ impl SecretStoreProvider for AzureKeyVaultSecretStoreProvider {
                 format!("Failed to acquire Azure token for Key Vault secret '{name}'")
             })?;
 
+        let encoded_name = urlencoding::encode(name);
         let url = format!(
             "{}/secrets/{}?api-version={}",
-            self.vault_url, name, KEY_VAULT_API_VERSION
+            self.vault_url, encoded_name, KEY_VAULT_API_VERSION
         );
 
         let response = self
@@ -247,6 +284,58 @@ drasi_plugin_sdk::export_plugin!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct TestableProvider {
+        vault_url: String,
+        http_client: reqwest::Client,
+    }
+
+    impl TestableProvider {
+        fn new(vault_url: &str) -> Self {
+            Self {
+                vault_url: vault_url.trim_end_matches('/').to_string(),
+                http_client: reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                    .unwrap(),
+            }
+        }
+
+        async fn get_secret(&self, name: &str) -> anyhow::Result<String> {
+            let encoded_name = urlencoding::encode(name);
+            let url = format!(
+                "{}/secrets/{}?api-version={}",
+                self.vault_url, encoded_name, KEY_VAULT_API_VERSION
+            );
+
+            let response = self
+                .http_client
+                .get(&url)
+                .bearer_auth("fake-token")
+                .send()
+                .await
+                .with_context(|| format!("HTTP request failed for Key Vault secret '{name}'"))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow!(
+                    "Key Vault returned {status} for secret '{name}': {body}"
+                ));
+            }
+
+            let secret_response: KeyVaultSecretResponse =
+                response.json().await.with_context(|| {
+                    format!("Failed to parse Key Vault response for secret '{name}'")
+                })?;
+
+            secret_response.value.ok_or_else(|| {
+                anyhow!("Secret '{name}' in Azure Key Vault did not contain a value")
+            })
+        }
+    }
 
     #[test]
     fn test_config_dto_deserialization_defaults_auth_method() {
@@ -311,6 +400,36 @@ mod tests {
     }
 
     #[test]
+    fn test_vault_url_validation_rejects_non_azure_host() {
+        let config = AzureKeyVaultConfigDto {
+            vault_url: "https://evil.attacker.com/".to_string(),
+            auth_method: AzureAuthMethod::DeveloperTools,
+            client_id: None,
+            tenant_id: None,
+            client_secret: None,
+        };
+        match AzureKeyVaultSecretStoreProvider::new(&config) {
+            Ok(_) => panic!("expected invalid host to be rejected"),
+            Err(err) => assert!(err.to_string().contains("vault.azure.net")),
+        }
+    }
+
+    #[test]
+    fn test_vault_url_validation_rejects_http() {
+        let config = AzureKeyVaultConfigDto {
+            vault_url: "http://myvault.vault.azure.net/".to_string(),
+            auth_method: AzureAuthMethod::DeveloperTools,
+            client_id: None,
+            tenant_id: None,
+            client_secret: None,
+        };
+        match AzureKeyVaultSecretStoreProvider::new(&config) {
+            Ok(_) => panic!("expected non-HTTPS URL to be rejected"),
+            Err(err) => assert!(err.to_string().contains("HTTPS")),
+        }
+    }
+
+    #[test]
     fn test_descriptor_metadata() {
         let descriptor = AzureKeyVaultSecretStoreDescriptor;
         assert_eq!(descriptor.kind(), "azure-keyvault");
@@ -340,6 +459,117 @@ mod tests {
             Ok(_) => panic!("should fail without tenant_id"),
             Err(e) => assert!(e.to_string().contains("tenant_id is required")),
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/secrets/my-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": "super-secret-value",
+                "id": "https://myvault.vault.azure.net/secrets/my-secret/version1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let result = provider.get_secret("my-secret").await.unwrap();
+        assert_eq!(result, "super-secret-value");
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_404_not_found() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/secrets/missing-secret"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "SecretNotFound",
+                    "message": "A secret with (name/id) missing-secret was not found"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let err = provider.get_secret("missing-secret").await.unwrap_err();
+        assert!(err.to_string().contains("404"), "Error: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_403_forbidden() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/secrets/forbidden"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Access denied"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let err = provider.get_secret("forbidden").await.unwrap_err();
+        assert!(err.to_string().contains("403"), "Error: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_null_value() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/secrets/null-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": null,
+                "id": "https://myvault.vault.azure.net/secrets/null-secret/version1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let err = provider.get_secret("null-secret").await.unwrap_err();
+        assert!(
+            err.to_string().contains("did not contain a value"),
+            "Error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_malformed_json() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex("/secrets/bad-json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json {{{"))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let err = provider.get_secret("bad-json").await.unwrap_err();
+        assert!(
+            err.to_string().contains("parse") || err.to_string().contains("Failed"),
+            "Error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_url_encoding_prevents_path_traversal() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(
+                "/secrets/\\.\\.%2Fcertificates%2Fcert|/secrets/..%2Fcertificates%2Fcert",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let provider = TestableProvider::new(&mock_server.uri());
+        let err = provider
+            .get_secret("../certificates/cert")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("404"), "Error: {err}");
     }
 
     #[tokio::test]

@@ -220,7 +220,7 @@ pub use descriptor::{
 };
 pub use mapper::{ConfigMapper, DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
-pub use resolver::{register_secret_resolver, ResolverError, SecretStoreValueResolverAdapter};
+pub use resolver::{register_secret_resolver, ResolverError};
 
 /// Re-export tokio so the `export_plugin!` macro can reference it
 /// without requiring plugins to declare a direct tokio dependency.
@@ -638,7 +638,7 @@ macro_rules! export_plugin {
                 ) -> ::std::result::Result<String, $crate::resolver::ResolverError> {
                     let ptr = __CONFIG_RESOLVER_CB.load(::std::sync::atomic::Ordering::Acquire);
                     if ptr.is_null() {
-                        return Err($crate::resolver::ResolverError::NotImplemented(
+                        return Err($crate::resolver::ResolverError::SecretResolutionFailed(
                             "No config resolver callback registered".to_string(),
                         ));
                     }
@@ -657,7 +657,7 @@ macro_rules! export_plugin {
                         cb(ctx as *const ::std::ffi::c_void, $crate::ffi::FfiStr::from_str(&json));
                     unsafe {
                         ffi_result.into_result().map_err(|e| {
-                            $crate::resolver::ResolverError::NotImplemented(format!(
+                            $crate::resolver::ResolverError::SecretResolutionFailed(format!(
                                 "Host config resolver failed: {e}"
                             ))
                         })

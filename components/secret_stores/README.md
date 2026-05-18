@@ -1,6 +1,6 @@
 # Secret Store Plugins
 
-Secret store plugins provide pluggable secret resolution for Drasi. When a plugin's configuration uses `ConfigValue::Secret { name }`, the configured secret store provider resolves the named secret at initialization time.
+Secret store plugins provide pluggable secret resolution for Drasi. When a plugin's configuration uses `ConfigValue::Secret { name }`, the configured secret store provider resolves the named secret during plugin initialization (when the consuming plugin's `create_source`, `create_reaction`, or `create_bootstrap` method runs).
 
 ## Available Providers
 

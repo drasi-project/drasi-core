@@ -81,6 +81,10 @@ pub enum ResolverError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    /// Secret resolution failed at runtime (store unreachable, secret not found, auth error, etc.)
+    #[error("Secret resolution failed: {0}")]
+    SecretResolutionFailed(String),
+
     /// No resolver was registered for the given reference type.
     #[error("No resolver found for reference type: {0}")]
     NoResolverFound(String),
@@ -197,6 +201,9 @@ static SECRET_RESOLVER: RwLock<Option<Arc<dyn ValueResolver>>> = RwLock::new(Non
 /// ```
 pub fn register_secret_resolver(resolver: Arc<dyn ValueResolver>) {
     let mut guard = SECRET_RESOLVER.write().expect("SECRET_RESOLVER poisoned");
+    if guard.is_some() {
+        log::warn!("Secret resolver re-registered — previous resolver replaced");
+    }
     *guard = Some(resolver);
 }
 
@@ -204,40 +211,6 @@ pub fn register_secret_resolver(resolver: Arc<dyn ValueResolver>) {
 pub(crate) fn get_secret_resolver() -> Option<Arc<dyn ValueResolver>> {
     let guard = SECRET_RESOLVER.read().expect("SECRET_RESOLVER poisoned");
     guard.clone()
-}
-
-/// Adapter that wraps a [`SecretStoreProvider`] into a [`ValueResolver`].
-///
-/// This bridges the `drasi-lib` secret store trait into the plugin-sdk's
-/// resolver pipeline. When `DrasiLibBuilder` has a secret store provider
-/// configured, it wraps it in this adapter and registers it as the global
-/// secret resolver.
-pub struct SecretStoreValueResolverAdapter {
-    provider: Arc<dyn drasi_lib::secret_store::SecretStoreProvider>,
-}
-
-impl SecretStoreValueResolverAdapter {
-    /// Create a new adapter wrapping the given secret store provider.
-    pub fn new(provider: Arc<dyn drasi_lib::secret_store::SecretStoreProvider>) -> Self {
-        Self { provider }
-    }
-}
-
-#[async_trait]
-impl ValueResolver for SecretStoreValueResolverAdapter {
-    async fn resolve_to_string(
-        &self,
-        value: &ConfigValue<String>,
-    ) -> Result<String, ResolverError> {
-        match value {
-            ConfigValue::Secret { name } => self.provider.get_secret(name).await.map_err(|e| {
-                ResolverError::NotImplemented(format!(
-                    "Secret store failed to resolve '{name}': {e}"
-                ))
-            }),
-            _ => Err(ResolverError::WrongResolverType),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,17 +37,21 @@ pub struct FfiGetSecretResult {
 impl FfiGetSecretResult {
     /// Create a successful result with the given secret value.
     pub fn ok(value: String) -> Self {
-        let c_value = std::ffi::CString::new(value).unwrap_or_default();
-        Self {
-            error_code: 0,
-            error_msg: std::ptr::null_mut(),
-            value: c_value.into_raw(),
+        match std::ffi::CString::new(value) {
+            Ok(c_value) => Self {
+                error_code: 0,
+                error_msg: std::ptr::null_mut(),
+                value: c_value.into_raw(),
+            },
+            Err(_) => Self::err("secret value contained embedded null byte".to_string()),
         }
     }
 
     /// Create an error result.
     pub fn err(msg: String) -> Self {
-        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_else(|_| {
+            std::ffi::CString::new("(error message contained null bytes)").unwrap()
+        });
         Self {
             error_code: 1,
             error_msg: c_msg.into_raw(),
@@ -111,3 +115,30 @@ pub struct SecretStoreProviderVtable {
 // The underlying state is a Box<dyn SecretStoreProvider> which is Send+Sync.
 unsafe impl Send for SecretStoreProviderVtable {}
 unsafe impl Sync for SecretStoreProviderVtable {}
+
+#[cfg(test)]
+mod tests {
+    use super::FfiGetSecretResult;
+
+    #[test]
+    fn ok_returns_error_for_embedded_null_bytes() {
+        let result = FfiGetSecretResult::ok("abc\0def".to_string());
+
+        assert_eq!(result.error_code, 1);
+        assert!(result.value.is_null());
+
+        let err = unsafe { result.into_result() }.unwrap_err();
+        assert_eq!(err.to_string(), "secret value contained embedded null byte");
+    }
+
+    #[test]
+    fn err_uses_fallback_message_for_embedded_null_bytes() {
+        let result = FfiGetSecretResult::err("bad\0message".to_string());
+
+        assert_eq!(result.error_code, 1);
+        assert!(result.value.is_null());
+
+        let err = unsafe { result.into_result() }.unwrap_err();
+        assert_eq!(err.to_string(), "(error message contained null bytes)");
+    }
+}

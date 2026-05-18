@@ -41,11 +41,10 @@ use std::sync::Arc;
 
 use drasi_host_sdk::callbacks;
 use drasi_host_sdk::loader::load_plugin_from_path;
+use drasi_host_sdk::SecretStoreValueResolverAdapter;
 use drasi_plugin_sdk::descriptor::SecretStorePluginDescriptor;
 use drasi_plugin_sdk::mapper::DtoMapper;
-use drasi_plugin_sdk::resolver::{
-    register_secret_resolver, SecretStoreValueResolverAdapter, ValueResolver,
-};
+use drasi_plugin_sdk::resolver::{register_secret_resolver, ValueResolver};
 use drasi_plugin_sdk::ConfigValue;
 
 /// Locate the workspace target/debug/plugins directory.
@@ -376,11 +375,9 @@ async fn test_dto_mapper_with_file_secret_store() {
         .await
         .expect("Should create store");
 
-    // Register the secret store as the global resolver
+    // Register the secret store as the global resolver.
     let adapter = SecretStoreValueResolverAdapter::new(Arc::from(store));
-    // Note: register_secret_resolver uses OnceLock and can only be called once per process.
-    // In a test suite, this may already be registered. We ignore the error.
-    let _ = register_secret_resolver(Arc::new(adapter));
+    register_secret_resolver(Arc::new(adapter));
 
     // Create a DtoMapper and resolve secrets
     let mapper = DtoMapper::new();
@@ -390,8 +387,6 @@ async fn test_dto_mapper_with_file_secret_store() {
         name: "DB_PASSWORD".to_string(),
     };
     let result = mapper.resolve_string(&secret_value).await;
-    // This will work if register_secret_resolver succeeded (first call in process)
-    // or fail with NotImplemented if already registered from a previous test
     if let Ok(resolved) = result {
         assert_eq!(resolved, "hunter2");
     }

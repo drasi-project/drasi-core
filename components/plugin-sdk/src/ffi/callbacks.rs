@@ -105,5 +105,7 @@ pub type LifecycleCallbackFn = extern "C" fn(ctx: *mut c_void, event: *const Ffi
 ///
 /// The `ctx` pointer is an opaque host-owned context containing the secret
 /// store provider and any other resolution context.
-pub type ConfigResolverFn =
-    extern "C" fn(ctx: *const c_void, config_value_json: FfiStr) -> super::secret_store::FfiGetSecretResult;
+pub type ConfigResolverFn = extern "C" fn(
+    ctx: *const c_void,
+    config_value_json: FfiStr,
+) -> super::secret_store::FfiGetSecretResult;

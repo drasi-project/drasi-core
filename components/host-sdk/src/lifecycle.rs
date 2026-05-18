@@ -32,10 +32,10 @@ use crate::loader::{load_plugin_from_path, plugin_kind_from_filename, LoadedPlug
 use crate::plugin_registry::PluginRegistry;
 use crate::plugin_types::{PluginCategory, PluginEvent, PluginKindEntry, PluginStatus};
 
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
 };
-use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 
 /// Tracks the runtime state of a single loaded plugin library.
 #[derive(Debug)]
