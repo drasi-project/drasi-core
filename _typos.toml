@@ -10,6 +10,7 @@ extend-exclude = [
     "test-data/",
     "dump.rdb",
     "components/host-sdk/src/registry/cosign.rs",
+    "components/reactions/dashboard/static/",
 ]
 
 [default.extend-words]
