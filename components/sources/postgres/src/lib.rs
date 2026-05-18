@@ -1105,7 +1105,7 @@ mod tests {
         }
 
         fn ensure_test_secret_resolver() {
-            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+            drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
                 TestSecretResolver,
             ));
         }
