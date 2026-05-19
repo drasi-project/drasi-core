@@ -441,8 +441,8 @@ mod session {
     use drasi_core::{
         evaluation::functions::aggregation::ValueAccumulator,
         interface::{
-            AccumulatorIndex, ElementIndex, FutureQueue, LazySortedSetStore, PushType, ResultKey,
-            ResultOwner, ResultSequenceCounter, SessionControl,
+            AccumulatorIndex, CheckpointStore, ElementIndex, FutureQueue, LazySortedSetStore,
+            PushType, ResultKey, ResultOwner, SessionControl,
         },
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference},
     };
@@ -1089,44 +1089,60 @@ mod session {
 
         let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
         let session_control = GarnetSessionControl::new(session_state.clone());
-        let result_index = GarnetResultIndex::new(&query_id, connection, session_state.clone());
+        let checkpoint_store = drasi_index_garnet::GarnetCheckpointStore::new(
+            &query_id,
+            connection,
+            session_state.clone(),
+        );
 
-        result_index.clear().await.unwrap();
+        checkpoint_store.clear_checkpoints().await.unwrap();
 
         // Commit sequence 5
         session_control.begin().await.unwrap();
-        result_index.apply_sequence(5, "change-1").await.unwrap();
+        checkpoint_store
+            .stage_checkpoint("change-1", 5, None)
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
-        let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 5);
-        assert_eq!(seq.source_change_id.as_ref(), "change-1");
+        let cp = checkpoint_store.read_checkpoint("change-1").await.unwrap();
+        assert_eq!(cp.as_ref().unwrap().sequence, 5);
 
-        // Apply sequence 10 then rollback
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        // Stage sequence 10 then rollback
+        checkpoint_store
+            .stage_checkpoint("change-2", 10, None)
+            .await
+            .unwrap();
         session_control.rollback().unwrap();
 
-        // Verify rollback preserved the old value
+        // Verify rollback preserved the old value (change-2 should not exist)
         session_control.begin().await.unwrap();
-        let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 5, "sequence should not change after rollback");
+        let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
+        assert!(
+            cp.is_none(),
+            "change-2 checkpoint should not exist after rollback"
+        );
+        // change-1 still has sequence 5
+        let cp = checkpoint_store.read_checkpoint("change-1").await.unwrap();
         assert_eq!(
-            seq.source_change_id.as_ref(),
-            "change-1",
-            "source_change_id should not change after rollback"
+            cp.as_ref().unwrap().sequence,
+            5,
+            "sequence should not change after rollback"
         );
 
         // Now commit sequence 10
-        result_index.apply_sequence(10, "change-2").await.unwrap();
+        checkpoint_store
+            .stage_checkpoint("change-2", 10, None)
+            .await
+            .unwrap();
         session_control.commit().await.unwrap();
 
         // Verify it persisted
         session_control.begin().await.unwrap();
-        let seq = result_index.get_sequence().await.unwrap();
-        assert_eq!(seq.sequence, 10);
-        assert_eq!(seq.source_change_id.as_ref(), "change-2");
+        let cp = checkpoint_store.read_checkpoint("change-2").await.unwrap();
+        assert_eq!(cp.as_ref().unwrap().sequence, 10);
         session_control.rollback().unwrap();
     }
 
@@ -1457,5 +1473,63 @@ mod source_update_upsert {
     async fn test_aggregation_with_upserts() {
         let test_config = GarnetQueryConfig::new(false).await;
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}
+
+mod checkpoint_tests {
+    use super::*;
+    use drasi_core::interface::{AccumulatorIndex, CheckpointStore, SessionControl};
+    use drasi_index_garnet::checkpoint::GarnetCheckpointStore;
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn sequence_counter() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn checkpoint_round_trip() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let subject = GarnetCheckpointStore::new(&query_id, connection, session_state);
+
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::checkpoint_round_trip(&subject).await;
+        session_control.commit().await.unwrap();
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn result_sequence_counter() {
+        let redis = shared_redis().await;
+        let client = redis::Client::open(redis.url()).unwrap();
+        let connection = client.get_multiplexed_async_connection().await.unwrap();
+        let query_id = format!("test-{}", Uuid::new_v4());
+
+        let session_state = Arc::new(GarnetSessionState::new(connection.clone()));
+        let session_control = GarnetSessionControl::new(session_state.clone());
+        let subject = GarnetResultIndex::new(&query_id, connection, session_state);
+
+        subject.clear().await.unwrap();
+        session_control.begin().await.unwrap();
+        shared_tests::sequence_counter::result_sequence_counter(&subject).await;
+        session_control.commit().await.unwrap();
     }
 }

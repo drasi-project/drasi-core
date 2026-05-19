@@ -1,0 +1,19 @@
+[package]
+name = "application-identity-provider-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example demonstrating ApplicationIdentityProvider"
+
+# Keep this crate independent from the parent workspace
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+
+[[bin]]
+name = "application-identity-provider-example"
+path = "main.rs"

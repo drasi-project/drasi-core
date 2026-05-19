@@ -29,6 +29,7 @@ pub use component_graph::ComponentGraphBootstrapProvider;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,6 +142,13 @@ pub struct BootstrapResult {
     pub event_count: usize,
     pub last_sequence: Option<u64>,
     pub sequences_aligned: bool,
+    /// Opaque position bytes marking the snapshot boundary in the source's
+    /// native address space (e.g., a database WAL LSN). When set, the
+    /// framework persists this as the initial checkpoint so crash-recovery
+    /// after bootstrap can resume without re-bootstrapping.
+    ///
+    /// Must be at most [`SourceBase::MAX_SOURCE_POSITION_BYTES`] (64 KB).
+    pub source_position: Option<Bytes>,
 }
 
 /// Trait for bootstrap providers that handle initial data delivery

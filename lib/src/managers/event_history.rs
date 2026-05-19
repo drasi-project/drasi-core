@@ -171,6 +171,19 @@ impl ComponentEventHistory {
         (history, receiver)
     }
 
+    /// Subscribe to live events for a component (read-only).
+    ///
+    /// Returns the current history and a broadcast receiver, or `None` if the
+    /// component has no event channel yet. Unlike [`subscribe`](Self::subscribe),
+    /// this does not create a channel and therefore only requires `&self`.
+    pub fn try_subscribe(
+        &self,
+        component_id: &str,
+    ) -> Option<(Vec<ComponentEvent>, broadcast::Receiver<ComponentEvent>)> {
+        let channel = self.channels.get(component_id)?;
+        Some((channel.get_history(), channel.subscribe()))
+    }
+
     /// Get the most recent error message for a component.
     ///
     /// Searches backwards through the component's event history to find the

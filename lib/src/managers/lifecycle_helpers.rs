@@ -575,7 +575,7 @@ mod tests {
         ComponentNode {
             id: id.to_string(),
             kind: ComponentKind::Source,
-            status: ComponentStatus::Stopped,
+            status: ComponentStatus::Added,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -672,7 +672,7 @@ mod tests {
         let graph = Arc::new(RwLock::new(graph));
 
         let status = get_component_status(&graph, "s1", "source").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]

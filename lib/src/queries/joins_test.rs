@@ -70,6 +70,8 @@ mod query_joins_tests {
             dispatch_mode: None,
             storage_backend: None,
             recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -83,9 +85,8 @@ mod query_joins_tests {
 
         let mut property_map = ElementPropertyMap::new();
         for (key, value) in properties {
-            if let Ok(element_value) = convert_json_to_element_value(&value) {
-                property_map.insert(key, element_value);
-            }
+            let element_value = convert_json_to_element_value(&value);
+            property_map.insert(key, element_value);
         }
 
         let metadata = ElementMetadata {
@@ -152,6 +153,7 @@ mod query_joins_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)

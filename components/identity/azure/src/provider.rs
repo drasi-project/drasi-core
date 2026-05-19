@@ -14,10 +14,10 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use azure_core::credentials::TokenCredential;
+use azure_core::credentials::{Secret, TokenCredential};
 use azure_identity::{
-    DeveloperToolsCredential, ManagedIdentityCredential, ManagedIdentityCredentialOptions,
-    UserAssignedId, WorkloadIdentityCredential,
+    ClientSecretCredential, DeveloperToolsCredential, ManagedIdentityCredential,
+    ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential,
 };
 use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 use std::sync::Arc;
@@ -86,6 +86,31 @@ impl AzureIdentityProvider {
         })
     }
 
+    /// Create provider using OAuth2 client credentials flow (service principal).
+    ///
+    /// This is the standard server-to-server authentication path for Azure AD
+    /// applications: the caller provides a tenant ID, an application (client) ID,
+    /// and a client secret, and tokens are minted via Microsoft Entra ID's
+    /// `/oauth2/v2.0/token` endpoint. Token caching and refresh are handled by
+    /// the underlying `azure_identity::ClientSecretCredential`.
+    pub fn with_client_secret(
+        identity_name: impl Into<String>,
+        tenant_id: impl AsRef<str>,
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+    ) -> Result<Self> {
+        let secret = Secret::new(client_secret.into());
+        let credential =
+            ClientSecretCredential::new(tenant_id.as_ref(), client_id.into(), secret, None)
+                .map_err(|e| anyhow!("Failed to create client secret credential: {e}"))?;
+
+        Ok(Self {
+            credential: credential as Arc<dyn TokenCredential>,
+            identity_name: identity_name.into(),
+            scope: DEFAULT_AZURE_SCOPE.to_string(),
+        })
+    }
+
     /// Create provider using Workload Identity for AKS.
     pub fn with_workload_identity(identity_name: impl Into<String>) -> Result<Self> {
         let credential = WorkloadIdentityCredential::new(None)
@@ -107,10 +132,15 @@ impl AzureIdentityProvider {
 
 #[async_trait]
 impl IdentityProvider for AzureIdentityProvider {
-    async fn get_credentials(&self, _context: &CredentialContext) -> Result<Credentials> {
+    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
+        // Use scope from context if provided, otherwise fall back to the default scope.
+        // This allows components (e.g., Dataverse) to request resource-specific tokens
+        // without requiring the user to configure the scope on the identity provider.
+        let scope = context.get("scope").unwrap_or(&self.scope);
+
         let token_response = self
             .credential
-            .get_token(&[&self.scope], None)
+            .get_token(&[scope], None)
             .await
             .map_err(|e| anyhow!("Failed to get Azure AD token: {e}"))?;
 
@@ -166,6 +196,41 @@ mod tests {
         // WorkloadIdentityCredential may fail without AKS env vars, but should not panic.
         let _result =
             AzureIdentityProvider::with_workload_identity("workload@tenant.onmicrosoft.com");
+    }
+
+    #[test]
+    fn test_with_client_secret_creates_provider() {
+        let provider = AzureIdentityProvider::with_client_secret(
+            "dataverse",
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-0000-0000-000000000002",
+            "client-secret-value",
+        )
+        .expect("client-secret credential should construct");
+        assert_eq!(provider.identity_name, "dataverse");
+        assert_eq!(provider.scope, DEFAULT_AZURE_SCOPE);
+    }
+
+    #[test]
+    fn test_with_client_secret_rejects_invalid_tenant_id() {
+        let result = AzureIdentityProvider::with_client_secret(
+            "dataverse",
+            "not a valid tenant id with spaces",
+            "client-id",
+            "client-secret",
+        );
+        assert!(result.is_err(), "invalid tenant_id should be rejected");
+    }
+
+    #[test]
+    fn test_with_client_secret_rejects_empty_client_id() {
+        let result = AzureIdentityProvider::with_client_secret(
+            "dataverse",
+            "00000000-0000-0000-0000-000000000001",
+            "",
+            "client-secret",
+        );
+        assert!(result.is_err(), "empty client_id should be rejected");
     }
 
     // ---- Scope tests ----

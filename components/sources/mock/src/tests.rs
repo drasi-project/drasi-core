@@ -160,6 +160,86 @@ mod properties {
     }
 
     #[test]
+    fn test_describe_schema_matches_sensor_reading_shape() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::sensor_reading(5))
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("mock source should expose schema");
+
+        assert_eq!(schema.nodes.len(), 1);
+        let node = &schema.nodes[0];
+        assert_eq!(node.label, "SensorReading");
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "sensor_id"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "temperature"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "humidity"));
+    }
+
+    #[test]
+    fn test_describe_schema_matches_counter_shape() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::Counter)
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("mock source should expose schema for Counter");
+
+        assert_eq!(schema.nodes.len(), 1);
+        let node = &schema.nodes[0];
+        assert_eq!(node.label, "Counter");
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "value"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "timestamp"));
+    }
+
+    #[test]
+    fn test_describe_schema_matches_generic_shape() {
+        let source = MockSourceBuilder::new("test")
+            .with_data_type(DataType::Generic)
+            .build()
+            .unwrap();
+
+        let schema = source
+            .describe_schema()
+            .expect("mock source should expose schema for Generic");
+
+        assert_eq!(schema.nodes.len(), 1);
+        let node = &schema.nodes[0];
+        assert_eq!(node.label, "Generic");
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "value"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "message"));
+        assert!(node
+            .properties
+            .iter()
+            .any(|property| property.name == "timestamp"));
+    }
+
+    #[test]
     fn test_auto_start_returns_configured_value_false() {
         let source = MockSourceBuilder::new("test")
             .with_auto_start(false)
@@ -1403,6 +1483,7 @@ mod source_trait {
             relations: HashSet::new(),
             resume_from: None,
             request_position_handle: false,
+            last_sequence: None,
         };
 
         let result = source.subscribe(settings).await;

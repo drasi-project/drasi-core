@@ -308,9 +308,9 @@ pub(crate) mod manager_tests {
         let reactions = manager.list_reactions().await;
         assert_eq!(reactions.len(), 2);
 
-        // Both should be stopped initially
+        // Both should be in Added state initially
         for (_, status) in reactions {
-            assert!(matches!(status, ComponentStatus::Stopped));
+            assert!(matches!(status, ComponentStatus::Added));
         }
     }
 
@@ -325,7 +325,7 @@ pub(crate) mod manager_tests {
             .get_reaction_status("test-reaction".to_string())
             .await;
         assert!(status.is_ok());
-        assert!(matches!(status.unwrap(), ComponentStatus::Stopped));
+        assert!(matches!(status.unwrap(), ComponentStatus::Added));
     }
 
     #[tokio::test]
@@ -457,8 +457,8 @@ pub(crate) mod manager_tests {
             "Reaction with auto_start=true should be running"
         );
         assert!(
-            matches!(status2, ComponentStatus::Stopped),
-            "Reaction with auto_start=false should still be stopped"
+            matches!(status2, ComponentStatus::Added),
+            "Reaction with auto_start=false should still be in Added state"
         );
     }
 
@@ -522,7 +522,7 @@ pub(crate) mod manager_tests {
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
+            matches!(status, ComponentStatus::Added),
             "Reaction with auto_start=false should not be started by start_all"
         );
 
@@ -864,5 +864,224 @@ pub(crate) mod manager_tests {
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    // ========================================================================
+    // End-to-end bootstrap test — uses the DrasiLib public API with a real
+    // query engine and a mock source that feeds bootstrap data.
+    // ========================================================================
+
+    /// A reaction that captures snapshot data during bootstrap for verification.
+    struct SnapshotTestReaction {
+        id: String,
+        queries: Vec<String>,
+        status_handle: crate::component_graph::ComponentStatusHandle,
+        captured_snapshot: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+        bootstrap_called: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SnapshotTestReaction {
+        fn new(
+            id: &str,
+            queries: Vec<String>,
+        ) -> (
+            Self,
+            Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+            Arc<std::sync::atomic::AtomicBool>,
+        ) {
+            let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            (
+                Self {
+                    id: id.to_string(),
+                    queries,
+                    status_handle: crate::component_graph::ComponentStatusHandle::new(id),
+                    captured_snapshot: captured.clone(),
+                    bootstrap_called: called.clone(),
+                },
+                captured,
+                called,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl crate::reactions::Reaction for SnapshotTestReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn type_name(&self) -> &str {
+            "snapshot-test"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        async fn initialize(&self, context: crate::context::ReactionRuntimeContext) {
+            self.status_handle.wire(context.update_tx.clone()).await;
+        }
+        async fn start(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Running, None)
+                .await;
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Stopped, None)
+                .await;
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+        async fn enqueue_query_result(&self, _result: QueryResult) -> Result<()> {
+            Ok(())
+        }
+        fn needs_snapshot_on_fresh_start(&self) -> bool {
+            true
+        }
+        fn default_recovery_policy(&self) -> crate::recovery::ReactionRecoveryPolicy {
+            crate::recovery::ReactionRecoveryPolicy::AutoReset
+        }
+
+        async fn bootstrap(
+            &self,
+            ctx: crate::reactions::bootstrap_context::BootstrapContext,
+        ) -> Result<()> {
+            self.bootstrap_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+
+            let snapshot = ctx
+                .fetch_snapshot()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let data = snapshot.collect_vec().await;
+            let mut guard = self.captured_snapshot.lock().await;
+            *guard = data;
+
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_e2e_bootstrap_snapshot_reaction() {
+        use crate::channels::BootstrapEvent;
+        use crate::sources::tests::create_test_bootstrap_mock_source;
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+        };
+
+        // --- Build DrasiLib with a bootstrap mock source, a real query, and the reaction ---
+
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
+
+        let source = create_test_bootstrap_mock_source("e2e-src".to_string(), bootstrap_rx);
+
+        let (reaction, captured_snapshot, bootstrap_called) =
+            SnapshotTestReaction::new("snap-reaction", vec!["e2e-query".to_string()]);
+
+        let core = crate::DrasiLib::builder()
+            .with_id("e2e-bootstrap")
+            .with_source(source)
+            .with_query(
+                crate::Query::cypher("e2e-query")
+                    .query("MATCH (n:Person) RETURN n.name, n.age")
+                    .from_source("e2e-src")
+                    .build(),
+            )
+            .with_reaction(reaction)
+            .build()
+            .await
+            .unwrap();
+
+        // Subscribe to component events before starting.
+        let mut event_rx = core.subscribe_all_component_events();
+
+        // Start — auto-starts source (auto_start=true) and query (auto_start=true by
+        // default). The reaction has auto_start=false, so it stays provisioned.
+        core.start().await.unwrap();
+
+        // --- Feed bootstrap data through the source channel ---
+        let names = vec![("p1", "Alice", 30), ("p2", "Bob", 25), ("p3", "Carol", 35)];
+        for (i, (node_id, name, age)) in names.iter().enumerate() {
+            let mut props = ElementPropertyMap::default();
+            props.insert(
+                "name",
+                drasi_core::models::ElementValue::String((*name).into()),
+            );
+            props.insert(
+                "age",
+                drasi_core::models::ElementValue::Integer((*age) as i64),
+            );
+            let element = Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("e2e-src", node_id),
+                    labels: vec!["Person".into()].into(),
+                    effective_from: 1000,
+                },
+                properties: props,
+            };
+            bootstrap_tx
+                .send(BootstrapEvent {
+                    source_id: "e2e-src".to_string(),
+                    change: SourceChange::Insert { element },
+                    timestamp: chrono::Utc::now(),
+                    sequence: (i + 1) as u64,
+                })
+                .await
+                .unwrap();
+        }
+        drop(bootstrap_tx);
+
+        // Wait for the query to reach Running (bootstrap complete).
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "e2e-query",
+            ComponentStatus::Running,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // Sanity check: the real query should have 3 result rows.
+        let results = core.get_query_results("e2e-query").await.unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "Query should have 3 result rows from bootstrap"
+        );
+
+        // --- Start the reaction — triggers bootstrap → fetch_snapshot ---
+        core.start_reaction("snap-reaction").await.unwrap();
+
+        // --- Verify bootstrap was called and snapshot data matches ---
+        assert!(
+            bootstrap_called.load(std::sync::atomic::Ordering::SeqCst),
+            "bootstrap() should have been called on the reaction"
+        );
+
+        let captured = captured_snapshot.lock().await;
+        assert_eq!(
+            captured.len(),
+            3,
+            "Reaction bootstrap should have captured 3 snapshot rows"
+        );
+
+        let captured_names: Vec<String> = captured
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        for (_, expected_name, _) in &names {
+            assert!(
+                captured_names.contains(&expected_name.to_string()),
+                "Snapshot should contain person '{expected_name}', got: {captured_names:?}"
+            );
+        }
     }
 }

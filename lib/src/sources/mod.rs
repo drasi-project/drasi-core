@@ -38,6 +38,7 @@ pub trait Publisher: Send + Sync {
 // Re-export the Source trait and error types
 pub use traits::Source;
 pub use traits::SourceError;
+pub use traits::{ByteLexPositionComparator, PositionComparator};
 
 pub use base::{SourceBase, SourceBaseParams};
 pub use component_graph_source::{ComponentGraphSource, COMPONENT_GRAPH_SOURCE_ID};

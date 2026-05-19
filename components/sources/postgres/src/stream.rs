@@ -543,7 +543,7 @@ impl ReplicationStream {
                 if !json_value.is_null() {
                     properties.insert(
                         &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
+                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
                     );
                 }
             }
@@ -599,7 +599,7 @@ impl ReplicationStream {
                 if !json_value.is_null() {
                     after_properties.insert(
                         &column.name,
-                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value)?,
+                        drasi_lib::sources::manager::convert_json_to_element_value(&json_value),
                     );
                 }
             }

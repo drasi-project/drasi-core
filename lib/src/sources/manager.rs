@@ -29,40 +29,38 @@ use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
+use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 
 // Convert JSON value to ElementValue
-pub fn convert_json_to_element_value(value: &Value) -> Result<ElementValue> {
+pub fn convert_json_to_element_value(value: &Value) -> ElementValue {
     match value {
-        Value::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
+        Value::String(s) => ElementValue::String(Arc::from(s.as_str())),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(ElementValue::Integer(i))
+                ElementValue::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                Ok(ElementValue::Float(OrderedFloat(f)))
+                ElementValue::Float(OrderedFloat(f))
             } else {
-                Ok(ElementValue::String(Arc::from(n.to_string())))
+                ElementValue::String(Arc::from(n.to_string()))
             }
         }
-        Value::Bool(b) => Ok(ElementValue::Bool(*b)),
-        Value::Null => Ok(ElementValue::Null),
+        Value::Bool(b) => ElementValue::Bool(*b),
+        Value::Null => ElementValue::Null,
         // For arrays and objects, convert to string representation
-        Value::Array(_) | Value::Object(_) => {
-            Ok(ElementValue::String(Arc::from(value.to_string())))
-        }
+        Value::Array(_) | Value::Object(_) => ElementValue::String(Arc::from(value.to_string())),
     }
 }
 
 // Convert JSON properties to ElementPropertyMap
 pub fn convert_json_to_element_properties(
     json_props: &serde_json::Map<String, Value>,
-) -> Result<ElementPropertyMap> {
+) -> ElementPropertyMap {
     let mut properties = BTreeMap::new();
 
     for (key, value) in json_props {
-        let element_value = convert_json_to_element_value(value)?;
-
+        let element_value = convert_json_to_element_value(value);
         properties.insert(Arc::from(key.as_str()), element_value);
     }
 
@@ -70,7 +68,7 @@ pub fn convert_json_to_element_properties(
     for (key, value) in properties {
         property_map.insert(&key, value);
     }
-    Ok(property_map)
+    property_map
 }
 
 pub struct SourceManager {
@@ -242,6 +240,22 @@ impl SourceManager {
                 properties: source.properties(),
             };
             Ok(runtime)
+        } else {
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
+        }
+    }
+
+    /// Get the best-effort graph schema for a source, if available.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found.
+    pub async fn get_source_schema(&self, id: String) -> Result<Option<SourceSchema>> {
+        let graph = self.graph.read().await;
+        let source = graph.get_runtime::<Arc<dyn Source>>(&id).cloned();
+        drop(graph);
+
+        if let Some(source) = source {
+            Ok(source.describe_schema())
         } else {
             Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
@@ -446,10 +460,10 @@ impl SourceManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        let mut graph = self.graph.write().await;
+        let graph = self.graph.read().await;
         if !graph.has_runtime(id) {
             return None;
         }
-        Some(graph.subscribe_events(id))
+        graph.subscribe_events(id)
     }
 }

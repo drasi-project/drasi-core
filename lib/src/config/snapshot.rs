@@ -78,7 +78,11 @@ pub struct SourceSnapshot {
     pub status: ComponentStatus,
     /// Whether the source was configured to auto-start
     pub auto_start: bool,
-    /// Configuration properties reported by the source plugin
+    /// Configuration properties from [`Source::properties()`], including secrets.
+    ///
+    /// This is the authoritative config used to persist and recreate the source.
+    /// It intentionally contains sensitive values — see the persistence contract
+    /// on [`Source::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
     /// Bootstrap provider configuration, if one is attached to this source
     pub bootstrap_provider: Option<BootstrapSnapshot>,
@@ -89,7 +93,7 @@ pub struct SourceSnapshot {
 pub struct BootstrapSnapshot {
     /// Bootstrap provider kind (e.g., "postgres", "scriptfile", "noop")
     pub kind: String,
-    /// Configuration properties for the bootstrap provider
+    /// Configuration properties for the bootstrap provider, including secrets.
     pub properties: HashMap<String, serde_json::Value>,
 }
 
@@ -117,6 +121,10 @@ pub struct ReactionSnapshot {
     pub auto_start: bool,
     /// Query IDs this reaction subscribes to
     pub queries: Vec<String>,
-    /// Configuration properties reported by the reaction plugin
+    /// Configuration properties from [`Reaction::properties()`], including secrets.
+    ///
+    /// This is the authoritative config used to persist and recreate the reaction.
+    /// It intentionally contains sensitive values — see the persistence contract
+    /// on [`Reaction::properties()`] for details.
     pub properties: HashMap<String, serde_json::Value>,
 }

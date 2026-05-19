@@ -16,6 +16,7 @@ pub mod base;
 pub mod config_hash;
 pub mod label_extractor;
 pub mod manager;
+pub mod output_state;
 pub mod priority_queue;
 pub mod sequence_dedup;
 pub mod subscription_builder;
@@ -26,10 +27,20 @@ mod tests;
 #[cfg(test)]
 mod joins_test;
 
+#[cfg(test)]
+mod checkpoint_tests;
+
+#[cfg(test)]
+mod e2e_checkpoint_tests;
+
 pub use base::QueryBase;
 pub use config_hash::compute_config_hash;
 pub use label_extractor::*;
 pub use manager::*;
+pub use output_state::{
+    FetchError, OutboxGap, OutboxResponse, OutboxStream, QueryOutputState, SnapshotResponse,
+    SnapshotStream,
+};
 pub use priority_queue::*;
 pub use sequence_dedup::SequenceDedup;
 pub use subscription_builder::*;
