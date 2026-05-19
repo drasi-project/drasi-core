@@ -2240,5 +2240,130 @@ mod tests {
                 );
             }
         }
+
+        #[tokio::test]
+        async fn snapshot_captures_bootstrap_via_builder_api() {
+            // Use with_bootstrap_for_source() to register bootstrap metadata
+            // through the builder API (Option B: external metadata registration).
+            let source = PropertiedSource::new("http-src");
+            let mut bootstrap_props = HashMap::new();
+            bootstrap_props.insert(
+                "endpoints".to_string(),
+                serde_json::json!([{
+                    "url": "https://api.example.com/items",
+                    "method": "GET",
+                    "response": {
+                        "itemsPath": "$.data",
+                        "contentType": "json",
+                        "mappings": [{
+                            "elementType": "node",
+                            "template": {
+                                "id": "item-{{id}}",
+                                "labels": ["Item"],
+                                "properties": { "name": "{{name}}" }
+                            }
+                        }]
+                    }
+                }]),
+            );
+            bootstrap_props.insert("timeoutSeconds".to_string(), serde_json::json!(60));
+
+            let core = DrasiLib::builder()
+                .with_id("builder-bp-test")
+                .with_source(source)
+                .with_bootstrap_for_source("http-src", "http", bootstrap_props.clone())
+                .with_query(
+                    Query::cypher("bp-q1")
+                        .query("MATCH (n:Item) RETURN n")
+                        .from_source("http-src")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            let src = snapshot
+                .sources
+                .iter()
+                .find(|s| s.id == "http-src")
+                .expect("http-src should be in snapshot");
+
+            let bp = src
+                .bootstrap_provider
+                .as_ref()
+                .expect("Source should have bootstrap_provider from builder API");
+
+            assert_eq!(bp.kind, "http");
+            assert!(
+                bp.properties.contains_key("endpoints"),
+                "Bootstrap properties should include endpoints"
+            );
+            assert!(
+                bp.properties.contains_key("timeoutSeconds"),
+                "Bootstrap properties should include timeoutSeconds"
+            );
+            // Verify the properties roundtrip correctly
+            assert_eq!(bp.properties["timeoutSeconds"], serde_json::json!(60));
+        }
+
+        #[tokio::test]
+        async fn snapshot_bootstrap_builder_api_json_roundtrip() {
+            // Verify that bootstrap metadata registered via the builder API
+            // survives JSON serialization/deserialization (lossless roundtrip).
+            let source = PropertiedSource::new("rt-src");
+            let mut props = HashMap::new();
+            props.insert(
+                "url".to_string(),
+                serde_json::json!("https://api.example.com/data"),
+            );
+            props.insert(
+                "auth".to_string(),
+                serde_json::json!({
+                    "type": "bearer",
+                    "token": { "$env": "API_TOKEN" }
+                }),
+            );
+
+            let core = DrasiLib::builder()
+                .with_id("rt-bp-test")
+                .with_source(source)
+                .with_bootstrap_for_source("rt-src", "http", props.clone())
+                .with_query(
+                    Query::cypher("rt-q1")
+                        .query("MATCH (n) RETURN n")
+                        .from_source("rt-src")
+                        .auto_start(false)
+                        .build(),
+                )
+                .build()
+                .await
+                .unwrap();
+            core.start().await.unwrap();
+
+            let snapshot = core.snapshot_configuration().await.unwrap();
+
+            // Serialize to JSON and back
+            let json = serde_json::to_string_pretty(&snapshot).expect("Should serialize");
+            let restored: ConfigurationSnapshot =
+                serde_json::from_str(&json).expect("Should deserialize");
+
+            let src = restored.sources.iter().find(|s| s.id == "rt-src").unwrap();
+            let bp = src.bootstrap_provider.as_ref().unwrap();
+
+            assert_eq!(bp.kind, "http");
+            assert_eq!(
+                bp.properties["auth"],
+                serde_json::json!({ "type": "bearer", "token": { "$env": "API_TOKEN" } }),
+                "ConfigValue envelope should survive roundtrip"
+            );
+            assert_eq!(
+                bp.properties["url"],
+                serde_json::json!("https://api.example.com/data"),
+            );
+        }
     }
 }
