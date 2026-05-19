@@ -1335,20 +1335,17 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         // Row 602 will be replayed but should be filtered for query1 (already committed).
         core.start().await.context("Failed to restart")?;
 
-        // Resubscribe for query2's reaction (it was stopped and restarted)
-        let mut sub2_new = handle2
-            .subscribe_with_options(sub_opts.clone())
-            .await
-            .context("resubscribe query2")?;
+        // The original subscription stays valid across stop/start since the
+        // mpsc channel between ApplicationReaction and handle persists.
 
         // query2 should now see rows 602 and 603 (it missed 602 while stopped)
-        wait_for_change(&mut sub2_new, 20, |e| {
+        wait_for_change(&mut sub2, 20, |e| {
             matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
         })
         .await
         .context("query2 did not see replayed row 602")?;
 
-        wait_for_change(&mut sub2_new, 20, |e| {
+        wait_for_change(&mut sub2, 20, |e| {
             matches_change(e, "ADD", &[("id", "603"), ("name", "WhileStopped")])
         })
         .await

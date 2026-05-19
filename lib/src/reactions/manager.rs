@@ -460,8 +460,20 @@ impl ReactionManager {
             // No snapshot needed — just record the current sequence.
             // If the query is not running or hasn't bootstrapped yet, start from 0.
             let seq = match query.fetch_outbox(0).await {
-                Ok(resp) => resp.latest_sequence,
-                Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
+                Ok(resp) => {
+                    info!(
+                        "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
+                        resp.latest_sequence
+                    );
+                    resp.latest_sequence
+                }
+                Err(FetchError::OutboxGap(gap)) => {
+                    info!(
+                        "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
+                        gap.latest_sequence
+                    );
+                    gap.latest_sequence
+                }
                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
@@ -1002,14 +1014,40 @@ impl ReactionManager {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
+                                    log::debug!(
+                                        "[{reaction_id_owned}] Skipping seq={} <= initial_seq={initial_seq} for query '{query_id_clone}'",
+                                        query_result.sequence
+                                    );
                                     continue;
                                 }
+                                let seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
                                 if let Err(e) = reaction.enqueue_query_result(result).await {
                                     log::error!(
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
+                                } else {
+                                    // Advance checkpoint so outbox catchup on restart
+                                    // won't replay already-delivered events.
+                                    let config_hash = {
+                                        let cps = checkpoints.read().await;
+                                        cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
+                                    };
+                                    let cp = ReactionCheckpoint { sequence: seq, config_hash };
+                                    checkpoints.write().await.insert(query_id_clone.clone(), cp.clone());
+                                    if let Some(store) = state_store_clone.as_ref() {
+                                        if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
+                                            store.as_ref(),
+                                            &reaction_id_owned,
+                                            &query_id_clone,
+                                            &cp,
+                                        ).await {
+                                            log::warn!(
+                                                "[{reaction_id_owned}] Failed to persist checkpoint for query '{query_id_clone}' at seq={seq}: {e}"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {

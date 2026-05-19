@@ -1002,10 +1002,25 @@ impl SourceBase {
                     if let Some(resume_pos) = resume_positions.get(&idx) {
                         if let Some(ref event_pos) = arc_wrapper.source_position {
                             if !cmp.position_reached(event_pos, resume_pos) {
+                                debug!(
+                                    "[{}] Position filter: SKIPPING event for dispatcher {} \
+                                     (event_pos={:?} <= resume_pos={:?})",
+                                    self.id, idx, event_pos.as_ref(), resume_pos.as_ref()
+                                );
                                 continue;
                             }
+                            debug!(
+                                "[{}] Position filter: PASSING event for dispatcher {} \
+                                 (event_pos={:?} > resume_pos={:?})",
+                                self.id, idx, event_pos.as_ref(), resume_pos.as_ref()
+                            );
                             cleared_indices.push(idx);
                         }
+                    } else {
+                        debug!(
+                            "[{}] Position filter: NO resume position for dispatcher {}, passing through",
+                            self.id, idx
+                        );
                     }
                 }
 
