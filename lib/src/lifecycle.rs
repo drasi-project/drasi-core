@@ -163,10 +163,21 @@ impl LifecycleManager {
 
         let mut failures = Vec::new();
 
-        for (id, kind, status) in shutdown_order {
+        for (id, kind, _snapshot_status) in shutdown_order {
+            // Re-check the live status — it may have changed since we took the
+            // snapshot (e.g., a reaction can race to Error after its source is
+            // stopped).
+            let live_status = {
+                let g = self.graph.read().await;
+                g.get_component(&id).map(|n| n.status)
+            };
+            let live_status = match live_status {
+                Some(s) => s,
+                None => continue, // component removed concurrently
+            };
             if !matches!(
-                status,
-                ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error
+                live_status,
+                ComponentStatus::Running | ComponentStatus::Starting
             ) {
                 continue;
             }
