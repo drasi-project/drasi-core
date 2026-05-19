@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bootstrap_context;
+pub mod checkpoint;
 pub mod common;
 pub mod manager;
+pub mod snapshot_fetcher;
 mod traits;
 
 #[cfg(test)]
@@ -23,5 +26,9 @@ pub(crate) mod tests;
 pub(crate) use traits::QueryProvider;
 pub use traits::Reaction;
 
+pub use bootstrap_context::BootstrapBackend;
+pub use bootstrap_context::BootstrapContext;
+pub use checkpoint::ReactionCheckpoint;
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;
+pub use snapshot_fetcher::SnapshotFetcher;

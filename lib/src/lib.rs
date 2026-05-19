@@ -132,7 +132,7 @@ pub use lib_core::DrasiLib;
 pub use error::{DrasiError, Result};
 
 /// Recovery policy and error types for checkpoint-based recovery
-pub use recovery::{RecoveryError, RecoveryPolicy};
+pub use recovery::{ReactionRecoveryPolicy, RecoveryError, RecoveryPolicy};
 
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
@@ -209,6 +209,10 @@ pub use wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig, MIN_MA
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
 
+/// Checkpoint type for durable reaction progress tracking
+pub use reactions::ReactionCheckpoint;
+/// Runtime snapshot fetcher trait for on-demand query access
+pub use reactions::SnapshotFetcher;
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Position comparison trait for per-subscriber replay filtering

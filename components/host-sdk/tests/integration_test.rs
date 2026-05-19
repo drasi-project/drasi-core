@@ -1835,6 +1835,7 @@ async fn test_reaction_enqueue_query_result() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
 
@@ -1897,6 +1898,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -1954,6 +1956,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -2035,6 +2038,7 @@ async fn test_reaction_start_stop_stress() {
             update_tx,
             state_store: None,
             identity_provider: None,
+            snapshot_fetcher: None,
         };
         reaction.initialize(context).await;
         reaction.start().await.expect("reaction start");
