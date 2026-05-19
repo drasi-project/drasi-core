@@ -1005,14 +1005,20 @@ impl SourceBase {
                                 debug!(
                                     "[{}] Position filter: SKIPPING event for dispatcher {} \
                                      (event_pos={:?} <= resume_pos={:?})",
-                                    self.id, idx, event_pos.as_ref(), resume_pos.as_ref()
+                                    self.id,
+                                    idx,
+                                    event_pos.as_ref(),
+                                    resume_pos.as_ref()
                                 );
                                 continue;
                             }
                             debug!(
                                 "[{}] Position filter: PASSING event for dispatcher {} \
                                  (event_pos={:?} > resume_pos={:?})",
-                                self.id, idx, event_pos.as_ref(), resume_pos.as_ref()
+                                self.id,
+                                idx,
+                                event_pos.as_ref(),
+                                resume_pos.as_ref()
                             );
                             cleared_indices.push(idx);
                         }
