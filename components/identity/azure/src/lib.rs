@@ -121,14 +121,14 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
         let mut provider = match dto.auth_method {
             AzureAuthMethod::ManagedIdentity => AzureIdentityProvider::new(&identity_name)?,
             AzureAuthMethod::ManagedIdentityUserAssigned => {
-                let client_id =
-                    mapper
-                        .resolve_optional_string(&dto.client_id).await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
+                let client_id = mapper
+                    .resolve_optional_string(&dto.client_id)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
                             "client_id is required for managed_identity_user_assigned auth method"
                         )
-                        })?;
+                    })?;
                 AzureIdentityProvider::with_managed_identity(&identity_name, client_id)?
             }
             AzureAuthMethod::WorkloadIdentity => {
