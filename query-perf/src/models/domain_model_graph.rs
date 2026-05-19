@@ -184,7 +184,7 @@ impl Relation {
 // Define a DomainModelGraph struct.
 // The DomainModelGraph struct contains two Arenas, one for Nodes and one for Relations.
 // The Node Arena is used to store Node structs and the Relation Arena is used to store Relation structs.
-// The DomainModelGraph struct also contains a HashMap that maps NodeIds to NodeIndexs and a HashMap that maps RelationIds to RelationIndexs.
+// The DomainModelGraph struct also contains a HashMap that maps NodeIds to NodeIndexes and a HashMap that maps RelationIds to RelationIndexes.
 pub struct DomainModelGraph {
     nodes: Arena<Node>,
     relations: Arena<Relation>,

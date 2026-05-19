@@ -351,13 +351,13 @@ async fn get_adjacent_elements(
             out_node,
             properties: _,
         } => {
-            let adjecent_ref = match direction {
+            let adjacent_ref = match direction {
                 SolveDirection::Outward => out_node,
                 SolveDirection::Inward => in_node,
             };
 
             match element_index
-                .get_slot_element_by_ref(target_slot, adjecent_ref)
+                .get_slot_element_by_ref(target_slot, adjacent_ref)
                 .await?
             {
                 Some(adjacent_element) => Ok(Box::pin(tokio_stream::once::<ElementResult>(Ok(

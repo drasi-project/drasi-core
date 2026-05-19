@@ -100,15 +100,15 @@ impl InMemoryElementIndex {
                 out_node,
                 properties: _,
             } => {
-                let mut in_gaurd = self.element_by_slot_in.write().await;
-                let mut out_gaurd = self.element_by_slot_out.write().await;
+                let mut in_guard = self.element_by_slot_in.write().await;
+                let mut out_guard = self.element_by_slot_out.write().await;
 
                 for old_slot in affinity.drain() {
-                    if let Some(set) = in_gaurd.get_mut(&(old_slot, in_node.clone())) {
+                    if let Some(set) = in_guard.get_mut(&(old_slot, in_node.clone())) {
                         set.remove(&metadata.reference);
                     }
 
-                    if let Some(set) = out_gaurd.get_mut(&(old_slot, out_node.clone())) {
+                    if let Some(set) = out_guard.get_mut(&(old_slot, out_node.clone())) {
                         set.remove(&metadata.reference);
                     }
                 }
@@ -144,18 +144,18 @@ impl InMemoryElementIndex {
                 out_node,
                 properties: _,
             } => {
-                let mut in_gaurd = self.element_by_slot_in.write().await;
-                let mut out_gaurd = self.element_by_slot_out.write().await;
+                let mut in_guard = self.element_by_slot_in.write().await;
+                let mut out_guard = self.element_by_slot_out.write().await;
 
                 for slot in slots {
                     affinity.insert(*slot);
 
-                    in_gaurd
+                    in_guard
                         .entry((*slot, in_node.clone()))
                         .or_default()
                         .insert(metadata.reference.clone());
 
-                    out_gaurd
+                    out_guard
                         .entry((*slot, out_node.clone()))
                         .or_default()
                         .insert(metadata.reference.clone());

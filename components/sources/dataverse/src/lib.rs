@@ -501,7 +501,7 @@ impl DataverseSource {
                 }
 
                 // Use `modifiedon` from the record for accurate ordering.
-                // Falls back to current time if the field is missing or unparseable.
+                // Falls back to current time if the field is missing or unparsable.
                 let effective_from = attributes
                     .get("modifiedon")
                     .and_then(|v| v.as_str())

@@ -435,7 +435,7 @@ impl SourceBase {
         }
     }
 
-    /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
+    /// Returns a cloneable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
     /// The handle can both read and write the component's status and automatically
     /// notifies the graph on every status change (after `initialize()`).
