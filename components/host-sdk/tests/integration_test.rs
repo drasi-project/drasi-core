@@ -311,6 +311,50 @@ async fn test_create_mock_source_instance() {
 }
 
 #[tokio::test]
+async fn test_mock_source_schema_roundtrip_over_ffi() {
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let descriptor = &plugin.source_plugins[0];
+    let config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 1000
+    });
+
+    let source = descriptor
+        .create_source("schema-roundtrip", &config, false)
+        .await
+        .expect("Should create mock source instance");
+
+    let schema = source
+        .describe_schema()
+        .expect("mock source should expose schema over FFI");
+
+    assert_eq!(schema.nodes.len(), 1);
+    let node = &schema.nodes[0];
+    assert_eq!(node.label, "Counter");
+    assert!(node
+        .properties
+        .iter()
+        .any(|property| property.name == "value"));
+    assert!(node
+        .properties
+        .iter()
+        .any(|property| property.name == "timestamp"));
+}
+
+#[tokio::test]
 async fn test_create_log_reaction_instance() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
@@ -1791,6 +1835,7 @@ async fn test_reaction_enqueue_query_result() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
 
@@ -1853,6 +1898,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -1910,6 +1956,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        snapshot_fetcher: None,
     };
     reaction.initialize(context).await;
     reaction.start().await.expect("Reaction should start");
@@ -1991,6 +2038,7 @@ async fn test_reaction_start_stop_stress() {
             update_tx,
             state_store: None,
             identity_provider: None,
+            snapshot_fetcher: None,
         };
         reaction.initialize(context).await;
         reaction.start().await.expect("reaction start");

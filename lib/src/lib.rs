@@ -90,6 +90,9 @@ pub mod state_guard;
 // Config module needs to be public for configuration types
 pub mod config;
 
+// Schema discovery types (separate from configuration)
+pub mod schema;
+
 // Indexes module for storage backend configuration
 pub mod indexes;
 
@@ -129,7 +132,7 @@ pub use lib_core::DrasiLib;
 pub use error::{DrasiError, Result};
 
 /// Recovery policy and error types for checkpoint-based recovery
-pub use recovery::{RecoveryError, RecoveryPolicy};
+pub use recovery::{ReactionRecoveryPolicy, RecoveryError, RecoveryPolicy};
 
 /// Component status type for monitoring component states
 pub use channels::ComponentStatus;
@@ -163,6 +166,12 @@ pub use config::{
     BootstrapSnapshot, ConfigurationSnapshot, DrasiLibConfig, QueryConfig, QueryLanguage,
     QueryRuntime, ReactionRuntime, ReactionSnapshot, RuntimeConfig, SourceRuntime, SourceSnapshot,
     SourceSubscriptionSettings,
+};
+
+/// Schema discovery types (also available via `config::` for backward compatibility)
+pub use schema::{
+    normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
+    PropertySchema, PropertyType, RelationSchema, SourceSchema,
 };
 
 /// Storage backend configuration types
@@ -200,6 +209,10 @@ pub use wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig, MIN_MA
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
 
+/// Checkpoint type for durable reaction progress tracking
+pub use reactions::ReactionCheckpoint;
+/// Runtime snapshot fetcher trait for on-demand query access
+pub use reactions::SnapshotFetcher;
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
 /// Base implementations for source plugins

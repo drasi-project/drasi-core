@@ -22,6 +22,13 @@ use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use crate::recovery::RecoveryPolicy;
 use drasi_core::models::SourceMiddlewareConfig;
 
+// Re-export schema discovery types from their dedicated module for backward compatibility.
+// Consumers can import from either `crate::config` or `crate::schema`.
+pub use crate::schema::{
+    normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
+    PropertySchema, PropertyType, RelationSchema, SourceSchema,
+};
+
 /// Query language for continuous queries
 ///
 /// Drasi supports two query languages for continuous query processing:
@@ -640,5 +647,84 @@ impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
             id: config.id,
             keys: config.keys.into_iter().map(|k| k.into()).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn btreeset_sources_maintains_sorted_order_and_deduplication() {
+        let mut graph = GraphSchema::default();
+        let schema = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Item".to_string(),
+                properties: Vec::new(),
+            }],
+            relations: Vec::new(),
+        };
+
+        graph.merge_source_schema("charlie", &schema);
+        graph.merge_source_schema("alpha", &schema);
+        graph.merge_source_schema("bravo", &schema);
+        graph.merge_source_schema("alpha", &schema); // duplicate
+
+        let item = graph.nodes.get("Item").unwrap();
+        let sources: Vec<_> = item.sources.iter().cloned().collect();
+        assert_eq!(sources, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn normalize_table_label_strips_schema_prefix() {
+        assert_eq!(normalize_table_label("public.users"), "users");
+        assert_eq!(normalize_table_label("dbo.orders"), "orders");
+        assert_eq!(normalize_table_label("customers"), "customers");
+    }
+
+    #[test]
+    fn merge_source_schema_combines_properties() {
+        let mut graph = GraphSchema::default();
+
+        let schema_a = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![PropertySchema::new("temperature")],
+            }],
+            relations: Vec::new(),
+        };
+        let schema_b = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![
+                    PropertySchema {
+                        name: "temperature".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    },
+                    PropertySchema::new("humidity"),
+                ],
+            }],
+            relations: Vec::new(),
+        };
+
+        graph.merge_source_schema("src-a", &schema_a);
+        graph.merge_source_schema("src-b", &schema_b);
+
+        let sensor = graph.nodes.get("Sensor").unwrap();
+        assert_eq!(
+            sensor.sources,
+            BTreeSet::from(["src-a".to_string(), "src-b".to_string()])
+        );
+        assert_eq!(sensor.properties.len(), 2);
+
+        // temperature should have gotten the type from src-b
+        let temp = sensor
+            .properties
+            .iter()
+            .find(|p| p.name == "temperature")
+            .unwrap();
+        assert_eq!(temp.data_type, Some(PropertyType::Float));
     }
 }

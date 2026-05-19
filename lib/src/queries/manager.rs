@@ -44,6 +44,7 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
+use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
 };
@@ -132,6 +133,11 @@ pub trait Query: Send + Sync {
     async fn status(&self) -> ComponentStatus;
     fn get_config(&self) -> &QueryConfig;
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Return the number of active subscription forwarder tasks (diagnostic/testing).
+    async fn subscription_count(&self) -> usize {
+        0
+    }
 
     /// Subscribe to query results for reactions
     /// Returns a broadcast receiver for Arc-wrapped QueryResults
@@ -288,6 +294,8 @@ pub struct DrasiQuery {
     // Use QueryBase for common functionality
     base: QueryBase,
     output_state: Arc<RwLock<QueryOutputState>>,
+    // Pre-computed config hash for bootstrap APIs
+    config_hash: u64,
     // Priority queue for ordered event processing
     priority_queue: PriorityQueue,
     // Reference to SourceManager for direct subscription
@@ -323,6 +331,7 @@ impl DrasiQuery {
         let priority_queue = PriorityQueue::new(priority_capacity);
         let outbox_capacity = config.outbox_capacity;
         let bootstrap_timeout = std::time::Duration::from_secs(config.bootstrap_timeout_secs);
+        let config_hash = crate::queries::compute_config_hash(&config);
 
         // Create QueryBase for common functionality
         let base = QueryBase::new(config).context("Failed to create QueryBase")?;
@@ -331,6 +340,7 @@ impl DrasiQuery {
             instance_id: instance_id.into(),
             base,
             output_state: Arc::new(RwLock::new(QueryOutputState::new(outbox_capacity))),
+            config_hash,
             priority_queue,
             source_manager,
             subscription_tasks: Arc::new(RwLock::new(Vec::new())),
@@ -1446,6 +1456,10 @@ impl Query for DrasiQuery {
         self
     }
 
+    async fn subscription_count(&self) -> usize {
+        self.subscription_tasks.read().await.len()
+    }
+
     async fn subscribe(&self, reaction_id: String) -> Result<QuerySubscriptionResponse> {
         debug!(
             "Reaction '{}' subscribing to query '{}'",
@@ -1463,11 +1477,15 @@ impl Query for DrasiQuery {
         // This ensures reactions don't observe a partial result set during initialization.
         self.wait_until_running().await?;
 
-        let state = self.output_state.read().await;
-        Ok(SnapshotResponse {
-            results: state.get_results_as_vec(),
-            as_of_sequence: state.as_of_sequence(),
-        })
+        let (results_clone, as_of_sequence) = {
+            let state = self.output_state.read().await;
+            (state.clone_results(), state.as_of_sequence())
+        };
+        Ok(SnapshotResponse::new(
+            results_clone,
+            as_of_sequence,
+            self.config_hash,
+        ))
     }
 
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError> {
@@ -1475,10 +1493,16 @@ impl Query for DrasiQuery {
         self.wait_until_running().await?;
 
         let state = self.output_state.read().await;
-        let results = state.fetch_outbox_after(after_sequence)?;
+        let results = state
+            .fetch_outbox_after(after_sequence)
+            .map_err(|mut gap| {
+                gap.config_hash = self.config_hash;
+                gap
+            })?;
         Ok(OutboxResponse {
             latest_sequence: state.as_of_sequence(),
             results,
+            config_hash: self.config_hash,
         })
     }
 }
@@ -1496,6 +1520,9 @@ pub struct QueryManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Cached query labels extracted at registration time to avoid re-parsing
+    /// queries on every `get_graph_schema()` call.
+    label_cache: RwLock<HashMap<String, QueryLabels>>,
 }
 
 impl QueryManager {
@@ -1516,6 +1543,7 @@ impl QueryManager {
             log_registry,
             graph,
             update_tx,
+            label_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1535,6 +1563,20 @@ impl QueryManager {
     pub async fn add_query_instance_for_test(&self, query: Arc<dyn Query>) -> Result<()> {
         let query_id = query.get_config().id.clone();
 
+        // Cache labels from the query config
+        let config = query.get_config();
+        match LabelExtractor::extract_labels(&config.query, &config.query_language) {
+            Ok(labels) => {
+                self.label_cache
+                    .write()
+                    .await
+                    .insert(query_id.clone(), labels);
+            }
+            Err(e) => {
+                warn!("Failed to extract labels for test query '{query_id}': {e}");
+            }
+        }
+
         let mut graph = self.graph.write().await;
         if graph.has_runtime(&query_id) {
             return Err(anyhow::anyhow!("Query with id '{query_id}' already exists"));
@@ -1550,6 +1592,19 @@ impl QueryManager {
     /// Graph registration (node creation, dependency edges) must be done by the caller
     /// beforehand via `ComponentGraph::register_query()`.
     pub async fn provision_query(&self, config: QueryConfig) -> Result<()> {
+        // Cache labels at registration time to avoid re-parsing on every get_graph_schema() call
+        match LabelExtractor::extract_labels(&config.query, &config.query_language) {
+            Ok(labels) => {
+                self.label_cache
+                    .write()
+                    .await
+                    .insert(config.id.clone(), labels);
+            }
+            Err(e) => {
+                warn!("Failed to extract labels for query '{}': {e}", config.id);
+            }
+        }
+
         // Create the query instance
         let query = DrasiQuery::new(
             &self.instance_id,
@@ -1718,6 +1773,7 @@ impl QueryManager {
     ///
     /// The caller should validate dependencies via `graph.can_remove()` before calling this.
     pub async fn teardown_query(&self, id: String) -> Result<()> {
+        self.label_cache.write().await.remove(&id);
         crate::managers::lifecycle_helpers::teardown_component::<Arc<dyn Query>, _, _>(
             &self.graph,
             &id,
@@ -1744,6 +1800,19 @@ impl QueryManager {
             .map(|q| q.get_config().clone())
     }
 
+    /// Return all cached query labels as (query_id, labels) pairs.
+    ///
+    /// Labels are extracted at query registration time and cached to avoid
+    /// re-parsing the query string on every `get_graph_schema()` call.
+    pub async fn get_all_query_labels(&self) -> Vec<(String, QueryLabels)> {
+        self.label_cache
+            .read()
+            .await
+            .iter()
+            .map(|(id, labels)| (id.clone(), labels.clone()))
+            .collect()
+    }
+
     pub async fn get_query_results(&self, id: &str) -> Result<Vec<serde_json::Value>> {
         let query = {
             let graph = self.graph.read().await;
@@ -1757,14 +1826,11 @@ impl QueryManager {
                 return Err(anyhow::anyhow!("Query '{id}' is not running"));
             }
 
-            // Downcast to DrasiQuery to access get_current_results
-            // Since all queries are DrasiQuery instances, this is safe
-            let drasi_query = query
-                .as_any()
-                .downcast_ref::<DrasiQuery>()
-                .ok_or_else(|| anyhow::anyhow!("Internal error: invalid query type"))?;
-
-            Ok(drasi_query.get_current_results().await)
+            let snapshot = query
+                .fetch_snapshot()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch snapshot: {e}"))?;
+            Ok(snapshot.to_vec())
         } else {
             Err(crate::managers::ComponentNotFoundError::new("query", id).into())
         }

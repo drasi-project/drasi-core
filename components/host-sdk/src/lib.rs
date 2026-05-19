@@ -34,6 +34,7 @@ pub mod plugin_types;
 pub mod proxies;
 #[cfg(feature = "registry")]
 pub mod registry;
+pub mod snapshot_fetcher_bridge;
 pub mod state_store_bridge;
 pub mod watcher;
 
@@ -47,6 +48,7 @@ pub use loader::{
 pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
+pub use snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 pub use state_store_bridge::StateStoreVtableBuilder;
 
 pub use plugin_types::{

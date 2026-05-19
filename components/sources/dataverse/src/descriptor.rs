@@ -53,10 +53,6 @@ pub struct DataverseSourceConfigDto {
     #[serde(default)]
     pub client_secret: Option<ConfigValue<String>>,
 
-    /// Use Azure CLI for authentication instead of client credentials.
-    #[serde(default)]
-    pub use_azure_cli: bool,
-
     /// Entity logical names to monitor (e.g., `["account", "contact"]`).
     pub entities: Vec<String>,
 
@@ -144,7 +140,6 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             tenant_id,
             client_id,
             client_secret,
-            use_azure_cli: dto.use_azure_cli,
             entities: dto.entities,
             entity_set_overrides: dto.entity_set_overrides,
             entity_columns: dto.entity_columns,
@@ -163,10 +158,6 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
             .with_max_interval_seconds(config.max_interval_seconds)
             .with_api_version(config.api_version.clone())
             .with_auto_start(auto_start);
-
-        if config.use_azure_cli {
-            source = source.with_azure_cli_auth();
-        }
 
         // Apply entity set overrides
         for (entity, set_name) in &config.entity_set_overrides {
@@ -233,27 +224,11 @@ mod tests {
         assert_eq!(dto.min_interval_ms, ConfigValue::Static(500));
         assert_eq!(dto.max_interval_seconds, ConfigValue::Static(30));
         assert_eq!(dto.api_version, ConfigValue::Static("v9.2".to_string()));
-        assert!(!dto.use_azure_cli);
         assert!(dto.entity_set_overrides.is_empty());
         assert!(dto.entity_columns.is_empty());
         assert_eq!(dto.tenant_id, None);
         assert_eq!(dto.client_id, None);
         assert_eq!(dto.client_secret, None);
-    }
-
-    #[test]
-    fn test_dto_azure_cli_mode() {
-        let json = serde_json::json!({
-            "environmentUrl": "https://myorg.crm.dynamics.com",
-            "useAzureCli": true,
-            "entities": ["account"]
-        });
-
-        let dto: DataverseSourceConfigDto =
-            serde_json::from_value(json).expect("should deserialize");
-
-        assert!(dto.use_azure_cli);
-        assert_eq!(dto.tenant_id, None);
     }
 
     #[test]
