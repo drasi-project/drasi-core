@@ -139,6 +139,7 @@ mod manager_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)
@@ -1033,6 +1034,7 @@ mod output_state_integration_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)

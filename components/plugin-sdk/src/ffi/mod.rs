@@ -63,7 +63,8 @@ pub use vtable_gen::{
 pub use vtables::{
     BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext, FfiBootstrapEvent,
     FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn, FfiBootstrapPushCallbackFn,
-    FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver, FfiBootstrapSender,
+    FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver, FfiBootstrapResult,
+    FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapSender,
     FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
     FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,

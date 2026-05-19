@@ -229,6 +229,7 @@ impl Source for SourceProxy {
             resume_from_len,
             has_last_sequence,
             last_sequence_val,
+            settings.request_position_handle,
         );
 
         if resp_ptr.is_null() {
@@ -269,17 +270,160 @@ impl Source for SourceProxy {
             Some(proxy.into_mpsc_receiver())
         };
 
+        // Reconstruct position_handle from Arc::into_raw pointer
+        let position_handle = if ffi_resp.position_handle_ptr.is_null() {
+            None
+        } else {
+            // Safety: the plugin side did Arc::into_raw(arc) which transfers one
+            // ref-count. We reconstruct the Arc without incrementing. The plugin's
+            // SourceBase holds another clone, so the AtomicU64 stays alive until
+            // both sides drop their Arcs.
+            Some(unsafe {
+                std::sync::Arc::from_raw(
+                    ffi_resp.position_handle_ptr as *const std::sync::atomic::AtomicU64,
+                )
+            })
+        };
+
+        // Reconstruct bootstrap_result_receiver via push-based callback
+        let bootstrap_result_receiver = if ffi_resp.bootstrap_result_receiver.is_null() {
+            None
+        } else {
+            let ffi_brr = unsafe { *Box::from_raw(ffi_resp.bootstrap_result_receiver) };
+            let (host_tx, host_rx) = tokio::sync::oneshot::channel::<
+                anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+            >();
+
+            // Wrap sender in Mutex<Option<...>> so duplicate callbacks are
+            // harmless (second call sees None and is a no-op).
+            struct BootstrapResultCtx {
+                tx: std::sync::Mutex<
+                    Option<
+                        tokio::sync::oneshot::Sender<
+                            anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                        >,
+                    >,
+                >,
+            }
+
+            // Callback the plugin will invoke when bootstrap result is ready
+            extern "C" fn host_bootstrap_result_callback(
+                ctx: *mut std::ffi::c_void,
+                result: *mut drasi_plugin_sdk::ffi::FfiBootstrapResult,
+            ) {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if ctx.is_null() {
+                        return;
+                    }
+                    let wrapper = unsafe { Box::from_raw(ctx as *mut BootstrapResultCtx) };
+                    let tx = match wrapper.tx.lock() {
+                        Ok(mut guard) => guard.take(),
+                        Err(_) => None,
+                    };
+                    let Some(tx) = tx else {
+                        return;
+                    };
+                    if result.is_null() {
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "Bootstrap result receiver dropped without result"
+                        )));
+                        return;
+                    }
+                    let ffi_result = unsafe { *Box::from_raw(result) };
+                    if ffi_result.event_count < 0 {
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "Bootstrap failed with code {}",
+                            ffi_result.event_count
+                        )));
+                        return;
+                    }
+                    let last_sequence = if ffi_result.last_sequence >= 0 {
+                        Some(ffi_result.last_sequence as u64)
+                    } else {
+                        None
+                    };
+                    let source_position = if !ffi_result.source_position_ptr.is_null()
+                        && ffi_result.source_position_len > 0
+                    {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(
+                                ffi_result.source_position_ptr,
+                                ffi_result.source_position_len,
+                            )
+                        };
+                        let owned = bytes::Bytes::copy_from_slice(bytes);
+                        if let Some(drop_fn) = ffi_result.source_position_drop_fn {
+                            (drop_fn)(
+                                ffi_result.source_position_ptr as *mut u8,
+                                ffi_result.source_position_len,
+                            );
+                        }
+                        Some(owned)
+                    } else {
+                        None
+                    };
+                    let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
+                        event_count: ffi_result.event_count as usize,
+                        last_sequence,
+                        sequences_aligned: ffi_result.sequences_aligned,
+                        source_position,
+                    }));
+                }));
+            }
+
+            let ctx_wrapper = Box::new(BootstrapResultCtx {
+                tx: std::sync::Mutex::new(Some(host_tx)),
+            });
+            let ctx = Box::into_raw(ctx_wrapper) as *mut std::ffi::c_void;
+            (ffi_brr.start_fn)(ffi_brr.state, host_bootstrap_result_callback, ctx);
+            // Safe to call drop_fn: the plugin state is Arc-based, so the
+            // spawned task holds its own clone. Dropping the FFI handle's Arc
+            // reference won't free the state while the task is alive.
+            (ffi_brr.drop_fn)(ffi_brr.state);
+
+            Some(host_rx)
+        };
+
         Ok(SubscriptionResponse {
             query_id,
             source_id,
             receiver,
             bootstrap_receiver,
-            position_handle: None,
+            position_handle,
+            bootstrap_result_receiver,
         })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn supports_replay(&self) -> bool {
+        (self.vtable.supports_replay_fn)(self.vtable.state)
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let remove_fn = self.vtable.remove_position_handle_fn;
+        let qid = query_id.to_string();
+        let result = std::thread::spawn(move || {
+            let ffi_qid = drasi_plugin_sdk::ffi::FfiStr::from_str(&qid);
+            (remove_fn)(state.as_ptr(), ffi_qid)
+        })
+        .join()
+        .map(|r| unsafe { r.into_result() });
+
+        match result {
+            Ok(Ok(())) => {
+                log::debug!("SourceProxy::remove_position_handle('{query_id}') completed via FFI");
+            }
+            Ok(Err(e)) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI error: {e}");
+            }
+            Err(_) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') thread panicked");
+            }
+        }
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {

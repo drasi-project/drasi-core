@@ -296,6 +296,7 @@ impl DrasiLib {
             log_registry.clone(),
             component_graph.clone(),
             update_tx.clone(),
+            config.default_recovery_policy,
         ));
 
         let reaction_manager = Arc::new(ReactionManager::new(
@@ -1292,6 +1293,7 @@ mod tests {
                     receiver,
                     bootstrap_receiver: None,
                     position_handle: None,
+                    bootstrap_result_receiver: None,
                 })
             }
             fn as_any(&self) -> &dyn std::any::Any {
@@ -1889,6 +1891,7 @@ mod tests {
                     receiver,
                     bootstrap_receiver: None,
                     position_handle: None,
+                    bootstrap_result_receiver: None,
                 })
             }
             fn as_any(&self) -> &dyn std::any::Any {

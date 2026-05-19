@@ -215,6 +215,8 @@ pub use reactions::ReactionCheckpoint;
 pub use reactions::SnapshotFetcher;
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
+/// Position comparison trait for per-subscriber replay filtering
+pub use sources::{ByteLexPositionComparator, PositionComparator};
 /// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
 

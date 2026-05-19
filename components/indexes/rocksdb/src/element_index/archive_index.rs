@@ -206,8 +206,16 @@ impl ElementArchiveIndex for RocksDbElementIndex {
         let context = self.context.clone();
 
         let task = task::spawn_blocking(move || {
-            if let Err(err) = context.db.drop_cf(ARCHIVE_CF) {
-                return Err(IndexError::other(err));
+            match context.db.drop_cf(ARCHIVE_CF) {
+                Ok(()) => {}
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("Invalid column family") {
+                        // Column family doesn't exist — nothing to clear
+                        return Ok(());
+                    }
+                    return Err(IndexError::other(err));
+                }
             }
             if let Err(err) = context.db.create_cf(ARCHIVE_CF, &get_archive_cf_options()) {
                 return Err(IndexError::other(err));

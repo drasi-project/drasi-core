@@ -676,7 +676,7 @@ mod runtime_tests {
             queries: vec![],
         };
 
-        let runtime_config = RuntimeConfig::new(config, None, None, None);
+        let runtime_config = RuntimeConfig::new(config, None, None, None, None);
         assert_eq!(runtime_config.id, "test-server");
     }
 
