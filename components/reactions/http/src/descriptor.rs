@@ -122,14 +122,31 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = HttpReactionSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "reaction.http.HttpReactionConfig")
+            .expect("root schema not found")
+            .field("baseUrl", |f| {
+                f.group("Connection")
+                    .order(1)
+                    .placeholder("https://api.example.com")
+            })
+            .field("token", |f| {
+                f.group("Connection").order(2).widget("password")
+            })
+            .field("timeoutMs", |f| {
+                f.group("Connection").order(3).placeholder("30000")
+            })
+            .field("routes", |f| f.order(4))
+            .annotate()
     }
 
     async fn create_reaction(

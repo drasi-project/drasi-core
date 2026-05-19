@@ -386,6 +386,7 @@ impl BootstrapProvider for PlatformBootstrapProvider {
             event_count: sent_count,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: None,
         })
     }
 }

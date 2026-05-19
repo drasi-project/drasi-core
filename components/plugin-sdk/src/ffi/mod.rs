@@ -34,6 +34,7 @@ pub mod identity;
 pub mod identity_proxy;
 pub mod metadata;
 pub mod secret_store;
+pub mod snapshot_fetcher_proxy;
 pub mod state_store_proxy;
 pub mod tracing_bridge;
 pub mod types;
@@ -62,11 +63,16 @@ pub use vtable_gen::{
     current_instance_log_ctx, InstanceLogContext,
 };
 pub use vtables::{
-    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapPushCallbackFn,
-    FfiBootstrapReceiver, FfiBootstrapSender, FfiChangePushCallbackFn, FfiChangeReceiver,
-    FfiPluginRegistration, FfiResultPushCallbackFn, FfiRuntimeContext, FfiSourceEvent,
-    FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable, ReactionVtable,
-    SecretStorePluginVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    BootstrapPluginVtable, BootstrapProviderVtable, FfiBootstrapContext, FfiBootstrapEvent,
+    FfiBootstrapFetchOutboxFn, FfiBootstrapFetchSnapshotFn, FfiBootstrapPushCallbackFn,
+    FfiBootstrapReadCheckpointFn, FfiBootstrapReceiver, FfiBootstrapResult,
+    FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver, FfiBootstrapSender,
+    FfiBootstrapWriteCheckpointFn, FfiChangePushCallbackFn, FfiChangeReceiver, FfiCheckpoint,
+    FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
+    FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
+    FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
+    ReactionVtable, SecretStorePluginVtable, SnapshotFetcherVtable, SourcePluginVtable,
+    SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
@@ -76,4 +82,5 @@ pub use identity::{
 };
 pub use identity_proxy::FfiIdentityProviderProxy;
 pub use secret_store::{FfiGetSecretResult, SecretStoreProviderVtable};
+pub use snapshot_fetcher_proxy::FfiSnapshotFetcherProxy;
 pub use state_store_proxy::FfiStateStoreProxy;

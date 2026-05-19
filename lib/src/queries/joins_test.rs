@@ -153,6 +153,7 @@ mod query_joins_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)

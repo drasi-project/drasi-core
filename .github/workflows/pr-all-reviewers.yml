@@ -48,6 +48,14 @@ jobs:
   # ensures a failed reviewer does NOT abort the chain — subsequent
   # reviewers still run. We still gate on `resolve` succeeding so the
   # chain stops if PR-URL resolution itself failed.
+  # NOTE: A unique `aw_context` value is passed to each reusable reviewer workflow.
+  # The gh-aw `compute_artifact_prefix.sh` script derives the artifact name prefix by
+  # hashing `toJSON(inputs) + GITHUB_RUN_ATTEMPT`. When the calling workflow invokes
+  # multiple reusable workflows in the same run with identical inputs, every reviewer
+  # would compute the same prefix and the second `<prefix>-activation` artifact upload
+  # fails with `409 Conflict: an artifact with this name already exists on the workflow
+  # run`. Passing a distinct `aw_context` per reviewer perturbs the inputs hash so each
+  # reviewer gets its own unique artifact-name prefix.
   correctness:
     needs: resolve
     if: ${{ needs.resolve.result == 'success' }}
@@ -55,6 +63,7 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/correctness
 
   security:
     needs: [resolve, correctness]
@@ -63,6 +72,7 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/security
 
   design:
     needs: [resolve, security]
@@ -71,6 +81,7 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/design
 
   testing:
     needs: [resolve, design]
@@ -79,6 +90,7 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/testing
 
   docs:
     needs: [resolve, testing]
@@ -87,6 +99,7 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/docs
 
   prior_art:
     needs: [resolve, docs]
@@ -95,3 +108,4 @@ jobs:
     secrets: inherit
     with:
       pr_url: ${{ needs.resolve.outputs.pr_url }}
+      aw_context: pr-all-reviewers/prior_art

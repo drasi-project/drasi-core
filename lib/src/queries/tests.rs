@@ -139,6 +139,7 @@ mod manager_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)
@@ -365,12 +366,11 @@ mod manager_tests {
         )
         .await;
 
-        // Inspect concrete query to verify subscription tasks are present
+        // Inspect query to verify subscription tasks are present
         let query = manager.get_query_instance("test-query").await.unwrap();
-        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
 
         assert!(
-            concrete.subscription_task_count().await > 0,
+            query.subscription_count().await > 0,
             "Expected active subscription task"
         );
 
@@ -386,7 +386,7 @@ mod manager_tests {
         .await;
 
         assert!(
-            concrete.subscription_task_count().await == 0,
+            query.subscription_count().await == 0,
             "Subscription tasks should be cleared on stop"
         );
     }
@@ -433,12 +433,11 @@ mod manager_tests {
 
         // Crucially: subscription tasks from source1 should have been cleaned up
         let query = manager.get_query_instance("test-query").await.unwrap();
-        let concrete = query.as_any().downcast_ref::<DrasiQuery>().unwrap();
 
         // The forwarder task for source1 was spawned before source2 subscription failed,
         // so the rollback code should have aborted it
         assert_eq!(
-            concrete.subscription_task_count().await,
+            query.subscription_count().await,
             0,
             "Subscription tasks should be cleaned up after partial failure"
         );
@@ -1035,6 +1034,7 @@ mod output_state_integration_tests {
             log_registry,
             graph.clone(),
             update_tx,
+            None,
         ));
 
         (query_manager, source_manager, graph)
@@ -1204,7 +1204,7 @@ mod output_state_integration_tests {
         // Before any live events: snapshot should be empty, sequence 0
         let snap = query.fetch_snapshot().await.unwrap();
         assert_eq!(snap.as_of_sequence, 0);
-        assert!(snap.results.is_empty());
+        assert!(snap.is_empty());
 
         // Outbox after 0 should also be empty
         let outbox = query.fetch_outbox(0).await.unwrap();
