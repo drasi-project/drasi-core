@@ -174,6 +174,15 @@ pub trait Source: Send + Sync {
         false
     }
 
+    /// Describe the graph schema this source provides, if known.
+    ///
+    /// This is a best-effort introspection hook used by inspection APIs and
+    /// future MCP adapters. Sources that cannot determine their schema should
+    /// return `None`.
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        None
+    }
+
     /// Start the source
     ///
     /// This begins data ingestion and event generation.
@@ -282,6 +291,10 @@ impl Source for Box<dyn Source + 'static> {
 
     fn auto_start(&self) -> bool {
         (**self).auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        (**self).describe_schema()
     }
 
     fn supports_replay(&self) -> bool {
