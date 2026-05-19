@@ -164,7 +164,7 @@ impl LifecycleManager {
         let mut failures = Vec::new();
 
         for (id, kind, status) in shutdown_order {
-            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting | ComponentStatus::Error) {
                 continue;
             }
 
