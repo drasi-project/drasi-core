@@ -948,13 +948,8 @@ async fn test_postgres_reaction_lifecycle() {
     );
     assert_eq!(
         properties.get("database").and_then(|v| v.as_str()),
-        Some("PostgreSQL"),
-        "Database type should be PostgreSQL"
-    );
-    assert_eq!(
-        properties.get("database_name").and_then(|v| v.as_str()),
         Some(pg_config.database.as_str()),
-        "Database name should match"
+        "Database should match config"
     );
     assert_eq!(
         properties.get("ssl").and_then(|v| v.as_bool()),

@@ -41,11 +41,25 @@ clippy-fix:
 
 # Build the cdylib plugins required by host-sdk integration tests.
 # These are built individually to avoid feature unification issues.
+# Plugins are copied to target/debug/plugins/ to match xtask build-plugins layout.
+PLUGIN_OUT_DIR := target/debug/plugins
 build-test-plugins:
 	@echo "=== Building cdylib test plugins ==="
 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
+	@mkdir -p $(PLUGIN_OUT_DIR)
+	@echo "=== Copying plugins to $(PLUGIN_OUT_DIR) ==="
+	@for ext in dylib so dll; do \
+		for f in target/debug/libdrasi_source_mock.$$ext \
+		         target/debug/libdrasi_reaction_log.$$ext \
+		         target/debug/libdrasi_reaction_sse.$$ext \
+		         target/debug/drasi_source_mock.$$ext \
+		         target/debug/drasi_reaction_log.$$ext \
+		         target/debug/drasi_reaction_sse.$$ext; do \
+			[ -f "$$f" ] && cp "$$f" $(PLUGIN_OUT_DIR)/ || true; \
+		done; \
+	done
 	@echo "=== Test plugins built ==="
 
 # Build test plugins, then run host-sdk integration tests.

@@ -37,38 +37,52 @@ use tracing::Instrument;
 // Helpers
 // ============================================================================
 
-/// Poll until a source reaches the expected status (with timeout).
+/// Wait for a source to reach the expected status via event notification.
 async fn wait_for_source_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(status) = drasi.get_source_status(id).await {
-            if status == expected {
-                return;
+    // Subscribe BEFORE checking to avoid missing events
+    let mut rx = drasi.subscribe_all_component_events();
+    if drasi.get_source_status(id).await.ok() == Some(expected) {
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event) if event.component_id == id && event.status == expected => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for source '{id}'");
+                }
+                _ => continue,
             }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Timed out waiting for source '{id}' to reach {expected:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("Timed out waiting for source '{id}' to reach {expected:?}");
+    });
 }
 
-/// Poll until a reaction reaches the expected status (with timeout).
+/// Wait for a reaction to reach the expected status via event notification.
 async fn wait_for_reaction_status(drasi: &DrasiLib, id: &str, expected: ComponentStatus) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(status) = drasi.get_reaction_status(id).await {
-            if status == expected {
-                return;
+    // Subscribe BEFORE checking to avoid missing events
+    let mut rx = drasi.subscribe_all_component_events();
+    if drasi.get_reaction_status(id).await.ok() == Some(expected) {
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event) if event.component_id == id && event.status == expected => return,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("Event channel closed while waiting for reaction '{id}'");
+                }
+                _ => continue,
             }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "Timed out waiting for reaction '{id}' to reach {expected:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("Timed out waiting for reaction '{id}' to reach {expected:?}");
+    });
 }
 
 // ============================================================================
@@ -151,8 +165,8 @@ impl Source for TestSource {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -289,8 +303,8 @@ impl Reaction for TestReaction {
         .await;
 
         self.base
-            .set_status_with_event(ComponentStatus::Running, Some("Started".to_string()))
-            .await?;
+            .set_status(ComponentStatus::Running, Some("Started".to_string()))
+            .await;
         Ok(())
     }
 
@@ -398,7 +412,7 @@ async fn test_source_remove_with_cleanup_calls_deprovision() {
         "Source should be removed"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a source with cleanup=false does NOT call deprovision.
@@ -423,7 +437,7 @@ async fn test_source_remove_without_cleanup_skips_deprovision() {
         "deprovision() should NOT have been called with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a stopped source with cleanup=true still calls deprovision.
@@ -452,7 +466,7 @@ async fn test_source_remove_stopped_with_cleanup() {
         "deprovision() should be called even on a stopped source"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -488,7 +502,7 @@ async fn test_reaction_remove_with_cleanup_calls_deprovision() {
         "deprovision() should have been called with cleanup=true"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a reaction with cleanup=false does NOT call deprovision.
@@ -520,7 +534,7 @@ async fn test_reaction_remove_without_cleanup_skips_deprovision() {
         "deprovision() should NOT have been called with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -576,7 +590,7 @@ async fn test_source_update_running_stops_and_restarts() {
     let status = drasi.get_source_status("reconfig-src-1").await.unwrap();
     assert_eq!(status, ComponentStatus::Running);
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a stopped source replaces the instance without restart.
@@ -612,7 +626,7 @@ async fn test_source_update_stopped_replaces_without_restart() {
         "should NOT restart a stopped source"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -662,7 +676,7 @@ async fn test_reaction_update_running_stops_and_restarts() {
         "should have started new instance"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -717,7 +731,7 @@ async fn test_source_update_emits_reconfiguring_event() {
         "Expected Running event after reconfigure, got: {statuses:?}"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Verify that Reconfiguring event is emitted during reaction update.
@@ -770,7 +784,7 @@ async fn test_reaction_update_emits_reconfiguring_event() {
         "Expected Reconfiguring event, got: {statuses:?}"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -788,11 +802,19 @@ async fn test_source_update_preserves_log_history() {
         .await
         .unwrap();
 
+    // Subscribe to logs before starting to detect log arrival
+    let (_, mut log_rx) = drasi
+        .subscribe_source_logs("reconfig-log-src")
+        .await
+        .unwrap();
+
     drasi.start().await.unwrap();
     wait_for_source_status(&drasi, "reconfig-log-src", ComponentStatus::Running).await;
 
-    // Give the source a moment to emit logs after reaching Running status
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for at least one log to arrive (event-based instead of sleep)
+    let _ = timeout(Duration::from_secs(5), log_rx.recv())
+        .await
+        .expect("Timed out waiting for source logs to arrive");
 
     // Capture pre-update log count
     let (pre_logs, _) = drasi
@@ -822,7 +844,7 @@ async fn test_source_update_preserves_log_history() {
         post_logs.len()
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Active log subscribers continue receiving logs through a reconfigure.
@@ -881,7 +903,7 @@ async fn test_source_update_active_log_stream_continues() {
         "Active log subscriber should continue receiving logs after reconfigure"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -897,7 +919,7 @@ async fn test_remove_nonexistent_source_fails() {
     let result = drasi.remove_source("does-not-exist", true).await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a non-existent source returns an error.
@@ -911,7 +933,7 @@ async fn test_update_nonexistent_source_fails() {
         .await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a non-existent reaction returns an error.
@@ -923,7 +945,7 @@ async fn test_remove_nonexistent_reaction_fails() {
     let result = drasi.remove_reaction("does-not-exist", true).await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Updating a non-existent reaction returns an error.
@@ -940,7 +962,7 @@ async fn test_update_nonexistent_reaction_fails() {
         .await;
     assert!(result.is_err());
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 // ============================================================================
@@ -990,7 +1012,7 @@ async fn test_source_remove_with_cleanup_clears_state_store() {
         keys.len()
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }
 
 /// Removing a source with cleanup=false preserves its state store partition.
@@ -1029,5 +1051,5 @@ async fn test_source_remove_without_cleanup_preserves_state_store() {
         "State store should still have 2 keys after delete with cleanup=false"
     );
 
-    drasi.stop().await.unwrap();
+    let _ = drasi.stop().await;
 }

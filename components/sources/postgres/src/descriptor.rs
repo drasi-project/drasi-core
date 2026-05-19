@@ -80,6 +80,46 @@ impl From<SslModeDto> for SslMode {
     }
 }
 
+impl From<&SslMode> for SslModeDto {
+    fn from(mode: &SslMode) -> Self {
+        match mode {
+            SslMode::Disable => SslModeDto::Disable,
+            SslMode::Prefer => SslModeDto::Prefer,
+            SslMode::Require => SslModeDto::Require,
+        }
+    }
+}
+
+impl From<&TableKeyConfig> for TableKeyConfigDto {
+    fn from(tk: &TableKeyConfig) -> Self {
+        Self {
+            table: tk.table.clone(),
+            key_columns: tk.key_columns.clone(),
+        }
+    }
+}
+
+impl From<&PostgresSourceConfig> for PostgresSourceConfigDto {
+    fn from(config: &PostgresSourceConfig) -> Self {
+        Self {
+            host: ConfigValue::Static(config.host.clone()),
+            port: ConfigValue::Static(config.port),
+            database: ConfigValue::Static(config.database.clone()),
+            user: ConfigValue::Static(config.user.clone()),
+            password: ConfigValue::Static(config.password.clone()),
+            tables: config.tables.clone(),
+            slot_name: config.slot_name.clone(),
+            publication_name: config.publication_name.clone(),
+            ssl_mode: ConfigValue::Static(SslModeDto::from(&config.ssl_mode)),
+            table_keys: config
+                .table_keys
+                .iter()
+                .map(TableKeyConfigDto::from)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::postgres::TableKeyConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -134,14 +174,48 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = PostgresSourceSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "source.postgres.PostgresSourceConfig")
+            .expect("root schema not found")
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("localhost")
+            })
+            .field("port", |f| {
+                f.group("Connection").order(2).placeholder("5432")
+            })
+            .field("database", |f| {
+                f.group("Connection").order(3).placeholder("mydb")
+            })
+            .field("user", |f| {
+                f.group("Authentication").order(1).placeholder("postgres")
+            })
+            .field("password", |f| {
+                f.group("Authentication").order(2).widget("password")
+            })
+            .field("tables", |f| f.group("Tables").order(1))
+            .field("tableKeys", |f| f.group("Tables").order(2))
+            .field("slotName", |f| {
+                f.group("Replication")
+                    .order(1)
+                    .placeholder("drasi_slot")
+                    .collapsed(true)
+            })
+            .field("publicationName", |f| {
+                f.group("Replication")
+                    .order(2)
+                    .placeholder("drasi_publication")
+            })
+            .field("sslMode", |f| f.group("SSL").order(1).collapsed(true))
+            .annotate()
     }
 
     async fn create_source(
@@ -173,10 +247,12 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
                 .collect(),
         };
 
-        let source = crate::PostgresSourceBuilder::new(id)
+        let mut source = crate::PostgresSourceBuilder::new(id)
             .with_config(config)
             .with_auto_start(auto_start)
             .build()?;
+
+        source.base.set_raw_config(config_json.clone());
 
         Ok(Box::new(source))
     }

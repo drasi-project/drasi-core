@@ -49,7 +49,8 @@ pub use crate::resolver::{
 
 // Plugin descriptor traits
 pub use crate::descriptor::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SourcePluginDescriptor,
 };
 
 // Registration

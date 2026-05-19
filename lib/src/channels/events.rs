@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use crate::profiling::ProfilingMetadata;
+use bytes::Bytes;
 use drasi_core::models::SourceChange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -32,6 +34,8 @@ pub enum ComponentType {
     Source,
     Query,
     Reaction,
+    BootstrapProvider,
+    IdentityProvider,
 }
 
 /// Execution status of a Drasi component
@@ -45,17 +49,19 @@ pub enum ComponentType {
 /// A typical component lifecycle follows this progression:
 ///
 /// ```text
-/// Stopped → Starting → Running → Stopping → Stopped
-///                ↓
-///              Error
+/// Added → Starting → Running → Stopping → Stopped
+///              ↓                              ↓
+///            Error                         Removed
 /// ```
 ///
 /// # Status Values
 ///
+/// - **Added**: Component has been registered in the graph but not yet started
 /// - **Starting**: Component is initializing (connecting to resources, loading data, etc.)
 /// - **Running**: Component is actively processing (ingesting, querying, or delivering)
 /// - **Stopping**: Component is shutting down gracefully
-/// - **Stopped**: Component is not running (initial or final state)
+/// - **Stopped**: Component is not running (stopped after previously running)
+/// - **Removed**: Component has been removed from the graph
 /// - **Error**: Component encountered an error and cannot continue (see error_message)
 ///
 /// # Usage
@@ -156,16 +162,21 @@ pub enum ComponentType {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ComponentStatus {
+    /// Component has been registered in the graph but not yet started.
+    Added,
     Starting,
     Running,
     Stopping,
     Stopped,
+    /// Component has been removed from the graph.
+    Removed,
     Reconfiguring,
     Error,
 }
 
+/// A source change event with metadata for dispatching to queries.
 #[derive(Debug, Clone)]
 pub struct SourceChangeEvent {
     pub source_id: String,
@@ -213,6 +224,30 @@ pub struct SourceEventWrapper {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Optional profiling metadata for performance tracking
     pub profiling: Option<ProfilingMetadata>,
+    /// Monotonic sequence number assigned by the framework.
+    /// Used for ordering, watermarks, gap detection, and dedup.
+    /// `None` for volatile sources that don't support replay.
+    pub sequence: Option<u64>,
+    /// Opaque source position bytes for stream resumption on restart.
+    /// Only the source can interpret these bytes — the framework persists
+    /// them alongside the sequence and returns them on restart via
+    /// subscribe(resume_from: ...).
+    /// `None` for volatile sources that don't support replay.
+    pub source_position: Option<Bytes>,
+}
+
+/// Decomposed parts of a [`SourceEventWrapper`], returned by [`SourceEventWrapper::into_parts()`].
+///
+/// Using a named struct instead of a tuple makes call sites resilient to
+/// field reordering and easier to evolve with new fields.
+#[derive(Debug)]
+pub struct SourceEventParts {
+    pub source_id: String,
+    pub event: SourceEvent,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub profiling: Option<ProfilingMetadata>,
+    pub sequence: Option<u64>,
+    pub source_position: Option<Bytes>,
 }
 
 impl SourceEventWrapper {
@@ -227,6 +262,8 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: None,
+            sequence: None,
+            source_position: None,
         }
     }
 
@@ -242,20 +279,46 @@ impl SourceEventWrapper {
             event,
             timestamp,
             profiling: Some(profiling),
+            sequence: None,
+            source_position: None,
         }
     }
 
-    /// Consume this wrapper and return its components.
+    /// Create a new SourceEventWrapper with a sequence number (and optional profiling)
+    pub fn with_sequence(
+        source_id: String,
+        event: SourceEvent,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        sequence: u64,
+        profiling: Option<ProfilingMetadata>,
+    ) -> Self {
+        Self {
+            source_id,
+            event,
+            timestamp,
+            profiling,
+            sequence: Some(sequence),
+            source_position: None,
+        }
+    }
+
+    /// Set the opaque source position bytes for stream resumption.
+    /// Only called by source plugins to attach their native position token.
+    pub fn set_source_position(&mut self, position: Bytes) {
+        self.source_position = Some(position);
+    }
+
+    /// Consume this wrapper and return its components as a named struct.
     /// This enables zero-copy extraction when the wrapper has sole ownership.
-    pub fn into_parts(
-        self,
-    ) -> (
-        String,
-        SourceEvent,
-        chrono::DateTime<chrono::Utc>,
-        Option<ProfilingMetadata>,
-    ) {
-        (self.source_id, self.event, self.timestamp, self.profiling)
+    pub fn into_parts(self) -> SourceEventParts {
+        SourceEventParts {
+            source_id: self.source_id,
+            event: self.event,
+            timestamp: self.timestamp,
+            profiling: self.profiling,
+            sequence: self.sequence,
+            source_position: self.source_position,
+        }
     }
 
     /// Try to extract components from an Arc<SourceEventWrapper>.
@@ -264,17 +327,7 @@ impl SourceEventWrapper {
     ///
     /// This enables zero-copy in Channel dispatch mode (single consumer per event)
     /// while still working correctly in Broadcast mode (cloning required).
-    pub fn try_unwrap_arc(
-        arc_self: Arc<Self>,
-    ) -> Result<
-        (
-            String,
-            SourceEvent,
-            chrono::DateTime<chrono::Utc>,
-            Option<ProfilingMetadata>,
-        ),
-        Arc<Self>,
-    > {
+    pub fn try_unwrap_arc(arc_self: Arc<Self>) -> Result<SourceEventParts, Arc<Self>> {
         Arc::try_unwrap(arc_self).map(|wrapper| wrapper.into_parts())
     }
 }
@@ -298,13 +351,6 @@ pub struct BootstrapEvent {
     pub sequence: u64,
 }
 
-/// Bootstrap completion signal
-#[derive(Debug, Clone)]
-pub struct BootstrapComplete {
-    pub source_id: String,
-    pub total_events: u64,
-}
-
 /// Subscription request from Query to Source
 #[derive(Debug, Clone)]
 pub struct SubscriptionRequest {
@@ -321,6 +367,17 @@ pub struct SubscriptionResponse {
     pub source_id: String,
     pub receiver: Box<dyn super::ChangeReceiver<SourceEventWrapper>>,
     pub bootstrap_receiver: Option<BootstrapEventReceiver>,
+    /// Shared handle for the query to report its last durably-processed sequence position.
+    /// Created by replay-capable sources when `request_position_handle` is true.
+    /// The query writes to this atomically after each commit; the source reads the
+    /// minimum across all subscribers to advance its upstream cursor.
+    /// Sources should initialize this to `u64::MAX` (meaning "no position confirmed yet").
+    pub position_handle: Option<Arc<AtomicU64>>,
+    /// Receives the `BootstrapResult` after bootstrap completes, carrying handover
+    /// metadata (`last_sequence`, `sequences_aligned`) for the bootstrap-to-streaming
+    /// transition. `None` when bootstrap is not active or for FFI/plugin sources.
+    pub bootstrap_result_receiver:
+        Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
 }
 
 /// Subscription response from Query to Reaction
@@ -330,13 +387,26 @@ pub struct QuerySubscriptionResponse {
 }
 
 /// Typed result diff emitted by continuous queries.
+///
+/// Each non-`Noop` variant carries a `row_signature` stamped by the core engine:
+/// the path-solver binding hash for non-aggregating rows, and the grouping-key hash
+/// for aggregations. Downstream consumers use it as the row identity in place of
+/// JSON-equality matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ResultDiff {
     #[serde(rename = "ADD")]
-    Add { data: serde_json::Value },
+    Add {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
     #[serde(rename = "DELETE")]
-    Delete { data: serde_json::Value },
+    Delete {
+        data: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
+    },
     #[serde(rename = "UPDATE")]
     Update {
         data: serde_json::Value,
@@ -344,19 +414,32 @@ pub enum ResultDiff {
         after: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         grouping_keys: Option<Vec<String>>,
+        #[serde(default)]
+        row_signature: u64,
     },
     #[serde(rename = "aggregation")]
     Aggregation {
         before: Option<serde_json::Value>,
         after: serde_json::Value,
+        #[serde(default)]
+        row_signature: u64,
     },
     #[serde(rename = "noop")]
     Noop,
 }
 
+/// Result emitted by a continuous query when data changes.
+///
+/// Contains the diff (added, updated, deleted rows) plus metadata and
+/// optional profiling information. Dispatched to reactions via the priority queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub query_id: String,
+    /// Monotonic per-query sequence number identifying this emission.
+    /// Reactions persist this in their checkpoint, the outbox is keyed by it,
+    /// and the bootstrap APIs return it as `as_of_sequence`.
+    #[serde(default)]
+    pub sequence: u64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub results: Vec<ResultDiff>,
     pub metadata: HashMap<String, serde_json::Value>,
@@ -369,12 +452,14 @@ impl QueryResult {
     /// Create a new QueryResult without profiling
     pub fn new(
         query_id: String,
+        sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
     ) -> Self {
         Self {
             query_id,
+            sequence,
             timestamp,
             results,
             metadata,
@@ -385,6 +470,7 @@ impl QueryResult {
     /// Create a new QueryResult with profiling metadata
     pub fn with_profiling(
         query_id: String,
+        sequence: u64,
         timestamp: chrono::DateTime<chrono::Utc>,
         results: Vec<ResultDiff>,
         metadata: HashMap<String, serde_json::Value>,
@@ -392,6 +478,7 @@ impl QueryResult {
     ) -> Self {
         Self {
             query_id,
+            sequence,
             timestamp,
             results,
             metadata,
@@ -410,6 +497,10 @@ impl Timestamped for QueryResult {
 /// Arc-wrapped QueryResult for zero-copy distribution
 pub type ArcQueryResult = Arc<QueryResult>;
 
+/// Lifecycle event emitted when a component's status changes.
+///
+/// Broadcast via the component event channel to all subscribers.
+/// Used for monitoring, logging, and reactive lifecycle coordination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEvent {
     pub component_id: String,
@@ -419,6 +510,7 @@ pub struct ComponentEvent {
     pub message: Option<String>,
 }
 
+/// Control messages for component lifecycle management.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Start(String),
@@ -427,8 +519,12 @@ pub enum ControlMessage {
     Shutdown,
 }
 
-pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
+pub type ComponentEventBroadcastSender = broadcast::Sender<ComponentEvent>;
+pub type ComponentEventBroadcastReceiver = broadcast::Receiver<ComponentEvent>;
+/// Backward-compatible mpsc channel types used by host-sdk plugin callbacks.
+/// New code should use `ComponentUpdateSender` from `component_graph` instead.
 pub type ComponentEventSender = mpsc::Sender<ComponentEvent>;
+pub type ComponentEventReceiver = mpsc::Receiver<ComponentEvent>;
 pub type ControlMessageReceiver = mpsc::Receiver<ControlMessage>;
 pub type ControlMessageSender = mpsc::Sender<ControlMessage>;
 
@@ -443,8 +539,6 @@ pub type QueryResultBroadcastReceiver = broadcast::Receiver<ArcQueryResult>;
 // Bootstrap channel types for dedicated bootstrap data delivery
 pub type BootstrapEventSender = mpsc::Sender<BootstrapEvent>;
 pub type BootstrapEventReceiver = mpsc::Receiver<BootstrapEvent>;
-pub type BootstrapCompleteSender = mpsc::Sender<BootstrapComplete>;
-pub type BootstrapCompleteReceiver = mpsc::Receiver<BootstrapComplete>;
 
 /// Control signals for coordination
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -487,31 +581,26 @@ pub type ControlSignalReceiver = mpsc::Receiver<ControlSignalWrapper>;
 pub type ControlSignalSender = mpsc::Sender<ControlSignalWrapper>;
 
 pub struct EventChannels {
-    pub component_event_tx: ComponentEventSender,
     pub _control_tx: ControlMessageSender,
     pub control_signal_tx: ControlSignalSender,
 }
 
 pub struct EventReceivers {
-    pub component_event_rx: ComponentEventReceiver,
     pub _control_rx: ControlMessageReceiver,
     pub control_signal_rx: ControlSignalReceiver,
 }
 
 impl EventChannels {
     pub fn new() -> (Self, EventReceivers) {
-        let (component_event_tx, component_event_rx) = mpsc::channel(1000);
         let (control_tx, control_rx) = mpsc::channel(100);
         let (control_signal_tx, control_signal_rx) = mpsc::channel(100);
 
         let channels = Self {
-            component_event_tx,
             _control_tx: control_tx,
             control_signal_tx,
         };
 
         let receivers = EventReceivers {
-            component_event_rx,
             _control_rx: control_rx,
             control_signal_rx,
         };
@@ -546,11 +635,11 @@ mod tests {
             chrono::Utc::now(),
         );
 
-        let (source_id, event, _timestamp, profiling) = wrapper.into_parts();
+        let parts = wrapper.into_parts();
 
-        assert_eq!(source_id, "test-source");
-        assert!(matches!(event, SourceEvent::Change(_)));
-        assert!(profiling.is_none());
+        assert_eq!(parts.source_id, "test-source");
+        assert!(matches!(parts.event, SourceEvent::Change(_)));
+        assert!(parts.profiling.is_none());
     }
 
     #[test]
@@ -567,9 +656,9 @@ mod tests {
         let result = SourceEventWrapper::try_unwrap_arc(arc);
         assert!(result.is_ok());
 
-        let (source_id, event, _timestamp, _profiling) = result.unwrap();
-        assert_eq!(source_id, "test-source");
-        assert!(matches!(event, SourceEvent::Change(_)));
+        let parts = result.unwrap();
+        assert_eq!(parts.source_id, "test-source");
+        assert!(matches!(parts.event, SourceEvent::Change(_)));
     }
 
     #[test]
@@ -604,27 +693,88 @@ mod tests {
         let arc = Arc::new(wrapper);
 
         // This is the zero-copy path - when we have sole ownership
-        let (source_id, event, _timestamp, _profiling) =
-            match SourceEventWrapper::try_unwrap_arc(arc) {
-                Ok(parts) => parts,
-                Err(arc) => {
-                    // Fallback to cloning (would be needed in broadcast mode)
-                    (
-                        arc.source_id.clone(),
-                        arc.event.clone(),
-                        arc.timestamp,
-                        arc.profiling.clone(),
-                    )
+        let parts = match SourceEventWrapper::try_unwrap_arc(arc) {
+            Ok(parts) => parts,
+            Err(arc) => {
+                // Fallback to cloning (would be needed in broadcast mode)
+                SourceEventParts {
+                    source_id: arc.source_id.clone(),
+                    event: arc.event.clone(),
+                    timestamp: arc.timestamp,
+                    profiling: arc.profiling.clone(),
+                    sequence: arc.sequence,
+                    source_position: arc.source_position.clone(),
                 }
-            };
+            }
+        };
 
         // Extract SourceChange from owned event (no clone!)
-        let source_change = match event {
+        let source_change = match parts.event {
             SourceEvent::Change(change) => Some(change),
             _ => None,
         };
 
-        assert_eq!(source_id, "test-source");
+        assert_eq!(parts.source_id, "test-source");
         assert!(source_change.is_some());
+    }
+
+    #[test]
+    fn test_source_event_wrapper_with_sequence() {
+        let change = create_test_source_change();
+        let wrapper = SourceEventWrapper::with_sequence(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            42,
+            None,
+        );
+        assert_eq!(wrapper.sequence, Some(42));
+        assert!(wrapper.profiling.is_none());
+
+        let parts = wrapper.into_parts();
+        assert_eq!(parts.sequence, Some(42));
+    }
+
+    #[test]
+    fn test_source_event_wrapper_new_has_no_sequence() {
+        let change = create_test_source_change();
+        let wrapper = SourceEventWrapper::new(
+            "test-source".to_string(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+        );
+        assert!(wrapper.sequence.is_none());
+    }
+
+    #[test]
+    fn test_subscription_response_with_position_handle() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let handle = Arc::new(AtomicU64::new(u64::MAX));
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
+
+        // Verify the handle can be cloned and read (simulates source reading query's position)
+        let handle_clone = handle.clone();
+        handle.store(500, Ordering::Relaxed);
+        assert_eq!(handle_clone.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
+    fn test_subscription_settings_with_resume_from() {
+        use std::collections::HashSet;
+        let position_bytes = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]);
+        let settings = crate::config::SourceSubscriptionSettings {
+            source_id: "test-source".to_string(),
+            enable_bootstrap: false,
+            query_id: "test-query".to_string(),
+            nodes: HashSet::new(),
+            relations: HashSet::new(),
+            resume_from: Some(position_bytes.clone()),
+            request_position_handle: true,
+            last_sequence: None,
+        };
+        assert_eq!(settings.resume_from, Some(position_bytes));
+        assert!(settings.request_position_handle);
     }
 }

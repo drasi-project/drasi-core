@@ -113,6 +113,7 @@ impl LabelExtractor {
     }
 }
 
+/// The set of node and relation labels extracted from a parsed query.
 #[derive(Debug, Clone)]
 pub struct QueryLabels {
     pub node_labels: Vec<String>,

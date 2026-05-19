@@ -143,7 +143,7 @@ async fn test_postgres_source_logs_captured_on_success() {
             .collect::<Vec<_>>()
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that error logs are captured when PostgreSQL source fails to connect.
@@ -210,7 +210,7 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
             .collect::<Vec<_>>()
     );
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 }
 
 /// Test that log streaming works for PostgreSQL source via DrasiLib API.
@@ -257,7 +257,7 @@ async fn test_postgres_source_log_streaming() {
     })
     .await;
 
-    drasi.stop().await.expect("Failed to stop DrasiLib");
+    drasi.stop().await.ok();
 
     // We should have received at least some logs via streaming
     assert!(

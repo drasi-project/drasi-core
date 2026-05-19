@@ -36,7 +36,7 @@ use std::collections::HashMap;
 ///
 /// # Usage Pattern
 ///
-/// 1. Get the handle from `DrasiServerCore::reaction_handle()`
+/// 1. Get the handle from `DrasiLib::reaction_handle()`
 /// 2. Choose a consumption pattern:
 ///    - **Subscription** (recommended): Use `subscribe_with_options()` for flexible result consumption
 ///    - **Async Stream**: Use `as_stream()` for async iteration
@@ -528,19 +528,19 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting application reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Application reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
@@ -602,11 +602,11 @@ impl Reaction for ApplicationReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Application reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

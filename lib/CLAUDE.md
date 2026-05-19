@@ -187,7 +187,7 @@ sources:
 
 **Script File Format**: JSONL (JSON Lines) with record types: Header (required first), Node, Relation, Comment (filtered), Label (checkpoint), and Finish (optional end). Supports multi-file reading in sequence.
 
-## Server Core Architecture
+## drasi-lib Architecture
 
 ### Modular Design
 The `DrasiLib` implementation has been refactored from a monolithic structure into specialized modules, each responsible for a specific concern:
@@ -231,10 +231,11 @@ The codebase is designed as a library for embedding in applications:
 
 ### Component Lifecycle
 All components (sources, queries, reactions) follow a consistent lifecycle:
-1. Create (configuration)
-2. Start (begin processing)
-3. Stop (pause processing)
-4. Delete (cleanup)
+1. Create (configuration) — a `ComponentStatusHandle` is created in the component base's `new()`, owning an `Arc<RwLock<ComponentStatus>>` internally
+2. Initialize (added to DrasiLib) — the handle is wired to the graph update channel so `set_status()` writes locally and notifies the graph; for queries this wiring happens at construction
+3. Start (begin processing) — the handle can be cloned into spawned tasks via `base.status_handle()`
+4. Stop (pause processing)
+5. Delete (cleanup)
 
 Bootstrap providers are automatically registered during source creation and handle initial data delivery independently from streaming operations.
 
@@ -285,12 +286,12 @@ Sources and Reactions receive a runtime context during initialization that provi
 
 **SourceRuntimeContext** (provided to Sources):
 - `source_id`: Unique identifier for this source instance
-- `status_tx`: Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `update_tx`: mpsc sender for fire-and-forget status updates to the component graph (used by `ComponentStatusHandle`)
 - `state_store`: Optional persistent state storage (if configured)
 
 **ReactionRuntimeContext** (provided to Reactions):
 - `reaction_id`: Unique identifier for this reaction instance
-- `status_tx`: Channel for reporting component status events (Starting, Running, Stopped, Error)
+- `update_tx`: mpsc sender for fire-and-forget status updates to the component graph (used by `ComponentStatusHandle`)
 - `state_store`: Optional persistent state storage (if configured)
 - `query_provider`: Access to query instances for subscription
 

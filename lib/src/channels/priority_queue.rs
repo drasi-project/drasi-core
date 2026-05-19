@@ -537,7 +537,7 @@ mod tests {
 
         // Spawn a task that will enqueue after a delay
         tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
             let event = create_test_event("event1", Utc::now());
             pq_clone.enqueue(event).await;
         });
@@ -582,7 +582,7 @@ mod tests {
         });
 
         // Give it a moment to block
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
 
         // Task should still be pending (blocked)
         assert!(!enqueue_task.is_finished());
@@ -614,7 +614,7 @@ mod tests {
         });
 
         // Wait a bit to ensure it's blocked
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
 
         // Dequeue to create space (this should notify the blocked enqueuer)
         let dequeued = pq.try_dequeue().await;
@@ -649,14 +649,14 @@ mod tests {
         }
 
         // Wait to ensure all are blocked
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
 
         // Dequeue items one by one and verify waiting tasks complete
         for expected_id in 2..=4 {
             pq.try_dequeue().await;
 
             // One task should complete
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
             let completed_count = tasks.iter().filter(|t| t.is_finished()).count();
             assert_eq!(
                 completed_count,
@@ -695,7 +695,7 @@ mod tests {
         });
 
         // Wait for it to block
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
 
         // Check metrics - blocked count should be at least 1
         // Note: It might be higher if notify wakes it up but queue is still full

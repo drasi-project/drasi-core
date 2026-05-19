@@ -573,17 +573,14 @@ impl Source for MySource {
 
     async fn start(&self) -> Result<()> {
         // 1. Set status to Starting
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
 
-        // 2. Send component event
-        self.base.send_component_event(ComponentStatus::Starting, None).await?;
-
-        // 3. Spawn your task
+        // 2. Spawn your task
         let task = tokio::spawn(async move { /* ... */ });
         *self.base.task_handle.write().await = Some(task);
 
-        // 4. Set status to Running
-        self.base.set_status(ComponentStatus::Running).await;
+        // 3. Set status to Running
+        self.base.set_status(ComponentStatus::Running, None).await;
         Ok(())
     }
 
@@ -594,19 +591,10 @@ impl Source for MySource {
 
     async fn subscribe(
         &self,
-        query_id: String,
-        enable_bootstrap: bool,
-        node_labels: Vec<String>,
-        relation_labels: Vec<String>,
+        settings: SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
         // Delegate to base for bootstrap handling
-        self.base.subscribe_with_bootstrap(
-            query_id, enable_bootstrap, node_labels, relation_labels, "MySource"
-        ).await
-    }
-
-    async fn inject_event_tx(&self, tx: ComponentEventSender) {
-        self.base.inject_event_tx(tx).await;
+        self.base.subscribe_with_bootstrap(&settings, "MySource").await
     }
 }
 ```

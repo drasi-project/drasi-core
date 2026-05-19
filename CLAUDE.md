@@ -86,3 +86,25 @@ The main query evaluation logic is in `core/src/evaluation/` which processes con
 - Redis service required for some tests (configured in CI)
 - Performance benchmarks in `query-perf/` crate
 - Shared test utilities in `shared-tests/` for cross-crate testing
+
+## Error Handling in drasi-lib
+
+The `lib/` crate (`drasi-lib`) uses a three-layer error handling pattern following idiomatic Rust conventions (matching `sqlx`, `reqwest`, `tonic`):
+
+### Layer 1: Public API → `DrasiError` (structured, pattern-matchable)
+All methods on `DrasiLib` and the `*_ops` extension methods (source/query/reaction CRUD), `InspectionAPI`, and `component_ops` **must** return `crate::error::Result<T>` which uses `DrasiError` — a `thiserror` enum with variants like `ComponentNotFound`, `InvalidState`, `OperationFailed`, etc. This enables callers to pattern-match on error types.
+
+### Layer 2: Internal modules → `anyhow::Result` (opaque, context-rich)
+Internal orchestration modules (`lifecycle`, `component_graph`, `sources/manager`, `reactions/manager`, `queries/base`) use `anyhow::Result` with `.context()` to build rich error chains. These modules are `#[doc(hidden)]` and not part of the external API.
+
+### Layer 3: Plugin traits → `anyhow::Result` (implementor-friendly)
+Traits that plugin authors implement (`Source`, `Reaction`, `BootstrapProvider`) return `anyhow::Result`. Plugin authors use `anyhow::context()` for error chains, and the framework wraps these into `DrasiError::OperationFailed` or `DrasiError::Internal` at the public API boundary.
+
+### Bridge mechanism
+`DrasiError::Internal(#[from] anyhow::Error)` auto-converts internal `anyhow` errors to structured errors at the boundary via the `?` operator. Use `DrasiError::invalid_state()`, `DrasiError::operation_failed()`, etc. for errors with known semantics.
+
+### Rules for contributors and agents
+- **Never** return `anyhow::Result` from a public API method on `DrasiLib` or the `*_ops` modules
+- **Never** use `anyhow!()` to construct errors in public API methods — use `DrasiError` variants
+- **Always** use `anyhow::Result` with `.context("description")` in internal modules
+- See `lib/src/error.rs` for the full `DrasiError` enum and constructor helpers

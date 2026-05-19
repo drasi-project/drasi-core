@@ -903,13 +903,8 @@ async fn test_mysql_reaction_lifecycle() {
     );
     assert_eq!(
         properties.get("database").and_then(|v| v.as_str()),
-        Some("MySQL"),
-        "Database type should be MySQL"
-    );
-    assert_eq!(
-        properties.get("database_name").and_then(|v| v.as_str()),
         Some(mysql_config.database.as_str()),
-        "Database name should match"
+        "Database should match config"
     );
     assert_eq!(
         properties.get("ssl").and_then(|v| v.as_bool()),

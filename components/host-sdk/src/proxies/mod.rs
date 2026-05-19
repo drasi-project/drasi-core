@@ -16,5 +16,7 @@
 
 pub mod bootstrap_provider;
 pub mod change_receiver;
+pub mod identity_provider;
+pub(crate) mod identity_resolution;
 pub mod reaction;
 pub mod source;

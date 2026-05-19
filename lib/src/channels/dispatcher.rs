@@ -263,16 +263,16 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn recv(&mut self) -> Result<Arc<T>> {
-        match self.rx.recv().await {
-            Ok(change) => Ok(change),
-            Err(broadcast::error::RecvError::Closed) => {
-                Err(anyhow::anyhow!("Broadcast channel closed"))
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Log the lag but try to continue
-                log::warn!("Broadcast receiver lagged by {n} messages");
-                // Try to receive the next message
-                self.recv().await
+        loop {
+            match self.rx.recv().await {
+                Ok(change) => return Ok(change),
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow::anyhow!("Broadcast channel closed"));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("Broadcast receiver lagged by {n} messages");
+                    // Continue the loop to receive the next available message
+                }
             }
         }
     }
@@ -335,6 +335,16 @@ where
     rx: mpsc::Receiver<Arc<T>>,
 }
 
+impl<T> ChannelChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Creates a new `ChannelChangeReceiver` wrapping the given mpsc receiver.
+    pub fn new(rx: mpsc::Receiver<Arc<T>>) -> Self {
+        Self { rx }
+    }
+}
+
 #[async_trait]
 impl<T> ChangeReceiver<T> for ChannelChangeReceiver<T>
 where
@@ -351,8 +361,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
-
     #[derive(Clone, Debug, PartialEq)]
     struct TestMessage {
         id: u32,
@@ -492,7 +500,7 @@ mod tests {
         }
 
         // Give some time for messages to accumulate
-        sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
 
         // Try to receive - should handle lag and continue
         let result = receiver.recv().await;

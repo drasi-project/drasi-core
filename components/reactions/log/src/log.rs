@@ -26,7 +26,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
 pub struct LogReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: LogReactionConfig,
 }
 
@@ -328,7 +328,33 @@ impl Reaction for LogReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        HashMap::new()
+        use crate::descriptor::{LogReactionConfigDto, QueryConfigDto, TemplateSpecDto};
+
+        fn map_spec_to_dto(spec: &crate::TemplateSpec) -> TemplateSpecDto {
+            TemplateSpecDto {
+                template: spec.template.clone(),
+            }
+        }
+
+        fn map_qc_to_dto(qc: &crate::QueryConfig) -> QueryConfigDto {
+            QueryConfigDto {
+                added: qc.added.as_ref().map(map_spec_to_dto),
+                updated: qc.updated.as_ref().map(map_spec_to_dto),
+                deleted: qc.deleted.as_ref().map(map_spec_to_dto),
+            }
+        }
+
+        let dto = LogReactionConfigDto {
+            routes: self
+                .config
+                .routes
+                .iter()
+                .map(|(k, v)| (k.clone(), map_qc_to_dto(v)))
+                .collect(),
+            default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
+        };
+
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -348,19 +374,19 @@ impl Reaction for LogReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting log reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Log reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         self.log_result(&format!(
             "Started - receiving results from queries: {:?}",
@@ -449,7 +475,7 @@ impl Reaction for LogReaction {
                         .or(config.default_template.as_ref());
 
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             context.insert("operation".to_string(), Value::String("ADD".into()));
                             context.insert("after".to_string(), data.clone());
 
@@ -480,7 +506,7 @@ impl Reaction for LogReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             context.insert("operation".to_string(), Value::String("DELETE".into()));
                             context.insert("before".to_string(), data.clone());
 
@@ -598,11 +624,11 @@ impl Reaction for LogReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Log reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }

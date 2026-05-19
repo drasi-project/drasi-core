@@ -1,4 +1,4 @@
-# cargo-deny configuration for Drasi Server Core
+# cargo-deny configuration for drasi-lib
 # Ensures dependency security and license compliance
 
 [graph]

@@ -128,6 +128,7 @@
 
 use async_trait::async_trait;
 use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
 
@@ -197,6 +198,27 @@ pub trait SourcePluginDescriptor: Send + Sync {
     /// ```
     fn config_schema_name(&self) -> &str;
 
+    /// Human-readable display name for this source kind (e.g., "PostgreSQL").
+    ///
+    /// Used by the UI and init wizard. Defaults to the `kind()` value.
+    fn display_name(&self) -> &str {
+        self.kind()
+    }
+
+    /// Human-readable description of this source plugin.
+    ///
+    /// Used by the UI and init wizard. Defaults to an empty string.
+    fn display_description(&self) -> &str {
+        ""
+    }
+
+    /// Icon identifier for this source kind (e.g., "postgres", "database").
+    ///
+    /// Used by the UI. Defaults to the `kind()` value.
+    fn display_icon(&self) -> &str {
+        self.kind()
+    }
+
     /// Create a new source instance from the given configuration.
     ///
     /// # Arguments
@@ -240,6 +262,21 @@ pub trait ReactionPluginDescriptor: Send + Sync {
     /// Returns the OpenAPI schema name for this plugin's configuration DTO.
     fn config_schema_name(&self) -> &str;
 
+    /// Human-readable display name for this reaction kind.
+    fn display_name(&self) -> &str {
+        self.kind()
+    }
+
+    /// Human-readable description of this reaction plugin.
+    fn display_description(&self) -> &str {
+        ""
+    }
+
+    /// Icon identifier for this reaction kind.
+    fn display_icon(&self) -> &str {
+        self.kind()
+    }
+
     /// Create a new reaction instance from the given configuration.
     ///
     /// # Arguments
@@ -281,6 +318,21 @@ pub trait BootstrapPluginDescriptor: Send + Sync {
     /// Returns the OpenAPI schema name for this plugin's configuration DTO.
     fn config_schema_name(&self) -> &str;
 
+    /// Human-readable display name for this bootstrap kind.
+    fn display_name(&self) -> &str {
+        self.kind()
+    }
+
+    /// Human-readable description of this bootstrap plugin.
+    fn display_description(&self) -> &str {
+        ""
+    }
+
+    /// Icon identifier for this bootstrap kind.
+    fn display_icon(&self) -> &str {
+        self.kind()
+    }
+
     /// Create a new bootstrap provider from the given configuration.
     ///
     /// # Arguments
@@ -293,6 +345,44 @@ pub trait BootstrapPluginDescriptor: Send + Sync {
         config_json: &serde_json::Value,
         source_config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn BootstrapProvider>>;
+}
+
+/// Descriptor for an **identity provider** plugin.
+///
+/// Identity provider plugins supply authentication credentials (passwords, tokens,
+/// certificates) to sources and reactions that need them for connecting to external
+/// systems. Examples include Azure AD managed-identity providers and AWS IAM
+/// authentication providers.
+///
+/// # Implementors
+///
+/// Each identity provider plugin crate (e.g., `drasi-identity-azure`) implements
+/// this trait on a zero-sized descriptor struct and returns it via
+/// [`PluginRegistration`].
+#[async_trait]
+pub trait IdentityProviderPluginDescriptor: Send + Sync {
+    /// The unique kind identifier for this identity provider (e.g., `"azure"`, `"aws"`).
+    fn kind(&self) -> &str;
+
+    /// The semver version of this plugin's configuration DTO.
+    fn config_version(&self) -> &str;
+
+    /// Returns all OpenAPI schemas as a JSON-serialized map (see [`SourcePluginDescriptor::config_schema_json`]).
+    fn config_schema_json(&self) -> String;
+
+    /// Returns the OpenAPI schema name for this plugin's configuration DTO.
+    fn config_schema_name(&self) -> &str;
+
+    /// Create a new identity provider instance from the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_json` — The plugin-specific configuration as a JSON value.
+    ///   This should be deserialized into the plugin's DTO type.
+    async fn create_identity_provider(
+        &self,
+        config_json: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn IdentityProvider>>;
 }
 
 #[cfg(test)]

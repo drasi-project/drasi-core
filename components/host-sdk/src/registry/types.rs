@@ -195,6 +195,74 @@ impl PluginReference {
     }
 }
 
+/// Determines whether a plugin source string refers to an OCI registry or a local directory.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PluginSourceKind {
+    /// OCI registry URL (e.g., "ghcr.io/drasi-project").
+    Oci(String),
+    /// Local filesystem directory containing plugin binaries.
+    LocalDir(std::path::PathBuf),
+}
+
+impl PluginSourceKind {
+    /// Parse a registry/source string into the appropriate kind.
+    ///
+    /// Local paths are detected cross-platform:
+    /// - Unix absolute: `/opt/plugins`
+    /// - Windows drive: `C:\plugins`, `D:/plugins`
+    /// - Windows UNC: `\\server\share\plugins`
+    /// - Relative: `./plugins`, `../plugins`, `.\plugins`, `..\plugins`
+    /// - Home-relative: `~/plugins`
+    /// - file:// URI: `file:///opt/plugins`
+    ///
+    /// Everything else is treated as an OCI registry URL.
+    pub fn parse(value: &str) -> Self {
+        if value.starts_with("file://") {
+            return Self::LocalDir(std::path::PathBuf::from(
+                value.strip_prefix("file://").unwrap_or(value),
+            ));
+        }
+        if value.starts_with('/') {
+            return Self::LocalDir(std::path::PathBuf::from(value));
+        }
+        if value.starts_with("./")
+            || value.starts_with("../")
+            || value.starts_with(".\\")
+            || value.starts_with("..\\")
+        {
+            return Self::LocalDir(std::path::PathBuf::from(value));
+        }
+        if value.starts_with('~') {
+            return Self::LocalDir(std::path::PathBuf::from(value));
+        }
+        // Windows drive letter: C:\ or C:/
+        if value.len() >= 3 {
+            let bytes = value.as_bytes();
+            if bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+            {
+                return Self::LocalDir(std::path::PathBuf::from(value));
+            }
+        }
+        // Windows UNC: \\server\share
+        if value.starts_with("\\\\") {
+            return Self::LocalDir(std::path::PathBuf::from(value));
+        }
+        Self::Oci(value.to_string())
+    }
+
+    /// Returns `true` if this is a local directory source.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::LocalDir(_))
+    }
+
+    /// Returns `true` if this is an OCI registry source.
+    pub fn is_oci(&self) -> bool {
+        matches!(self, Self::Oci(_))
+    }
+}
+
 /// OCI annotation keys used for Drasi plugin metadata.
 pub mod annotations {
     pub const PLUGIN_KIND: &str = "io.drasi.plugin.kind";
@@ -271,6 +339,101 @@ mod tests {
         assert_eq!(
             p.to_oci_reference(),
             "ghcr.io/drasi-project/source/postgres"
+        );
+    }
+
+    // ── PluginSourceKind tests ──
+
+    #[test]
+    fn test_source_kind_oci_urls() {
+        assert_eq!(
+            PluginSourceKind::parse("ghcr.io/drasi-project"),
+            PluginSourceKind::Oci("ghcr.io/drasi-project".to_string())
+        );
+        assert_eq!(
+            PluginSourceKind::parse("registry.example.com/plugins"),
+            PluginSourceKind::Oci("registry.example.com/plugins".to_string())
+        );
+        assert!(PluginSourceKind::parse("ghcr.io/drasi-project").is_oci());
+        assert!(!PluginSourceKind::parse("ghcr.io/drasi-project").is_local());
+    }
+
+    #[test]
+    fn test_source_kind_unix_absolute() {
+        assert_eq!(
+            PluginSourceKind::parse("/opt/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("/opt/plugins"))
+        );
+        assert_eq!(
+            PluginSourceKind::parse("/home/user/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("/home/user/plugins"))
+        );
+        assert!(PluginSourceKind::parse("/opt/plugins").is_local());
+    }
+
+    #[test]
+    fn test_source_kind_relative_paths() {
+        assert_eq!(
+            PluginSourceKind::parse("./plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("./plugins"))
+        );
+        assert_eq!(
+            PluginSourceKind::parse("../drasi-core/target/debug/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from(
+                "../drasi-core/target/debug/plugins"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_source_kind_windows_relative() {
+        assert_eq!(
+            PluginSourceKind::parse(".\\plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from(".\\plugins"))
+        );
+        assert_eq!(
+            PluginSourceKind::parse("..\\plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("..\\plugins"))
+        );
+    }
+
+    #[test]
+    fn test_source_kind_home_relative() {
+        assert_eq!(
+            PluginSourceKind::parse("~/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("~/plugins"))
+        );
+    }
+
+    #[test]
+    fn test_source_kind_file_uri() {
+        assert_eq!(
+            PluginSourceKind::parse("file:///opt/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("/opt/plugins"))
+        );
+        assert_eq!(
+            PluginSourceKind::parse("file://C:/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("C:/plugins"))
+        );
+    }
+
+    #[test]
+    fn test_source_kind_windows_drive() {
+        assert_eq!(
+            PluginSourceKind::parse("C:\\plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("C:\\plugins"))
+        );
+        assert_eq!(
+            PluginSourceKind::parse("D:/plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("D:/plugins"))
+        );
+    }
+
+    #[test]
+    fn test_source_kind_windows_unc() {
+        assert_eq!(
+            PluginSourceKind::parse("\\\\server\\share\\plugins"),
+            PluginSourceKind::LocalDir(std::path::PathBuf::from("\\\\server\\share\\plugins"))
         );
     }
 }

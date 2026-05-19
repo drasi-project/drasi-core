@@ -36,6 +36,9 @@ impl SubscriptionSettingsBuilder {
                 query_id: query_config.id.clone(),
                 nodes: source_config.nodes.iter().cloned().collect(),
                 relations: source_config.relations.iter().cloned().collect(),
+                resume_from: None,
+                request_position_handle: false,
+                last_sequence: None,
             })
             .collect();
 
@@ -70,7 +73,10 @@ impl SubscriptionSettingsBuilder {
 
             match matching_indices.len() {
                 0 => {
-                    // Not found in any source config - add to first source (default)
+                    // Not found in any source config — default to the first source.
+                    // This is intentional: labels that aren't explicitly mapped in
+                    // source configuration are assumed to belong to the primary
+                    // (first) source, which is the common single-source case.
                     if let Some(first_settings) = settings_vec.first_mut() {
                         first_settings.nodes.insert(node_label.clone());
                     } else {
@@ -179,6 +185,9 @@ mod tests {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: 1000,
+            bootstrap_timeout_secs: 300,
         }
     }
 

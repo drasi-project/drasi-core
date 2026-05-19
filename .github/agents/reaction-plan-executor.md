@@ -1,7 +1,7 @@
 ---
 name: reaction-plan-executor
 description: Executes implementation plans for reaction components in Drasi.
-model: gpt-5.2-codex
+model: gpt-5.3-codex
 ---
 
 # reaction-plan-executor
@@ -55,7 +55,8 @@ Implement components **exactly as specified** in the plan:
 - Refer to existing reactions (`components/reactions/`) for patterns
 - Follow Drasi coding standards
 - Use builder pattern for configuration
-- Implement proper error handling & logging
+- **Error handling:** Plugin trait methods (`start`, `stop`, `bootstrap`) return `anyhow::Result` — use `.context("what failed")` to build rich error chains. **Never** use `DrasiError` inside plugin implementations; the framework converts `anyhow` errors to structured `DrasiError` at the public API boundary. See `lib/src/error.rs` for details.
+- Implement proper logging with `log::info!`/`log::error!`
 - No deviations without documenting rationale
 
 ### 3. Core Implementation
@@ -370,6 +371,12 @@ Document in completion report:
 - Remove temporary files and POCs
 - Ensure no debug/test code in core components
 - Verify all TODOs resolved
+
+### 9. Review
+
+- Review the new components for bugs and issues, and spawn a parallel sub-agent without the session context to do an independent review
+- Fix any issues found during review
+- Do a second pass review and fix any further issues
 
 ## Quality Gates
 

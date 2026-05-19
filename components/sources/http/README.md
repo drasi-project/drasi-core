@@ -109,9 +109,9 @@ let config = HttpSourceConfig {
 let source = HttpSource::new("my-source", config)?;
 ```
 
-### YAML Configuration (DrasiServer)
+### YAML Configuration (DrasiLib)
 
-When using DrasiServer, configure HTTP sources via YAML:
+When using DrasiLib, configure HTTP sources via YAML:
 
 ```yaml
 sources:

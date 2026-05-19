@@ -210,7 +210,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            props.get("batch_size"),
+            props.get("batchSize"),
             Some(&serde_json::Value::Number(100.into()))
         );
     }

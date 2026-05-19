@@ -179,14 +179,19 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use log::{error, info};
+use drasi_lib::schema::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
+use log::{debug, error, info};
+use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use drasi_lib::channels::{DispatchMode, *};
+use drasi_lib::component_graph::ComponentStatusHandle;
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -205,6 +210,127 @@ pub struct PostgresReplicationSource {
     base: SourceBase,
     /// PostgreSQL source configuration
     config: PostgresSourceConfig,
+    /// Best-effort cached schema populated from information_schema on start.
+    cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+}
+
+fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
+    match data_type {
+        "smallint" | "integer" | "bigint" => Some(PropertyType::Integer),
+        "real" | "double precision" | "numeric" | "decimal" => Some(PropertyType::Float),
+        "boolean" => Some(PropertyType::Boolean),
+        "timestamp without time zone"
+        | "timestamp with time zone"
+        | "date"
+        | "time without time zone"
+        | "time with time zone" => Some(PropertyType::Timestamp),
+        "json" | "jsonb" => Some(PropertyType::Json),
+        "character" | "character varying" | "text" | "uuid" | "bytea" => Some(PropertyType::String),
+        _ => None,
+    }
+}
+
+async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let mut pg_config = tokio_postgres::Config::new();
+    pg_config.host(&config.host);
+    pg_config.port(config.port);
+    pg_config.dbname(&config.database);
+    pg_config.user(&config.user);
+    if !config.password.is_empty() {
+        pg_config.password(&config.password);
+    }
+
+    let client = match config.ssl_mode {
+        SslMode::Require => {
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            debug!("Schema introspection: connecting with SSL (require)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+            debug!("Schema introspection: connecting with SSL (prefer)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Disable => {
+            debug!("Schema introspection: connecting without SSL");
+            let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+    };
+
+    let mut nodes = Vec::new();
+
+    for table in &config.tables {
+        let (schema_name, table_name) = table
+            .split_once('.')
+            .map(|(schema, name)| (schema.to_string(), name.to_string()))
+            .unwrap_or_else(|| ("public".to_string(), table.to_string()));
+
+        let rows = client
+            .query(
+                "SELECT column_name, data_type \
+                 FROM information_schema.columns \
+                 WHERE table_schema = $1 AND table_name = $2 \
+                 ORDER BY ordinal_position",
+                &[&schema_name, &table_name],
+            )
+            .await?;
+
+        let properties = rows
+            .into_iter()
+            .map(|row| PropertySchema {
+                name: row.get::<_, String>(0),
+                data_type: postgres_type_to_property_type(&row.get::<_, String>(1)),
+                description: None,
+            })
+            .collect();
+
+        nodes.push(NodeSchema {
+            label: normalize_table_label(&table_name),
+            properties,
+        });
+    }
+
+    Ok(Some(SourceSchema {
+        nodes,
+        relations: Vec::new(),
+    }))
 }
 
 impl PostgresReplicationSource {
@@ -265,6 +391,7 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -289,6 +416,7 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 }
@@ -304,39 +432,36 @@ impl Source for PostgresReplicationSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "host".to_string(),
-            serde_json::Value::String(self.config.host.clone()),
-        );
-        props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
-        );
-        props.insert(
-            "database".to_string(),
-            serde_json::Value::String(self.config.database.clone()),
-        );
-        props.insert(
-            "user".to_string(),
-            serde_json::Value::String(self.config.user.clone()),
-        );
-        // Don't expose password in properties
-        props.insert(
-            "tables".to_string(),
-            serde_json::Value::Array(
-                self.config
-                    .tables
-                    .iter()
-                    .map(|t| serde_json::Value::String(t.clone()))
-                    .collect(),
-            ),
-        );
-        props
+        use crate::descriptor::PostgresSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&PostgresSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.cached_schema
+            .read()
+            .ok()
+            .and_then(|schema| schema.clone())
+            .or_else(|| {
+                if self.config.tables.is_empty() {
+                    None
+                } else {
+                    Some(SourceSchema {
+                        nodes: self
+                            .config
+                            .tables
+                            .iter()
+                            .map(|table| NodeSchema::new(normalize_table_label(table)))
+                            .collect(),
+                        relations: Vec::new(),
+                    })
+                }
+            })
     }
 
     async fn start(&self) -> Result<()> {
@@ -344,14 +469,28 @@ impl Source for PostgresReplicationSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting PostgreSQL replication source: {}", self.base.id);
+
+        match introspect_postgres_schema(&self.config).await {
+            Ok(Some(schema)) => {
+                if let Ok(mut cached) = self.cached_schema.write() {
+                    *cached = Some(schema);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Failed to introspect PostgreSQL schema for '{}': {e}",
+                    self.base.id
+                );
+            }
+        }
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let dispatchers = self.base.dispatchers.clone();
-        let status_tx = self.base.status_tx();
-        let status_clone = self.base.status.clone();
+        let reporter = self.base.status_handle();
 
         // Get instance_id from context for log routing isolation
         let instance_id = self
@@ -372,42 +511,28 @@ impl Source for PostgresReplicationSource {
 
         let task = tokio::spawn(
             async move {
-                if let Err(e) = run_replication(
-                    source_id.clone(),
-                    config,
-                    dispatchers,
-                    status_tx.clone(),
-                    status_clone.clone(),
-                )
-                .await
+                if let Err(e) =
+                    run_replication(source_id.clone(), config, dispatchers, reporter.clone()).await
                 {
                     error!("Replication task failed for {source_id}: {e}");
-                    *status_clone.write().await = ComponentStatus::Error;
-                    if let Some(ref tx) = *status_tx.read().await {
-                        let _ = tx
-                            .send(ComponentEvent {
-                                component_id: source_id,
-                                component_type: ComponentType::Source,
-                                status: ComponentStatus::Error,
-                                timestamp: chrono::Utc::now(),
-                                message: Some(format!("Replication failed: {e}")),
-                            })
-                            .await;
-                    }
+                    reporter
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Replication failed: {e}")),
+                        )
+                        .await;
                 }
             }
             .instrument(span),
         );
 
         *self.base.task_handle.write().await = Some(task);
-        self.base.set_status(ComponentStatus::Running).await;
-
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("PostgreSQL replication started".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -419,20 +544,24 @@ impl Source for PostgresReplicationSource {
 
         info!("Stopping PostgreSQL replication source: {}", self.base.id);
 
-        self.base.set_status(ComponentStatus::Stopping).await;
+        self.base.set_status(ComponentStatus::Stopping, None).await;
 
         // Cancel the replication task
         if let Some(task) = self.base.task_handle.write().await.take() {
             task.abort();
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
+        }
+
         self.base
-            .send_component_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("PostgreSQL replication stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
@@ -474,13 +603,11 @@ async fn run_replication(
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
-    status_tx: Arc<RwLock<Option<ComponentEventSender>>>,
-    status: Arc<RwLock<ComponentStatus>>,
+    status_handle: ComponentStatusHandle,
 ) -> Result<()> {
     info!("Starting replication for source {source_id}");
 
-    let mut stream =
-        stream::ReplicationStream::new(config, source_id, dispatchers, status_tx, status);
+    let mut stream = stream::ReplicationStream::new(config, source_id, dispatchers, status_handle);
 
     stream.run().await
 }
@@ -694,6 +821,7 @@ impl PostgresSourceBuilder {
         Ok(PostgresReplicationSource {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 }
@@ -807,7 +935,7 @@ mod tests {
         }
 
         #[test]
-        fn test_properties_does_not_expose_password() {
+        fn test_properties_includes_password() {
             let source = PostgresSourceBuilder::new("test")
                 .with_database("db")
                 .with_user("user")
@@ -816,8 +944,13 @@ mod tests {
                 .unwrap();
             let props = source.properties();
 
-            // Password should not be exposed in properties
-            assert!(!props.contains_key("password"));
+            // Password must be preserved for config persistence roundtrip
+            assert_eq!(
+                props.get("password"),
+                Some(&serde_json::Value::String(
+                    "super_secret_password".to_string()
+                ))
+            );
         }
 
         #[test]
@@ -835,10 +968,212 @@ mod tests {
             assert_eq!(tables[0], "users");
             assert_eq!(tables[1], "orders");
         }
+
+        #[test]
+        fn test_describe_schema_falls_back_to_configured_tables() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .with_tables(vec!["public.users".to_string(), "orders".to_string()])
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("configured postgres tables should produce fallback schema");
+
+            assert_eq!(schema.nodes.len(), 2);
+            assert!(schema.nodes.iter().any(|node| node.label == "users"));
+            assert!(schema.nodes.iter().any(|node| node.label == "orders"));
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_integer() {
+            assert_eq!(
+                postgres_type_to_property_type("integer"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("bigint"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("smallint"),
+                Some(PropertyType::Integer)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_float() {
+            assert_eq!(
+                postgres_type_to_property_type("double precision"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("real"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("numeric"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("decimal"),
+                Some(PropertyType::Float)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_boolean() {
+            assert_eq!(
+                postgres_type_to_property_type("boolean"),
+                Some(PropertyType::Boolean)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_timestamp() {
+            assert_eq!(
+                postgres_type_to_property_type("timestamp with time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("timestamp without time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("date"),
+                Some(PropertyType::Timestamp)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_json() {
+            assert_eq!(
+                postgres_type_to_property_type("json"),
+                Some(PropertyType::Json)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("jsonb"),
+                Some(PropertyType::Json)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_string() {
+            assert_eq!(
+                postgres_type_to_property_type("character varying"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("text"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("uuid"),
+                Some(PropertyType::String)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_unknown_returns_none() {
+            assert_eq!(postgres_type_to_property_type("point"), None);
+            assert_eq!(postgres_type_to_property_type("polygon"), None);
+            assert_eq!(postgres_type_to_property_type("cidr"), None);
+        }
     }
 
     mod lifecycle {
         use super::*;
+
+        /// A test secret resolver that returns a fixed value for any secret name.
+        struct TestSecretResolver;
+
+        impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
+            fn resolve_to_string(
+                &self,
+                value: &drasi_plugin_sdk::ConfigValue<String>,
+            ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
+                match value {
+                    drasi_plugin_sdk::ConfigValue::Secret { name } => {
+                        Ok(format!("resolved-secret-{name}"))
+                    }
+                    _ => Err(drasi_plugin_sdk::resolver::ResolverError::WrongResolverType),
+                }
+            }
+        }
+
+        fn ensure_test_secret_resolver() {
+            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+                TestSecretResolver,
+            ));
+        }
+
+        #[tokio::test]
+        async fn test_descriptor_preserves_secret_envelope() {
+            use crate::descriptor::PostgresSourceDescriptor;
+            use drasi_lib::sources::Source;
+            use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
+
+            ensure_test_secret_resolver();
+
+            let config_json = serde_json::json!({
+                "host": "db.example.com",
+                "port": 5432,
+                "database": "mydb",
+                "user": "app_user",
+                "password": {
+                    "kind": "Secret",
+                    "name": "db-password"
+                },
+                "tables": ["users"],
+                "slotName": "drasi_slot",
+                "publicationName": "drasi_pub"
+            });
+
+            let descriptor = PostgresSourceDescriptor;
+            let source = descriptor
+                .create_source("pg-secret-test", &config_json, true)
+                .await
+                .expect("descriptor should create source");
+
+            let props = source.properties();
+
+            // Password must be the Secret envelope, NOT the resolved value
+            let password = props.get("password").expect("password must be present");
+            assert!(
+                password.is_object(),
+                "password should be Secret envelope, got: {password}"
+            );
+            assert_eq!(
+                password.get("kind").and_then(|v| v.as_str()),
+                Some("Secret"),
+                "envelope kind must be Secret"
+            );
+            assert_eq!(
+                password.get("name").and_then(|v| v.as_str()),
+                Some("db-password"),
+                "secret name must be preserved"
+            );
+
+            // Resolved value must NOT leak into persisted properties
+            let props_str = serde_json::to_string(&props).unwrap();
+            assert!(
+                !props_str.contains("resolved-secret-db-password"),
+                "resolved secret must not appear in properties"
+            );
+
+            // Keys must be camelCase (from raw_config)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+        }
 
         #[tokio::test]
         async fn test_initial_status_is_stopped() {
@@ -848,6 +1183,62 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(source.status().await, ComponentStatus::Stopped);
+        }
+
+        #[test]
+        fn test_builder_fallback_produces_camel_case() {
+            use drasi_lib::sources::Source;
+
+            let source = PostgresSourceBuilder::new("pg-fallback")
+                .with_host("myhost.example.com")
+                .with_port(5433)
+                .with_database("mydb")
+                .with_user("admin")
+                .with_password("secret123")
+                .with_ssl_mode(SslMode::Require)
+                .with_slot_name("custom_slot")
+                .with_publication_name("custom_pub")
+                .build()
+                .unwrap();
+
+            let props = source.properties();
+
+            // Must use camelCase keys (DTO serialization)
+            assert!(
+                props.contains_key("slotName"),
+                "expected camelCase 'slotName', got keys: {:?}",
+                props.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                props.contains_key("publicationName"),
+                "expected camelCase 'publicationName'"
+            );
+            assert!(
+                props.contains_key("sslMode"),
+                "expected camelCase 'sslMode'"
+            );
+
+            // Must NOT have snake_case keys
+            assert!(
+                !props.contains_key("slot_name"),
+                "should not have snake_case 'slot_name'"
+            );
+            assert!(
+                !props.contains_key("publication_name"),
+                "should not have snake_case 'publication_name'"
+            );
+
+            // Values should be correct
+            assert_eq!(
+                props.get("host").and_then(|v| v.as_str()),
+                Some("myhost.example.com")
+            );
+            assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(5433));
+            assert_eq!(props.get("database").and_then(|v| v.as_str()), Some("mydb"));
+            assert_eq!(
+                props.get("password").and_then(|v| v.as_str()),
+                Some("secret123")
+            );
         }
     }
 

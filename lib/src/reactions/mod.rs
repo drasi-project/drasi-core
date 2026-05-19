@@ -12,15 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bootstrap_context;
+pub mod checkpoint;
 pub mod common;
 pub mod manager;
+pub mod snapshot_fetcher;
 mod traits;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
-// Re-export the Reaction trait
+// Re-export the Reaction trait. QueryProvider is internal to ReactionManager.
+pub(crate) use traits::QueryProvider;
 pub use traits::Reaction;
 
+pub use bootstrap_context::BootstrapBackend;
+pub use bootstrap_context::BootstrapContext;
+pub use checkpoint::ReactionCheckpoint;
 pub use common::base::{ReactionBase, ReactionBaseParams};
 pub use manager::ReactionManager;
+pub use snapshot_fetcher::SnapshotFetcher;

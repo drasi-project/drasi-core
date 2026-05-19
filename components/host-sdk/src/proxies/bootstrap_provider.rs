@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::events::{BootstrapEvent, BootstrapEventSender};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_plugin_sdk::descriptor::BootstrapPluginDescriptor;
@@ -57,7 +59,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&SourceSubscriptionSettings>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BootstrapResult> {
         // Build FfiStr arrays for node/relation labels
         let node_label_strs: Vec<String> = request.node_labels.clone();
         let rel_label_strs: Vec<String> = request.relation_labels.clone();
@@ -83,7 +85,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         let rel_labels_ptr = rel_ffi.as_ptr();
         let rel_labels_count = rel_ffi.len();
 
-        let count = (bootstrap_fn)(
+        let result_ptr = (bootstrap_fn)(
             state,
             query_id_ffi,
             node_labels_ptr,
@@ -106,11 +108,53 @@ impl BootstrapProvider for BootstrapProviderProxy {
             (sender.drop_fn)(sender.state);
         }
 
-        if count < 0 {
-            return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
+        // Extract handover metadata from the FfiBootstrapResult
+        if result_ptr.is_null() {
+            return Err(anyhow::anyhow!("Bootstrap failed: null result"));
         }
 
-        Ok(count as usize)
+        let ffi_result = unsafe { *Box::from_raw(result_ptr) };
+
+        if ffi_result.event_count < 0 {
+            return Err(anyhow::anyhow!(
+                "Bootstrap failed with code {}",
+                ffi_result.event_count
+            ));
+        }
+
+        let last_sequence = if ffi_result.last_sequence >= 0 {
+            Some(ffi_result.last_sequence as u64)
+        } else {
+            None
+        };
+
+        let source_position =
+            if !ffi_result.source_position_ptr.is_null() && ffi_result.source_position_len > 0 {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        ffi_result.source_position_ptr,
+                        ffi_result.source_position_len,
+                    )
+                };
+                let owned = bytes::Bytes::copy_from_slice(bytes);
+                // Free the source position allocation
+                if let Some(drop_fn) = ffi_result.source_position_drop_fn {
+                    (drop_fn)(
+                        ffi_result.source_position_ptr as *mut u8,
+                        ffi_result.source_position_len,
+                    );
+                }
+                Some(owned)
+            } else {
+                None
+            };
+
+        Ok(BootstrapResult {
+            event_count: ffi_result.event_count as usize,
+            last_sequence,
+            sequences_aligned: ffi_result.sequences_aligned,
+            source_position,
+        })
     }
 }
 
@@ -146,26 +190,30 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     let state = Box::into_raw(Box::new(std_tx)) as *mut c_void;
 
     extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
-        let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
-        if event.is_null() {
-            return -1;
-        }
-        let ffi_event = unsafe { &*event };
-        let bootstrap_event = unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
-        // Free the FFI envelope but not the opaque (we took ownership)
-        unsafe { drop(Box::from_raw(event)) };
-        match tx.send(bootstrap_event) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
+            if event.is_null() {
+                return -1;
+            }
+            let ffi_event = unsafe { &*event };
+            let bootstrap_event =
+                unsafe { *Box::from_raw(ffi_event.opaque as *mut BootstrapEvent) };
+            // Free the FFI envelope but not the opaque (we took ownership)
+            unsafe { drop(Box::from_raw(event)) };
+            match tx.send(bootstrap_event) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            }
+        }))
+        .unwrap_or(-1)
     }
 
     extern "C" fn drop_fn(state: *mut c_void) {
-        unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             drop(Box::from_raw(
                 state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
             ))
-        };
+        }));
     }
 
     FfiBootstrapSender {
@@ -186,6 +234,7 @@ pub struct BootstrapPluginProxy {
     cached_kind: String,
     cached_config_version: String,
     cached_config_schema_name: String,
+    plugin_id: String,
 }
 
 unsafe impl Send for BootstrapPluginProxy {}
@@ -204,7 +253,18 @@ impl BootstrapPluginProxy {
             cached_kind,
             cached_config_version,
             cached_config_schema_name,
+            plugin_id: String::new(),
         }
+    }
+
+    /// The unique identifier of the plugin that provided this descriptor.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// Set the plugin identity for this descriptor.
+    pub fn set_plugin_id(&mut self, id: String) {
+        self.plugin_id = id;
     }
 }
 
@@ -240,7 +300,13 @@ impl BootstrapPluginDescriptor for BootstrapPluginProxy {
 
         let state = self.vtable.state;
         let create_fn = self.vtable.create_bootstrap_provider_fn;
-        let vtable_ptr = (create_fn)(state, config_ffi, source_config_ffi);
+        let result = (create_fn)(state, config_ffi, source_config_ffi);
+
+        let vtable_ptr = unsafe {
+            result
+                .into_result::<BootstrapProviderVtable>()
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?
+        };
 
         if vtable_ptr.is_null() {
             return Err(anyhow::anyhow!(

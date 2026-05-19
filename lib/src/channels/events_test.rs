@@ -93,6 +93,8 @@ mod tests {
             event: SourceEvent::Change(change),
             timestamp: chrono::Utc::now(),
             profiling: None,
+            sequence: None,
+            source_position: None,
         };
 
         assert_eq!(wrapper.source_id, "test-source");
@@ -105,6 +107,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,
@@ -124,6 +127,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: metadata.clone(),
             profiling: None,
@@ -141,12 +145,8 @@ mod tests {
     fn test_event_channels_creation() {
         let (channels, receivers) = EventChannels::new();
 
-        // Verify channel senders exist
-        // NOTE: query_result_tx no longer exists - queries use broadcast channels
-        assert!(channels.component_event_tx.max_capacity() > 0);
-
-        // Verify receivers exist
-        drop(receivers.component_event_rx);
+        // Verify channels are constructed
+        drop(channels);
         drop(receivers.control_signal_rx);
     }
 
@@ -208,6 +208,7 @@ mod tests {
 
         let result = QueryResult {
             query_id: "query-1".to_string(),
+            sequence: 0,
             results: vec![],
             metadata: HashMap::new(),
             profiling: None,

@@ -95,7 +95,9 @@ pub fn get_or_init_global_registry() -> Arc<ComponentLogRegistry> {
 
             // Spawn the log worker in a dedicated thread with its own runtime.
             // This ensures the worker is independent of any caller's runtime.
-            spawn_log_worker(registry.clone(), rx);
+            if let Err(e) = spawn_log_worker(registry.clone(), rx) {
+                eprintln!("drasi-lib: failed to spawn log worker thread: {e}. Component logs will not be captured.");
+            }
 
             // Initialize tracing subscriber
             init_tracing_internal(registry.clone());
@@ -110,22 +112,33 @@ pub fn get_or_init_global_registry() -> Arc<ComponentLogRegistry> {
 /// This worker drains the channel and writes logs to the registry.
 /// Uses a dedicated thread with its own tokio runtime to ensure
 /// independence from the caller's async context.
-fn spawn_log_worker(registry: Arc<ComponentLogRegistry>, mut rx: mpsc::Receiver<LogMessage>) {
+///
+/// Returns `Err` if the thread or runtime cannot be created.
+fn spawn_log_worker(
+    registry: Arc<ComponentLogRegistry>,
+    mut rx: mpsc::Receiver<LogMessage>,
+) -> std::result::Result<(), std::io::Error> {
     std::thread::Builder::new()
         .name("drasi-log-worker".to_string())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to create log worker runtime");
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("drasi-lib: failed to create log worker runtime: {e}");
+                    return;
+                }
+            };
 
             rt.block_on(async move {
                 while let Some(message) = rx.recv().await {
                     registry.log(message).await;
                 }
             });
-        })
-        .expect("Failed to spawn log worker thread");
+        })?;
+    Ok(())
 }
 
 /// Initialize the tracing subscriber with component log routing.
@@ -164,6 +177,10 @@ fn spawn_log_worker(registry: Arc<ComponentLogRegistry>, mut rx: mpsc::Receiver<
 ///
 /// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
 /// This function is kept for backward compatibility.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
+)]
 pub fn init_tracing(log_registry: Arc<ComponentLogRegistry>) {
     // Ensure global registry is initialized (which sets up the channel worker)
     let _ = get_or_init_global_registry();
@@ -209,6 +226,10 @@ fn init_tracing_internal(log_registry: Arc<ComponentLogRegistry>) {
 /// # Deprecated
 ///
 /// Prefer using `get_or_init_global_registry()` which handles initialization automatically.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use get_or_init_global_registry() instead, which handles initialization automatically"
+)]
 pub fn try_init_tracing(log_registry: Arc<ComponentLogRegistry>) -> bool {
     // Check if already initialized
     if GLOBAL_LOG_REGISTRY.get().is_some() {

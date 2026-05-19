@@ -448,16 +448,18 @@ impl Reaction for ProfilerReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        let mut props = HashMap::new();
-        props.insert(
-            "window_size".to_string(),
-            serde_json::Value::Number(self.config.window_size.into()),
-        );
-        props.insert(
-            "report_interval_secs".to_string(),
-            serde_json::Value::Number(self.config.report_interval_secs.into()),
-        );
-        props
+        use crate::descriptor::ProfilerReactionConfigDto;
+        use drasi_plugin_sdk::ConfigValue;
+
+        let dto = ProfilerReactionConfigDto {
+            window_size: Some(ConfigValue::Static(self.config.window_size)),
+            report_interval_secs: Some(ConfigValue::Static(self.config.report_interval_secs)),
+        };
+
+        match serde_json::to_value(&dto) {
+            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
+            _ => HashMap::new(),
+        }
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -477,19 +479,19 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Starting
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting profiler reaction".to_string()),
             )
-            .await?;
+            .await;
 
         // Transition to Running
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Profiler reaction started".to_string()),
             )
-            .await?;
+            .await;
 
         info!(
             "[{}] Profiler started - window_size: {}, report_interval: {}s",
@@ -561,11 +563,11 @@ impl Reaction for ProfilerReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
                 Some("Profiler reaction stopped".to_string()),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
