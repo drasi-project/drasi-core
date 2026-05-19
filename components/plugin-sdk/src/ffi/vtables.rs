@@ -180,6 +180,8 @@ pub struct FfiRuntimeContext {
     pub lifecycle_ctx: *mut c_void,
     /// Nullable — identity provider for credential injection.
     pub identity_provider: *const super::identity::IdentityProviderVtable,
+    /// Nullable — snapshot fetcher for on-demand query snapshot access.
+    pub snapshot_fetcher: *const SnapshotFetcherVtable,
 }
 
 // Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
@@ -231,6 +233,110 @@ drasi_ffi_primitives::ffi_vtable! {
 // Reaction vtable
 // ============================================================================
 
+// --- FFI types for the reaction bootstrap bridge ---
+
+/// FFI-safe checkpoint data.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiCheckpoint {
+    pub sequence: u64,
+    pub config_hash: u64,
+}
+
+/// Result of a checkpoint read — `found=false` means no checkpoint exists.
+#[repr(C)]
+pub struct FfiCheckpointResult {
+    pub found: bool,
+    pub checkpoint: FfiCheckpoint,
+    /// Non-null on error.
+    pub error: FfiOwnedStr,
+}
+
+/// FFI-safe iterator for streaming snapshot rows one at a time.
+///
+/// The host creates this iterator and the plugin pulls rows via `next_fn`.
+/// Each `next_fn` call returns one JSON-serialized row, or an empty string
+/// when the iterator is exhausted.
+///
+/// **Ownership:** The plugin MUST call `drop_fn` when done — even if it
+/// doesn't exhaust the iterator. The host allocates the iterator state
+/// and `drop_fn` is the only way to reclaim it.
+#[repr(C)]
+pub struct FfiSnapshotIterator {
+    /// Opaque host-allocated iterator state.
+    pub iter_ctx: *mut c_void,
+    /// Returns the next row as JSON, or an empty string when exhausted.
+    pub next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    /// Drops the iterator state. Must be called exactly once.
+    pub drop_fn: extern "C" fn(*mut c_void),
+}
+
+/// FFI-safe response from a snapshot fetch — streaming variant.
+///
+/// On success (`error` is empty): `iterator` is valid and the plugin
+/// pulls rows via `iterator.next_fn`. On error: `error` is non-empty
+/// and `iterator` fields are invalid (must not be called).
+#[repr(C)]
+pub struct FfiSnapshotIteratorResponse {
+    pub iterator: FfiSnapshotIterator,
+    pub as_of_sequence: u64,
+    pub config_hash: u64,
+    /// Non-empty on error — iterator fields are invalid in that case.
+    pub error: FfiOwnedStr,
+}
+
+/// FFI-safe iterator for streaming outbox entries one at a time.
+///
+/// Same ownership model as `FfiSnapshotIterator`.
+#[repr(C)]
+pub struct FfiOutboxIterator {
+    /// Opaque host-allocated iterator state.
+    pub iter_ctx: *mut c_void,
+    /// Returns the next `QueryResult` as JSON, or an empty string when exhausted.
+    pub next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    /// Drops the iterator state. Must be called exactly once.
+    pub drop_fn: extern "C" fn(*mut c_void),
+}
+
+/// FFI-safe response from an outbox fetch — streaming variant.
+#[repr(C)]
+pub struct FfiOutboxIteratorResponse {
+    pub iterator: FfiOutboxIterator,
+    pub latest_sequence: u64,
+    pub config_hash: u64,
+    /// Non-empty on error — iterator fields are invalid in that case.
+    pub error: FfiOwnedStr,
+}
+
+/// Callback signatures for FfiBootstrapContext.
+pub type FfiBootstrapFetchSnapshotFn = extern "C" fn(*mut c_void) -> FfiSnapshotIteratorResponse;
+pub type FfiBootstrapFetchOutboxFn = extern "C" fn(*mut c_void, u64) -> FfiOutboxIteratorResponse;
+pub type FfiBootstrapReadCheckpointFn = extern "C" fn(*mut c_void) -> FfiCheckpointResult;
+pub type FfiBootstrapWriteCheckpointFn = extern "C" fn(*mut c_void, FfiCheckpoint) -> FfiResult;
+
+/// FFI-safe bootstrap context passed to `bootstrap_fn`.
+///
+/// The host builds this and passes a pointer. The plugin calls the callback
+/// function pointers with `callback_ctx` to invoke `fetch_snapshot()`, etc.
+#[repr(C)]
+pub struct FfiBootstrapContext {
+    /// Query ID this bootstrap is for.
+    pub query_id: FfiStr,
+    /// `true` when a prior checkpoint is being discarded (reset/recovery).
+    /// `false` on a fresh start with no prior checkpoint.
+    pub is_reset: bool,
+    /// Opaque host context passed as first arg to all callbacks.
+    pub callback_ctx: *mut c_void,
+    /// Fetch a snapshot of the query's live result set.
+    pub fetch_snapshot_fn: FfiBootstrapFetchSnapshotFn,
+    /// Fetch outbox entries after a given sequence.
+    pub fetch_outbox_fn: FfiBootstrapFetchOutboxFn,
+    /// Read the persisted checkpoint for this query subscription.
+    pub read_checkpoint_fn: FfiBootstrapReadCheckpointFn,
+    /// Write a checkpoint for this query subscription.
+    pub write_checkpoint_fn: FfiBootstrapWriteCheckpointFn,
+}
+
 drasi_ffi_primitives::ffi_vtable! {
     /// FFI-safe vtable for a Reaction instance.
     pub struct ReactionVtable {
@@ -258,6 +364,20 @@ drasi_ffi_primitives::ffi_vtable! {
         /// The plugin spawns a forwarder task that reads from an internal channel
         /// and calls `reaction.enqueue_query_result()` for each item.
         fn start_result_push_fn(state: *mut, callback: FfiResultPushCallbackFn, callback_ctx: *mut c_void),
+
+        // Recovery archetype methods
+        /// Whether this reaction requires a durable state store.
+        fn is_durable_fn(state: *const) -> bool,
+        /// Whether this reaction needs a full snapshot on first start.
+        fn needs_snapshot_on_fresh_start_fn(state: *const) -> bool,
+        /// Default recovery policy (returned as u8 ordinal: 0=Strict, 1=AutoReset, 2=AutoSkipGap).
+        fn default_recovery_policy_fn(state: *const) -> u8,
+
+        // Bootstrap hook
+        /// Called during startup when bootstrap or recovery is needed.
+        /// The FfiBootstrapContext provides callbacks for fetch_snapshot, fetch_outbox,
+        /// and checkpoint read/write.
+        fn bootstrap_fn(state: *mut, ctx: *const FfiBootstrapContext) -> FfiResult,
     }
 }
 
@@ -388,6 +508,38 @@ pub struct StateStoreVtable {
 
 unsafe impl Send for StateStoreVtable {}
 unsafe impl Sync for StateStoreVtable {}
+
+// ============================================================================
+// Snapshot fetcher vtable — host creates and provides to plugins for on-demand
+// query snapshot access at runtime (not just during bootstrap).
+// ============================================================================
+
+/// Snapshot fetcher vtable — host creates and provides to plugins.
+///
+/// Plugins call `fetch_snapshot_fn` to get the current result set of a query
+/// as a streaming iterator. The callback accepts a `query_id` parameter
+/// (unlike bootstrap callbacks which are per-query).
+///
+/// Follows the same ownership pattern as [`StateStoreVtable`]:
+/// - Host `Box::into_raw`s an `Arc<dyn SnapshotFetcher>` into `state`
+/// - Plugin calls `fetch_snapshot_fn` with `state` and `query_id`
+/// - `drop_fn` reclaims the `Arc` when the plugin drops the proxy
+#[repr(C)]
+pub struct SnapshotFetcherVtable {
+    /// Opaque host-owned state (Arc<dyn SnapshotFetcher> behind a raw pointer).
+    pub state: *mut c_void,
+    /// Fetch a snapshot for the given query ID.
+    /// Returns an `FfiSnapshotIteratorResponse` with a streaming iterator on success,
+    /// or a non-empty error string on failure.
+    pub fetch_snapshot_fn:
+        extern "C" fn(state: *mut c_void, query_id: FfiStr) -> FfiSnapshotIteratorResponse,
+    /// Drop the host-owned state. Must be called exactly once when the plugin
+    /// no longer needs the fetcher.
+    pub drop_fn: extern "C" fn(state: *mut c_void),
+}
+
+unsafe impl Send for SnapshotFetcherVtable {}
+unsafe impl Sync for SnapshotFetcherVtable {}
 
 // ============================================================================
 // Plugin registration — returned by drasi_plugin_init() for cdylib builds
