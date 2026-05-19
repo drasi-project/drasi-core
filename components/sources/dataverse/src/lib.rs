@@ -655,22 +655,22 @@ impl Source for DataverseSource {
         let base_url = self.config.environment_url.clone();
 
         // Build the identity provider for token acquisition.
-        // Priority: explicit identity_provider > Azure CLI / Developer Tools > client credentials.
+        // Priority:
+        //   1. Provider injected by the host via `set_identity_provider()` (e.g. drasi-server).
+        //   2. Provider supplied directly on the builder via `with_identity_provider()`.
+        //   3. Built-in client credentials (`tenant_id` / `client_id` / `client_secret`).
         //
-        // Both internal paths delegate to `AzureIdentityProvider` (which wraps
-        // `azure_identity` from the Azure SDK for Rust) so token acquisition,
-        // caching, and refresh stay in one well-maintained place.
-        let provider: Arc<dyn IdentityProvider> = if let Some(ref ip) = self.identity_provider {
+        // For Azure CLI / developer tools / managed identity authentication,
+        // configure an Azure identity provider (`kind: azure`) and inject it
+        // via paths (1) or (2). The internal client-credentials path delegates
+        // to `AzureIdentityProvider` (which wraps `azure_identity` from the
+        // Azure SDK for Rust).
+        let provider: Arc<dyn IdentityProvider> = if let Some(injected) =
+            self.base.identity_provider().await
+        {
+            injected
+        } else if let Some(ref ip) = self.identity_provider {
             Arc::from(ip.clone_box())
-        } else if self.config.use_azure_cli {
-            log::info!(
-                "[{}] Using Azure developer tools (CLI / azd / VS) for authentication",
-                self.base.id
-            );
-            let azure_provider =
-                drasi_identity_azure::AzureIdentityProvider::with_default_credentials("dataverse")?
-                    .with_scope(Self::dataverse_scope(&base_url));
-            Arc::new(azure_provider)
         } else {
             let azure_provider = drasi_identity_azure::AzureIdentityProvider::with_client_secret(
                 "dataverse",
@@ -891,7 +891,6 @@ pub struct DataverseSourceBuilder {
     tenant_id: String,
     client_id: String,
     client_secret: String,
-    use_azure_cli: bool,
     entities: Vec<String>,
     entity_set_overrides: HashMap<String, String>,
     entity_columns: HashMap<String, Vec<String>>,
@@ -914,7 +913,6 @@ impl DataverseSourceBuilder {
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
-            use_azure_cli: false,
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -953,23 +951,10 @@ impl DataverseSourceBuilder {
         self
     }
 
-    /// Use Azure CLI for authentication instead of client credentials.
-    ///
-    /// When enabled, the source acquires tokens by running
-    /// `az account get-access-token --resource <environment_url>`.
-    /// Requires `az login` to have been run beforehand.
-    ///
-    /// This is the simplest auth option for local development and testing.
-    /// When using Azure CLI auth, `tenant_id`, `client_id`, and `client_secret` are not required.
-    pub fn with_azure_cli_auth(mut self) -> Self {
-        self.use_azure_cli = true;
-        self
-    }
-
     /// Set an identity provider for token acquisition.
     ///
     /// When an identity provider is set, it takes precedence over
-    /// `tenant_id`/`client_id`/`client_secret` and `use_azure_cli`.
+    /// `tenant_id`/`client_id`/`client_secret`.
     /// The provider's `get_credentials()` must return `Credentials::Token`.
     ///
     /// This enables using any of the platform's identity providers, including:
@@ -1081,7 +1066,6 @@ impl DataverseSourceBuilder {
             tenant_id: self.tenant_id,
             client_id: self.client_id,
             client_secret: self.client_secret,
-            use_azure_cli: self.use_azure_cli,
             entities: self.entities,
             entity_set_overrides: self.entity_set_overrides,
             entity_columns: self.entity_columns,
@@ -1090,9 +1074,16 @@ impl DataverseSourceBuilder {
             api_version: self.api_version,
         };
 
-        // When an identity provider is supplied, skip client credential validation
-        // (only environment_url and entities are required)
-        if self.identity_provider.is_some() {
+        // Auth resolution order:
+        // 1. An identity provider was supplied directly on the builder → relaxed validation.
+        // 2. No identity provider and no client credentials → assume a host
+        //    (e.g. drasi-server) will inject an identity provider after
+        //    `build()` via `set_identity_provider()`. Relaxed validation.
+        // 3. Otherwise (built-in client credentials) → strict validation.
+        let no_builtin_credentials = config.tenant_id.is_empty()
+            && config.client_id.is_empty()
+            && config.client_secret.is_empty();
+        if self.identity_provider.is_some() || no_builtin_credentials {
             config
                 .validate_with_identity_provider()
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1167,7 +1158,6 @@ mod tests {
                 tenant_id: "t".to_string(),
                 client_id: "c".to_string(),
                 client_secret: "s".to_string(),
-                use_azure_cli: false,
                 entities: vec!["account".to_string()],
                 entity_set_overrides: HashMap::new(),
                 entity_columns: HashMap::new(),

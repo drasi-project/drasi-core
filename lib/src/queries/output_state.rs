@@ -21,7 +21,10 @@
 //! - A bounded ring buffer (`outbox`) of recent `QueryResult` emissions
 
 use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::Arc;
+
+use tokio_stream::Stream;
 
 use crate::channels::{QueryResult, ResultDiff};
 
@@ -158,6 +161,14 @@ impl QueryOutputState {
         self.results.get(row_signature)
     }
 
+    /// Clone the live result set as an `im::HashMap` (O(1) via structural sharing).
+    ///
+    /// This is used by `DrasiQuery::fetch_snapshot()` to take a lightweight clone
+    /// under the read lock, then build the `SnapshotResponse` outside the lock.
+    pub fn clone_results(&self) -> im::HashMap<u64, serde_json::Value> {
+        self.results.clone()
+    }
+
     /// Fetch outbox entries after the given sequence number.
     ///
     /// Returns `Ok(entries)` if the requested position is available in the ring buffer,
@@ -183,6 +194,7 @@ impl QueryOutputState {
                 requested: after_sequence,
                 earliest_available: earliest,
                 latest_sequence: self.as_of_sequence,
+                config_hash: 0, // Enriched by `DrasiQuery::fetch_outbox()`
             });
         }
 
@@ -208,6 +220,8 @@ pub struct OutboxGap {
     pub earliest_available: u64,
     /// The latest sequence in the outbox.
     pub latest_sequence: u64,
+    /// The query's config hash (set by `DrasiQuery`, not by `QueryOutputState`).
+    pub config_hash: u64,
 }
 
 /// Error returned by `fetch_snapshot` or `fetch_outbox` when the query is not
@@ -229,13 +243,55 @@ pub enum FetchError {
 }
 
 /// Response from `fetch_snapshot` on the Query trait.
+///
+/// Contains the live result set as an O(1) `im::HashMap` clone (private) and
+/// exposes it via `stream()`, `to_vec()`, `len()`, and `is_empty()`.
 #[derive(Debug, Clone)]
 pub struct SnapshotResponse {
-    /// The live result set at the time of the snapshot.
-    /// This is a collected `Vec` decoupled from the internal storage representation.
-    pub results: Vec<serde_json::Value>,
+    /// The live result set (private — not part of the public API).
+    results: im::HashMap<u64, serde_json::Value>,
     /// The sequence number this snapshot reflects.
     pub as_of_sequence: u64,
+    /// The query's configuration hash at the time of the snapshot.
+    pub config_hash: u64,
+}
+
+impl SnapshotResponse {
+    /// Create a new `SnapshotResponse` from an `im::HashMap` clone.
+    pub fn new(
+        results: im::HashMap<u64, serde_json::Value>,
+        as_of_sequence: u64,
+        config_hash: u64,
+    ) -> Self {
+        Self {
+            results,
+            as_of_sequence,
+            config_hash,
+        }
+    }
+
+    /// Return an async stream of the result values.
+    ///
+    /// The stream yields each `serde_json::Value` from the underlying `im::HashMap`
+    /// without holding any lock (the clone was taken under the read lock).
+    pub fn stream(self) -> impl Stream<Item = serde_json::Value> + Send {
+        tokio_stream::iter(self.results.into_iter().map(|(_, v)| v))
+    }
+
+    /// Collect the results into a `Vec<serde_json::Value>`.
+    pub fn to_vec(&self) -> Vec<serde_json::Value> {
+        self.results.values().cloned().collect()
+    }
+
+    /// Return the number of results in the snapshot.
+    pub fn len(&self) -> usize {
+        self.results.len()
+    }
+
+    /// Return `true` if the snapshot contains no results.
+    pub fn is_empty(&self) -> bool {
+        self.results.is_empty()
+    }
 }
 
 /// Response from `fetch_outbox` on the Query trait.
@@ -245,6 +301,121 @@ pub struct OutboxResponse {
     pub results: Vec<Arc<QueryResult>>,
     /// The latest sequence number in the query's output state.
     pub latest_sequence: u64,
+    /// The query's configuration hash.
+    pub config_hash: u64,
+}
+
+/// Streaming snapshot response for the bootstrap path.
+///
+/// Wraps a `Stream` of `serde_json::Value` rows plus snapshot metadata.
+/// Created from either an in-process `SnapshotResponse` (via `from_snapshot()`)
+/// or an FFI iterator (via the plugin SDK).
+///
+/// Consumers iterate with `while let Some(row) = stream.next().await { ... }`
+/// or call `collect_vec()` to drain all rows into a `Vec`.
+pub struct SnapshotStream {
+    inner: Pin<Box<dyn Stream<Item = serde_json::Value> + Send>>,
+    /// The sequence number this snapshot reflects.
+    pub as_of_sequence: u64,
+    /// The query's configuration hash at the time of the snapshot.
+    pub config_hash: u64,
+}
+
+impl SnapshotStream {
+    /// Create a `SnapshotStream` from an in-process `SnapshotResponse`.
+    pub fn from_snapshot(snapshot: SnapshotResponse) -> Self {
+        let as_of_sequence = snapshot.as_of_sequence;
+        let config_hash = snapshot.config_hash;
+        Self {
+            inner: Box::pin(snapshot.stream()),
+            as_of_sequence,
+            config_hash,
+        }
+    }
+
+    /// Create a `SnapshotStream` from an arbitrary `Stream` implementation.
+    pub fn from_stream(
+        stream: impl Stream<Item = serde_json::Value> + Send + 'static,
+        as_of_sequence: u64,
+        config_hash: u64,
+    ) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            as_of_sequence,
+            config_hash,
+        }
+    }
+
+    /// Collect all rows from the stream into a `Vec`.
+    pub async fn collect_vec(self) -> Vec<serde_json::Value> {
+        use tokio_stream::StreamExt;
+        self.inner.collect().await
+    }
+}
+
+impl Stream for SnapshotStream {
+    type Item = serde_json::Value;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+/// Streaming outbox response for the bootstrap path.
+///
+/// Wraps a `Stream` of `Arc<QueryResult>` entries plus outbox metadata.
+pub struct OutboxStream {
+    inner: Pin<Box<dyn Stream<Item = Arc<QueryResult>> + Send>>,
+    /// The latest sequence number in the query's output state.
+    pub latest_sequence: u64,
+    /// The query's configuration hash.
+    pub config_hash: u64,
+}
+
+impl OutboxStream {
+    /// Create an `OutboxStream` from an in-process `OutboxResponse`.
+    pub fn from_outbox(outbox: OutboxResponse) -> Self {
+        let latest_sequence = outbox.latest_sequence;
+        let config_hash = outbox.config_hash;
+        Self {
+            inner: Box::pin(tokio_stream::iter(outbox.results)),
+            latest_sequence,
+            config_hash,
+        }
+    }
+
+    /// Create an `OutboxStream` from an arbitrary `Stream` implementation.
+    pub fn from_stream(
+        stream: impl Stream<Item = Arc<QueryResult>> + Send + 'static,
+        latest_sequence: u64,
+        config_hash: u64,
+    ) -> Self {
+        Self {
+            inner: Box::pin(stream),
+            latest_sequence,
+            config_hash,
+        }
+    }
+
+    /// Collect all entries from the stream into a `Vec`.
+    pub async fn collect_vec(self) -> Vec<Arc<QueryResult>> {
+        use tokio_stream::StreamExt;
+        self.inner.collect().await
+    }
+}
+
+impl Stream for OutboxStream {
+    type Item = Arc<QueryResult>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +612,7 @@ mod tests {
         assert_eq!(err.requested, 0);
         assert_eq!(err.earliest_available, 3);
         assert_eq!(err.latest_sequence, 5);
+        assert_eq!(err.config_hash, 0); // Default; enriched by DrasiQuery
     }
 
     #[test]
@@ -495,5 +667,27 @@ mod tests {
         state.advance_sequence_and_push(result);
         assert_eq!(state.outbox.len(), 1);
         assert_eq!(state.outbox.front().unwrap().sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn snapshot_stream_yields_all_values() {
+        use tokio_stream::StreamExt;
+
+        let mut map = im::HashMap::new();
+        map.insert(1, serde_json::json!({"id": 1}));
+        map.insert(2, serde_json::json!({"id": 2}));
+        map.insert(3, serde_json::json!({"id": 3}));
+
+        let snap = SnapshotResponse::new(map, 10, 42);
+        assert_eq!(snap.len(), 3);
+        assert!(!snap.is_empty());
+
+        // Consume via stream()
+        let mut collected: Vec<serde_json::Value> = snap.stream().collect().await;
+        collected.sort_by_key(|v| v["id"].as_u64().unwrap());
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0]["id"], 1);
+        assert_eq!(collected[1]["id"], 2);
+        assert_eq!(collected[2]["id"], 3);
     }
 }

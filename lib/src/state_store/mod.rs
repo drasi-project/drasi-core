@@ -290,6 +290,17 @@ pub trait StateStoreProvider: Send + Sync {
     async fn sync(&self) -> StateStoreResult<()> {
         Ok(())
     }
+
+    /// Whether this state store provides durable (persistent) storage.
+    ///
+    /// Returns `true` for stores backed by disk or remote storage (e.g., redb, Redis).
+    /// Returns `false` for in-memory stores (data lost on restart).
+    ///
+    /// The host uses this to validate that durable reactions (`is_durable() == true`)
+    /// are paired with a durable state store.
+    fn is_durable(&self) -> bool {
+        false
+    }
 }
 
 /// In-memory implementation of StateStoreProvider.
