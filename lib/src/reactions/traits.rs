@@ -247,6 +247,8 @@ pub trait Reaction: Send + Sync {
         // Default implementation does nothing - reactions that consume an
         // identity provider should override this to delegate to their
         // ReactionBase.
+    }
+
     /// Whether this reaction requires a durable (persistent) state store.
     ///
     /// Reactions that checkpoint their outbox position should return `true`.
