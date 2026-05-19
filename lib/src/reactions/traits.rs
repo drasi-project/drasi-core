@@ -225,6 +225,30 @@ pub trait Reaction: Send + Sync {
         Ok(())
     }
 
+    /// Set the identity provider for this reaction.
+    ///
+    /// This method allows attaching a per-reaction identity provider after
+    /// construction (e.g. when wiring up a reaction from declarative config
+    /// that references a named identity provider). It is optional — reactions
+    /// that do not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementations backed by a [`ReactionBase`](crate::reactions::ReactionBase)
+    /// should delegate to `self.base.set_identity_provider(provider).await`;
+    /// other implementors should store the provider and apply it during
+    /// `initialize()`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - reactions that consume an
+        // identity provider should override this to delegate to their
+        // ReactionBase.
+    }
+
     /// Whether this reaction requires a durable (persistent) state store.
     ///
     /// Reactions that checkpoint their outbox position should return `true`.
@@ -313,6 +337,13 @@ impl Reaction for Box<dyn Reaction + 'static> {
 
     async fn deprovision(&self) -> Result<()> {
         (**self).deprovision().await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
     }
 
     fn is_durable(&self) -> bool {

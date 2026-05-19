@@ -50,10 +50,6 @@ pub struct DataverseBootstrapConfigDto {
     #[serde(default)]
     pub client_secret: Option<ConfigValue<String>>,
 
-    /// Use Azure CLI for authentication instead of client credentials.
-    #[serde(default)]
-    pub use_azure_cli: bool,
-
     /// Entity logical names to bootstrap (e.g., `["account", "contact"]`).
     pub entities: Vec<String>,
 
@@ -134,7 +130,6 @@ impl BootstrapPluginDescriptor for DataverseBootstrapDescriptor {
             tenant_id,
             client_id,
             client_secret,
-            use_azure_cli: dto.use_azure_cli,
             entities: dto.entities,
             entity_set_overrides: dto.entity_set_overrides,
             entity_columns: dto.entity_columns,
@@ -142,8 +137,9 @@ impl BootstrapPluginDescriptor for DataverseBootstrapDescriptor {
             page_size,
         };
 
-        config.validate().map_err(|e| anyhow::anyhow!(e))?;
-
+        // Validation is handled by `DataverseBootstrapProvider::new` and applies
+        // the relaxed rule when no built-in credentials are supplied (host will
+        // inject an identity provider).
         let provider = crate::DataverseBootstrapProvider::new(config)?;
         Ok(Box::new(provider))
     }
@@ -197,7 +193,6 @@ mod tests {
 
         assert_eq!(dto.api_version, ConfigValue::Static("v9.2".to_string()));
         assert_eq!(dto.page_size, ConfigValue::Static(5000));
-        assert!(!dto.use_azure_cli);
         assert!(dto.entity_set_overrides.is_empty());
         assert!(dto.entity_columns.is_empty());
         assert_eq!(dto.tenant_id, None);
