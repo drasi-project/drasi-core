@@ -342,6 +342,8 @@ impl Reaction for Box<dyn Reaction + 'static> {
         provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
     ) {
         (**self).set_identity_provider(provider).await
+    }
+
     fn is_durable(&self) -> bool {
         (**self).is_durable()
     }

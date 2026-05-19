@@ -132,14 +132,10 @@ impl DataverseBootstrapConfig {
             return Err("environment_url is required".to_string());
         }
         if self.tenant_id.is_empty() {
-            return Err(
-                "tenant_id is required (or configure an identity provider)".to_string(),
-            );
+            return Err("tenant_id is required (or configure an identity provider)".to_string());
         }
         if self.client_id.is_empty() {
-            return Err(
-                "client_id is required (or configure an identity provider)".to_string(),
-            );
+            return Err("client_id is required (or configure an identity provider)".to_string());
         }
         if self.client_secret.is_empty() {
             return Err(
