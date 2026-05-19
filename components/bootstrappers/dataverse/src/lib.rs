@@ -87,8 +87,22 @@ pub struct DataverseBootstrapProvider {
 
 impl DataverseBootstrapProvider {
     /// Create a new bootstrap provider with a given configuration.
+    ///
+    /// Uses relaxed validation when no built-in credentials are present, since
+    /// this shape indicates the host (e.g. drasi-server) will inject an
+    /// identity provider via `with_identity_provider()` /
+    /// `set_identity_provider()` before use.
     pub fn new(config: DataverseBootstrapConfig) -> Result<Self> {
-        config.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let no_builtin_credentials = config.tenant_id.is_empty()
+            && config.client_id.is_empty()
+            && config.client_secret.is_empty();
+        if no_builtin_credentials {
+            config
+                .validate_with_identity_provider()
+                .map_err(|e| anyhow::anyhow!(e))?;
+        } else {
+            config.validate().map_err(|e| anyhow::anyhow!(e))?;
+        }
         Ok(Self {
             config,
             identity_provider: None,
@@ -104,31 +118,25 @@ impl DataverseBootstrapProvider {
     ///
     /// Priority:
     /// 1. Identity provider (if set) — delegates to `get_credentials()`
-    /// 2. Azure developer tools (CLI / azd / VS) when `use_azure_cli` is true
-    /// 3. OAuth2 client credentials (service principal)
+    /// 2. OAuth2 client credentials (service principal)
     ///
-    /// The internal paths delegate to `drasi-identity-azure`'s
-    /// `AzureIdentityProvider`, which wraps `azure_identity` from the Azure
-    /// SDK for Rust. This keeps OAuth2 flow handling, token caching, and
-    /// developer-tool integration in one well-maintained place rather than
-    /// reimplementing them here.
+    /// For Azure CLI / developer tools / managed identity authentication,
+    /// configure an Azure identity provider (`kind: azure`) and inject it via
+    /// `with_identity_provider()`. The internal client-credentials path
+    /// delegates to `drasi-identity-azure`'s `AzureIdentityProvider`, which
+    /// wraps `azure_identity` from the Azure SDK for Rust.
     async fn get_token(&self) -> Result<String> {
         if let Some(ref provider) = self.identity_provider {
             return self.get_token_from_provider(provider.as_ref()).await;
         }
 
-        let azure_provider = if self.config.use_azure_cli {
-            drasi_identity_azure::AzureIdentityProvider::with_default_credentials("dataverse")?
-                .with_scope(dataverse_scope(&self.config.environment_url))
-        } else {
-            drasi_identity_azure::AzureIdentityProvider::with_client_secret(
-                "dataverse",
-                &self.config.tenant_id,
-                &self.config.client_id,
-                &self.config.client_secret,
-            )?
-            .with_scope(dataverse_scope(&self.config.environment_url))
-        };
+        let azure_provider = drasi_identity_azure::AzureIdentityProvider::with_client_secret(
+            "dataverse",
+            &self.config.tenant_id,
+            &self.config.client_id,
+            &self.config.client_secret,
+        )?
+        .with_scope(dataverse_scope(&self.config.environment_url));
         self.get_token_from_provider(&azure_provider).await
     }
 
@@ -442,7 +450,6 @@ pub struct DataverseBootstrapProviderBuilder {
     tenant_id: String,
     client_id: String,
     client_secret: String,
-    use_azure_cli: bool,
     entities: Vec<String>,
     entity_set_overrides: HashMap<String, String>,
     entity_columns: HashMap<String, Vec<String>>,
@@ -459,7 +466,6 @@ impl DataverseBootstrapProviderBuilder {
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
-            use_azure_cli: false,
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -493,16 +499,10 @@ impl DataverseBootstrapProviderBuilder {
         self
     }
 
-    /// Use Azure CLI authentication instead of client credentials.
-    pub fn with_azure_cli_auth(mut self) -> Self {
-        self.use_azure_cli = true;
-        self
-    }
-
     /// Set an identity provider for token acquisition.
     ///
     /// When an identity provider is set, it takes precedence over
-    /// `tenant_id`/`client_id`/`client_secret` and `use_azure_cli`.
+    /// `tenant_id`/`client_id`/`client_secret`.
     /// The provider's `get_credentials()` must return `Credentials::Token`.
     pub fn with_identity_provider(mut self, provider: impl IdentityProvider + 'static) -> Self {
         self.identity_provider = Some(Box::new(provider));
@@ -557,7 +557,6 @@ impl DataverseBootstrapProviderBuilder {
             tenant_id: self.tenant_id,
             client_id: self.client_id,
             client_secret: self.client_secret,
-            use_azure_cli: self.use_azure_cli,
             entities: self.entities,
             entity_set_overrides: self.entity_set_overrides,
             entity_columns: self.entity_columns,
@@ -565,8 +564,16 @@ impl DataverseBootstrapProviderBuilder {
             page_size: self.page_size,
         };
 
-        // When an identity provider is supplied, skip client credential validation
-        if self.identity_provider.is_some() {
+        // Auth resolution order:
+        // 1. An identity provider was supplied directly on the builder → relaxed validation.
+        // 2. No identity provider and no client credentials → assume a host
+        //    (e.g. drasi-server) will inject an identity provider after
+        //    `build()` via `set_identity_provider()`. Relaxed validation.
+        // 3. Otherwise (built-in client credentials) → strict validation.
+        let no_builtin_credentials = config.tenant_id.is_empty()
+            && config.client_id.is_empty()
+            && config.client_secret.is_empty();
+        if self.identity_provider.is_some() || no_builtin_credentials {
             config
                 .validate_with_identity_provider()
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -824,13 +831,34 @@ mod tests {
         }
 
         #[test]
-        fn rejects_missing_credentials_when_no_identity_provider() {
-            // No tenant/client/secret AND no identity provider AND no Azure CLI mode.
+        fn rejects_partial_builtin_credentials() {
+            // User opted into built-in client credentials (set tenant_id) but
+            // omitted client_id/client_secret. Must still fail validation.
+            let result = DataverseBootstrapProvider::builder()
+                .with_environment_url("https://test.crm.dynamics.com")
+                .with_entities(vec!["account".to_string()])
+                .with_tenant_id("t")
+                .build();
+            assert!(
+                result.is_err(),
+                "partial built-in credentials should fail validation"
+            );
+        }
+
+        #[test]
+        fn allows_no_credentials_when_provider_will_be_injected() {
+            // No credentials AND no identity provider AND no Azure CLI mode.
+            // This shape means "a host (e.g. drasi-server) will inject an
+            // identity provider via set_identity_provider() before use", so
+            // validation must be relaxed.
             let result = DataverseBootstrapProvider::builder()
                 .with_environment_url("https://test.crm.dynamics.com")
                 .with_entities(vec!["account".to_string()])
                 .build();
-            assert!(result.is_err(), "should require credentials");
+            assert!(
+                result.is_ok(),
+                "missing creds + no provider should be treated as 'host will inject'"
+            );
         }
     }
 

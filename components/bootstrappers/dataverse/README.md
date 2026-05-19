@@ -80,12 +80,6 @@ Pass an `AzureIdentityProvider` via `.with_identity_provider()`. When using an i
 .with_client_secret("client-secret")
 ```
 
-### Azure CLI (built-in)
-
-```rust
-.with_azure_cli_auth()
-```
-
 ## Configuration
 
 | Field                  | Type                        | Default   | Description                                   |
@@ -100,7 +94,7 @@ Pass an `AzureIdentityProvider` via `.with_identity_provider()`. When using an i
 | `api_version`          | `String`                    | `"v9.2"`  | Dataverse Web API version                     |
 | `page_size`            | `usize`                     | `5000`    | Records per page during bootstrap             |
 
-\* Required when using built-in client credentials authentication. Not required when using an identity provider or Azure CLI auth.
+\* Required when using built-in client credentials authentication. Not required when using an identity provider.
 
 ## Usage with DataverseSource
 
@@ -147,7 +141,6 @@ All bootstrap records are emitted as `SourceChange::Insert`, since the bootstrap
 
 1. **Microsoft Dataverse environment**
 2. **Authentication** — one of:
-   - **Identity provider** (recommended): An `AzureIdentityProvider` from `drasi-identity-azure`. For managed identity or workload identity, the identity must be registered as an [application user](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users) in the Power Platform admin center with an appropriate security role.
+   - **Identity provider** (recommended): An `AzureIdentityProvider` from `drasi-identity-azure`. For managed identity or workload identity, the identity must be registered as an [application user](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users) in the Power Platform admin center with an appropriate security role. For local development use the Azure identity provider with `authMethod: developer_tools` and `az login`.
    - **Client credentials**: An Azure AD app registration with `Dynamics CRM` API permission and a client secret.
-   - **Azure CLI**: `az login` for local development.
 3. Records must exist in the target entities for bootstrap to return data

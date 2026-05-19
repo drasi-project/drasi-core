@@ -34,20 +34,32 @@ use utoipa::OpenApi;
 #[serde(rename_all = "camelCase")]
 pub struct AwsIdentityProviderConfigDto {
     /// IAM username used for authentication.
-    pub username: String,
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
+    #[schema(value_type = ConfigValueString)]
+    pub username: ConfigValue<String>,
 
     /// AWS region (e.g., `"us-west-2"`). If omitted, loaded from environment.
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub region: Option<ConfigValue<String>>,
 
     /// IAM role ARN to assume (e.g., `"arn:aws:iam::123456789012:role/MyAccessRole"`).
     /// If provided, the provider will assume this role before generating tokens.
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub role_arn: Option<String>,
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub role_arn: Option<ConfigValue<String>>,
 
     /// STS session name when assuming a role. Defaults to `"drasi-session"`.
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_name: Option<String>,
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub session_name: Option<ConfigValue<String>>,
 }
 
 #[derive(utoipa::OpenApi)]
@@ -87,13 +99,19 @@ impl IdentityProviderPluginDescriptor for AwsIdentityProviderDescriptor {
         config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn IdentityProvider>> {
         let dto: AwsIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
+        let mapper = DtoMapper::new();
 
-        let provider = if let Some(role_arn) = dto.role_arn {
-            AwsIdentityProvider::with_assumed_role(dto.username, role_arn, dto.session_name).await?
-        } else if let Some(region) = dto.region {
-            AwsIdentityProvider::with_region(dto.username, region).await?
+        let username = mapper.resolve_string(&dto.username)?;
+        let region = mapper.resolve_optional_string(&dto.region)?;
+        let role_arn = mapper.resolve_optional_string(&dto.role_arn)?;
+        let session_name = mapper.resolve_optional_string(&dto.session_name)?;
+
+        let provider = if let Some(role_arn) = role_arn {
+            AwsIdentityProvider::with_assumed_role(username, role_arn, session_name).await?
+        } else if let Some(region) = region {
+            AwsIdentityProvider::with_region(username, region).await?
         } else {
-            AwsIdentityProvider::new(dto.username).await?
+            AwsIdentityProvider::new(username).await?
         };
 
         Ok(Box::new(provider))

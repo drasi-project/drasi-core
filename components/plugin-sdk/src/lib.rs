@@ -645,7 +645,18 @@ macro_rules! export_plugin {
         pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
             match ::std::panic::catch_unwind(|| {
                 let _ = __plugin_runtime();
-                let (mut source_descs, mut reaction_descs, mut bootstrap_descs, mut identity_provider_descs) = $init_fn();
+                let (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs) = $init_fn();
+
+                // Convert each Vec to a boxed slice so the underlying allocation's
+                // capacity exactly matches its length. This is required by the host's
+                // ABI contract: the host reconstructs each array via
+                // `Vec::from_raw_parts(ptr, len, len)`, which is only sound when the
+                // original allocation has capacity == len. `Vec::into_boxed_slice`
+                // shrinks the allocation to fit before yielding the raw pointer.
+                let mut source_descs = source_descs.into_boxed_slice();
+                let mut reaction_descs = reaction_descs.into_boxed_slice();
+                let mut bootstrap_descs = bootstrap_descs.into_boxed_slice();
+                let mut identity_provider_descs = identity_provider_descs.into_boxed_slice();
 
                 let registration = Box::new($crate::ffi::FfiPluginRegistration {
                     source_plugins: source_descs.as_mut_ptr(),
@@ -659,10 +670,12 @@ macro_rules! export_plugin {
                     set_log_callback: __set_log_callback_impl,
                     set_lifecycle_callback: __set_lifecycle_callback_impl,
                 });
-                ::std::mem::forget(source_descs);
-                ::std::mem::forget(reaction_descs);
-                ::std::mem::forget(bootstrap_descs);
-                ::std::mem::forget(identity_provider_descs);
+                // Host takes ownership of the boxed-slice allocations. It will
+                // reclaim them via `Vec::from_raw_parts(ptr, len, len)` + drop.
+                let _ = ::std::boxed::Box::into_raw(source_descs);
+                let _ = ::std::boxed::Box::into_raw(reaction_descs);
+                let _ = ::std::boxed::Box::into_raw(bootstrap_descs);
+                let _ = ::std::boxed::Box::into_raw(identity_provider_descs);
                 Box::into_raw(registration)
             }) {
                 Ok(ptr) => ptr,
