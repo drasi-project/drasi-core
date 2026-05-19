@@ -688,11 +688,32 @@ impl ReactionManager {
                     ))
                 })?;
 
-        // Abort subscription forwarder tasks before stopping
+        // Transition to Stopping FIRST so the supervisor won't race us
+        // and transition to Error when forwarder tasks are aborted.
+        {
+            let mut g = self.graph.write().await;
+            g.validate_and_transition(
+                &id,
+                ComponentStatus::Stopping,
+                Some("Stopping reaction".to_string()),
+            )?;
+        }
+
+        // Now abort subscription forwarder tasks
         self.abort_subscription_tasks(&id).await;
 
-        crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "reaction", &reaction)
-            .await
+        // Call the reaction's stop logic
+        if let Err(e) = reaction.stop().await {
+            let mut g = self.graph.write().await;
+            let _ = g.validate_and_transition(
+                &id,
+                ComponentStatus::Error,
+                Some(format!("Stop failed: {e}")),
+            );
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     /// Returns the current status of a reaction (e.g. Running, Stopped, Error).
