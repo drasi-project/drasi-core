@@ -204,7 +204,6 @@ async fn introspect_mssql_schema(config: &MsSqlSourceConfig) -> Result<Option<So
         nodes,
         relations: Vec::new(),
     }))
-
 }
 
 impl MsSqlSource {
