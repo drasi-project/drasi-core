@@ -806,9 +806,11 @@ mod tests {
         let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
+            0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": "a/b"}),
+                row_signature: 0,
             }],
             HashMap::new(),
         );
@@ -839,9 +841,11 @@ mod tests {
         let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
+            0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 1}),
+                row_signature: 0,
             }],
             HashMap::new(),
         );
@@ -884,9 +888,11 @@ mod tests {
         let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "unknown-query".to_string(),
+            0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 7}),
+                row_signature: 0,
             }],
             HashMap::new(),
         );
@@ -938,9 +944,11 @@ mod tests {
         let file_locks = FileReaction::new_file_locks();
         let result = QueryResult::new(
             "orders".to_string(),
+            0,
             chrono::Utc::now(),
             vec![ResultDiff::Add {
                 data: serde_json::json!({"id": 9}),
+                row_signature: 0,
             }],
             HashMap::new(),
         );
