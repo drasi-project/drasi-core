@@ -1121,16 +1121,16 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     // Row 602 replays but should be filtered for query1.
     core.start().await?;
 
-    let mut sub2_new = handle2.subscribe_with_options(sub_opts.clone()).await?;
-
+    // Reuse sub2 — the mpsc channel survives stop/start because
+    // ApplicationReaction.app_tx (the field) keeps the sender alive.
     // query2 should see rows 602 and 603
-    wait_for_subscription_change(&mut sub2_new, 20, |e| {
+    wait_for_subscription_change(&mut sub2, 20, |e| {
         pg_matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
     })
     .await
     .context("query2 did not see replayed row 602")?;
 
-    wait_for_subscription_change(&mut sub2_new, 20, |e| {
+    wait_for_subscription_change(&mut sub2, 20, |e| {
         pg_matches_change(e, "ADD", &[("id", "603"), ("name", "WhileStopped")])
     })
     .await

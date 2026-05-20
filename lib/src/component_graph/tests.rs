@@ -530,7 +530,8 @@ fn test_invalid_state_transitions() {
         &ComponentStatus::Running,
         &ComponentStatus::Starting
     ));
-    assert!(!is_valid_transition(
+    // Starting → Stopping is now valid (graceful stop during initialization)
+    assert!(is_valid_transition(
         &ComponentStatus::Starting,
         &ComponentStatus::Stopping
     ));
