@@ -137,17 +137,17 @@ impl SqsReaction {
     ) -> Map<String, Value> {
         let mut context = Map::new();
         match result {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 context.insert("after".to_string(), data.clone());
             }
             ResultDiff::Update { before, after, .. } => {
                 context.insert("before".to_string(), before.clone());
                 context.insert("after".to_string(), after.clone());
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 context.insert("before".to_string(), data.clone());
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 if let Some(before) = before {
                     context.insert("before".to_string(), before.clone());
                 }
@@ -193,8 +193,8 @@ impl SqsReaction {
         }
 
         let fallback_json = match result {
-            ResultDiff::Add { data } => data.clone(),
-            ResultDiff::Delete { data } => data.clone(),
+            ResultDiff::Add { data, .. } => data.clone(),
+            ResultDiff::Delete { data, .. } => data.clone(),
             ResultDiff::Update {
                 before,
                 after,
@@ -207,7 +207,7 @@ impl SqsReaction {
                 obj.insert("after".to_string(), after.clone());
                 Value::Object(obj)
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 let mut obj = serde_json::Map::new();
                 if let Some(before) = before {
                     obj.insert("before".to_string(), before.clone());
