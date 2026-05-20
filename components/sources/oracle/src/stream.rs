@@ -228,7 +228,9 @@ fn run_logminer_poll_loop(
             );
             min_scn
         } else {
-            log::debug!("No subscriber resume positions; using configured start_position for '{source_id}'");
+            log::debug!(
+                "No subscriber resume positions; using configured start_position for '{source_id}'"
+            );
             resolve_initial_scn(conn, config.start_position)?
         }
     };

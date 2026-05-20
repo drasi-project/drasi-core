@@ -665,9 +665,9 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
 
     match result {
         Ok(inner) => inner?,
-        Err(_) => anyhow::bail!(
-            "Oracle checkpoint recovery round-trip test timed out after 300 seconds"
-        ),
+        Err(_) => {
+            anyhow::bail!("Oracle checkpoint recovery round-trip test timed out after 300 seconds")
+        }
     }
 
     Ok(())
@@ -813,9 +813,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
 
     match result {
         Ok(inner) => inner?,
-        Err(_) => anyhow::bail!(
-            "Oracle full restart checkpoint test timed out after 300 seconds"
-        ),
+        Err(_) => anyhow::bail!("Oracle full restart checkpoint test timed out after 300 seconds"),
     }
 
     Ok(())
