@@ -12,6 +12,7 @@ members = [
 
   # Shared component libraries
   "components/mssql-common",
+  "components/mysql-common",
   "components/kubernetes-common",
   "components/oracle-common",
 
@@ -24,6 +25,7 @@ members = [
   "components/bootstrappers/noop",
   "components/bootstrappers/mssql",
   "components/bootstrappers/dataverse",
+  "components/bootstrappers/mysql",
   "components/bootstrappers/http",
   "components/bootstrappers/sui-deepbook",
   "components/bootstrappers/kubernetes",
@@ -40,6 +42,7 @@ members = [
   "components/sources/ris-live",
   "components/sources/mssql",
   "components/sources/dataverse",
+  "components/sources/mysql",
   "components/sources/hyperliquid",
   "components/sources/sui-deepbook",
   "components/sources/kubernetes",
@@ -155,6 +158,9 @@ drasi-reaction-grpc = { version = "0.3.1", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
 drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.2.1", path = "components/mssql-common" }
+drasi-mysql-common = { version = "0.2.0", path = "components/mysql-common" }
+drasi-bootstrap-mysql = { version = "0.2.0", path = "components/bootstrappers/mysql" }
+drasi-source-mysql = { version = "0.2.0", path = "components/sources/mysql" }
 drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
 drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
 drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook" }
