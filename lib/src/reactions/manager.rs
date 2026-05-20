@@ -405,6 +405,27 @@ impl ReactionManager {
             }
         }
 
+        // 5. Persist checkpoints AFTER bootstrap succeeds — a crash before this
+        //    point will re-trigger bootstrap on next start (safe).
+        if let Some(store) = state_store.as_ref() {
+            for (query_id, cp) in &initial_checkpoints {
+                if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
+                    store.as_ref(),
+                    reaction_id,
+                    query_id,
+                    cp,
+                )
+                .await
+                {
+                    log::warn!(
+                        "[{reaction_id}] Failed to persist checkpoint for query '{query_id}' \
+                         at seq={}: {e}",
+                        cp.sequence
+                    );
+                }
+            }
+        }
+
         // Publish the computed checkpoints so forwarders can filter stale events.
         *shared_checkpoints.write().await = initial_checkpoints;
 
@@ -436,23 +457,6 @@ impl ReactionManager {
                 sequence: snapshot.as_of_sequence,
                 config_hash,
             };
-
-            // Persist the checkpoint.
-            if let Some(store) = state_store.as_ref() {
-                crate::reactions::checkpoint::write_checkpoint(
-                    store.as_ref(),
-                    reaction_id,
-                    query_id,
-                    &cp,
-                )
-                .await?;
-            } else {
-                log::debug!(
-                    "[{reaction_id}] No state store — checkpoint for query '{query_id}' \
-                     not persisted (seq={})",
-                    cp.sequence
-                );
-            }
 
             bootstrap_queries.push((query_id.to_string(), query.clone()));
             Ok(cp)
@@ -622,16 +626,6 @@ impl ReactionManager {
                     sequence: snapshot.as_of_sequence,
                     config_hash,
                 };
-
-                if let Some(store) = state_store.as_ref() {
-                    crate::reactions::checkpoint::write_checkpoint(
-                        store.as_ref(),
-                        reaction_id,
-                        query_id,
-                        &cp,
-                    )
-                    .await?;
-                }
 
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
                 Ok(cp)
@@ -1101,26 +1095,19 @@ impl ReactionManager {
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
                                 } else {
-                                    // Advance checkpoint so outbox catchup on restart
-                                    // won't replay already-delivered events.
+                                    // Advance in-memory checkpoint so forwarder tracks
+                                    // position (skip stale events on reconnect).
+                                    // NOTE: We do NOT persist to durable storage here.
+                                    // The reaction should persist its checkpoint after
+                                    // successfully processing the event. This prevents
+                                    // permanent skipping if the process crashes between
+                                    // enqueue and handler processing.
                                     let config_hash = {
                                         let cps = checkpoints.read().await;
                                         cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
                                     };
                                     let cp = ReactionCheckpoint { sequence: seq, config_hash };
-                                    checkpoints.write().await.insert(query_id_clone.clone(), cp.clone());
-                                    if let Some(store) = state_store_clone.as_ref() {
-                                        if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
-                                            store.as_ref(),
-                                            &reaction_id_owned,
-                                            &query_id_clone,
-                                            &cp,
-                                        ).await {
-                                            log::warn!(
-                                                "[{reaction_id_owned}] Failed to persist checkpoint for query '{query_id_clone}' at seq={seq}: {e}"
-                                            );
-                                        }
-                                    }
+                                    checkpoints.write().await.insert(query_id_clone.clone(), cp);
                                 }
                             }
                             Err(e) => {
@@ -1255,6 +1242,18 @@ impl ReactionManager {
                     config_hash,
                 };
 
+                // Invoke bootstrap hook BEFORE persisting checkpoint — a crash
+                // during bootstrap will re-trigger recovery on next start.
+                let ctx = BootstrapContext::new(
+                    query_id.to_string(),
+                    true,
+                    query.clone(),
+                    reaction_id.to_string(),
+                    state_store.clone(),
+                );
+                reaction.bootstrap(ctx).await?;
+
+                // Bootstrap succeeded — now safe to persist checkpoint.
                 if let Some(store) = state_store.as_ref() {
                     crate::reactions::checkpoint::write_checkpoint(
                         store.as_ref(),
@@ -1266,16 +1265,6 @@ impl ReactionManager {
                 }
 
                 checkpoints.write().await.insert(query_id.to_string(), cp);
-
-                // Invoke bootstrap hook for this query.
-                let ctx = BootstrapContext::new(
-                    query_id.to_string(),
-                    true,
-                    query.clone(),
-                    reaction_id.to_string(),
-                    state_store.clone(),
-                );
-                reaction.bootstrap(ctx).await?;
 
                 Ok(())
             }

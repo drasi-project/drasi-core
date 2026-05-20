@@ -134,11 +134,12 @@ impl OutboxWriter for RocksDbOutboxWriter {
     async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
-        // Seek to the end of this prefix range by using prefix with last byte = 0xFF
+        // Seek to the end of this prefix range by appending the maximum possible
+        // sequence suffix (8 bytes of 0xFF). This ensures we land within the
+        // exact prefix even when other query IDs share the same prefix string
+        // (e.g., "q1" vs "q10").
         let mut end_seek = prefix.clone();
-        if let Some(last) = end_seek.last_mut() {
-            *last = 0xFF;
-        }
+        end_seek.extend_from_slice(&[0xFF; 8]);
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");

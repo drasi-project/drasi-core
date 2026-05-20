@@ -284,6 +284,7 @@ async fn dispatch_query_results(
     // Persist to outbox and live results writers if available (best-effort).
     // These writes are NOT transactional with the index updates — on crash between
     // index commit and outbox write, reactions will re-read from checkpoint sequence.
+    let mut outbox_ok = true;
     if let Some(writer) = outbox_writer {
         // Serialize the QueryResult for the outbox using MessagePack (compact binary)
         match rmp_serde::to_vec(arc_result.as_ref()) {
@@ -293,6 +294,7 @@ async fn dispatch_query_results(
                         "Query '{query_id}' failed to persist result seq={} to outbox: {e}",
                         arc_result.sequence
                     );
+                    outbox_ok = false;
                 }
             }
             Err(e) => {
@@ -300,17 +302,21 @@ async fn dispatch_query_results(
                     "Query '{query_id}' failed to serialize result seq={} for outbox: {e}",
                     arc_result.sequence
                 );
+                outbox_ok = false;
             }
         }
 
         // Trim the persistent outbox to the configured capacity
-        if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-            warn!(
-                "Query '{query_id}' failed to trim persistent outbox: {e}"
-            );
+        if outbox_ok {
+            if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
+                warn!(
+                    "Query '{query_id}' failed to trim persistent outbox: {e}"
+                );
+            }
         }
     }
 
+    let mut live_results_ok = true;
     if let Some(writer) = live_results_writer {
         use drasi_core::interface::RowMutation;
 
@@ -377,21 +383,25 @@ async fn dispatch_query_results(
                     "Query '{query_id}' failed to persist live results for seq={}: {e}",
                     arc_result.sequence
                 );
+                live_results_ok = false;
             }
         }
     }
 
-    // Record the last persisted result sequence so recovery can compare
-    // the checkpoint's committed sequence against the outbox's actual contents.
-    if let Some(store) = checkpoint_store {
-        if let Err(e) = store
-            .write_result_sequence(query_id, arc_result.sequence)
-            .await
-        {
-            warn!(
-                "Query '{query_id}' failed to write result sequence {}: {e}",
-                arc_result.sequence
-            );
+    // Record the last persisted result sequence only if BOTH the outbox and
+    // live-results writes succeeded. Otherwise recovery may see this sequence
+    // as durable while the actual data is missing.
+    if outbox_ok && live_results_ok {
+        if let Some(store) = checkpoint_store {
+            if let Err(e) = store
+                .write_result_sequence(query_id, arc_result.sequence)
+                .await
+            {
+                warn!(
+                    "Query '{query_id}' failed to write result sequence {}: {e}",
+                    arc_result.sequence
+                );
+            }
         }
     }
 
@@ -2373,12 +2383,12 @@ impl Query for DrasiQuery {
 
             if persisted_seq > 0 {
                 match writer.read_snapshot(query_id).await {
-                    Ok(rows) if !rows.is_empty() => {
+                    Ok(rows) => {
                         let mut results = im::HashMap::new();
-                        for (sig, data) in rows {
-                            match rmp_serde::from_slice::<serde_json::Value>(&data) {
+                        for (sig, data) in &rows {
+                            match rmp_serde::from_slice::<serde_json::Value>(data) {
                                 Ok(value) => {
-                                    results.insert(sig, value);
+                                    results.insert(*sig, value);
                                 }
                                 Err(e) => {
                                     warn!(
@@ -2387,13 +2397,14 @@ impl Query for DrasiQuery {
                                 }
                             }
                         }
+                        // Return with persisted_seq even if rows is empty
+                        // (all rows deleted is a valid state).
                         return Ok(SnapshotResponse::new(
                             results,
                             persisted_seq,
                             self.config_hash,
                         ));
                     }
-                    Ok(_) => {} // empty — fall through
                     Err(e) => {
                         warn!(
                             "Query '{query_id}' failed to read persistent live results: {e}"
