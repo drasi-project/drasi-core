@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::state_store::StateStoreProvider;
 use drasi_lib::Source;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -44,10 +43,13 @@ pub struct OracleSource {
     source_id: String,
     config: OracleSourceConfig,
     base: SourceBase,
-    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<Mutex<Option<watch::Sender<bool>>>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
+    /// Per-subscriber resume positions from checkpoint recovery.
+    /// Populated during subscribe() when a query provides resume_from bytes.
+    /// The LogMiner poll loop uses the minimum SCN as its start point.
+    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
 }
 
 impl OracleSource {
@@ -59,10 +61,10 @@ impl OracleSource {
             source_id,
             config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
             bootstrap_sync: Arc::new(AsyncMutex::new(BootstrapSyncState::default())),
+            subscriber_resume_scns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -132,8 +134,8 @@ impl Source for OracleSource {
         let config = self.config.clone();
         let base = self.base.clone_shared();
         let dispatchers = self.base.dispatchers.clone();
-        let state_store = self.state_store.read().await.clone();
         let bootstrap_sync = self.bootstrap_sync.clone();
+        let subscriber_resume_scns = self.subscriber_resume_scns.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         *self
             .shutdown_tx
@@ -145,19 +147,14 @@ impl Source for OracleSource {
                 source_id.clone(),
                 config,
                 dispatchers,
-                state_store,
                 bootstrap_sync,
+                subscriber_resume_scns,
+                base,
                 shutdown_rx,
             )
             .await
             {
                 log::error!("Oracle LogMiner stream failed for {source_id}: {error}");
-                let _ = base
-                    .set_status(
-                        ComponentStatus::Error,
-                        Some(format!("Oracle LogMiner stream failed: {error}")),
-                    )
-                    .await;
             }
         });
 
@@ -192,6 +189,14 @@ impl Source for OracleSource {
             }
         }
 
+        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
+        // does not dispatch events to dead receivers.
+        self.base.clear_dispatchers().await;
+
+        // Clear stale resume positions — they will be repopulated by subscribe()
+        // on the next lifecycle with fresh checkpoint data.
+        self.subscriber_resume_scns.write().await.clear();
+
         self.base
             .set_status(
                 ComponentStatus::Stopped,
@@ -206,6 +211,32 @@ impl Source for OracleSource {
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
         let mut bootstrap_properties = HashMap::new();
+
+        // If the subscriber has a resume_from position, deserialize it to an SCN
+        // and store it keyed by query_id. The LogMiner poll loop computes the min
+        // across all active subscribers to decide where to start polling from.
+        if let Some(ref resume_bytes) = settings.resume_from {
+            match Scn::from_bytes(resume_bytes) {
+                Ok(scn) => {
+                    log::info!(
+                        "Subscriber '{}' requesting resume from SCN {} on source '{}'",
+                        settings.query_id,
+                        scn,
+                        self.base.id
+                    );
+                    self.subscriber_resume_scns
+                        .write()
+                        .await
+                        .insert(settings.query_id.clone(), scn);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to deserialize resume_from bytes to SCN for subscriber '{}': {e}",
+                        settings.query_id
+                    );
+                }
+            }
+        }
 
         // resume_from overrides bootstrap: a resuming query already has base
         // state in its persistent index and just needs replay from the
@@ -238,14 +269,22 @@ impl Source for OracleSource {
     }
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
-        self.base.initialize(context.clone()).await;
-        if let Some(state_store) = context.state_store {
-            *self.state_store.write().await = Some(state_store);
-        }
+        self.base.initialize(context).await;
+        // Oracle SCNs are 8-byte big-endian u64 — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
         self.base.set_bootstrap_provider(provider).await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        // Remove the per-subscriber resume SCN so the LogMiner poll loop no longer
+        // pins its start position on behalf of this query.
+        self.subscriber_resume_scns.write().await.remove(query_id);
+        self.base.remove_position_handle(query_id).await;
     }
 }
 
@@ -255,7 +294,6 @@ pub struct OracleSourceBuilder {
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
-    state_store: Option<Arc<dyn StateStoreProvider>>,
     auto_start: bool,
 }
 
@@ -267,7 +305,6 @@ impl OracleSourceBuilder {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
-            state_store: None,
             auto_start: true,
         }
     }
@@ -354,11 +391,6 @@ impl OracleSourceBuilder {
         self
     }
 
-    pub fn with_state_store(mut self, state_store: Arc<dyn StateStoreProvider>) -> Self {
-        self.state_store = Some(state_store);
-        self
-    }
-
     pub fn with_auto_start(mut self, auto_start: bool) -> Self {
         self.auto_start = auto_start;
         self
@@ -390,10 +422,10 @@ impl OracleSourceBuilder {
             source_id: self.id.clone(),
             config: self.config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(self.state_store)),
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(Mutex::new(None)),
             bootstrap_sync: Arc::new(AsyncMutex::new(BootstrapSyncState::default())),
+            subscriber_resume_scns: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }

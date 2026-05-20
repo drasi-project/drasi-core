@@ -37,6 +37,7 @@ drasi-oracle-common = { path = "../../oracle-common", package = "drasi-oracle-co
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
+bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 oracle = "0.6.3"
@@ -47,9 +48,11 @@ tracing = "0.1"
 
 [dev-dependencies]
 drasi-bootstrap-oracle = { path = "../../bootstrappers/oracle" }
+drasi-index-rocksdb = { path = "../../indexes/rocksdb" }
 drasi-reaction-application = { path = "../../reactions/application" }
 env_logger = "0.10.0"
 serial_test = "3.0"
+tempfile = "3.0"
 testcontainers = "0.26"
 tokio-test = "0.4"
 

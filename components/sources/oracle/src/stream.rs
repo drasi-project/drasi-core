@@ -24,7 +24,7 @@ use drasi_core::models::{
 };
 use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
 use drasi_lib::profiling;
-use drasi_lib::state_store::StateStoreProvider;
+use drasi_lib::sources::base::SourceBase;
 use drasi_oracle_common::{
     extract_row_properties, parse_sql_undo_insert, parse_sql_undo_update, split_table_name,
     sql_literal_to_element_value, LogMinerGuard,
@@ -35,7 +35,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, RwLock};
 
-const CHECKPOINT_KEY: &str = "checkpoint.scn";
 const INITIAL_RECONNECT_DELAY_MS: u64 = 1_000;
 const MAX_RECONNECT_DELAY_MS: u64 = 60_000;
 const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
@@ -63,10 +62,24 @@ pub(crate) async fn run_logminer_stream(
     source_id: String,
     config: OracleSourceConfig,
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    state_store: Option<Arc<dyn StateStoreProvider>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
+    // Wait for at least one subscriber before entering the poll loop.
+    // On a restart cycle, dispatchers are cleared during stop() so the source
+    // would otherwise dispatch events to an empty list, silently dropping them.
+    tokio::select! {
+        _ = base.wait_for_subscribers() => {
+            log::debug!("Subscriber(s) registered, starting LogMiner poll loop for '{source_id}'");
+        }
+        _ = shutdown_rx.wait_for(|v| *v) => {
+            log::info!("LogMiner poll loop for source '{source_id}' shutdown while waiting for subscribers");
+            return Ok(());
+        }
+    }
+
     let mut reconnect_delay = Duration::from_millis(INITIAL_RECONNECT_DELAY_MS);
 
     loop {
@@ -78,8 +91,8 @@ pub(crate) async fn run_logminer_stream(
             source_id.clone(),
             config.clone(),
             dispatchers.clone(),
-            state_store.clone(),
             bootstrap_sync.clone(),
+            subscriber_resume_scns.clone(),
             shutdown_rx.clone(),
         )
         .await
@@ -123,11 +136,11 @@ async fn run_stream_session(
     source_id: String,
     config: OracleSourceConfig,
     dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    state_store: Option<Arc<dyn StateStoreProvider>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<SourceChange>>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(Vec<SourceChange>, Scn)>();
     let runtime = tokio::runtime::Handle::current();
     let source_id_for_worker = source_id.clone();
 
@@ -135,16 +148,16 @@ async fn run_stream_session(
         run_logminer_poll_loop(
             source_id_for_worker,
             config,
-            state_store,
             bootstrap_sync,
+            subscriber_resume_scns,
             shutdown_rx,
             tx,
             runtime,
         )
     });
 
-    while let Some(batch) = rx.recv().await {
-        if let Err(error) = dispatch_batch(&source_id, &dispatchers, batch).await {
+    while let Some((batch, commit_scn)) = rx.recv().await {
+        if let Err(error) = dispatch_batch(&source_id, &dispatchers, batch, commit_scn).await {
             drop(rx);
             let _ = worker.await;
             return Err(error);
@@ -160,23 +173,26 @@ async fn dispatch_batch(
     source_id: &str,
     dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     batch: Vec<SourceChange>,
+    commit_scn: Scn,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
 
+    let position_bytes = bytes::Bytes::from(commit_scn.to_bytes());
     let dispatchers = dispatchers.read().await;
     for dispatcher in dispatchers.iter() {
         for change in &batch {
             let mut profiling = profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(profiling::timestamp_ns());
 
-            let wrapper = SourceEventWrapper::with_profiling(
+            let mut wrapper = SourceEventWrapper::with_profiling(
                 source_id.to_string(),
                 SourceEvent::Change(change.clone()),
                 chrono::Utc::now(),
                 profiling,
             );
+            wrapper.source_position = Some(position_bytes.clone());
             dispatcher.dispatch_change(Arc::new(wrapper)).await?;
         }
     }
@@ -187,10 +203,10 @@ async fn dispatch_batch(
 fn run_logminer_poll_loop(
     source_id: String,
     config: OracleSourceConfig,
-    state_store: Option<Arc<dyn StateStoreProvider>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
+    subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
     shutdown_rx: watch::Receiver<bool>,
-    batch_tx: mpsc::UnboundedSender<Vec<SourceChange>>,
+    batch_tx: mpsc::UnboundedSender<(Vec<SourceChange>, Scn)>,
     runtime: tokio::runtime::Handle,
 ) -> Result<()> {
     let mut shutdown_rx = shutdown_rx;
@@ -203,12 +219,20 @@ fn run_logminer_poll_loop(
     let mut pk_cache = PrimaryKeyCache::new();
     pk_cache.discover_keys(conn, &config)?;
 
-    let mut current_checkpoint =
-        if let Some(checkpoint) = load_checkpoint(&runtime, &source_id, &state_store)? {
-            checkpoint
+    // Use the minimum subscriber resume SCN as the start position.
+    // This ensures no subscriber misses events that occurred after its checkpoint.
+    let mut current_checkpoint = {
+        let positions = runtime.block_on(subscriber_resume_scns.read());
+        if let Some(&min_scn) = positions.values().min() {
+            log::info!(
+                "Using minimum subscriber resume SCN {min_scn} as LogMiner start position for '{source_id}'"
+            );
+            min_scn
         } else {
+            log::debug!("No subscriber resume positions; using configured start_position for '{source_id}'");
             resolve_initial_scn(conn, config.start_position)?
-        };
+        }
+    };
 
     loop {
         if *shutdown_rx.borrow() {
@@ -220,7 +244,6 @@ fn run_logminer_poll_loop(
             if let Some(pending_bootstrap_scn) = bootstrap_state.pending_scn.take() {
                 if pending_bootstrap_scn > current_checkpoint {
                     current_checkpoint = pending_bootstrap_scn;
-                    save_checkpoint(&runtime, &source_id, &state_store, current_checkpoint)?;
                 }
             }
         }
@@ -242,17 +265,15 @@ fn run_logminer_poll_loop(
                 let changes = convert_events_to_changes(&source_id, conn, &pk_cache, &events)?;
                 if !changes.is_empty() {
                     batch_tx
-                        .send(changes)
+                        .send((changes, next_checkpoint))
                         .map_err(|error| anyhow!("failed to send Oracle batch: {error}"))?;
                 }
                 if next_checkpoint != current_checkpoint {
-                    save_checkpoint(&runtime, &source_id, &state_store, next_checkpoint)?;
                     current_checkpoint = next_checkpoint;
                 }
             }
             Err(error) => {
                 if OracleError::classify(&error) == Some(OracleErrorKind::RecoverableScn) {
-                    clear_checkpoint(&runtime, &source_id, &state_store)?;
                     current_checkpoint = get_current_scn(conn)?;
                     continue;
                 }
@@ -642,47 +663,6 @@ fn table_predicates(tables: &[String], default_owner: &str) -> Result<String> {
     Ok(predicates.join(" OR "))
 }
 
-fn load_checkpoint(
-    runtime: &tokio::runtime::Handle,
-    source_id: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-) -> Result<Option<Scn>> {
-    if let Some(store) = state_store {
-        if let Some(bytes) = runtime.block_on(store.get(source_id, CHECKPOINT_KEY))? {
-            match Scn::from_bytes(&bytes) {
-                Ok(scn) => return Ok(Some(scn)),
-                Err(error) => {
-                    log::warn!("Failed to parse stored Oracle SCN checkpoint: {error}");
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn save_checkpoint(
-    runtime: &tokio::runtime::Handle,
-    source_id: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-    scn: Scn,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        runtime.block_on(store.set(source_id, CHECKPOINT_KEY, scn.to_bytes()))?;
-    }
-    Ok(())
-}
-
-fn clear_checkpoint(
-    runtime: &tokio::runtime::Handle,
-    source_id: &str,
-    state_store: &Option<Arc<dyn StateStoreProvider>>,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        runtime.block_on(store.delete(source_id, CHECKPOINT_KEY))?;
-    }
-    Ok(())
-}
-
 pub fn validate_connection(config: &OracleSourceConfig) -> Result<()> {
     let connection = OracleConnection::connect(config)?;
     connection.test_connection()?;
@@ -716,11 +696,6 @@ mod tests {
         assert!(predicates.contains("SEG_OWNER = 'HR'"));
         assert!(predicates.contains("SEG_NAME = 'EMPLOYEES'"));
         assert!(predicates.contains("SEG_NAME = 'DEPARTMENTS'"));
-    }
-
-    #[test]
-    fn test_checkpoint_key() {
-        assert_eq!(CHECKPOINT_KEY, "checkpoint.scn");
     }
 
     #[test]
