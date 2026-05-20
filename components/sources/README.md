@@ -37,6 +37,7 @@ Sources are responsible for:
 | `drasi-source-mock` | Test data generator for development | `mock/` |
 | `drasi-source-platform` | Redis Streams consumer for platform integration | `platform/` |
 | `drasi-source-postgres` | PostgreSQL WAL-based replication | `postgres/` |
+| `drasi-source-hyperliquid` | Hyperliquid market data streaming | `hyperliquid/` |
 
 ## Architecture
 
