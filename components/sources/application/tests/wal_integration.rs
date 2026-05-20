@@ -246,7 +246,10 @@ async fn test_capacity_exhaustion_reject_incoming() {
     let result = handle.send_node_insert("n17", vec!["T"], props).await;
     assert!(result.is_err(), "Expected capacity exhaustion error");
     assert!(
-        result.unwrap_err().to_string().contains("capacity exhausted"),
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("capacity exhausted"),
         "Error should mention capacity exhaustion"
     );
 

@@ -472,7 +472,10 @@ impl ApplicationSource {
                     .await;
 
                 while let Some(event) = rx.recv().await {
-                    debug!("ApplicationSource '{source_name}' received event: {:?}", event.change);
+                    debug!(
+                        "ApplicationSource '{source_name}' received event: {:?}",
+                        event.change
+                    );
 
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
