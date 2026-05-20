@@ -813,7 +813,15 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
 
         let output_file = temp_dir.path().join("order_a_b_ADD.json");
         assert!(output_file.exists());
@@ -838,7 +846,15 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
 
         let output_file = temp_dir.path().join("orders_ADD_1.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -875,7 +891,15 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
 
         let output_file = temp_dir.path().join("unknown-query.log");
         let content = tokio::fs::read_to_string(output_file)
@@ -921,7 +945,15 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(&config, &handlebars, &file_locks, &Arc::new(Mutex::new(HashSet::new())), &result, "test").await;
+        FileReaction::process_result(
+            &config,
+            &handlebars,
+            &file_locks,
+            &Arc::new(Mutex::new(HashSet::new())),
+            &result,
+            "test",
+        )
+        .await;
 
         let output_file = temp_dir.path().join("orders.log");
         let content = tokio::fs::read_to_string(output_file)
