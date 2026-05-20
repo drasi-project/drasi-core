@@ -381,11 +381,11 @@ impl ReplicationStream {
                 self.pending_transaction = Some(Vec::new());
             }
             WalMessage::Commit(tx_info) => {
-                // Commit the transaction
+                // Commit the transaction — stamp all changes with the commit LSN
+                // for atomic checkpoint semantics
                 if let Some(changes) = self.pending_transaction.take() {
-                    // Send all changes in the transaction
-                    for (change, lsn) in changes {
-                        self.dispatch_change(change, lsn).await;
+                    for (change, _) in changes {
+                        self.dispatch_change(change, tx_info.commit_lsn).await;
                     }
                     debug!(
                         "Committed transaction {} with LSN {:x}",

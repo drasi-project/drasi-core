@@ -282,6 +282,7 @@ impl ReplicationConnection {
             consistent_point: String::new(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
+            restart_lsn: None,
         };
 
         loop {
@@ -352,6 +353,7 @@ impl ReplicationConnection {
             consistent_point: "0/0".to_string(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
+            restart_lsn: None,
         };
         let mut found_row = false;
 
@@ -370,10 +372,12 @@ impl ReplicationConnection {
                                 slot_info.consistent_point = lsn;
                             }
                         }
-                        if slot_info.consistent_point == "0/0" {
-                            if let Some(Some(restart_lsn)) = row.get(2) {
-                                let lsn = String::from_utf8_lossy(restart_lsn).to_string();
-                                if !lsn.is_empty() {
+                        if let Some(Some(restart_lsn_val)) = row.get(2) {
+                            let lsn = String::from_utf8_lossy(restart_lsn_val).to_string();
+                            if !lsn.is_empty() {
+                                slot_info.restart_lsn = Some(lsn.clone());
+                                // Fall back to restart_lsn for consistent_point if confirmed_flush is unset
+                                if slot_info.consistent_point == "0/0" {
                                     slot_info.consistent_point = lsn;
                                 }
                             }

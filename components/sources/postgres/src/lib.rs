@@ -585,10 +585,17 @@ impl PostgresReplicationSource {
             .await?;
         let _ = conn.close().await;
 
-        if slot_info.consistent_point.is_empty() || slot_info.consistent_point == "0/0" {
+        // Use restart_lsn (the earliest WAL the slot retains) when available,
+        // falling back to consistent_point for newly created slots.
+        let lsn_str = slot_info
+            .restart_lsn
+            .as_deref()
+            .unwrap_or(&slot_info.consistent_point);
+
+        if lsn_str.is_empty() || lsn_str == "0/0" {
             Ok(0)
         } else {
-            connection::parse_lsn(&slot_info.consistent_point)
+            connection::parse_lsn(lsn_str)
         }
     }
 }
