@@ -33,7 +33,9 @@ pub use config::{CoinSelection, HyperliquidNetwork, HyperliquidSourceConfig, Ini
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_core::models::{Element, SourceChange};
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{
     BootstrapEvent, BootstrapEventSender, ComponentStatus, DispatchMode, SubscriptionResponse,
 };
@@ -144,7 +146,7 @@ impl Source for HyperliquidSource {
             return Ok(());
         }
 
-        self.base.set_status(ComponentStatus::Starting).await;
+        self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting Hyperliquid source '{}'", self.base.id);
 
         let config = self.config.clone();
@@ -253,7 +255,7 @@ impl Source for HyperliquidSource {
         );
 
         *self.task_handle.write().await = Some(stream_task);
-        self.base.set_status(ComponentStatus::Running).await;
+        self.base.set_status(ComponentStatus::Running, None).await;
 
         Ok(())
     }
@@ -273,7 +275,7 @@ impl Source for HyperliquidSource {
             }
         }
 
-        self.base.set_status(ComponentStatus::Stopped).await;
+        self.base.set_status(ComponentStatus::Stopped, None).await;
         Ok(())
     }
 
@@ -497,7 +499,7 @@ impl BootstrapProvider for HyperliquidBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let rest_client = HyperliquidRestClient::new(self.config.network.rest_url());
         let mut node_changes: Vec<SourceChange> = Vec::new();
         let mut relation_changes: Vec<SourceChange> = Vec::new();
@@ -628,7 +630,10 @@ impl BootstrapProvider for HyperliquidBootstrapProvider {
                 .map_err(|e| anyhow::anyhow!("Failed to send bootstrap event: {e}"))?;
         }
 
-        Ok(sequence as usize)
+        Ok(BootstrapResult {
+            event_count: sequence as usize,
+            ..BootstrapResult::default()
+        })
     }
 }
 
