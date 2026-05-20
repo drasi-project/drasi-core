@@ -23,6 +23,7 @@ members = [
   "components/bootstrappers/mssql",
   "components/bootstrappers/dataverse",
   "components/bootstrappers/http",
+  "components/bootstrappers/sui-deepbook",
 
   # Source Plugins
   "components/sources/postgres",
@@ -36,6 +37,7 @@ members = [
   "components/sources/mssql",
   "components/sources/dataverse",
   "components/sources/hyperliquid",
+  "components/sources/sui-deepbook",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -125,6 +127,8 @@ drasi-host-sdk = { version = "0.8.1", path = "components/host-sdk" }
 
 # Common dependencies
 im = "15"
+# Pin roaring below 0.11.4 which requires rustc 1.90.0 (transitive via sui-sdk-types)
+roaring = ">=0.11.2, <0.11.4"
 utoipa = { version = "4", features = ["chrono"] }
 drasi-index-rocksdb = { version = "0.5.1", path = "components/indexes/rocksdb" }
 drasi-index-garnet = { version = "0.3.0", path = "components/indexes/garnet" }
@@ -142,6 +146,8 @@ drasi-reaction-http = { version = "0.2.1", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.3.1", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.2.1", path = "components/mssql-common" }
 drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
+drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
+drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook" }
 
 [workspace.lints.rust]
 warnings = "deny"
