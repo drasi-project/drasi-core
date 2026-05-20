@@ -658,6 +658,17 @@ impl SourceBase {
         // Recover sequence counter from checkpoint before anything else
         self.apply_subscription_settings(settings);
 
+        self.subscribe_with_bootstrap_context(settings, source_type, HashMap::new())
+            .await
+    }
+
+    /// Subscribe to this source with optional bootstrap context properties.
+    pub async fn subscribe_with_bootstrap_context(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
             settings.query_id,
@@ -703,7 +714,7 @@ impl SourceBase {
             (None, None)
         } else if settings.enable_bootstrap {
             match self
-                .handle_bootstrap_subscription(settings, source_type)
+                .handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
                 .await?
             {
                 Some((event_rx, result_rx)) => (Some(event_rx), Some(result_rx)),
@@ -741,6 +752,19 @@ impl SourceBase {
         })
     }
 
+    /// Create only the bootstrap receiver for a subscription.
+    pub async fn create_bootstrap_receiver(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<Option<BootstrapEventReceiver>> {
+        Ok(self
+            .handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
+            .await?
+            .map(|(bootstrap_receiver, _)| bootstrap_receiver))
+    }
+
     /// Handle bootstrap subscription logic.
     ///
     /// Returns the bootstrap event receiver and a oneshot receiver for the
@@ -749,6 +773,7 @@ impl SourceBase {
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
     ) -> Result<
         Option<(
             BootstrapEventReceiver,
@@ -765,10 +790,18 @@ impl SourceBase {
             );
 
             // Create bootstrap context
-            let context = BootstrapContext::new_minimal(
-                self.id.clone(), // server_id
-                self.id.clone(), // source_id
-            );
+            let context = if bootstrap_properties.is_empty() {
+                BootstrapContext::new_minimal(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                )
+            } else {
+                BootstrapContext::with_properties(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                    bootstrap_properties,
+                )
+            };
 
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
