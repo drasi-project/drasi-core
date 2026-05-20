@@ -348,7 +348,7 @@ impl FileReaction {
         context.insert("uuid".into(), Value::String(Uuid::new_v4().to_string()));
 
         match diff {
-            ResultDiff::Add { data } => {
+            ResultDiff::Add { data, .. } => {
                 context.insert("after".into(), data.clone());
                 context.insert("data".into(), data.clone());
             }
@@ -362,11 +362,11 @@ impl FileReaction {
                 context.insert("after".into(), after.clone());
                 context.insert("data".into(), data.clone());
             }
-            ResultDiff::Delete { data } => {
+            ResultDiff::Delete { data, .. } => {
                 context.insert("before".into(), data.clone());
                 context.insert("data".into(), data.clone());
             }
-            ResultDiff::Aggregation { before, after } => {
+            ResultDiff::Aggregation { before, after, .. } => {
                 context.insert("before".into(), before.clone().unwrap_or(Value::Null));
                 context.insert("after".into(), after.clone());
                 context.insert("data".into(), after.clone());
