@@ -152,20 +152,20 @@
 //!
 //! # Usage Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
 //! use std::sync::Arc;
 //!
-//! let config = PostgresSourceBuilder::new()
+//! # fn main() -> anyhow::Result<()> {
+//! let source = PostgresReplicationSource::builder("pg-source")
 //!     .with_host("db.example.com")
 //!     .with_database("production")
 //!     .with_user("replication_user")
 //!     .with_password("secret")
 //!     .with_tables(vec!["users".to_string(), "orders".to_string()])
-//!     .build();
-//!
-//! let source = Arc::new(PostgresReplicationSource::new("pg-source", config)?);
-//! drasi.add_source(source).await?;
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;
@@ -361,17 +361,19 @@ impl PostgresReplicationSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use drasi_source_postgres::PostgresReplicationSource;
     ///
+    /// # fn main() -> anyhow::Result<()> {
     /// let source = PostgresReplicationSource::builder("pg-source")
     ///     .with_host("db.example.com")
     ///     .with_database("production")
     ///     .with_user("replication_user")
     ///     .with_password("secret")
     ///     .with_tables(vec!["users".to_string(), "orders".to_string()])
-    ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(id: impl Into<String>) -> PostgresSourceBuilder {
         PostgresSourceBuilder::new(id)
@@ -397,16 +399,26 @@ impl PostgresReplicationSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+    /// ```rust,no_run
+    /// use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceConfig, SslMode};
     ///
-    /// let config = PostgresSourceBuilder::new()
-    ///     .with_host("db.example.com")
-    ///     .with_database("mydb")
-    ///     .with_user("replication_user")
-    ///     .build();
+    /// # fn main() -> anyhow::Result<()> {
+    /// let config = PostgresSourceConfig {
+    ///     host: "db.example.com".to_string(),
+    ///     port: 5432,
+    ///     database: "mydb".to_string(),
+    ///     user: "replication_user".to_string(),
+    ///     password: "secret".to_string(),
+    ///     tables: vec!["users".to_string()],
+    ///     slot_name: "drasi_slot".to_string(),
+    ///     publication_name: "drasi_pub".to_string(),
+    ///     ssl_mode: SslMode::Disable,
+    ///     table_keys: vec![],
+    /// };
     ///
     /// let source = PostgresReplicationSource::new("my-pg-source", config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(id: impl Into<String>, config: PostgresSourceConfig) -> Result<Self> {
         let id = id.into();
@@ -819,9 +831,10 @@ impl Source for PostgresReplicationSource {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use drasi_source_postgres::PostgresReplicationSource;
 ///
+/// # fn main() -> anyhow::Result<()> {
 /// let source = PostgresReplicationSource::builder("pg-source")
 ///     .with_host("db.example.com")
 ///     .with_database("production")
@@ -830,6 +843,8 @@ impl Source for PostgresReplicationSource {
 ///     .with_tables(vec!["users".to_string(), "orders".to_string()])
 ///     .with_slot_name("my_slot")
 ///     .build()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct PostgresSourceBuilder {
     id: String,
