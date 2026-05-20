@@ -754,7 +754,9 @@ impl Source for PostgresReplicationSource {
                 return Err(SourceError::PositionUnavailable {
                     source_id: self.base.id.clone(),
                     requested: resume_bytes.clone(),
-                    earliest_available: Some(Bytes::from(earliest_available.to_be_bytes().to_vec())),
+                    earliest_available: Some(Bytes::from(
+                        earliest_available.to_be_bytes().to_vec(),
+                    )),
                 }
                 .into());
             }

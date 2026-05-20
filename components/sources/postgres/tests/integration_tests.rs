@@ -20,8 +20,8 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
-use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
 use drasi_lib::ComponentStatus;
+use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
 use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
@@ -856,11 +856,7 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
             Err(_) => continue,
         }
     }
-    assert_eq!(
-        positions.len(),
-        2,
-        "Should receive 2 events with positions"
-    );
+    assert_eq!(positions.len(), 2, "Should receive 2 events with positions");
 
     // The first position is the LSN of the first event. Try resuming from it.
     // This should replay all events from that LSN onwards (i.e., both events).
@@ -872,8 +868,7 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     source.start().await?;
     wait_for_source_running(&source).await;
 
-    let settings =
-        subscription_settings("pg-direct-source", "q-resumed", Some(resume_lsn), true);
+    let settings = subscription_settings("pg-direct-source", "q-resumed", Some(resume_lsn), true);
     let response = source.subscribe(settings).await?;
     let mut rx2 = response.receiver;
 
