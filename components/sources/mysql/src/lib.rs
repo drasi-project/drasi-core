@@ -205,10 +205,17 @@ impl Source for MySqlReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
+        self.base
+            .set_position_comparator(crate::types::MySqlPositionComparator)
+            .await;
     }
 
     async fn set_bootstrap_provider(&self, provider: Box<dyn BootstrapProvider + 'static>) {
         self.base.set_bootstrap_provider(provider).await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        self.base.remove_position_handle(query_id).await;
     }
 }
 

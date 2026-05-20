@@ -477,3 +477,532 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         mismatches.join("\n")
     );
 }
+
+// --- Checkpoint Recovery Integration Tests ---
+
+use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+use drasi_reaction_application::subscription::SubscriptionOptions;
+
+/// Helper to start a MySQL container with replication and GTID enabled.
+#[allow(clippy::unwrap_used)]
+async fn setup_mysql_container() -> (testcontainers::ContainerAsync<Mysql>, u16) {
+    let mysql_image = Mysql::default()
+        .with_env_var("MYSQL_DATABASE", "test")
+        .with_env_var("MYSQL_USER", "test")
+        .with_env_var("MYSQL_PASSWORD", "test")
+        .with_env_var("MYSQL_ROOT_PASSWORD", "root")
+        .with_env_var("MYSQL_AUTHENTICATION_PLUGIN", "mysql_native_password")
+        .with_cmd(vec![
+            "--log-bin=mysql-bin",
+            "--binlog-format=ROW",
+            "--binlog-row-image=FULL",
+            "--binlog-row-metadata=FULL",
+            "--server-id=1",
+            "--gtid-mode=ON",
+            "--enforce-gtid-consistency=ON",
+        ]);
+
+    let container = mysql_image.start().await.unwrap();
+    let port = container.get_host_port_ipv4(3306).await.unwrap();
+    (container, port)
+}
+
+/// Create the test table and grant replication privileges.
+#[allow(clippy::unwrap_used)]
+async fn prepare_mysql_database(port: u16) {
+    let root_opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname("127.0.0.1")
+        .tcp_port(port)
+        .user(Some("root"))
+        .pass(Some("root"))
+        .db_name(Some("test"));
+
+    let mut conn = Conn::new(root_opts).await.unwrap();
+
+    // Wait for MySQL to be fully ready
+    for _ in 0..20 {
+        if conn.query_drop("SELECT 1").await.is_ok() {
+            break;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    conn.query_drop(
+        "CREATE TABLE items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            value DECIMAL(10,2) NOT NULL
+        )",
+    )
+    .await
+    .unwrap();
+
+    conn.query_drop("CREATE USER IF NOT EXISTS 'test'@'%' IDENTIFIED BY 'test'")
+        .await
+        .unwrap();
+    conn.query_drop("GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'test'@'%'")
+        .await
+        .unwrap();
+    conn.query_drop("GRANT SELECT, INSERT, UPDATE, DELETE ON test.* TO 'test'@'%'")
+        .await
+        .unwrap();
+    conn.query_drop("FLUSH PRIVILEGES").await.unwrap();
+    conn.disconnect().await.unwrap();
+}
+
+/// Get a test connection.
+#[allow(clippy::unwrap_used)]
+async fn test_conn(port: u16) -> Conn {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname("127.0.0.1")
+        .tcp_port(port)
+        .user(Some("test"))
+        .pass(Some("test"))
+        .db_name(Some("test"));
+    Conn::new(opts).await.unwrap()
+}
+
+/// Helper: wait for a specific change to appear in the subscription.
+async fn wait_for_change<F>(
+    sub: &mut drasi_reaction_application::subscription::Subscription,
+    max_attempts: usize,
+    predicate: F,
+) -> Result<(), String>
+where
+    F: Fn(&ResultDiff) -> bool,
+{
+    for _ in 0..max_attempts {
+        if let Ok(Some(result)) = timeout(Duration::from_secs(3), sub.recv()).await {
+            for row in &result.results {
+                if predicate(row) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err("Change not found within attempts".to_string())
+}
+
+fn is_add_with_name(diff: &ResultDiff, expected_name: &str) -> bool {
+    match diff {
+        ResultDiff::Add { data, .. } => {
+            data.get("name").and_then(|v| v.as_str()) == Some(expected_name)
+        }
+        _ => false,
+    }
+}
+
+/// Full query stop/restart checkpoint recovery test for MySQL.
+///
+/// 1. Bootstrap from existing data (snapshot captures binlog position).
+///    NOTE: Bootstrap only populates query state; it does NOT emit diffs
+///    to reactions. We verify bootstrap via `get_query_results()`.
+/// 2. Insert rows via CDC so the checkpoint advances.
+/// 3. Stop the query, then restart it within the same DrasiLib.
+/// 4. Insert a new row post-restart to verify the query resumes streaming
+///    from the checkpointed position without re-bootstrapping.
+#[tokio::test]
+#[ignore]
+async fn test_mysql_checkpoint_recovery_round_trip() {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let result = timeout(Duration::from_secs(300), async {
+        let (_container, port) = setup_mysql_container().await;
+        prepare_mysql_database(port).await;
+
+        let mut conn = test_conn(port).await;
+
+        // Seed data for bootstrap
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('Seed1', 10.00)")
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(1)).await;
+
+        let bootstrap = MySqlBootstrapProvider::builder()
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .build()
+            .unwrap();
+
+        let source = MySqlReplicationSource::builder("mysql-cp-src")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .with_start_position(StartPosition::FromEnd)
+            .with_bootstrap_provider(bootstrap)
+            .build()
+            .unwrap();
+
+        let query = Query::cypher("cp-query")
+            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+            .from_source("mysql-cp-src")
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("cp-reaction")
+            .with_query("cp-query")
+            .build();
+
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+        let core = DrasiLib::builder()
+            .with_id("mysql-cp-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .unwrap();
+
+        core.start().await.unwrap();
+
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        // Phase 1: Wait for bootstrap to complete (populates query state only,
+        // does NOT emit to reactions). Poll get_query_results() until the
+        // bootstrapped row appears.
+        let mut bootstrap_done = false;
+        for _ in 0..30 {
+            sleep(Duration::from_secs(1)).await;
+            if let Ok(results) = core.get_query_results("cp-query").await {
+                for row in &results {
+                    if row.get("name").and_then(|v| v.as_str()) == Some("Seed1") {
+                        bootstrap_done = true;
+                    }
+                }
+            }
+            if bootstrap_done {
+                break;
+            }
+        }
+        assert!(bootstrap_done, "Bootstrap did not populate query state with Seed1");
+
+        // Insert a CDC row to advance checkpoint beyond bootstrap
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('CDC1', 20.00)")
+            .await
+            .unwrap();
+
+        wait_for_change(&mut sub, 10, |entry| is_add_with_name(entry, "CDC1"))
+            .await
+            .expect("Did not observe CDC row");
+
+        // Let checkpoint persist
+        sleep(Duration::from_secs(2)).await;
+
+        // Phase 2: Stop and restart the query
+        core.stop_query("cp-query").await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+        core.start_query("cp-query").await.unwrap();
+
+        // Phase 3: Insert a new row post-restart to verify recovery.
+        // Since the source is still running, new CDC events should flow
+        // to the re-subscribed query.
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('PostRestart', 30.00)")
+            .await
+            .unwrap();
+
+        wait_for_change(&mut sub, 15, |entry| is_add_with_name(entry, "PostRestart"))
+            .await
+            .expect("Did not observe post-restart CDC row — checkpoint recovery may have failed");
+
+        core.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "test_mysql_checkpoint_recovery_round_trip timed out"
+    );
+}
+
+/// Verify that bootstrap's captured binlog position is persisted and used as
+/// the CDC resume point after a full system restart.
+///
+/// Unlike `test_mysql_full_restart_picks_up_offline_changes` (which advances
+/// the checkpoint via CDC before stopping), this test verifies recovery from
+/// the BOOTSTRAP snapshot position alone (no prior CDC events).
+///
+/// 1. Start system with bootstrap from empty table (captures binlog position).
+/// 2. Full stop the entire system.
+/// 3. Insert a row while everything is stopped.
+/// 4. Full restart — source reconnects from persisted position (set during
+///    bootstrap), picks up the row inserted during the outage.
+#[tokio::test]
+#[ignore]
+async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let result = timeout(Duration::from_secs(300), async {
+        let (_container, port) = setup_mysql_container().await;
+        prepare_mysql_database(port).await;
+
+        let bootstrap = MySqlBootstrapProvider::builder()
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .build()
+            .unwrap();
+
+        let source = MySqlReplicationSource::builder("mysql-bs-src")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .with_start_position(StartPosition::FromEnd)
+            .with_bootstrap_provider(bootstrap)
+            .build()
+            .unwrap();
+
+        let query = Query::cypher("bs-query")
+            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+            .from_source("mysql-bs-src")
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("bs-reaction")
+            .with_query("bs-query")
+            .build();
+
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+        let core = DrasiLib::builder()
+            .with_id("mysql-bs-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .unwrap();
+
+        core.start().await.unwrap();
+
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        // Phase 1: Wait for bootstrap to complete (empty table, so just wait
+        // for the system to stabilize and persist the checkpoint).
+        sleep(Duration::from_secs(5)).await;
+
+        // Phase 2: Full stop, insert while stopped, full restart.
+        // The source persists its binlog position (captured during bootstrap)
+        // so on restart it reconnects from there.
+        core.stop().await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        // Insert data while everything is stopped
+        let mut conn = test_conn(port).await;
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('WhileStopped', 42.00)")
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(1)).await;
+
+        // Phase 3: Full restart
+        core.start().await.unwrap();
+
+        // The row inserted while stopped should be picked up because the
+        // source resumes from the bootstrap-captured binlog position.
+        wait_for_change(&mut sub, 20, |entry| {
+            is_add_with_name(entry, "WhileStopped")
+        })
+        .await
+        .expect(
+            "Did not observe row inserted while stopped — \
+             bootstrap snapshot position may not have been persisted correctly",
+        );
+
+        core.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "test_mysql_bootstrap_then_restart_resumes_from_snapshot_position timed out"
+    );
+}
+
+/// Full system stop/restart test — verifies that a change made while the entire
+/// Drasi system is down (including the source) is picked up after restart.
+///
+/// 1. Bootstrap and process some CDC events so checkpoint advances.
+/// 2. Stop ALL components (source + query + reaction) via `core.stop()`.
+/// 3. Insert a row while everything is stopped.
+/// 4. Restart ALL components via `core.start()`.
+/// 5. Verify the row inserted during the outage is delivered to the reaction.
+#[tokio::test]
+#[ignore]
+async fn test_mysql_full_restart_picks_up_offline_changes() {
+    use drasi_index_rocksdb::RocksDbIndexProvider;
+    use std::sync::Arc;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let result = timeout(Duration::from_secs(300), async {
+        let (_container, port) = setup_mysql_container().await;
+        prepare_mysql_database(port).await;
+
+        let mut conn = test_conn(port).await;
+
+        // Seed data for bootstrap
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('Seed', 1.00)")
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(1)).await;
+
+        let bootstrap = MySqlBootstrapProvider::builder()
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .build()
+            .unwrap();
+
+        let source = MySqlReplicationSource::builder("mysql-fr-src")
+            .with_host("127.0.0.1")
+            .with_port(port)
+            .with_database("test")
+            .with_user("test")
+            .with_password("test")
+            .with_tables(vec!["items".to_string()])
+            .with_start_position(StartPosition::FromEnd)
+            .with_bootstrap_provider(bootstrap)
+            .build()
+            .unwrap();
+
+        let query = Query::cypher("fr-query")
+            .query("MATCH (i:items) RETURN i.id AS id, i.name AS name, i.value AS value")
+            .from_source("mysql-fr-src")
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
+                path: tmp_dir.path().to_string_lossy().to_string(),
+                enable_archive: false,
+                direct_io: false,
+            }))
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("fr-reaction")
+            .with_query("fr-query")
+            .build();
+
+        let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+
+        let core = DrasiLib::builder()
+            .with_id("mysql-fr-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_index_provider(Arc::new(provider))
+            .build()
+            .await
+            .unwrap();
+
+        core.start().await.unwrap();
+
+        let mut sub = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        // Phase 1: Let bootstrap finish and process one CDC event
+        sleep(Duration::from_secs(3)).await;
+
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('PreStop', 2.00)")
+            .await
+            .unwrap();
+
+        wait_for_change(&mut sub, 15, |entry| is_add_with_name(entry, "PreStop"))
+            .await
+            .expect("Did not observe CDC row before stop");
+
+        // Let the checkpoint persist
+        sleep(Duration::from_secs(2)).await;
+
+        // Phase 2: Full stop (source + query + reaction)
+        core.stop().await.unwrap();
+        sleep(Duration::from_millis(500)).await;
+
+        // Insert data while everything is stopped
+        conn.query_drop("INSERT INTO items (name, value) VALUES ('WhileStopped', 3.00)")
+            .await
+            .unwrap();
+        sleep(Duration::from_secs(1)).await;
+
+        // Phase 3: Full restart
+        core.start().await.unwrap();
+
+        // Phase 4: Verify the offline change is delivered
+        wait_for_change(&mut sub, 20, |entry| {
+            is_add_with_name(entry, "WhileStopped")
+        })
+        .await
+        .expect(
+            "Did not observe row inserted while stopped — \
+             full restart CDC resume may have skipped the offline change",
+        );
+
+        core.stop().await.unwrap();
+        conn.disconnect().await.unwrap();
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "test_mysql_full_restart_picks_up_offline_changes timed out"
+    );
+}

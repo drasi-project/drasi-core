@@ -49,6 +49,7 @@ pub struct ReplicationStream {
     current_binlog_file: String,
     current_binlog_position: u32,
     current_gtid: Option<String>,
+    current_event_timestamp: u64,
     shutdown: StdArc<AtomicBool>,
 }
 
@@ -81,6 +82,7 @@ impl ReplicationStream {
             current_binlog_file: String::new(),
             current_binlog_position: 0,
             current_gtid: None,
+            current_event_timestamp: 0,
             shutdown,
         }
     }
@@ -337,6 +339,7 @@ impl ReplicationStream {
         state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
     ) -> Result<()> {
         let header = event.header();
+        self.current_event_timestamp = header.timestamp() as u64;
 
         match event.read_data()? {
             Some(EventData::TableMapEvent(_)) => {}
@@ -441,11 +444,15 @@ impl ReplicationStream {
             return Ok(());
         }
 
-        let wrapper = SourceEventWrapper::new(
+        let mut wrapper = SourceEventWrapper::new(
             self.source_id.clone(),
             SourceEvent::Change(change),
             chrono::Utc::now(),
         );
+
+        // Attach the current replication position for checkpoint recovery
+        wrapper
+            .set_source_position(self.position_bytes_with_timestamp(self.current_event_timestamp));
 
         SourceBase::dispatch_from_task(self.base.dispatchers.clone(), wrapper, &self.source_id)
             .await
@@ -456,13 +463,22 @@ impl ReplicationStream {
         state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
         header: &BinlogEventHeader,
     ) -> Result<()> {
+        // Update position from commit header before dispatching
+        let commit_position = match header.log_pos() {
+            0 => self.current_binlog_position,
+            position => position,
+        };
+        self.current_binlog_position = commit_position;
+
         if let Some(changes) = self.pending_changes.take() {
+            let position_bytes = self.position_bytes_with_timestamp(header.timestamp() as u64);
             for change in changes {
-                let wrapper = SourceEventWrapper::new(
+                let mut wrapper = SourceEventWrapper::new(
                     self.source_id.clone(),
                     SourceEvent::Change(change),
                     chrono::Utc::now(),
                 );
+                wrapper.set_source_position(position_bytes.clone());
                 SourceBase::dispatch_from_task(
                     self.base.dispatchers.clone(),
                     wrapper,
@@ -485,6 +501,17 @@ impl ReplicationStream {
         if self.pending_changes.is_none() {
             self.pending_changes = Some(Vec::new());
         }
+    }
+
+    /// Build a position token from the current replication state with a given timestamp.
+    fn position_bytes_with_timestamp(&self, timestamp: u64) -> bytes::Bytes {
+        let state = ReplicationState {
+            binlog_file: self.current_binlog_file.clone(),
+            binlog_position: self.current_binlog_position,
+            gtid_set: self.current_gtid.clone(),
+            last_processed_timestamp: timestamp,
+        };
+        state.to_position_bytes()
     }
 
     fn should_process_table(&self, table: &TableMapEvent<'_>) -> bool {

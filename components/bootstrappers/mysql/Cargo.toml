@@ -45,6 +45,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ordered-float = "3.0"
 mysql_async = "0.34"
 mysql_common = "0.32"
+bytes = "1.0"
 
 [features]
 dynamic-plugin = []

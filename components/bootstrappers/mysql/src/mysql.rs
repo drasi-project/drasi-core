@@ -36,6 +36,16 @@ use drasi_mysql_common::{
     escape_identifier, format_value_for_key, is_valid_identifier, quote_identifier,
 };
 
+/// Binlog position captured during bootstrap snapshot.
+/// Must be serialization-compatible with the source's `ReplicationState`.
+#[derive(serde::Serialize)]
+struct BootstrapBinlogPosition {
+    binlog_file: String,
+    binlog_position: u32,
+    gtid_set: Option<String>,
+    last_processed_timestamp: u64,
+}
+
 pub struct MySqlBootstrapHandler {
     config: MySqlBootstrapConfig,
     table_keys: HashMap<String, Vec<String>>,
@@ -79,6 +89,10 @@ impl MySqlBootstrapHandler {
             });
         }
 
+        // Capture the current binlog position before reading snapshot data.
+        // This becomes the resume point for checkpoint recovery.
+        let source_position = self.capture_binlog_position(&mut conn).await?;
+
         let mut total = 0usize;
         for (label, table_name) in tables {
             let count = self
@@ -91,7 +105,7 @@ impl MySqlBootstrapHandler {
             event_count: total,
             last_sequence: None,
             sequences_aligned: false,
-            source_position: None,
+            source_position,
         })
     }
 
@@ -104,6 +118,36 @@ impl MySqlBootstrapHandler {
             .db_name(Some(&self.config.database));
         let conn = Conn::new(opts).await?;
         Ok(conn)
+    }
+
+    /// Capture the current binlog position for use as the bootstrap snapshot point.
+    ///
+    /// Tries `SHOW BINARY LOG STATUS` (MySQL 8.4+) first, then falls back to
+    /// `SHOW MASTER STATUS` for older versions.
+    async fn capture_binlog_position(&self, conn: &mut Conn) -> Result<Option<bytes::Bytes>> {
+        let row: Option<Row> = match "SHOW BINARY LOG STATUS".first(&mut *conn).await {
+            Ok(row) => row,
+            Err(_) => "SHOW MASTER STATUS".first(conn).await?,
+        };
+
+        let Some(row) = row else {
+            warn!("Could not capture binlog position for bootstrap snapshot");
+            return Ok(None);
+        };
+
+        let file: String = row.get(0).unwrap_or_default();
+        let position: u64 = row.get(1).unwrap_or(0);
+        let gtid_set: Option<String> = row.get(4);
+
+        let state = BootstrapBinlogPosition {
+            binlog_file: file,
+            binlog_position: position as u32,
+            gtid_set,
+            last_processed_timestamp: 0,
+        };
+
+        let bytes = serde_json::to_vec(&state)?;
+        Ok(Some(bytes::Bytes::from(bytes)))
     }
 
     async fn determine_tables(&self, request: &BootstrapRequest) -> Result<Vec<(String, String)>> {
