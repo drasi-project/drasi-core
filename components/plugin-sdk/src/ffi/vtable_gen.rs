@@ -540,6 +540,21 @@ pub fn build_source_vtable<T: Source + 'static>(
         FfiOwnedStr::from_string(json)
     }
 
+    extern "C" fn describe_schema_fn<T: Source + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!("Source::describe_schema panicked for '{}'", w.cached_id);
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
     /// Emit a lifecycle event, preferring per-instance callback over global.
     fn emit_lifecycle_for<T: Source + 'static>(
         w: &SourceWrapper<T>,
@@ -685,6 +700,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_len: u32,
         has_last_sequence: bool,
         last_sequence: u64,
+        request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -716,7 +732,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             nodes,
             relations,
             resume_from,
-            request_position_handle: false,
+            request_position_handle,
             last_sequence: if has_last_sequence {
                 Some(last_sequence)
             } else {
@@ -809,6 +825,28 @@ pub fn build_source_vtable<T: Source + 'static>(
         });
     }
 
+    extern "C" fn supports_replay_fn<T: Source + 'static>(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn<T: Source + 'static>(
+        state: *mut c_void,
+        query_id: FfiStr,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -835,6 +873,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         auto_start_fn: auto_start_fn::<T>,
         dispatch_mode_fn: dispatch_mode_fn::<T>,
         properties_fn: properties_fn::<T>,
+        describe_schema_fn: describe_schema_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -842,6 +881,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         initialize_fn: initialize_fn::<T>,
         subscribe_fn: subscribe_fn::<T>,
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
+        supports_replay_fn: supports_replay_fn::<T>,
+        remove_position_handle_fn: remove_position_handle_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -896,6 +937,24 @@ pub fn build_source_vtable_from_boxed(
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let props = w.inner.properties();
         let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
+    extern "C" fn describe_schema_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!(
+                    "Dynamic source describe_schema panicked for '{}'",
+                    w.cached_id
+                );
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
         FfiOwnedStr::from_string(json)
     }
 
@@ -1038,6 +1097,7 @@ pub fn build_source_vtable_from_boxed(
         resume_from_len: u32,
         has_last_sequence: bool,
         last_sequence: u64,
+        request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -1069,7 +1129,7 @@ pub fn build_source_vtable_from_boxed(
             nodes,
             relations,
             resume_from,
-            request_position_handle: false,
+            request_position_handle,
             last_sequence: if has_last_sequence {
                 Some(last_sequence)
             } else {
@@ -1158,6 +1218,25 @@ pub fn build_source_vtable_from_boxed(
         });
     }
 
+    extern "C" fn supports_replay_fn(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn(state: *mut c_void, query_id: FfiStr) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -1184,6 +1263,7 @@ pub fn build_source_vtable_from_boxed(
         auto_start_fn,
         dispatch_mode_fn,
         properties_fn,
+        describe_schema_fn,
         start_fn,
         stop_fn,
         status_fn,
@@ -1191,6 +1271,8 @@ pub fn build_source_vtable_from_boxed(
         initialize_fn,
         subscribe_fn,
         set_bootstrap_provider_fn,
+        supports_replay_fn,
+        remove_position_handle_fn,
         drop_fn,
     }
 }
@@ -1992,7 +2074,7 @@ pub fn build_bootstrap_provider_vtable(
         server_id: FfiStr,
         source_id: FfiStr,
         sender: *mut FfiBootstrapSender,
-    ) -> i64 {
+    ) -> *mut FfiBootstrapResult {
         use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 
         let query_id_str = unsafe { query_id.to_string() };
@@ -2022,6 +2104,10 @@ pub fn build_bootstrap_provider_vtable(
         let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
+        // Channel to carry the BootstrapResult back from the provider thread
+        let (result_tx, result_rx) =
+            std::sync::mpsc::channel::<Result<drasi_lib::bootstrap::BootstrapResult, String>>();
+
         // Run the actual bootstrap provider in a background thread with its own tokio runtime
         let provider_ptr = SendPtr(state as *const BootstrapProviderWrapper);
         let _bootstrap_handle = std::thread::spawn(move || {
@@ -2038,11 +2124,12 @@ pub fn build_bootstrap_provider_vtable(
                         }
                     }
                 });
-                let _ = inner
+                let bootstrap_result = inner
                     .inner
                     .bootstrap(request, &context, tokio_tx, None)
                     .await;
                 let _ = forward_handle.await;
+                let _ = result_tx.send(bootstrap_result.map_err(|e| format!("{e:#}")));
             })
         });
 
@@ -2084,7 +2171,70 @@ pub fn build_bootstrap_provider_vtable(
             count += 1;
         }
 
-        count as i64
+        // Collect the BootstrapResult from the provider thread.
+        // If the provider failed, return a null pointer so the host can
+        // detect the error instead of treating it as a successful bootstrap.
+        let provider_result = match result_rx.recv() {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(e)) => {
+                log::error!("Bootstrap provider failed for source '{source_id_str}': {e}");
+                return std::ptr::null_mut();
+            }
+            Err(_) => {
+                log::error!(
+                    "Bootstrap provider thread exited without sending result for source '{source_id_str}'"
+                );
+                return std::ptr::null_mut();
+            }
+        };
+
+        // Build the FFI result with full handover metadata
+        let (
+            last_sequence,
+            sequences_aligned,
+            source_position_ptr,
+            source_position_len,
+            source_position_drop_fn,
+        ) = if let Some(ref br) = provider_result {
+            let last_seq = br.last_sequence.map(|s| s as i64).unwrap_or(-1);
+            let aligned = br.sequences_aligned;
+            if let Some(ref pos) = br.source_position {
+                let pos_vec = pos.to_vec();
+                let len = pos_vec.len();
+                let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                (
+                    last_seq,
+                    aligned,
+                    leaked as *const u8,
+                    len,
+                    Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)),
+                )
+            } else {
+                (last_seq, aligned, std::ptr::null(), 0, None)
+            }
+        } else {
+            (-1i64, false, std::ptr::null(), 0, None)
+        };
+
+        let ffi_result = Box::new(FfiBootstrapResult {
+            event_count: count as i64,
+            last_sequence,
+            sequences_aligned,
+            source_position_ptr,
+            source_position_len,
+            source_position_drop_fn,
+        });
+
+        Box::into_raw(ffi_result)
+    }
+
+    extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                let slice = std::slice::from_raw_parts_mut(ptr, len);
+                drop(Box::from_raw(slice as *mut [u8]));
+            }
+        }
     }
 
     extern "C" fn bootstrap_event_drop(opaque: *mut c_void) {
@@ -2899,11 +3049,178 @@ fn wrap_subscription_response(
         std::ptr::null_mut()
     };
 
+    // Transfer position_handle Arc across FFI.
+    // Arc::into_raw transfers one ref-count without decrementing. The host
+    // reconstructs with Arc::from_raw. Both sides (plugin's SourceBase HashMap
+    // and host's query manager) share the same AtomicU64 allocation.
+    let position_handle_ptr = match sub.position_handle {
+        Some(arc) => std::sync::Arc::into_raw(arc) as *const c_void,
+        None => std::ptr::null(),
+    };
+
+    // Wrap bootstrap_result_receiver as push-based FfiBootstrapResultReceiver.
+    // Uses Arc<BootstrapResultState> so drop_fn is safe to call while the
+    // spawned task may still hold a reference.
+    let bootstrap_result_receiver = if let Some(result_rx) = sub.bootstrap_result_receiver {
+        use super::vtables::{FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver};
+
+        struct BootstrapResultState {
+            rx: tokio::sync::Mutex<
+                Option<
+                    tokio::sync::oneshot::Receiver<
+                        anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                    >,
+                >,
+            >,
+            runtime_handle: tokio::runtime::Handle,
+        }
+
+        extern "C" fn bootstrap_result_start_fn(
+            state: *mut c_void,
+            callback: FfiBootstrapResultCallbackFn,
+            ctx: *mut c_void,
+        ) {
+            ffi_guard((), || {
+                // Reconstruct the Arc without incrementing the ref count,
+                // then clone for the task and re-leak so drop_fn stays valid.
+                let arc = unsafe { Arc::from_raw(state as *const BootstrapResultState) };
+                let rt_handle = arc.runtime_handle.clone();
+                let task_arc = arc.clone();
+                let _ = Arc::into_raw(arc);
+
+                let ctx_raw = ctx as usize;
+
+                // Sentinel guarantees the callback is always invoked exactly
+                // once, even if the async task panics or is cancelled —
+                // same pattern as SourceSentinelOnDrop / BootstrapSentinelOnDrop.
+                struct BootstrapResultSentinel {
+                    ctx_raw: usize,
+                    callback: FfiBootstrapResultCallbackFn,
+                }
+                impl Drop for BootstrapResultSentinel {
+                    fn drop(&mut self) {
+                        let cb = self.callback;
+                        let ctx = self.ctx_raw as *mut c_void;
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cb(ctx, std::ptr::null_mut());
+                        }));
+                    }
+                }
+
+                rt_handle.spawn(async move {
+                    let _sentinel = BootstrapResultSentinel { ctx_raw, callback };
+                    let rx = task_arc.rx.lock().await.take();
+                    if let Some(rx) = rx {
+                        match rx.await {
+                            Ok(Ok(result)) => {
+                                let last_sequence =
+                                    result.last_sequence.map(|s| s as i64).unwrap_or(-1);
+                                let sequences_aligned = result.sequences_aligned;
+
+                                let (
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                ) = if let Some(ref pos) = result.source_position {
+                                    let pos_vec = pos.to_vec();
+                                    let len = pos_vec.len();
+                                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                                    (
+                                        leaked as *const u8,
+                                        len,
+                                        Some(
+                                            ffi_drop_position_bytes
+                                                as extern "C" fn(*mut u8, usize),
+                                        ),
+                                    )
+                                } else {
+                                    (std::ptr::null(), 0, None)
+                                };
+
+                                let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: result.event_count as i64,
+                                    last_sequence,
+                                    sequences_aligned,
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                }));
+                                // Defuse sentinel — deliver real result instead.
+                                std::mem::forget(_sentinel);
+                                let _ =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        callback(ctx_raw as *mut c_void, ffi_result);
+                                    }));
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Bootstrap result error: {e}");
+                                let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: -1,
+                                    last_sequence: -1,
+                                    sequences_aligned: false,
+                                    source_position_ptr: std::ptr::null(),
+                                    source_position_len: 0,
+                                    source_position_drop_fn: None,
+                                }));
+                                std::mem::forget(_sentinel);
+                                let _ =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        callback(ctx_raw as *mut c_void, ffi_result);
+                                    }));
+                            }
+                            Err(_) => {
+                                log::warn!("Bootstrap result oneshot dropped");
+                                // Sentinel fires null callback on drop
+                            }
+                        }
+                    }
+                    // If rx was None (already consumed), sentinel fires null callback
+                });
+            });
+        }
+
+        extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
+            if !ptr.is_null() && len > 0 {
+                unsafe {
+                    let slice = std::slice::from_raw_parts_mut(ptr, len);
+                    drop(Box::from_raw(slice as *mut [u8]));
+                }
+            }
+        }
+
+        extern "C" fn bootstrap_result_drop_fn(state: *mut c_void) {
+            ffi_guard((), || {
+                if !state.is_null() {
+                    // Drop one Arc reference. The spawned task (if any) holds
+                    // its own clone, so the state stays alive until it completes.
+                    unsafe {
+                        drop(Arc::from_raw(state as *const BootstrapResultState));
+                    }
+                }
+            });
+        }
+
+        let state = Arc::new(BootstrapResultState {
+            rx: tokio::sync::Mutex::new(Some(result_rx)),
+            runtime_handle: runtime_handle.clone(),
+        });
+
+        Box::into_raw(Box::new(FfiBootstrapResultReceiver {
+            state: Arc::into_raw(state) as *mut c_void,
+            start_fn: bootstrap_result_start_fn,
+            drop_fn: bootstrap_result_drop_fn,
+        }))
+    } else {
+        std::ptr::null_mut()
+    };
+
     Box::into_raw(Box::new(FfiSubscriptionResponse {
         query_id: FfiOwnedStr::from_string(sub.query_id),
         source_id: FfiOwnedStr::from_string(sub.source_id),
         receiver: Box::into_raw(ffi_rx),
         bootstrap_receiver,
+        position_handle_ptr,
+        bootstrap_result_receiver,
     }))
 }
 

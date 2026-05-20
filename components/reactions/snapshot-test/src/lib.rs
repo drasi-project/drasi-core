@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Temporary POC reaction that exercises the streaming FFI bootstrap path.
+//! Test reaction that exercises the streaming FFI bootstrap and snapshot
+//! fetcher vtable paths.
 //!
-//! This crate compiles as a cdylib and exercises all 4 `BootstrapContext`
-//! callbacks through the FFI boundary, validating the streaming iterator
-//! protocol for snapshot and outbox data.
+//! This crate compiles as a cdylib and exercises:
+//! - All 4 `BootstrapContext` callbacks through the FFI boundary
+//! - The `SnapshotFetcher` vtable path (injected via `ReactionRuntimeContext`)
+//!
+//! During `start()`, if a `SnapshotFetcher` was provided at `initialize()`,
+//! the reaction fetches a snapshot for the first query ID and streams all rows.
 
 use std::sync::Arc;
 
@@ -24,7 +28,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use drasi_lib::channels::QueryResult;
 use drasi_lib::reactions::bootstrap_context::BootstrapContext;
-use drasi_lib::reactions::Reaction;
+use drasi_lib::reactions::{Reaction, SnapshotFetcher};
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
 use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
 use serde::{Deserialize, Serialize};
@@ -52,6 +56,7 @@ pub struct SnapshotTestReaction {
     query_ids: Vec<String>,
     status: Mutex<ComponentStatus>,
     report: Arc<Mutex<BootstrapReport>>,
+    snapshot_fetcher: Mutex<Option<Arc<dyn SnapshotFetcher>>>,
 }
 
 impl SnapshotTestReaction {
@@ -62,6 +67,7 @@ impl SnapshotTestReaction {
             query_ids,
             status: Mutex::new(ComponentStatus::Added),
             report: report.clone(),
+            snapshot_fetcher: Mutex::new(None),
         };
         (reaction, report)
     }
@@ -101,9 +107,34 @@ impl Reaction for SnapshotTestReaction {
         std::collections::HashMap::new()
     }
 
-    async fn initialize(&self, _context: ReactionRuntimeContext) {}
+    async fn initialize(&self, context: ReactionRuntimeContext) {
+        // Store the snapshot fetcher (if provided) for use during start().
+        let mut guard = self.snapshot_fetcher.lock().await;
+        *guard = context.snapshot_fetcher;
+    }
 
     async fn start(&self) -> Result<()> {
+        // If a SnapshotFetcher was injected, exercise it by fetching and
+        // streaming all rows. This validates the vtable FFI path (Site 1).
+        let fetcher = self.snapshot_fetcher.lock().await.clone();
+        if let Some(fetcher) = fetcher {
+            if let Some(query_id) = self.query_ids.first() {
+                let snapshot = fetcher
+                    .fetch_snapshot(query_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("vtable fetch_snapshot failed: {e}"))?;
+
+                let mut report = self.report.lock().await;
+                report.snapshot_sequence = snapshot.as_of_sequence;
+                report.snapshot_config_hash = snapshot.config_hash;
+
+                let mut stream = Box::pin(snapshot);
+                while let Some(row) = stream.next().await {
+                    report.snapshot_rows.push(row);
+                }
+            }
+        }
+
         *self.status.lock().await = ComponentStatus::Running;
         Ok(())
     }

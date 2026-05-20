@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
@@ -56,6 +57,12 @@ pub struct ReactionProxy {
         std::sync::Mutex<Option<std::sync::mpsc::SyncSender<drasi_lib::channels::QueryResult>>>,
     /// Keep the callback context alive for the lifetime of the forwarder.
     _push_ctx: std::sync::Mutex<Option<Arc<ResultPushContext>>>,
+    /// Per-reaction identity provider set programmatically via
+    /// [`Reaction::set_identity_provider`]. When present, it takes precedence
+    /// over any instance-wide provider supplied via
+    /// [`ReactionRuntimeContext::identity_provider`] during
+    /// [`Reaction::initialize`].
+    identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
 /// Context for the push-based result callback.
@@ -146,6 +153,7 @@ impl ReactionProxy {
             _callback_ctx: std::sync::Mutex::new(None),
             result_tx: std::sync::Mutex::new(None),
             _push_ctx: std::sync::Mutex::new(None),
+            identity_provider: std::sync::Mutex::new(None),
         }
     }
 }
@@ -221,10 +229,12 @@ impl Reaction for ReactionProxy {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = context
-            .identity_provider
-            .as_ref()
-            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip.clone()));
+        let identity_vtable = crate::proxies::identity_resolution::resolve_identity_provider(
+            &self.identity_provider,
+            context.identity_provider.clone(),
+            &format!("Reaction '{}'", self.cached_id),
+        )
+        .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip));
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
@@ -347,6 +357,27 @@ impl Reaction for ReactionProxy {
         unsafe { result.into_result().map_err(|e| anyhow::anyhow!(e)) }
     }
 
+    /// Stash a per-instance identity provider that will take precedence over
+    /// the runtime-context provider during [`Reaction::initialize`].
+    ///
+    /// # Timing constraint (FFI reactions only)
+    ///
+    /// For `ReactionProxy`, the provider must be set **before** the reaction
+    /// is added to `DrasiLib` (i.e. before the lifecycle manager calls
+    /// `initialize`). There is no FFI hook for late identity-provider
+    /// injection — the plugin only receives the provider through
+    /// `FfiRuntimeContext` during `initialize_fn`. Calls made after
+    /// `initialize` have no effect on the running plugin.
+    async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        // See doc comment above for the timing constraint.
+        match self.identity_provider.lock() {
+            Ok(mut guard) => *guard = Some(provider),
+            Err(_) => log::warn!(
+                "Reaction '{}': identity_provider mutex is poisoned; provider not set",
+                self.cached_id
+            ),
+        }
+    }
     fn is_durable(&self) -> bool {
         (self.vtable.is_durable_fn)(self.vtable.state as *const c_void)
     }
@@ -459,10 +490,15 @@ fn host_dispatch<R: Send + 'static>(
 
 // ---- Snapshot iterator callbacks ----
 
-/// Host-allocated snapshot iterator state.
+/// Host-allocated streaming snapshot iterator state.
+///
+/// Holds a dedicated current-thread tokio runtime and the `SnapshotStream`.
+/// Each `next_fn` call pulls exactly one row via `rt.block_on(stream.next())`.
 struct SnapshotIteratorState {
-    rows: Vec<serde_json::Value>,
-    pos: usize,
+    /// `Option` so `drop_fn` can move it to a dedicated thread for safe cleanup.
+    rt: Option<tokio::runtime::Runtime>,
+    /// `Option` so we can drop the stream before the runtime in `drop_fn`.
+    stream: Option<drasi_lib::queries::output_state::SnapshotStream>,
 }
 
 extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi::FfiOwnedStr {
@@ -470,19 +506,29 @@ extern "C" fn snapshot_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi
         return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
     }
     let state = unsafe { &mut *(iter_ctx as *mut SnapshotIteratorState) };
-    if state.pos >= state.rows.len() {
-        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    let (rt, stream) = match (state.rt.as_ref(), state.stream.as_mut()) {
+        (Some(rt), Some(s)) => (rt, s),
+        _ => return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+    };
+    use tokio_stream::StreamExt;
+    match rt.block_on(stream.next()) {
+        Some(row) => {
+            let json = serde_json::to_string(&row).unwrap_or_else(|_| "null".into());
+            drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
+        }
+        None => drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
     }
-    let row = &state.rows[state.pos];
-    state.pos += 1;
-    let json = serde_json::to_string(row).unwrap_or_else(|_| "null".into());
-    drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
 }
 
 extern "C" fn snapshot_iter_drop(iter_ctx: *mut c_void) {
     if !iter_ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(iter_ctx as *mut SnapshotIteratorState));
+        let mut state = unsafe { Box::from_raw(iter_ctx as *mut SnapshotIteratorState) };
+        // Drop the stream first to release async resources.
+        state.stream = None;
+        // Move the runtime to a dedicated thread for safe cleanup — dropping a
+        // tokio Runtime from within an async context panics.
+        if let Some(rt) = state.rt.take() {
+            std::thread::spawn(move || drop(rt));
         }
     }
 }
@@ -506,23 +552,35 @@ extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotIter
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+
+        // Phase 1: Fetch the SnapshotStream on the host runtime.
         let result = host_dispatch(host_ctx, {
             let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
-            async move {
-                let snapshot = ctx_ref.ctx.fetch_snapshot().await?;
+            async move { ctx_ref.ctx.fetch_snapshot().await }
+        });
+
+        match result {
+            Ok(snapshot) => {
                 let as_of_sequence = snapshot.as_of_sequence;
                 let config_hash = snapshot.config_hash;
-                let rows = snapshot.collect_vec().await;
-                Ok::<_, drasi_lib::queries::output_state::FetchError>((
-                    rows,
-                    as_of_sequence,
-                    config_hash,
-                ))
-            }
-        });
-        match result {
-            Ok((rows, as_of_sequence, config_hash)) => {
-                let iter_state = Box::new(SnapshotIteratorState { rows, pos: 0 });
+
+                // Phase 2: Create a lightweight runtime for lazy iteration.
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return make_error_snapshot_response(format!(
+                            "failed to build iterator runtime: {e}"
+                        ));
+                    }
+                };
+
+                let iter_state = Box::new(SnapshotIteratorState {
+                    rt: Some(rt),
+                    stream: Some(snapshot),
+                });
                 let iter_ctx = Box::into_raw(iter_state) as *mut c_void;
 
                 FfiSnapshotIteratorResponse {
@@ -544,9 +602,12 @@ extern "C" fn host_bootstrap_fetch_snapshot(ctx: *mut c_void) -> FfiSnapshotIter
 
 // ---- Outbox iterator callbacks ----
 
+/// Host-allocated streaming outbox iterator state.
 struct OutboxIteratorState {
-    entries: Vec<std::sync::Arc<drasi_lib::channels::QueryResult>>,
-    pos: usize,
+    /// `Option` so `drop_fn` can move it to a dedicated thread for safe cleanup.
+    rt: Option<tokio::runtime::Runtime>,
+    /// `Option` so we can drop the stream before the runtime in `drop_fn`.
+    stream: Option<drasi_lib::queries::output_state::OutboxStream>,
 }
 
 extern "C" fn outbox_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi::FfiOwnedStr {
@@ -554,19 +615,26 @@ extern "C" fn outbox_iter_next(iter_ctx: *mut c_void) -> drasi_plugin_sdk::ffi::
         return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
     }
     let state = unsafe { &mut *(iter_ctx as *mut OutboxIteratorState) };
-    if state.pos >= state.entries.len() {
-        return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new());
+    let (rt, stream) = match (state.rt.as_ref(), state.stream.as_mut()) {
+        (Some(rt), Some(s)) => (rt, s),
+        _ => return drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
+    };
+    use tokio_stream::StreamExt;
+    match rt.block_on(stream.next()) {
+        Some(entry) => {
+            let json = serde_json::to_string(entry.as_ref()).unwrap_or_else(|_| "null".into());
+            drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
+        }
+        None => drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(String::new()),
     }
-    let entry = &state.entries[state.pos];
-    state.pos += 1;
-    let json = serde_json::to_string(entry.as_ref()).unwrap_or_else(|_| "null".into());
-    drasi_plugin_sdk::ffi::FfiOwnedStr::from_string(json)
 }
 
 extern "C" fn outbox_iter_drop(iter_ctx: *mut c_void) {
     if !iter_ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(iter_ctx as *mut OutboxIteratorState));
+        let mut state = unsafe { Box::from_raw(iter_ctx as *mut OutboxIteratorState) };
+        state.stream = None;
+        if let Some(rt) = state.rt.take() {
+            std::thread::spawn(move || drop(rt));
         }
     }
 }
@@ -597,23 +665,37 @@ extern "C" fn host_bootstrap_fetch_outbox(
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let host_ctx = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
+
+        // Phase 1: Fetch the OutboxStream on the host runtime.
         let result = host_dispatch(host_ctx, {
             let ctx_ref = unsafe { &*(ctx as *const HostBootstrapCallbackCtx) };
-            async move {
-                let outbox = ctx_ref.ctx.fetch_outbox(after_sequence).await?;
+            async move { ctx_ref.ctx.fetch_outbox(after_sequence).await }
+        });
+
+        match result {
+            Ok(outbox) => {
                 let latest_sequence = outbox.latest_sequence;
                 let config_hash = outbox.config_hash;
-                let entries = outbox.collect_vec().await;
-                Ok::<_, drasi_lib::queries::output_state::FetchError>((
-                    entries,
-                    latest_sequence,
-                    config_hash,
-                ))
-            }
-        });
-        match result {
-            Ok((entries, latest_sequence, config_hash)) => {
-                let iter_state = Box::new(OutboxIteratorState { entries, pos: 0 });
+
+                // Phase 2: Create a lightweight runtime for lazy iteration.
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        return make_error_outbox_response(
+                            format!("failed to build iterator runtime: {e}"),
+                            latest_sequence,
+                            config_hash,
+                        );
+                    }
+                };
+
+                let iter_state = Box::new(OutboxIteratorState {
+                    rt: Some(rt),
+                    stream: Some(outbox),
+                });
                 let iter_ctx = Box::into_raw(iter_state) as *mut c_void;
 
                 FfiOutboxIteratorResponse {

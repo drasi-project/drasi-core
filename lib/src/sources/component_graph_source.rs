@@ -45,7 +45,10 @@ use tokio::sync::RwLock;
 use crate::bootstrap::{BootstrapProvider, ComponentGraphBootstrapProvider};
 use crate::channels::*;
 use crate::component_graph::ComponentGraph;
-use crate::config::SourceSubscriptionSettings;
+use crate::config::{
+    NodeSchema, PropertySchema, PropertyType, RelationSchema, SourceSchema,
+    SourceSubscriptionSettings,
+};
 use crate::context::SourceRuntimeContext;
 use crate::sources::base::{SourceBase, SourceBaseParams};
 use crate::sources::graph_elements::{
@@ -118,6 +121,88 @@ impl Source for ComponentGraphSource {
 
     fn auto_start(&self) -> bool {
         true
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        let id_prop = PropertySchema {
+            name: "id".to_string(),
+            data_type: Some(PropertyType::String),
+            description: Some("Component identifier".to_string()),
+        };
+        let status_prop = PropertySchema {
+            name: "status".to_string(),
+            data_type: Some(PropertyType::String),
+            description: Some("Component lifecycle status".to_string()),
+        };
+        let error_prop = PropertySchema {
+            name: "error".to_string(),
+            data_type: Some(PropertyType::String),
+            description: Some("Error message (present when status is Error)".to_string()),
+        };
+
+        let component_props = vec![id_prop.clone(), status_prop.clone(), error_prop.clone()];
+
+        Some(SourceSchema {
+            nodes: vec![
+                NodeSchema {
+                    label: "DrasiInstance".to_string(),
+                    properties: vec![
+                        id_prop,
+                        status_prop,
+                        error_prop,
+                        PropertySchema {
+                            name: "running".to_string(),
+                            data_type: Some(PropertyType::String),
+                            description: Some("Whether the instance is running".to_string()),
+                        },
+                    ],
+                },
+                NodeSchema {
+                    label: "Source".to_string(),
+                    properties: component_props.clone(),
+                },
+                NodeSchema {
+                    label: "Query".to_string(),
+                    properties: component_props.clone(),
+                },
+                NodeSchema {
+                    label: "Reaction".to_string(),
+                    properties: component_props,
+                },
+            ],
+            relations: vec![
+                RelationSchema {
+                    label: "HAS_SOURCE".to_string(),
+                    from: Some("DrasiInstance".to_string()),
+                    to: Some("Source".to_string()),
+                    properties: Vec::new(),
+                },
+                RelationSchema {
+                    label: "HAS_QUERY".to_string(),
+                    from: Some("DrasiInstance".to_string()),
+                    to: Some("Query".to_string()),
+                    properties: Vec::new(),
+                },
+                RelationSchema {
+                    label: "HAS_REACTION".to_string(),
+                    from: Some("DrasiInstance".to_string()),
+                    to: Some("Reaction".to_string()),
+                    properties: Vec::new(),
+                },
+                RelationSchema {
+                    label: "SUBSCRIBES_TO".to_string(),
+                    from: Some("Query".to_string()),
+                    to: Some("Source".to_string()),
+                    properties: Vec::new(),
+                },
+                RelationSchema {
+                    label: "LISTENS_TO".to_string(),
+                    from: Some("Reaction".to_string()),
+                    to: Some("Query".to_string()),
+                    properties: Vec::new(),
+                },
+            ],
+        })
     }
 
     async fn start(&self) -> Result<()> {
@@ -428,5 +513,65 @@ mod tests {
     fn as_any_downcasts_to_self() {
         let source = make_source();
         assert!(source.as_any().is::<ComponentGraphSource>());
+    }
+
+    #[test]
+    fn describe_schema_returns_component_graph_schema() {
+        let source = make_source();
+        let schema = source.describe_schema().expect("should return Some");
+
+        // Node labels
+        let node_labels: Vec<&str> = schema.nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(node_labels.contains(&"DrasiInstance"));
+        assert!(node_labels.contains(&"Source"));
+        assert!(node_labels.contains(&"Query"));
+        assert!(node_labels.contains(&"Reaction"));
+
+        // Relation labels
+        let rel_labels: Vec<&str> = schema.relations.iter().map(|r| r.label.as_str()).collect();
+        assert!(rel_labels.contains(&"HAS_SOURCE"));
+        assert!(rel_labels.contains(&"HAS_QUERY"));
+        assert!(rel_labels.contains(&"HAS_REACTION"));
+        assert!(rel_labels.contains(&"SUBSCRIBES_TO"));
+        assert!(rel_labels.contains(&"LISTENS_TO"));
+
+        // Endpoint constraints on relations
+        let subscribes = schema
+            .relations
+            .iter()
+            .find(|r| r.label == "SUBSCRIBES_TO")
+            .unwrap();
+        assert_eq!(subscribes.from.as_deref(), Some("Query"));
+        assert_eq!(subscribes.to.as_deref(), Some("Source"));
+
+        let listens = schema
+            .relations
+            .iter()
+            .find(|r| r.label == "LISTENS_TO")
+            .unwrap();
+        assert_eq!(listens.from.as_deref(), Some("Reaction"));
+        assert_eq!(listens.to.as_deref(), Some("Query"));
+
+        // DrasiInstance has running property
+        let instance = schema
+            .nodes
+            .iter()
+            .find(|n| n.label == "DrasiInstance")
+            .unwrap();
+        assert!(instance.properties.iter().any(|p| p.name == "running"));
+
+        // All component nodes have id and status
+        for node in &schema.nodes {
+            assert!(
+                node.properties.iter().any(|p| p.name == "id"),
+                "{} should have id property",
+                node.label
+            );
+            assert!(
+                node.properties.iter().any(|p| p.name == "status"),
+                "{} should have status property",
+                node.label
+            );
+        }
     }
 }

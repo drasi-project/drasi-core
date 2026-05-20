@@ -460,8 +460,20 @@ impl ReactionManager {
             // No snapshot needed — just record the current sequence.
             // If the query is not running or hasn't bootstrapped yet, start from 0.
             let seq = match query.fetch_outbox(0).await {
-                Ok(resp) => resp.latest_sequence,
-                Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
+                Ok(resp) => {
+                    info!(
+                        "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
+                        resp.latest_sequence
+                    );
+                    resp.latest_sequence
+                }
+                Err(FetchError::OutboxGap(gap)) => {
+                    info!(
+                        "[{reaction_id}] Fresh start for query '{query_id}' — outbox gap, latest_seq={}",
+                        gap.latest_sequence
+                    );
+                    gap.latest_sequence
+                }
                 Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                     info!(
                         "[{reaction_id}] Fresh start for query '{query_id}' — \
@@ -676,40 +688,32 @@ impl ReactionManager {
                     ))
                 })?;
 
-        // Abort subscription forwarder tasks before stopping.
-        // This races with the supervisor task which may have already
-        // transitioned the reaction to Error (e.g. during orderly shutdown
-        // when queries are stopped before the reaction's stop is called).
-        self.abort_subscription_tasks(&id).await;
-
-        // If the supervisor already moved the reaction to Error, the normal
-        // stop_component path (Running → Stopping) will be rejected.
-        // In that case, still call stop() on the plugin and transition to Stopped.
-        let current_status = {
-            let graph = self.graph.read().await;
-            graph
-                .get_component(&id)
-                .map(|n| n.status)
-                .unwrap_or(ComponentStatus::Stopped)
-        };
-
-        if current_status == ComponentStatus::Error {
-            log::info!(
-                "Reaction '{id}' is in Error state (likely from subscription loss during shutdown); \
-                 stopping plugin and transitioning to Stopped"
-            );
-            let _ = reaction.stop().await;
-            let mut graph = self.graph.write().await;
-            // Error → Stopping is intentionally blocked for user commands,
-            // so directly set to Stopped for orderly shutdown cleanup.
-            if let Some(node) = graph.get_component_mut(&id) {
-                node.status = ComponentStatus::Stopped;
-            }
-            return Ok(());
+        // Transition to Stopping FIRST so the supervisor won't race us
+        // and transition to Error when forwarder tasks are aborted.
+        {
+            let mut g = self.graph.write().await;
+            g.validate_and_transition(
+                &id,
+                ComponentStatus::Stopping,
+                Some("Stopping reaction".to_string()),
+            )?;
         }
 
-        crate::managers::lifecycle_helpers::stop_component(&self.graph, &id, "reaction", &reaction)
-            .await
+        // Now abort subscription forwarder tasks
+        self.abort_subscription_tasks(&id).await;
+
+        // Call the reaction's stop logic
+        if let Err(e) = reaction.stop().await {
+            let mut g = self.graph.write().await;
+            let _ = g.validate_and_transition(
+                &id,
+                ComponentStatus::Error,
+                Some(format!("Stop failed: {e}")),
+            );
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     /// Returns the current status of a reaction (e.g. Running, Stopped, Error).
@@ -1034,6 +1038,10 @@ impl ReactionManager {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
+                                    log::debug!(
+                                        "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
+                                        query_result.sequence
+                                    );
                                     continue;
                                 }
 
@@ -1085,12 +1093,34 @@ impl ReactionManager {
                                 }
 
                                 last_forwarded_seq = query_result.sequence;
+                                let seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
                                 if let Err(e) = reaction.enqueue_query_result(result).await {
                                     log::error!(
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
+                                } else {
+                                    // Advance checkpoint so outbox catchup on restart
+                                    // won't replay already-delivered events.
+                                    let config_hash = {
+                                        let cps = checkpoints.read().await;
+                                        cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
+                                    };
+                                    let cp = ReactionCheckpoint { sequence: seq, config_hash };
+                                    checkpoints.write().await.insert(query_id_clone.clone(), cp.clone());
+                                    if let Some(store) = state_store_clone.as_ref() {
+                                        if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
+                                            store.as_ref(),
+                                            &reaction_id_owned,
+                                            &query_id_clone,
+                                            &cp,
+                                        ).await {
+                                            log::warn!(
+                                                "[{reaction_id_owned}] Failed to persist checkpoint for query '{query_id_clone}' at seq={seq}: {e}"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -1146,7 +1176,9 @@ impl ReactionManager {
         let supervisor = tokio::spawn(async move {
             // Wait for all forwarder tasks to complete.
             for handle in join_handles {
-                let _ = handle.await;
+                if let Err(e) = handle.await {
+                    log::warn!("[{supervisor_reaction_id}] Forwarder task failed: {e}");
+                }
             }
 
             // Only transition to Error if the reaction is still Running.

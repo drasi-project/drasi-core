@@ -90,6 +90,9 @@ pub mod state_guard;
 // Config module needs to be public for configuration types
 pub mod config;
 
+// Schema discovery types (separate from configuration)
+pub mod schema;
+
 // Indexes module for storage backend configuration
 pub mod indexes;
 
@@ -165,6 +168,12 @@ pub use config::{
     SourceSubscriptionSettings,
 };
 
+/// Schema discovery types (also available via `config::` for backward compatibility)
+pub use schema::{
+    normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
+    PropertySchema, PropertyType, RelationSchema, SourceSchema,
+};
+
 /// Storage backend configuration types
 pub use indexes::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
 
@@ -206,6 +215,8 @@ pub use reactions::ReactionCheckpoint;
 pub use reactions::SnapshotFetcher;
 /// Base implementations for reaction plugins
 pub use reactions::{ReactionBase, ReactionBaseParams};
+/// Position comparison trait for per-subscriber replay filtering
+pub use sources::{ByteLexPositionComparator, PositionComparator};
 /// Base implementations for source plugins
 pub use sources::{SourceBase, SourceBaseParams};
 

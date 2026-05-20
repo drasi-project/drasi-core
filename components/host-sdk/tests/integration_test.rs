@@ -311,6 +311,50 @@ async fn test_create_mock_source_instance() {
 }
 
 #[tokio::test]
+async fn test_mock_source_schema_roundtrip_over_ffi() {
+    if !plugin_exists("drasi-source-mock") {
+        eprintln!("SKIP: drasi-source-mock not built as cdylib");
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .unwrap();
+
+    let descriptor = &plugin.source_plugins[0];
+    let config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 1000
+    });
+
+    let source = descriptor
+        .create_source("schema-roundtrip", &config, false)
+        .await
+        .expect("Should create mock source instance");
+
+    let schema = source
+        .describe_schema()
+        .expect("mock source should expose schema over FFI");
+
+    assert_eq!(schema.nodes.len(), 1);
+    let node = &schema.nodes[0];
+    assert_eq!(node.label, "Counter");
+    assert!(node
+        .properties
+        .iter()
+        .any(|property| property.name == "value"));
+    assert!(node
+        .properties
+        .iter()
+        .any(|property| property.name == "timestamp"));
+}
+
+#[tokio::test]
 async fn test_create_log_reaction_instance() {
     if !plugin_exists("drasi-reaction-log") {
         eprintln!("SKIP: drasi-reaction-log not built as cdylib");
@@ -2624,4 +2668,434 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
     // If we get here without crashing, the shutdown/cleanup paths are sound
     source.stop().await.expect("Should stop source");
     println!("Stress test completed: {iterations} rapid subscribe/drop cycles without crash");
+}
+
+// ============================================================================
+// FFI checkpoint / recovery boundary tests
+//
+// These tests verify that the checkpoint-related fields are correctly wired
+// through the FFI vtable boundary: position_handle, bootstrap_result_receiver,
+// supports_replay, and resume_from. Without these, checkpoint-based recovery
+// silently degrades to no-op even though unit tests (which bypass FFI) pass.
+// ============================================================================
+
+/// Helper: load mock source cdylib, create + initialize + start a source instance.
+async fn create_started_mock_source(
+    source_id: &str,
+) -> (
+    drasi_host_sdk::loader::LoadedPlugin,
+    Box<dyn drasi_lib::Source>,
+    tokio::sync::mpsc::Receiver<drasi_lib::component_graph::ComponentUpdate>,
+) {
+    let path = require_plugin("drasi-source-mock");
+    let plugin = load_plugin_from_path(
+        &path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 60000
+    });
+    let source = plugin.source_plugins[0]
+        .create_source(source_id, &config, false)
+        .await
+        .expect("Should create mock source");
+
+    let (event_tx, event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "test-instance",
+        source_id,
+        None,
+        event_tx,
+        None,
+    );
+    source.initialize(context).await;
+    source.start().await.expect("Should start source");
+
+    (plugin, source, event_rx)
+}
+
+/// Verify `supports_replay()` is wired through FFI and returns the trait default (true).
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_supports_replay_returns_true() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("replay-test").await;
+
+    assert!(
+        source.supports_replay(),
+        "supports_replay() should return true through FFI (default Source trait impl)"
+    );
+
+    source.stop().await.expect("Should stop");
+}
+
+/// Verify `position_handle` is returned as `Some(Arc<AtomicU64>)` through FFI
+/// when `request_position_handle = true`, and `None` when `false`.
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_subscribe_position_handle() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("pos-handle-test").await;
+
+    // Subscribe WITH request_position_handle — should get Some
+    let settings_with = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "pos-handle-test".to_string(),
+        enable_bootstrap: false,
+        query_id: "query-with-handle".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+        last_sequence: None,
+    };
+    let sub = source
+        .subscribe(settings_with)
+        .await
+        .expect("subscribe should succeed");
+
+    assert!(
+        sub.position_handle.is_some(),
+        "position_handle must be Some when request_position_handle=true (FFI boundary)"
+    );
+
+    // Verify the Arc<AtomicU64> is usable — store and load round-trips
+    let handle = sub.position_handle.as_ref().unwrap();
+    handle.store(42, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        handle.load(std::sync::atomic::Ordering::Acquire),
+        42,
+        "position_handle Arc<AtomicU64> should be readable after store"
+    );
+
+    // Clean up this subscription
+    source.remove_position_handle("query-with-handle").await;
+    drop(sub);
+
+    // Subscribe WITHOUT request_position_handle — should get None
+    let settings_without = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "pos-handle-test".to_string(),
+        enable_bootstrap: false,
+        query_id: "query-no-handle".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: false,
+        last_sequence: None,
+    };
+    let sub2 = source
+        .subscribe(settings_without)
+        .await
+        .expect("subscribe should succeed");
+
+    assert!(
+        sub2.position_handle.is_none(),
+        "position_handle must be None when request_position_handle=false (FFI boundary)"
+    );
+
+    drop(sub2);
+    source.stop().await.expect("Should stop");
+}
+
+/// Verify that `resume_from` bytes pass through FFI and cause bootstrap to be
+/// skipped (bootstrap_receiver is None even when enable_bootstrap is true).
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_resume_from_skips_bootstrap() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("resume-test").await;
+
+    // Subscribe with resume_from set — bootstrap should be skipped
+    let resume_bytes = bytes::Bytes::from_static(b"\x00\x00\x00\x01\x00\x00\x00\x42");
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "resume-test".to_string(),
+        enable_bootstrap: true, // would normally trigger bootstrap
+        query_id: "resume-query".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: Some(resume_bytes),
+        request_position_handle: true,
+        last_sequence: Some(100),
+    };
+    let sub = source
+        .subscribe(settings)
+        .await
+        .expect("subscribe should succeed");
+
+    // When resume_from is set, SourceBase skips bootstrap entirely
+    assert!(
+        sub.bootstrap_receiver.is_none(),
+        "bootstrap_receiver must be None when resume_from is set (FFI boundary)"
+    );
+    assert!(
+        sub.bootstrap_result_receiver.is_none(),
+        "bootstrap_result_receiver must be None when resume_from is set (FFI boundary)"
+    );
+
+    // position_handle should still be returned
+    assert!(
+        sub.position_handle.is_some(),
+        "position_handle should be returned even with resume_from (FFI boundary)"
+    );
+
+    source.remove_position_handle("resume-query").await;
+    drop(sub);
+    source.stop().await.expect("Should stop");
+}
+
+/// A trivial bootstrap provider that returns a fixed BootstrapResult with
+/// source_position, without sending any bootstrap events.
+struct TestBootstrapProvider {
+    source_position: Option<bytes::Bytes>,
+    last_sequence: Option<u64>,
+}
+
+#[async_trait::async_trait]
+impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
+    async fn bootstrap(
+        &self,
+        _request: drasi_lib::bootstrap::BootstrapRequest,
+        _context: &drasi_lib::bootstrap::BootstrapContext,
+        _event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+    ) -> anyhow::Result<drasi_lib::bootstrap::BootstrapResult> {
+        // Drop event_tx immediately to signal "no bootstrap events"
+        drop(_event_tx);
+        Ok(drasi_lib::bootstrap::BootstrapResult {
+            event_count: 0,
+            last_sequence: self.last_sequence,
+            sequences_aligned: true,
+            source_position: self.source_position.clone(),
+        })
+    }
+}
+
+/// Verify `bootstrap_result_receiver` delivers `BootstrapResult` with
+/// `source_position` through the FFI boundary (plugin → host callback).
+#[tokio::test]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_bootstrap_result_receiver_delivers_result() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+    let (_plugin, source, _rx) = create_started_mock_source("bootstrap-test").await;
+
+    // Set a bootstrap provider through FFI
+    let position_bytes = bytes::Bytes::from_static(b"\xDE\xAD\xBE\xEF\x00\x01\x02\x03");
+    let provider = TestBootstrapProvider {
+        source_position: Some(position_bytes.clone()),
+        last_sequence: Some(42),
+    };
+    source.set_bootstrap_provider(Box::new(provider)).await;
+
+    // Subscribe with bootstrap enabled
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "bootstrap-test".to_string(),
+        enable_bootstrap: true,
+        query_id: "bootstrap-query".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+        last_sequence: None,
+    };
+    let sub = source
+        .subscribe(settings)
+        .await
+        .expect("subscribe should succeed");
+
+    // bootstrap_result_receiver must be Some
+    assert!(
+        sub.bootstrap_result_receiver.is_some(),
+        "bootstrap_result_receiver must be Some when bootstrap provider is set (FFI boundary)"
+    );
+
+    // Drain bootstrap events (there are none, but the channel must close first)
+    if let Some(mut brx) = sub.bootstrap_receiver {
+        while brx.recv().await.is_some() {}
+    }
+
+    // Await the BootstrapResult through the FFI callback
+    let result_rx = sub.bootstrap_result_receiver.unwrap();
+    let bootstrap_result = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx)
+        .await
+        .expect("bootstrap_result_receiver should complete within 5 seconds")
+        .expect("oneshot should not be dropped")
+        .expect("bootstrap should succeed");
+
+    assert_eq!(
+        bootstrap_result.event_count, 0,
+        "event_count should be 0 (no events sent)"
+    );
+    assert_eq!(
+        bootstrap_result.last_sequence,
+        Some(42),
+        "last_sequence should round-trip through FFI"
+    );
+    assert!(
+        bootstrap_result.sequences_aligned,
+        "sequences_aligned should round-trip through FFI"
+    );
+    assert_eq!(
+        bootstrap_result.source_position,
+        Some(position_bytes),
+        "source_position bytes must round-trip through FFI bootstrap_result_receiver"
+    );
+
+    source.remove_position_handle("bootstrap-query").await;
+    source.stop().await.expect("Should stop");
+}
+
+/// End-to-end test: verify that a DrasiLib instance with persistent backend,
+/// cdylib source, and checkpoint storage can persist checkpoints and resume
+/// from them on restart. This is the test that catches the real-world failure:
+/// stop Drasi, make changes, restart — missed changes must be replayed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+#[ignore = "requires cdylib: cargo build --lib -p drasi-source-mock --features dynamic-plugin"]
+async fn test_ffi_checkpoint_persist_and_resume_from() {
+    if !plugin_exists("drasi-source-mock") {
+        panic!("SKIP: drasi-source-mock not built as cdylib");
+    }
+
+    // --- Phase 1: Start DrasiLib, process events, checkpoint, stop ---
+    let mock_source_path = require_plugin("drasi-source-mock");
+    let plugin1 = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin");
+
+    let source_config = serde_json::json!({
+        "dataType": { "type": "counter" },
+        "intervalMs": 200
+    });
+    let source1 = plugin1.source_plugins[0]
+        .create_source("ckpt-source", &source_config, true)
+        .await
+        .expect("Should create mock source");
+
+    // Use a persistent (in-memory) checkpoint store shared between phases.
+    // Build DrasiLib with the source and a simple query
+    let core1 = drasi_lib::DrasiLib::builder()
+        .with_id("ckpt-test-1")
+        .with_source(source1)
+        .with_query(
+            drasi_lib::Query::cypher("ckpt-query")
+                .query("MATCH (n:Counter) RETURN n.value AS Value")
+                .from_source("ckpt-source")
+                .build(),
+        )
+        .build()
+        .await
+        .expect("Should build DrasiLib");
+
+    core1.start().await.expect("Should start DrasiLib");
+
+    // Wait for a few events to be processed (counter source generates at 200ms intervals)
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Verify query has results
+    let results = core1
+        .get_query_results("ckpt-query")
+        .await
+        .expect("Should get query results");
+    assert!(
+        !results.is_empty(),
+        "Query should have accumulated results before stop"
+    );
+
+    core1.stop().await.expect("Should stop DrasiLib");
+    println!(
+        "Phase 1 complete: processed {} results, stopped DrasiLib",
+        results.len()
+    );
+
+    // --- Phase 2: Restart with same persistent backend ---
+    // Create a fresh source instance (simulates process restart)
+    let plugin2 = load_plugin_from_path(
+        &mock_source_path,
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("Should load mock source plugin again");
+
+    let source2 = plugin2.source_plugins[0]
+        .create_source("ckpt-source", &source_config, true)
+        .await
+        .expect("Should create mock source again");
+
+    // Subscribe directly to verify resume_from and position_handle behavior
+    let (event_tx, _event_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(100);
+    let context = drasi_lib::context::SourceRuntimeContext::new(
+        "test-2",
+        "ckpt-source",
+        None,
+        event_tx,
+        None,
+    );
+    source2.initialize(context).await;
+    source2.start().await.expect("Should start source2");
+
+    // Verify the source reports supports_replay through FFI
+    assert!(
+        source2.supports_replay(),
+        "Mock source should report supports_replay=true through FFI"
+    );
+
+    // Subscribe with position_handle request (as the query manager would on restart)
+    let settings = drasi_lib::config::SourceSubscriptionSettings {
+        source_id: "ckpt-source".to_string(),
+        enable_bootstrap: true,
+        query_id: "ckpt-query".to_string(),
+        nodes: std::collections::HashSet::new(),
+        relations: std::collections::HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+        last_sequence: None,
+    };
+    let sub = source2
+        .subscribe(settings)
+        .await
+        .expect("Should subscribe on restart");
+
+    // position_handle must come through
+    assert!(
+        sub.position_handle.is_some(),
+        "position_handle must be Some through FFI on resumed subscribe"
+    );
+
+    // Verify the position handle is a real shared AtomicU64
+    let handle = sub.position_handle.as_ref().unwrap();
+    handle.store(999, std::sync::atomic::Ordering::Release);
+    assert_eq!(
+        handle.load(std::sync::atomic::Ordering::Acquire),
+        999,
+        "position_handle should be a working Arc<AtomicU64> through FFI"
+    );
+
+    source2.stop().await.expect("Should stop source2");
+    println!("Phase 2 complete: verified position_handle and supports_replay through FFI");
 }

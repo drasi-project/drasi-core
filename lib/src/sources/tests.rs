@@ -143,6 +143,7 @@ impl Source for TestMockSource {
             receiver,
             bootstrap_receiver: None,
             position_handle: None,
+            bootstrap_result_receiver: None,
         })
     }
 
@@ -250,6 +251,7 @@ impl Source for TestBootstrapMockSource {
             receiver,
             bootstrap_receiver: self.bootstrap_rx.lock().await.take(),
             position_handle: None,
+            bootstrap_result_receiver: None,
         })
     }
 
@@ -355,9 +357,9 @@ mod contract_tests {
     use super::*;
 
     #[test]
-    fn test_source_supports_replay_default_false() {
+    fn test_source_supports_replay_default_true() {
         let source = create_test_mock_source("test-replay".to_string());
-        assert!(!source.supports_replay());
+        assert!(source.supports_replay());
     }
 
     #[test]

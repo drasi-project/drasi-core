@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-wal-redb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Redb-based Write-Ahead Log implementation for Drasi transient sources"

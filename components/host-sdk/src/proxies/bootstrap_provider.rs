@@ -85,7 +85,7 @@ impl BootstrapProvider for BootstrapProviderProxy {
         let rel_labels_ptr = rel_ffi.as_ptr();
         let rel_labels_count = rel_ffi.len();
 
-        let count = (bootstrap_fn)(
+        let result_ptr = (bootstrap_fn)(
             state,
             query_id_ffi,
             node_labels_ptr,
@@ -108,17 +108,52 @@ impl BootstrapProvider for BootstrapProviderProxy {
             (sender.drop_fn)(sender.state);
         }
 
-        if count < 0 {
-            return Err(anyhow::anyhow!("Bootstrap failed with code {count}"));
+        // Extract handover metadata from the FfiBootstrapResult
+        if result_ptr.is_null() {
+            return Err(anyhow::anyhow!("Bootstrap failed: null result"));
         }
 
-        // The FFI ABI (bootstrap_fn in vtables.rs) returns only a count.
-        // `last_sequence` / `sequences_aligned` require a future extension of
-        // the C ABI to flow across the plugin boundary.
+        let ffi_result = unsafe { *Box::from_raw(result_ptr) };
+
+        if ffi_result.event_count < 0 {
+            return Err(anyhow::anyhow!(
+                "Bootstrap failed with code {}",
+                ffi_result.event_count
+            ));
+        }
+
+        let last_sequence = if ffi_result.last_sequence >= 0 {
+            Some(ffi_result.last_sequence as u64)
+        } else {
+            None
+        };
+
+        let source_position =
+            if !ffi_result.source_position_ptr.is_null() && ffi_result.source_position_len > 0 {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        ffi_result.source_position_ptr,
+                        ffi_result.source_position_len,
+                    )
+                };
+                let owned = bytes::Bytes::copy_from_slice(bytes);
+                // Free the source position allocation
+                if let Some(drop_fn) = ffi_result.source_position_drop_fn {
+                    (drop_fn)(
+                        ffi_result.source_position_ptr as *mut u8,
+                        ffi_result.source_position_len,
+                    );
+                }
+                Some(owned)
+            } else {
+                None
+            };
+
         Ok(BootstrapResult {
-            event_count: count as usize,
-            last_sequence: None,
-            sequences_aligned: false,
+            event_count: ffi_result.event_count as usize,
+            last_sequence,
+            sequences_aligned: ffi_result.sequences_aligned,
+            source_position,
         })
     }
 }
