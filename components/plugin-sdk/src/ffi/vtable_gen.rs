@@ -2693,13 +2693,23 @@ fn build_source_runtime_context(
     // In the plugin-side context, status updates flow through the FFI lifecycle callback,
     // not through this channel. The receiver is returned so it stays alive.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
+
+    let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
+        if ffi_ctx.wal_provider.is_null() {
+            None
+        } else {
+            Some(Arc::new(super::wal_provider_proxy::FfiWalProviderProxy {
+                vtable: ffi_ctx.wal_provider,
+            }))
+        };
+
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
         update_tx,
         state_store,
         identity_provider,
-        wal_provider: None,
+        wal_provider,
     };
     (ctx, status_rx)
 }

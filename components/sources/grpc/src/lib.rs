@@ -265,6 +265,7 @@ impl Source for GrpcSource {
                 .as_ref()
                 .map(|e| ConfigValue::Static(e.clone())),
             timeout_ms: ConfigValue::Static(self.config.timeout_ms),
+            durability: self.config.durability.clone(),
         };
 
         self.base.properties_or_serialize(&dto)

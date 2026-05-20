@@ -244,6 +244,8 @@ pub struct FfiRuntimeContext {
     pub identity_provider: *const super::identity::IdentityProviderVtable,
     /// Nullable — snapshot fetcher for on-demand query snapshot access.
     pub snapshot_fetcher: *const SnapshotFetcherVtable,
+    /// Nullable — WAL provider for transient source durability.
+    pub wal_provider: *const WalProviderVtable,
 }
 
 // Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
@@ -581,6 +583,86 @@ pub struct StateStoreVtable {
 
 unsafe impl Send for StateStoreVtable {}
 unsafe impl Sync for StateStoreVtable {}
+
+// ============================================================================
+// WAL provider vtable — host creates and provides to plugins for durable
+// event persistence (write-ahead log) in transient sources.
+// ============================================================================
+
+use super::types::{
+    FfiWalAppendResult, FfiWalEntry, FfiWalOptionalU64Result, FfiWalReadResult, FfiWalU64Result,
+};
+
+/// WAL provider vtable — host creates and provides to plugins.
+///
+/// Plugins call these function pointers to persist events before ACKing callers,
+/// enabling crash recovery and replay for transient sources.
+///
+/// Follows the same ownership pattern as [`StateStoreVtable`]:
+/// - Host `Box::into_raw`s an `Arc<dyn WalProvider>` into `state`
+/// - Plugin calls vtable functions with `state` and source/event parameters
+/// - `drop_fn` reclaims the `Arc` when the plugin drops the proxy
+///
+/// # Serialization
+///
+/// `SourceChange` is passed as an opaque `*const c_void` pointer because both
+/// the host and plugin statically link the same `drasi-core` crate, guaranteeing
+/// identical memory layout. The host dereferences the pointer directly.
+///
+/// For `read_from`, the host allocates `FfiWalEntry` buffers containing
+/// `Box::into_raw(Box::new(SourceChange))` pointers that the plugin takes ownership of.
+#[repr(C)]
+pub struct WalProviderVtable {
+    pub state: *mut c_void,
+
+    /// Register a source with the WAL.
+    /// `max_events`: capacity limit; `capacity_policy`: 0 = RejectIncoming, 1 = OverwriteOldest.
+    pub register_fn: extern "C" fn(
+        state: *mut c_void,
+        source_id: FfiStr,
+        max_events: u64,
+        capacity_policy: u8,
+    ) -> FfiResult,
+
+    /// Append an event to the WAL. `event` is a `*const SourceChange` (borrowed).
+    pub append_fn: extern "C" fn(
+        state: *mut c_void,
+        source_id: FfiStr,
+        event: *const c_void,
+    ) -> FfiWalAppendResult,
+
+    /// Read events from `sequence` (inclusive) to head.
+    /// Returns a buffer of `FfiWalEntry` that the caller must free via `free_read_result_fn`.
+    pub read_from_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr, sequence: u64) -> FfiWalReadResult,
+
+    /// Prune events up to `sequence` (inclusive). Returns count of pruned events.
+    pub prune_up_to_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr, sequence: u64) -> FfiWalU64Result,
+
+    /// Get the highest allocated sequence number.
+    pub head_sequence_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result,
+
+    /// Get the oldest retained sequence number (None if WAL is empty).
+    pub oldest_sequence_fn:
+        extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalOptionalU64Result,
+
+    /// Get the number of events currently in the WAL.
+    pub event_count_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiWalU64Result,
+
+    /// Delete all WAL data for a source.
+    pub delete_wal_fn: extern "C" fn(state: *mut c_void, source_id: FfiStr) -> FfiResult,
+
+    /// Free a read result buffer returned by `read_from_fn`.
+    /// The plugin MUST call this after consuming the entries.
+    pub free_read_result_fn: extern "C" fn(entries: *mut FfiWalEntry, count: usize),
+
+    /// Drop the vtable state (called when plugin no longer needs WAL access).
+    pub drop_fn: extern "C" fn(state: *mut c_void),
+}
+
+unsafe impl Send for WalProviderVtable {}
+unsafe impl Sync for WalProviderVtable {}
 
 // ============================================================================
 // Snapshot fetcher vtable — host creates and provides to plugins for on-demand

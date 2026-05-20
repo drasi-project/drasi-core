@@ -393,3 +393,228 @@ impl<T> SendMutPtr<T> {
         self.0
     }
 }
+
+// ============================================================================
+// WAL Provider FFI types
+// ============================================================================
+
+/// Result of a WAL `append` operation: either a sequence number or an error.
+#[repr(C)]
+pub struct FfiWalAppendResult {
+    /// Assigned sequence number (valid only when `error_code == 0`).
+    pub sequence: u64,
+    /// 0 on success, 1 for capacity_exhausted, 2 for other errors.
+    pub error_code: i32,
+    /// Error message (heap-allocated C string), or null on success.
+    pub error_msg: *mut c_char,
+}
+
+impl FfiWalAppendResult {
+    pub fn ok(sequence: u64) -> Self {
+        Self {
+            sequence,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn capacity_exhausted(source_id: &str) -> Self {
+        let msg = format!("WAL capacity exhausted for source '{source_id}'");
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            sequence: 0,
+            error_code: 1,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+
+    pub fn err(msg: String) -> Self {
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            sequence: 0,
+            error_code: 2,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+
+    /// # Safety
+    /// Must only be called once if error_msg is non-null.
+    pub unsafe fn into_result(self) -> Result<u64, (i32, String)> {
+        if self.error_code == 0 {
+            Ok(self.sequence)
+        } else {
+            let msg = if !self.error_msg.is_null() {
+                std::ffi::CString::from_raw(self.error_msg)
+                    .into_string()
+                    .unwrap_or_default()
+            } else {
+                "unknown WAL error".to_string()
+            };
+            Err((self.error_code, msg))
+        }
+    }
+}
+
+unsafe impl Send for FfiWalAppendResult {}
+
+/// Result of a WAL operation that returns a u64 value (head_sequence, event_count, prune_up_to).
+#[repr(C)]
+pub struct FfiWalU64Result {
+    pub value: u64,
+    pub error_code: i32,
+    pub error_msg: *mut c_char,
+}
+
+impl FfiWalU64Result {
+    pub fn ok(value: u64) -> Self {
+        Self {
+            value,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn err(msg: String) -> Self {
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            value: 0,
+            error_code: 1,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+
+    /// # Safety
+    /// Must only be called once if error_msg is non-null.
+    pub unsafe fn into_result(self) -> Result<u64, String> {
+        if self.error_code == 0 {
+            Ok(self.value)
+        } else if !self.error_msg.is_null() {
+            Err(std::ffi::CString::from_raw(self.error_msg)
+                .into_string()
+                .unwrap_or_default())
+        } else {
+            Err("unknown WAL error".to_string())
+        }
+    }
+}
+
+unsafe impl Send for FfiWalU64Result {}
+
+/// Result of `oldest_sequence` which returns Option<u64>.
+#[repr(C)]
+pub struct FfiWalOptionalU64Result {
+    pub value: u64,
+    /// Whether the value is Some (true) or None (false).
+    pub has_value: bool,
+    pub error_code: i32,
+    pub error_msg: *mut c_char,
+}
+
+impl FfiWalOptionalU64Result {
+    pub fn some(value: u64) -> Self {
+        Self {
+            value,
+            has_value: true,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            value: 0,
+            has_value: false,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn err(msg: String) -> Self {
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            value: 0,
+            has_value: false,
+            error_code: 1,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+
+    /// # Safety
+    /// Must only be called once if error_msg is non-null.
+    pub unsafe fn into_result(self) -> Result<Option<u64>, String> {
+        if self.error_code == 0 {
+            Ok(if self.has_value {
+                Some(self.value)
+            } else {
+                None
+            })
+        } else if !self.error_msg.is_null() {
+            Err(std::ffi::CString::from_raw(self.error_msg)
+                .into_string()
+                .unwrap_or_default())
+        } else {
+            Err("unknown WAL error".to_string())
+        }
+    }
+}
+
+unsafe impl Send for FfiWalOptionalU64Result {}
+
+/// A single entry returned by `read_from`: sequence + opaque SourceChange pointer.
+///
+/// The SourceChange is heap-allocated (Box) on the host side. The plugin takes
+/// ownership via `Box::from_raw(event)`.
+#[repr(C)]
+pub struct FfiWalEntry {
+    pub sequence: u64,
+    /// Pointer to a heap-allocated `SourceChange`. Plugin takes ownership.
+    pub event: *mut c_void,
+}
+
+/// Result of a WAL `read_from` operation: either a buffer of entries or an error.
+#[repr(C)]
+pub struct FfiWalReadResult {
+    /// Pointer to a heap-allocated array of FfiWalEntry.
+    pub entries: *mut FfiWalEntry,
+    /// Number of entries in the array.
+    pub count: usize,
+    /// 0 on success, non-zero on error.
+    pub error_code: i32,
+    /// Error message (heap-allocated C string), or null on success.
+    pub error_msg: *mut c_char,
+}
+
+impl FfiWalReadResult {
+    pub fn ok(entries: Vec<FfiWalEntry>) -> Self {
+        let mut entries = entries;
+        let result = Self {
+            entries: entries.as_mut_ptr(),
+            count: entries.len(),
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        };
+        std::mem::forget(entries);
+        result
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            entries: std::ptr::null_mut(),
+            count: 0,
+            error_code: 0,
+            error_msg: std::ptr::null_mut(),
+        }
+    }
+
+    pub fn err(msg: String) -> Self {
+        let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+        Self {
+            entries: std::ptr::null_mut(),
+            count: 0,
+            error_code: 1,
+            error_msg: c_msg.into_raw(),
+        }
+    }
+}
+
+unsafe impl Send for FfiWalReadResult {}

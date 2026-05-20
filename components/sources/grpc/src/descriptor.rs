@@ -31,6 +31,8 @@ pub struct GrpcSourceConfigDto {
     pub endpoint: Option<ConfigValue<String>>,
     #[serde(default = "default_grpc_timeout_ms")]
     pub timeout_ms: ConfigValue<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<drasi_lib::DurabilityConfig>,
 }
 
 fn default_grpc_host() -> ConfigValue<String> {
@@ -91,7 +93,7 @@ impl SourcePluginDescriptor for GrpcSourceDescriptor {
             port: mapper.resolve_typed(&dto.port)?,
             endpoint: mapper.resolve_optional(&dto.endpoint)?,
             timeout_ms: mapper.resolve_typed(&dto.timeout_ms)?,
-            durability: None,
+            durability: dto.durability.clone(),
         };
 
         let mut source = GrpcSourceBuilder::new(id)
