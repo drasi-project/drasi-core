@@ -574,10 +574,13 @@ impl ReplicationConnection {
     }
 }
 
+/// Formats a WAL LSN `u64` as the PostgreSQL `"high/low"` hex notation (e.g. `"0/1A3F00"`).
 pub(crate) fn format_lsn(lsn: u64) -> String {
     format!("{:X}/{:X}", lsn >> 32, lsn & 0xFFFFFFFF)
 }
 
+/// Parses a PostgreSQL LSN string in `"high/low"` hex notation into a `u64`.
+/// Returns an error if the string is not in `"X/Y"` format.
 pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {

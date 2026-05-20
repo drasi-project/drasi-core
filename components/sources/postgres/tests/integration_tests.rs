@@ -21,6 +21,7 @@ use drasi_bootstrap_postgres::{
     TableKeyConfig as BootstrapTableKeyConfig,
 };
 use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
+use drasi_lib::ComponentStatus;
 use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
@@ -47,6 +48,18 @@ fn init_logging() {
 
 fn slot_name() -> String {
     format!("drasi_slot_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Poll a source until it reaches Running state (or timeout after 10s).
+async fn wait_for_source_running(source: &PostgresReplicationSource) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if source.status().await == ComponentStatus::Running {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("Source did not reach Running state within 10s");
 }
 
 async fn wait_for_query_results(
@@ -685,7 +698,7 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
     source.start().await?;
 
     // Wait for source to become running
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_source_running(&source).await;
 
     // Try to resume from LSN 1 — which is definitely before the slot's consistent_point
     let settings = subscription_settings(
@@ -743,7 +756,7 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
     source.start().await?;
 
     // Wait for source to become running
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_source_running(&source).await;
 
     // Subscribe without resume (fresh subscriber)
     let settings = subscription_settings("pg-direct-source", "q-position-test", None, true);
@@ -817,7 +830,7 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     source.start().await?;
 
     // Wait for source to become running
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_source_running(&source).await;
 
     // Subscribe (first subscriber) to capture the initial LSN
     let settings = subscription_settings("pg-direct-source", "q-first", None, true);
@@ -857,7 +870,7 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
 
     // Restart and subscribe with resume_from
     source.start().await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for_source_running(&source).await;
 
     let settings =
         subscription_settings("pg-direct-source", "q-resumed", Some(resume_lsn), true);
@@ -881,8 +894,8 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     }
 
     assert!(
-        replay_count >= 1,
-        "Should replay at least 1 event from the resumed LSN, got {replay_count}"
+        replay_count >= 2,
+        "Should replay at least 2 events from the resumed LSN, got {replay_count}"
     );
 
     source.stop().await?;

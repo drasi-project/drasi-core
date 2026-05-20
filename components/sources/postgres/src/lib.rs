@@ -1490,6 +1490,42 @@ mod tests {
         }
     }
 
+    mod subscribe {
+        use super::*;
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use std::collections::HashSet;
+
+        #[tokio::test]
+        async fn test_malformed_resume_from_rejected() {
+            let source = PostgresSourceBuilder::new("test-source")
+                .with_database("testdb")
+                .with_user("testuser")
+                .build()
+                .unwrap();
+
+            // 4 bytes instead of expected 8
+            let bad_position = bytes::Bytes::from(vec![0u8; 4]);
+            let settings = SourceSubscriptionSettings {
+                source_id: "test-source".to_string(),
+                query_id: "q-bad-position".to_string(),
+                enable_bootstrap: false,
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_from: Some(bad_position),
+                request_position_handle: false,
+                last_sequence: None,
+            };
+
+            let result = source.subscribe(settings).await;
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.err().unwrap());
+            assert!(
+                err_msg.contains("expected 8 bytes"),
+                "Error should mention expected byte length, got: {err_msg}"
+            );
+        }
+    }
+
     mod builder {
         use super::*;
 
