@@ -56,6 +56,7 @@ members = [
   "components/reactions/application",
   "components/reactions/log",
   "components/reactions/loki",
+  "components/reactions/file",
   "components/reactions/storedproc-mssql",
   "components/reactions/storedproc-mysql",
   "components/reactions/storedproc-postgres",
@@ -148,6 +149,7 @@ drasi-source-hyperliquid = { version = "0.1.0", path = "components/sources/hyper
 drasi-bootstrap-application = { version = "0.2.1", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.1", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.3.1", path = "components/reactions/grpc" }
+drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
 drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
 drasi-mssql-common = { version = "0.2.1", path = "components/mssql-common" }
 drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
