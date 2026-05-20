@@ -2143,7 +2143,10 @@ mod tests {
         .await;
 
         // Should fail because fetch_snapshot returns error.
-        assert!(result.is_err(), "AutoReset should fail when snapshot fetch errors");
+        assert!(
+            result.is_err(),
+            "AutoReset should fail when snapshot fetch errors"
+        );
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("failed to fetch snapshot"),
@@ -2326,8 +2329,16 @@ mod tests {
             ),
         );
 
-        assert!(r1.is_ok(), "First gap recovery should succeed: {:?}", r1.err());
-        assert!(r2.is_ok(), "Second gap recovery should succeed: {:?}", r2.err());
+        assert!(
+            r1.is_ok(),
+            "First gap recovery should succeed: {:?}",
+            r1.err()
+        );
+        assert!(
+            r2.is_ok(),
+            "Second gap recovery should succeed: {:?}",
+            r2.err()
+        );
 
         // Both checkpoints should be set.
         let cps = checkpoints.read().await;

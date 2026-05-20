@@ -48,12 +48,7 @@ impl InMemoryOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for InMemoryOutboxWriter {
-    async fn append(
-        &self,
-        query_id: &str,
-        sequence: u64,
-        data: &[u8],
-    ) -> Result<(), IndexError> {
+    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let mut store = self.data.write().await;
         store
             .entry(query_id.to_string())
@@ -70,7 +65,10 @@ impl OutboxWriter for InMemoryOutboxWriter {
         let store = self.data.read().await;
         let entries = match store.get(query_id) {
             Some(map) => map
-                .range((std::ops::Bound::Excluded(after_sequence), std::ops::Bound::Unbounded))
+                .range((
+                    std::ops::Bound::Excluded(after_sequence),
+                    std::ops::Bound::Unbounded,
+                ))
                 .map(|(seq, data)| (*seq, data.clone()))
                 .collect(),
             None => Vec::new(),
@@ -91,11 +89,7 @@ impl OutboxWriter for InMemoryOutboxWriter {
         Ok(())
     }
 
-    async fn trim_to_capacity(
-        &self,
-        query_id: &str,
-        capacity: usize,
-    ) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let mut store = self.data.write().await;
         let map = match store.get_mut(query_id) {
             Some(map) => map,

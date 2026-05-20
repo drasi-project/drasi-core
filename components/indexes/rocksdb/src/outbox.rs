@@ -80,12 +80,7 @@ impl RocksDbOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for RocksDbOutboxWriter {
-    async fn append(
-        &self,
-        query_id: &str,
-        sequence: u64,
-        data: &[u8],
-    ) -> Result<(), IndexError> {
+    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let db = self.db.clone();
         let key = make_key(query_id, sequence);
         let data = data.to_vec();
@@ -109,7 +104,10 @@ impl OutboxWriter for RocksDbOutboxWriter {
 
         task::spawn_blocking(move || {
             let cf = db.cf_handle(OUTBOX_CF).expect("outbox cf not found");
-            let iter = db.iterator_cf(&cf, IteratorMode::From(&start_key, rocksdb::Direction::Forward));
+            let iter = db.iterator_cf(
+                &cf,
+                IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+            );
 
             let mut entries = Vec::new();
             for item in iter {
@@ -194,11 +192,7 @@ impl OutboxWriter for RocksDbOutboxWriter {
         .map_err(IndexError::other)?
     }
 
-    async fn trim_to_capacity(
-        &self,
-        query_id: &str,
-        capacity: usize,
-    ) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let db = self.db.clone();
         let prefix = make_prefix(query_id);
 

@@ -25,7 +25,7 @@ use drasi_lib::channels::{ComponentStatus, QueryResult};
 use drasi_lib::context::ReactionRuntimeContext;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::{DrasiLib, DispatchMode, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{DispatchMode, DrasiLib, MemoryStateStoreProvider, Query, Reaction};
 use mock_source::{MockSource, MockSourceHandle, PropertyMapBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -704,13 +704,7 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
     // Flood the broadcast channel to cause lag (buffer=2, send many fast).
     // The forwarder will detect a sequence gap when it catches up.
     for i in 0..20 {
-        insert_person(
-            &handle,
-            &format!("p-flood-{i}"),
-            &format!("Flood-{i}"),
-            i,
-        )
-        .await?;
+        insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
     // Wait for the forwarder to process what it can.
@@ -774,13 +768,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
 
     // Flood to cause broadcast lag — Strict policy should stop the forwarder.
     for i in 0..20 {
-        insert_person(
-            &handle,
-            &format!("p-flood-{i}"),
-            &format!("Flood-{i}"),
-            i,
-        )
-        .await?;
+        insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
     // Give time for the forwarder to detect the gap and exit.
@@ -788,7 +776,9 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
 
     // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;
-    let after = receiver.wait_for_count(1, Duration::from_millis(1000)).await;
+    let after = receiver
+        .wait_for_count(1, Duration::from_millis(1000))
+        .await;
     assert_eq!(
         after.len(),
         0,

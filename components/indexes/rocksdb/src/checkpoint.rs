@@ -349,11 +349,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn write_result_sequence(
-        &self,
-        query_id: &str,
-        sequence: u64,
-    ) -> Result<(), IndexError> {
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let db = self.db.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
 
@@ -371,10 +367,7 @@ impl CheckpointStore for RocksDbCheckpointStore {
         }
     }
 
-    async fn read_result_sequence(
-        &self,
-        query_id: &str,
-    ) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
         let db = self.db.clone();
         let key = format!("{RESULT_SEQUENCE_PREFIX}{query_id}");
 
@@ -385,7 +378,10 @@ impl CheckpointStore for RocksDbCheckpointStore {
             let data = db.get_cf(&cf, &key).map_err(IndexError::other)?;
             match data {
                 Some(v) => {
-                    let bytes: [u8; 8] = v.as_slice().try_into().map_err(|_| IndexError::CorruptedData)?;
+                    let bytes: [u8; 8] = v
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| IndexError::CorruptedData)?;
                     Ok(Some(u64::from_be_bytes(bytes)))
                 }
                 None => Ok(None),

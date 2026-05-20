@@ -57,12 +57,7 @@ impl GarnetOutboxWriter {
 
 #[async_trait]
 impl OutboxWriter for GarnetOutboxWriter {
-    async fn append(
-        &self,
-        query_id: &str,
-        sequence: u64,
-        data: &[u8],
-    ) -> Result<(), IndexError> {
+    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError> {
         let _ = query_id; // query_id is already bound in self
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();
@@ -171,11 +166,7 @@ impl OutboxWriter for GarnetOutboxWriter {
         Ok(())
     }
 
-    async fn trim_to_capacity(
-        &self,
-        query_id: &str,
-        capacity: usize,
-    ) -> Result<usize, IndexError> {
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError> {
         let _ = query_id;
         let mut con = self.connection.clone();
         let outbox_key = self.outbox_key();

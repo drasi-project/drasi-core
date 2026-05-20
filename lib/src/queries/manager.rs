@@ -309,9 +309,7 @@ async fn dispatch_query_results(
         // Trim the persistent outbox to the configured capacity
         if outbox_ok {
             if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
-                warn!(
-                    "Query '{query_id}' failed to trim persistent outbox: {e}"
-                );
+                warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
             }
         }
     }
@@ -2371,9 +2369,7 @@ impl Query for DrasiQuery {
                     Ok(Some(seq)) => seq,
                     Ok(None) => 0,
                     Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to read persisted result sequence: {e}"
-                        );
+                        warn!("Query '{query_id}' failed to read persisted result sequence: {e}");
                         0
                     }
                 }
@@ -2406,9 +2402,7 @@ impl Query for DrasiQuery {
                         ));
                     }
                     Err(e) => {
-                        warn!(
-                            "Query '{query_id}' failed to read persistent live results: {e}"
-                        );
+                        warn!("Query '{query_id}' failed to read persistent live results: {e}");
                     }
                 }
             }

@@ -1028,10 +1028,7 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
         self.inner.delete_many(store_id, keys).await
     }
 
-    async fn clear_store(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn clear_store(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.clear_store(store_id).await
     }
 
@@ -1042,17 +1039,11 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
         self.inner.list_keys(store_id).await
     }
 
-    async fn store_exists(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<bool> {
+    async fn store_exists(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<bool> {
         self.inner.store_exists(store_id).await
     }
 
-    async fn key_count(
-        &self,
-        store_id: &str,
-    ) -> drasi_lib::state_store::StateStoreResult<usize> {
+    async fn key_count(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
         self.inner.key_count(store_id).await
     }
 

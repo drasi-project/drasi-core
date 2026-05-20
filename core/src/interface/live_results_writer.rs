@@ -62,10 +62,7 @@ pub trait LiveResultsWriter: Send + Sync {
     ///
     /// Returns `(row_signature, serialized_data)` pairs in unspecified order.
     /// Returns an empty vec if no rows exist for this query.
-    async fn read_snapshot(
-        &self,
-        query_id: &str,
-    ) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
+    async fn read_snapshot(&self, query_id: &str) -> Result<Vec<(u64, Vec<u8>)>, IndexError>;
 
     /// Delete all live rows for a query.
     ///

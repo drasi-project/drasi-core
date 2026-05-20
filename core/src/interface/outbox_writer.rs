@@ -41,12 +41,7 @@ pub trait OutboxWriter: Send + Sync {
     /// Append a serialized query result entry.
     ///
     /// If the outbox already contains an entry at this sequence, it is overwritten.
-    async fn append(
-        &self,
-        query_id: &str,
-        sequence: u64,
-        data: &[u8],
-    ) -> Result<(), IndexError>;
+    async fn append(&self, query_id: &str, sequence: u64, data: &[u8]) -> Result<(), IndexError>;
 
     /// Read all entries with sequence strictly greater than `after_sequence`.
     ///
@@ -61,10 +56,7 @@ pub trait OutboxWriter: Send + Sync {
     /// Read the highest sequence number stored for this query.
     ///
     /// Returns `None` if the outbox is empty for this query.
-    async fn read_latest_sequence(
-        &self,
-        query_id: &str,
-    ) -> Result<Option<u64>, IndexError>;
+    async fn read_latest_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError>;
 
     /// Delete all outbox entries for a query.
     ///
@@ -75,9 +67,5 @@ pub trait OutboxWriter: Send + Sync {
     ///
     /// Returns the number of entries removed. If the outbox has ≤ `capacity`
     /// entries, this is a no-op returning 0.
-    async fn trim_to_capacity(
-        &self,
-        query_id: &str,
-        capacity: usize,
-    ) -> Result<usize, IndexError>;
+    async fn trim_to_capacity(&self, query_id: &str, capacity: usize) -> Result<usize, IndexError>;
 }

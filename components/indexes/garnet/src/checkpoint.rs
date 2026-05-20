@@ -304,10 +304,7 @@ impl CheckpointStore for GarnetCheckpointStore {
         Ok(())
     }
 
-    async fn read_result_sequence(
-        &self,
-        _query_id: &str,
-    ) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         let key = self.result_sequence_key();
         let mut con = self.connection.clone();
         match con.get::<String, Option<u64>>(key).await {

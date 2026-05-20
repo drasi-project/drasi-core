@@ -141,10 +141,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
         Ok(())
     }
 
-    async fn read_result_sequence(
-        &self,
-        _query_id: &str,
-    ) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         let data = self.result_sequence.read().await;
         Ok(*data)
     }

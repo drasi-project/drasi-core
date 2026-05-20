@@ -31,8 +31,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError,
-    LiveResultsWriter, OutboxWriter, ResultIndex, SessionControl,
+    CheckpointStore, ElementArchiveIndex, ElementIndex, FutureQueue, IndexError, LiveResultsWriter,
+    OutboxWriter, ResultIndex, SessionControl,
 };
 
 /// Set of indexes for a query.

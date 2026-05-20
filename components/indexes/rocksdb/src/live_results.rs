@@ -24,7 +24,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, LiveResultsWriter, RowMutation};
-use rocksdb::{ColumnFamilyDescriptor, IteratorMode, OptimisticTransactionDB, Options, WriteBatchWithTransaction};
+use rocksdb::{
+    ColumnFamilyDescriptor, IteratorMode, OptimisticTransactionDB, Options,
+    WriteBatchWithTransaction,
+};
 use tokio::task;
 
 /// Column family name for live results data.

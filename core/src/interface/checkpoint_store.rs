@@ -153,10 +153,7 @@ pub trait CheckpointStore: Send + Sync {
     /// Used during crash recovery to determine the outbox replay point.
     ///
     /// Default: returns `None` (volatile backends).
-    async fn read_result_sequence(
-        &self,
-        _query_id: &str,
-    ) -> Result<Option<u64>, IndexError> {
+    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
         Ok(None)
     }
 }
