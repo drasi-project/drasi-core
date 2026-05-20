@@ -14,6 +14,7 @@
 
 //! Binlog replication stream for MySQL sources.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
@@ -29,6 +30,7 @@ use mysql_common::binlog::events::{
 };
 use mysql_common::packets::Sid;
 use mysql_common::uuid::Uuid;
+use tokio::sync::RwLock;
 
 use drasi_core::models::SourceChange;
 use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
@@ -38,7 +40,6 @@ use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
 use crate::decoder::MySqlDecoder;
 use crate::types::ReplicationState;
 
-const STATE_KEY: &str = "replication_position";
 
 pub struct ReplicationStream {
     config: MySqlSourceConfig,
@@ -51,6 +52,7 @@ pub struct ReplicationStream {
     current_gtid: Option<String>,
     current_event_timestamp: u64,
     shutdown: StdArc<AtomicBool>,
+    subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
 }
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -71,6 +73,7 @@ impl ReplicationStream {
         source_id: String,
         base: SourceBase,
         shutdown: StdArc<AtomicBool>,
+        subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
     ) -> Self {
         let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
         Self {
@@ -84,6 +87,7 @@ impl ReplicationStream {
             current_gtid: None,
             current_event_timestamp: 0,
             shutdown,
+            subscriber_resume_positions,
         }
     }
 
@@ -98,7 +102,10 @@ impl ReplicationStream {
             );
         }
 
-        let state_store = self.base.state_store().await;
+        // Wait for at least one subscriber before starting the binlog stream.
+        // This ensures we don't miss events dispatched while no queries are subscribed.
+        self.base.wait_for_subscribers().await;
+
         let mut attempts = 0u32;
 
         loop {
@@ -107,12 +114,9 @@ impl ReplicationStream {
                 return Ok(());
             }
 
-            let start_position = self.load_start_position(state_store.as_deref()).await?;
+            let start_position = self.determine_start_position().await;
 
-            match self
-                .run_replication_loop(start_position, state_store.as_deref())
-                .await
-            {
+            match self.run_replication_loop(start_position).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if self.shutdown.load(Ordering::Relaxed) {
@@ -147,11 +151,7 @@ impl ReplicationStream {
         }
     }
 
-    async fn run_replication_loop(
-        &mut self,
-        start_position: StartPosition,
-        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
-    ) -> Result<()> {
+    async fn run_replication_loop(&mut self, start_position: StartPosition) -> Result<()> {
         self.pending_changes = None;
         self.current_gtid = match &start_position {
             StartPosition::FromGtid(gtid) => Some(gtid.clone()),
@@ -169,7 +169,7 @@ impl ReplicationStream {
 
             match stream.next().await {
                 Some(Ok(event)) => {
-                    self.process_event(&stream, &event, state_store).await?;
+                    self.process_event(&stream, &event).await?;
                 }
                 Some(Err(err)) => {
                     Self::close_stream(stream).await;
@@ -336,7 +336,6 @@ impl ReplicationStream {
         &mut self,
         stream: &BinlogStream,
         event: &Event,
-        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
     ) -> Result<()> {
         let header = event.header();
         self.current_event_timestamp = header.timestamp() as u64;
@@ -355,12 +354,12 @@ impl ReplicationStream {
                 self.process_rows_event(stream, rows_event).await?;
             }
             Some(EventData::XidEvent(_)) => {
-                self.flush_transaction(state_store, &header).await?;
+                self.flush_transaction(&header).await?;
             }
             Some(EventData::QueryEvent(query_event)) => {
                 let query = query_event.query();
                 if query.eq_ignore_ascii_case("COMMIT") || query.eq_ignore_ascii_case("ROLLBACK") {
-                    self.flush_transaction(state_store, &header).await?;
+                    self.flush_transaction(&header).await?;
                 }
             }
             Some(other) => {
@@ -458,11 +457,7 @@ impl ReplicationStream {
             .await
     }
 
-    async fn flush_transaction(
-        &mut self,
-        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
-        header: &BinlogEventHeader,
-    ) -> Result<()> {
+    async fn flush_transaction(&mut self, header: &BinlogEventHeader) -> Result<()> {
         // Update position from commit header before dispatching
         let commit_position = match header.log_pos() {
             0 => self.current_binlog_position,
@@ -485,12 +480,6 @@ impl ReplicationStream {
                     &self.source_id,
                 )
                 .await?;
-            }
-        }
-
-        if let Some(store) = state_store {
-            if let Err(e) = self.persist_state(store, header).await {
-                warn!("Failed to persist replication state: {e:?}");
             }
         }
 
@@ -530,47 +519,59 @@ impl ReplicationStream {
         self.config.tables.contains(&qualified_name) || self.config.tables.contains(&table_name)
     }
 
-    async fn load_start_position(
-        &self,
-        state_store: Option<&dyn drasi_lib::state_store::StateStoreProvider>,
-    ) -> Result<StartPosition> {
-        if let Some(store) = state_store {
-            if let Some(bytes) = store.get(&self.source_id, STATE_KEY).await? {
-                if let Ok(state) = serde_json::from_slice::<ReplicationState>(&bytes) {
-                    if let Some(gtid) = state.gtid_set {
-                        return Ok(StartPosition::FromGtid(gtid));
-                    }
-                    if !state.binlog_file.is_empty() {
-                        return Ok(StartPosition::FromPosition {
-                            file: state.binlog_file,
-                            position: state.binlog_position,
-                        });
-                    }
-                }
-            }
+    /// Determine the start position for the binlog stream based on subscriber resume positions.
+    /// The minimum position across all subscribers is used so no subscriber misses events.
+    /// If no subscribers have a resume position, fall back to the configured start_position.
+    async fn determine_start_position(&self) -> StartPosition {
+        let positions = self.subscriber_resume_positions.read().await;
+        if positions.is_empty() {
+            return self.config.start_position.clone();
         }
 
-        Ok(self.config.start_position.clone())
+        // Find the minimum (earliest) position across all subscribers.
+        // For GTID-based replication, we use the full GTID set.
+        // For file+offset, we compare lexicographically by file then by position.
+        let mut min_state: Option<&ReplicationState> = None;
+        for state in positions.values() {
+            min_state = Some(match min_state {
+                None => state,
+                Some(current_min) => {
+                    if Self::is_earlier(state, current_min) {
+                        state
+                    } else {
+                        current_min
+                    }
+                }
+            });
+        }
+
+        match min_state {
+            Some(state) => {
+                if let Some(ref gtid) = state.gtid_set {
+                    StartPosition::FromGtid(gtid.clone())
+                } else if !state.binlog_file.is_empty() {
+                    StartPosition::FromPosition {
+                        file: state.binlog_file.clone(),
+                        position: state.binlog_position,
+                    }
+                } else {
+                    self.config.start_position.clone()
+                }
+            }
+            None => self.config.start_position.clone(),
+        }
     }
 
-    async fn persist_state(
-        &self,
-        store: &dyn drasi_lib::state_store::StateStoreProvider,
-        header: &BinlogEventHeader,
-    ) -> Result<()> {
-        let state = ReplicationState {
-            binlog_file: self.current_binlog_file.clone(),
-            binlog_position: match header.log_pos() {
-                0 => self.current_binlog_position,
-                position => position,
-            },
-            gtid_set: self.current_gtid.clone(),
-            last_processed_timestamp: header.timestamp() as u64,
-        };
-
-        let bytes = serde_json::to_vec(&state)?;
-        store.set(&self.source_id, STATE_KEY, bytes).await?;
-        Ok(())
+    /// Compare two replication states; returns true if `a` is earlier than `b`.
+    fn is_earlier(a: &ReplicationState, b: &ReplicationState) -> bool {
+        // Compare by binlog file name (lexicographic), then by position.
+        // Binlog files have names like `mysql-bin.000001` so lexicographic comparison
+        // correctly orders them when the numeric suffix length is consistent.
+        match a.binlog_file.cmp(&b.binlog_file) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a.binlog_position < b.binlog_position,
+        }
     }
 
     fn relaxed_ssl_opts(&self) -> SslOpts {

@@ -33,7 +33,8 @@ use std::sync::Arc as StdArc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info};
+use log::{error, info, warn};
+use tokio::sync::RwLock;
 use tracing::Instrument;
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode};
@@ -42,11 +43,16 @@ use drasi_lib::sources::Source;
 use drasi_lib::{bootstrap::BootstrapProvider, channels::SubscriptionResponse};
 
 use crate::stream::ReplicationStream;
+use crate::types::ReplicationState;
 
 pub struct MySqlReplicationSource {
     base: SourceBase,
     config: MySqlSourceConfig,
     shutdown: StdArc<AtomicBool>,
+    /// Per-subscriber resume positions from checkpoint recovery.
+    /// Populated during subscribe() when a query provides resume_from bytes.
+    /// The replication stream uses the minimum position as its start point.
+    subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
 }
 
 impl MySqlReplicationSource {
@@ -57,6 +63,7 @@ impl MySqlReplicationSource {
             base: SourceBase::new(params)?,
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
+            subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -78,6 +85,7 @@ impl MySqlReplicationSource {
             base: SourceBase::new(params)?,
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
+            subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -121,6 +129,7 @@ impl Source for MySqlReplicationSource {
         let base = self.base.clone_shared();
         let reporter = self.base.status_handle();
         let shutdown = self.shutdown.clone();
+        let subscriber_resume_positions = self.subscriber_resume_positions.clone();
 
         let instance_id = self
             .base
@@ -139,7 +148,13 @@ impl Source for MySqlReplicationSource {
 
         let task = tokio::spawn(
             async move {
-                let mut stream = ReplicationStream::new(config, source_id.clone(), base, shutdown);
+                let mut stream = ReplicationStream::new(
+                    config,
+                    source_id.clone(),
+                    base,
+                    shutdown,
+                    subscriber_resume_positions,
+                );
                 if let Err(e) = stream.run().await {
                     error!("Replication task failed for {source_id}: {e}");
                     reporter
@@ -178,6 +193,14 @@ impl Source for MySqlReplicationSource {
             task.abort();
         }
 
+        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
+        // does not dispatch events to dead receivers.
+        self.base.clear_dispatchers().await;
+
+        // Clear stale resume positions — they will be repopulated by subscribe()
+        // on the next lifecycle with fresh checkpoint data.
+        self.subscriber_resume_positions.write().await.clear();
+
         self.base
             .set_status(
                 ComponentStatus::Stopped,
@@ -196,6 +219,30 @@ impl Source for MySqlReplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If the subscriber has a resume_from position, deserialize it and store
+        // keyed by query_id. The replication stream uses the minimum position
+        // across all subscribers to determine where to start the binlog stream.
+        if let Some(ref resume_bytes) = settings.resume_from {
+            match ReplicationState::from_position_bytes(resume_bytes) {
+                Some(state) => {
+                    info!(
+                        "Subscriber '{}' requesting resume from {}:{} on source '{}'",
+                        settings.query_id, state.binlog_file, state.binlog_position, self.base.id
+                    );
+                    self.subscriber_resume_positions
+                        .write()
+                        .await
+                        .insert(settings.query_id.clone(), state);
+                }
+                None => {
+                    warn!(
+                        "Failed to deserialize resume_from bytes for subscriber '{}' on source '{}'",
+                        settings.query_id, self.base.id
+                    );
+                }
+            }
+        }
+
         self.base.subscribe_with_bootstrap(&settings, "MySQL").await
     }
 
@@ -215,6 +262,12 @@ impl Source for MySqlReplicationSource {
     }
 
     async fn remove_position_handle(&self, query_id: &str) {
+        // Remove the per-subscriber resume position so the replication stream
+        // no longer pins its start position on behalf of this query.
+        self.subscriber_resume_positions
+            .write()
+            .await
+            .remove(query_id);
         self.base.remove_position_handle(query_id).await;
     }
 }
@@ -381,6 +434,7 @@ impl MySqlSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
+            subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
         })
     }
 }
