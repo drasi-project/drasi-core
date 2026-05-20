@@ -74,6 +74,8 @@ pub struct SourceBaseParams {
     pub dispatch_buffer_capacity: Option<usize>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
+    /// Optional state store provider to use when running standalone
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Whether this source should auto-start - defaults to true
     pub auto_start: bool,
 }
@@ -88,6 +90,10 @@ impl std::fmt::Debug for SourceBaseParams {
                 "bootstrap_provider",
                 &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
             )
+            .field(
+                "state_store",
+                &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
+            )
             .field("auto_start", &self.auto_start)
             .finish()
     }
@@ -101,6 +107,7 @@ impl SourceBaseParams {
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
+            state_store: None,
             auto_start: true,
         }
     }
@@ -123,6 +130,12 @@ impl SourceBaseParams {
     /// initial data to queries that request bootstrap.
     pub fn with_bootstrap_provider(mut self, provider: impl BootstrapProvider + 'static) -> Self {
         self.bootstrap_provider = Some(Box::new(provider));
+        self
+    }
+
+    /// Set the state store provider for standalone usage.
+    pub fn with_state_store(mut self, store: Arc<dyn StateStoreProvider>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -253,7 +266,7 @@ impl SourceBase {
             status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            state_store: Arc::new(RwLock::new(None)), // Extracted from context
+            state_store: Arc::new(RwLock::new(params.state_store)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),

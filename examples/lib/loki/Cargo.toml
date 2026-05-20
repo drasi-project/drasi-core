@@ -1,0 +1,22 @@
+[package]
+name = "loki-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib example: MockSource -> Query -> Loki reaction"
+
+[workspace]
+
+[dependencies]
+drasi-bootstrap-scriptfile = { path = "../../../components/bootstrappers/scriptfile" }
+drasi-lib = { path = "../../../lib" }
+drasi-reaction-loki = { path = "../../../components/reactions/loki" }
+drasi-source-mock = { path = "../../../components/sources/mock" }
+
+anyhow = "1.0"
+env_logger = "0.10.0"
+tokio = { version = "1.6", features = ["full"] }
+
+[[bin]]
+name = "loki-example"
+path = "main.rs"
