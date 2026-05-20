@@ -75,6 +75,7 @@ impl MySqlBootstrapHandler {
                 event_count: 0,
                 last_sequence: None,
                 sequences_aligned: false,
+                source_position: None,
             });
         }
 
@@ -90,6 +91,7 @@ impl MySqlBootstrapHandler {
             event_count: total,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: None,
         })
     }
 

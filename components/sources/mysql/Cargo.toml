@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-mysql"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "MySQL source plugin for Drasi"
@@ -56,5 +56,5 @@ dynamic-plugin = []
 tokio-test = "0.4"
 testcontainers = "0.26.3"
 testcontainers-modules = { version = "0.14", features = ["mysql"] }
-drasi-reaction-application = { path = "../../reactions/application" }
-drasi-bootstrap-mysql = { path = "../../bootstrappers/mysql" }
+drasi-reaction-application = { workspace = true }
+drasi-bootstrap-mysql = { workspace = true }
