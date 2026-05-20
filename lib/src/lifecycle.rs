@@ -97,33 +97,26 @@ impl LifecycleManager {
 
     /// Start all components with auto_start enabled
     ///
-    /// Components are started in dependency order: Sources → Reactions → Queries.
+    /// Components are started in dependency order: Sources → Queries → Reactions.
     ///
-    /// Reactions are started (and subscribed to query outputs) **before** queries
-    /// so that on a checkpoint-based restart the reaction dispatchers are already
-    /// in place when queries resume CDC processing. Without this ordering, the
-    /// queries can process replayed offline changes and dispatch results into an
-    /// empty dispatcher list, silently dropping them.
+    /// Queries start before reactions so they are in Running state when reactions
+    /// subscribe. Reactions may need to fetch a snapshot from a running query
+    /// during their startup (e.g., for fresh-start recovery). Query results
+    /// produced before reactions subscribe are buffered in the query's outbox
+    /// and replayed to the reaction during its bootstrap.
     ///
     /// Only components with auto_start=true will be started.
     pub async fn start_components(&self) -> Result<()> {
-        info!("Starting all auto-start components in sequence: Sources → Reactions → Queries");
+        info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
 
         // Start sources first (SourceManager.start_all() checks auto_start internally)
         info!("Starting auto-start sources");
         self.source_manager.start_all().await?;
         info!("All auto-start sources started successfully");
 
-        // Start reactions before queries so their dispatchers are wired up
-        // before the queries begin processing CDC events. Reaction.subscribe()
-        // only adds a dispatcher to the query's output channel list — it does
-        // not require the query to be running.
-        info!("Starting auto-start reactions");
-        self.reaction_manager.start_all().await?;
-        info!("All auto-start reactions started successfully");
-
-        // Start queries last — by this point reaction dispatchers are in place,
-        // so replayed CDC changes will reach reactions immediately.
+        // Start queries — by this point sources are running, so queries can
+        // subscribe and begin processing CDC events. Results are buffered in
+        // each query's outbox until reactions subscribe.
         //
         // Query startup is best-effort: individual queries that fail to start
         // (e.g., PositionUnavailable after a gap) are placed in Error state by
@@ -136,7 +129,14 @@ impl LifecycleManager {
             info!("All auto-start queries started successfully");
         }
 
-        info!("All auto-start components started in sequence: Sources → Reactions → Queries");
+        // Start reactions last — queries are running so snapshot fetching works.
+        // The reaction subscribes to the query outbox and catches up on any
+        // results produced between query start and reaction start.
+        info!("Starting auto-start reactions");
+        self.reaction_manager.start_all().await?;
+        info!("All auto-start reactions started successfully");
+
+        info!("All auto-start components started in sequence: Sources → Queries → Reactions");
         info!("[STARTUP-COMPLETE] DrasiLib.start() is now returning - all components and subscriptions should be active");
         Ok(())
     }
@@ -180,8 +180,22 @@ impl LifecycleManager {
 
         let mut failures = Vec::new();
 
-        for (id, kind, status) in shutdown_order {
-            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+        for (id, kind, _snapshot_status) in shutdown_order {
+            // Re-check the live status — it may have changed since we took the
+            // snapshot (e.g., a reaction can race to Error after its source is
+            // stopped).
+            let live_status = {
+                let g = self.graph.read().await;
+                g.get_component(&id).map(|n| n.status)
+            };
+            let live_status = match live_status {
+                Some(s) => s,
+                None => continue, // component removed concurrently
+            };
+            if !matches!(
+                live_status,
+                ComponentStatus::Running | ComponentStatus::Starting
+            ) {
                 continue;
             }
 

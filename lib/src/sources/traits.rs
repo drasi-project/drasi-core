@@ -322,6 +322,29 @@ pub trait Source: Send + Sync {
     /// FFI SDK update (see issue #371) will add the vtable entry so plugin
     /// sources can participate in position-handle cleanup.
     async fn remove_position_handle(&self, _query_id: &str) {}
+
+    /// Set the identity provider for this source.
+    ///
+    /// This method allows attaching a per-source identity provider after
+    /// construction (e.g. when wiring up a source from declarative config that
+    /// references a named identity provider). It is optional — sources that do
+    /// not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementations backed by a [`SourceBase`](crate::sources::SourceBase)
+    /// should delegate to `self.base.set_identity_provider(provider).await`;
+    /// other implementors should store the provider and apply it during
+    /// `initialize()`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - sources that consume an
+        // identity provider should override this to delegate to their SourceBase.
+    }
 }
 
 /// Blanket implementation of Source for `Box<dyn Source>`
@@ -397,5 +420,12 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn remove_position_handle(&self, query_id: &str) {
         (**self).remove_position_handle(query_id).await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
     }
 }
