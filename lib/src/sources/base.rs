@@ -72,7 +72,12 @@ pub struct SourceBaseParams {
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
     pub dispatch_buffer_capacity: Option<usize>,
-    /// Optional state store provider to set during construction
+    /// Optional state store provider to set during construction.
+    ///
+    /// When set, takes precedence over any state store provided via the runtime
+    /// context during `initialize()`. This differs from `bootstrap_provider` which
+    /// is never overwritten by context — only `state_store` and `identity_provider`
+    /// have context-provided fallback behavior.
     pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,

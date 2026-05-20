@@ -314,7 +314,19 @@ async fn test_here_traffic_change_detection_end_to_end() -> Result<()> {
         .await?;
 
     core.start().await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Wait until the mock server has received at least one request (first poll complete)
+    let start = Instant::now();
+    loop {
+        let received = mock_server.received_requests().await.unwrap_or_default();
+        if !received.is_empty() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            anyhow::bail!("Timed out waiting for first poll to hit mock server");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     mock_server.reset().await;
     mount_flow_mock(&mock_server, bbox, api_key, 45.0, 3.5).await;

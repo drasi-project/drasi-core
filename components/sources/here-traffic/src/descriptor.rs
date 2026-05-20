@@ -38,13 +38,10 @@ impl From<EndpointDto> for Endpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema, Default)]
 #[schema(as = source::here_traffic::StartFrom)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum StartFromDto {
     #[default]
     Now,
-    Timestamp {
-        value: i64,
-    },
 }
 
 impl std::str::FromStr for StartFromDto {
@@ -55,18 +52,7 @@ impl std::str::FromStr for StartFromDto {
         if normalized == "now" {
             return Ok(StartFromDto::Now);
         }
-
-        if let Some(stripped) = normalized.strip_prefix("timestamp:") {
-            return stripped
-                .parse::<i64>()
-                .map(|timestamp| StartFromDto::Timestamp { value: timestamp })
-                .map_err(|e| format!("Invalid timestamp value: {e}"));
-        }
-
-        normalized
-            .parse::<i64>()
-            .map(|timestamp| StartFromDto::Timestamp { value: timestamp })
-            .map_err(|_| format!("Invalid start_from value: {value}"))
+        Err(format!("Invalid start_from value: {value}"))
     }
 }
 
@@ -74,7 +60,6 @@ impl From<StartFromDto> for StartFrom {
     fn from(dto: StartFromDto) -> Self {
         match dto {
             StartFromDto::Now => StartFrom::Now,
-            StartFromDto::Timestamp { value } => StartFrom::Timestamp { value },
         }
     }
 }

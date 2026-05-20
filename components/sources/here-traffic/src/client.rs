@@ -152,8 +152,12 @@ struct OAuthTokenCache {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    #[serde(default)]
+    #[serde(default = "default_expires_in")]
     expires_in: u64,
+}
+
+fn default_expires_in() -> u64 {
+    3600
 }
 
 #[derive(Clone)]
@@ -232,7 +236,8 @@ impl HereTrafficClient {
                         "HERE Traffic API rate limit exceeded after {MAX_RETRIES} retries"
                     ));
                 }
-                let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
+                let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER))
+                    .map(|d| d.min(Duration::from_secs(MAX_BACKOFF_SECS)));
                 let wait = retry_after.unwrap_or(backoff);
                 warn!(
                     "HERE Traffic API rate limit hit (429). Retry {retries}/{MAX_RETRIES}, backing off for {:.1}s",
@@ -347,7 +352,7 @@ fn build_oauth_header(
     url: &str,
     timestamp: &str,
     nonce: &str,
-) -> String {
+) -> Result<String> {
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -380,18 +385,20 @@ fn build_oauth_header(
     let signing_key = format!("{}&", percent_encode(consumer_secret));
 
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac =
-        HmacSha256::new_from_slice(signing_key.as_bytes()).expect("HMAC accepts any key size");
+    // DevSkim: ignore DS126858 - This is OAuth 1.0a protocol signing; entropy
+    // comes from consumer_secret and a UUID nonce, not the timestamp alone.
+    let mut mac = HmacSha256::new_from_slice(signing_key.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to create HMAC: {e}"))?;
     mac.update(base_string.as_bytes());
     let signature = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
 
-    format!(
+    Ok(format!(
         r#"OAuth oauth_consumer_key="{}",oauth_nonce="{}",oauth_signature="{}",oauth_signature_method="HMAC-SHA256",oauth_timestamp="{}",oauth_version="1.0""#,
         percent_encode(consumer_key),
         percent_encode(nonce),
         percent_encode(&signature),
         percent_encode(timestamp),
-    )
+    ))
 }
 
 /// Exchange OAuth credentials for a bearer token.
@@ -410,7 +417,7 @@ async fn fetch_oauth_token(
         token_url,
         &timestamp,
         &nonce,
-    );
+    )?;
 
     let response = client
         .post(token_url)

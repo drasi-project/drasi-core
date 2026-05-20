@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 /// Authentication method for the HERE Traffic API.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthMethod {
     /// Simple API key passed as `apiKey` query parameter.
@@ -33,6 +33,19 @@ pub enum AuthMethod {
         #[serde(default = "default_token_url")]
         token_url: String,
     },
+}
+
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthMethod::ApiKey { .. } => f.write_str("ApiKey(<redacted>)"),
+            AuthMethod::OAuth { token_url, .. } => f
+                .debug_struct("OAuth")
+                .field("token_url", token_url)
+                .field("credentials", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 fn default_token_url() -> String {
@@ -97,14 +110,14 @@ pub enum Endpoint {
     Incidents,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
+/// Start behavior when no cursor is found in the state store.
+///
+/// Currently only `Now` is supported, which starts polling from the current time.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum StartFrom {
-    #[serde(rename = "now")]
     #[default]
     Now,
-    #[serde(rename = "timestamp")]
-    Timestamp { value: i64 },
 }
 
 /// Configuration for HERE Traffic source.
@@ -289,4 +302,43 @@ fn default_relation_distance_meters() -> f64 {
 
 fn default_base_url() -> String {
     "https://data.traffic.hereapi.com".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bounding_box_as_here_format_ascending_order() {
+        let bbox = BoundingBox {
+            lat1: 52.5,
+            lon1: 13.3,
+            lat2: 52.6,
+            lon2: 13.5,
+        };
+        assert_eq!(bbox.as_here_format(), "13.3,52.5,13.5,52.6");
+    }
+
+    #[test]
+    fn test_bounding_box_as_here_format_descending_order() {
+        // lat1 > lat2 and lon1 > lon2 — should still produce west,south,east,north
+        let bbox = BoundingBox {
+            lat1: 52.6,
+            lon1: 13.5,
+            lat2: 52.5,
+            lon2: 13.3,
+        };
+        assert_eq!(bbox.as_here_format(), "13.3,52.5,13.5,52.6");
+    }
+
+    #[test]
+    fn test_bounding_box_as_here_format_negative_coords() {
+        let bbox = BoundingBox {
+            lat1: -33.9,
+            lon1: 18.4,
+            lat2: -33.8,
+            lon2: 18.6,
+        };
+        assert_eq!(bbox.as_here_format(), "18.4,-33.9,18.6,-33.8");
+    }
 }

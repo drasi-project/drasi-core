@@ -396,7 +396,7 @@ pub fn segment_id_from_coords(lat: f64, lon: f64) -> String {
 }
 
 fn current_timestamp_millis() -> u64 {
-    Utc::now().timestamp_millis() as u64
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
 }
 
 pub fn haversine_distance_meters(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {

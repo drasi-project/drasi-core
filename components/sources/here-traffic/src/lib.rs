@@ -105,11 +105,6 @@ impl HereTrafficSource {
 
         match config.start_from {
             StartFrom::Now => {}
-            StartFrom::Timestamp { value } => {
-                info!(
-                    "[{source_id}] StartFrom configured with timestamp {value} (ignored for polling)"
-                );
-            }
         }
 
         let mut interval =
@@ -370,11 +365,6 @@ impl HereTrafficSourceBuilder {
 
     pub fn with_incident_match_distance_meters(mut self, distance: f64) -> Self {
         self.config.incident_match_distance_meters = distance;
-        self
-    }
-
-    pub fn with_start_from(mut self, start_from: StartFrom) -> Self {
-        self.config.start_from = start_from;
         self
     }
 
