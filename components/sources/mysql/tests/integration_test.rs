@@ -700,7 +700,10 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
                 break;
             }
         }
-        assert!(bootstrap_done, "Bootstrap did not populate query state with Seed1");
+        assert!(
+            bootstrap_done,
+            "Bootstrap did not populate query state with Seed1"
+        );
 
         // Insert a CDC row to advance checkpoint beyond bootstrap
         conn.query_drop("INSERT INTO items (name, value) VALUES ('CDC1', 20.00)")

@@ -40,7 +40,6 @@ use crate::config::{MySqlSourceConfig, SslMode, StartPosition};
 use crate::decoder::MySqlDecoder;
 use crate::types::ReplicationState;
 
-
 pub struct ReplicationStream {
     config: MySqlSourceConfig,
     source_id: String,
@@ -332,11 +331,7 @@ impl ReplicationStream {
         }
     }
 
-    async fn process_event(
-        &mut self,
-        stream: &BinlogStream,
-        event: &Event,
-    ) -> Result<()> {
+    async fn process_event(&mut self, stream: &BinlogStream, event: &Event) -> Result<()> {
         let header = event.header();
         self.current_event_timestamp = header.timestamp() as u64;
 
