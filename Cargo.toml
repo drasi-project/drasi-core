@@ -30,6 +30,7 @@ members = [
   "components/sources/platform",
   "components/sources/application",
   "components/sources/mock",
+  "components/sources/ris-live",
   "components/sources/mssql",
   "components/sources/dataverse",
 
@@ -135,6 +136,7 @@ drasi-bootstrap-application = { version = "0.2.0", path = "components/bootstrapp
 drasi-reaction-http = { version = "0.2.0", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.3.0", path = "components/reactions/grpc" }
 drasi-mssql-common = { version = "0.2.0", path = "components/mssql-common" }
+drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
 
 [workspace.lints.rust]
 warnings = "deny"
