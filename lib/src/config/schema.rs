@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::Result;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -20,6 +21,13 @@ use crate::channels::DispatchMode;
 use crate::indexes::{StorageBackendConfig, StorageBackendRef};
 use crate::recovery::RecoveryPolicy;
 use drasi_core::models::SourceMiddlewareConfig;
+
+// Re-export schema discovery types from their dedicated module for backward compatibility.
+// Consumers can import from either `crate::config` or `crate::schema`.
+pub use crate::schema::{
+    normalize_table_label, GraphNodeSchema, GraphRelationSchema, GraphSchema, NodeSchema,
+    PropertySchema, PropertyType, RelationSchema, SourceSchema,
+};
 
 /// Query language for continuous queries
 ///
@@ -152,6 +160,7 @@ pub struct SourceSubscriptionConfig {
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
 ///     request_position_handle: false,
+///     last_sequence: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -161,12 +170,17 @@ pub struct SourceSubscriptionSettings {
     pub query_id: String,
     pub nodes: HashSet<String>,
     pub relations: HashSet<String>,
-    /// If set, the subscribing query requests events replayed from this sequence position.
+    /// If set, the subscribing query requests events replayed from this source position.
+    /// Contains the opaque position bytes that the source interprets to seek its change stream.
     /// Only meaningful when the source returns `supports_replay() == true`.
-    pub resume_from: Option<u64>,
+    pub resume_from: Option<Bytes>,
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
+    /// The last sequence number processed by this query before shutdown.
+    /// Sources use this to ensure their sequence counter continues from where it left off,
+    /// maintaining monotonicity across restarts.
+    pub last_sequence: Option<u64>,
 }
 
 /// Root configuration for drasi-lib
@@ -434,6 +448,19 @@ pub struct QueryConfig {
         rename = "recoveryPolicy"
     )]
     pub recovery_policy: Option<RecoveryPolicy>,
+    /// Maximum number of recent QueryResult emissions retained in the outbox ring buffer.
+    /// Reactions use this buffer for gap recovery via `fetch_outbox`.
+    /// Default: 1000. Minimum: 1 (values below 1 are clamped to 1).
+    #[serde(default = "default_outbox_capacity", rename = "outboxCapacity")]
+    pub outbox_capacity: usize,
+    /// Maximum time in seconds that `fetch_snapshot` / `fetch_outbox` will wait for
+    /// the query to finish bootstrapping before returning `FetchError::TimedOut`.
+    /// Default: 300 (5 minutes).
+    #[serde(
+        default = "default_bootstrap_timeout_secs",
+        rename = "bootstrapTimeoutSecs"
+    )]
+    pub bootstrap_timeout_secs: u64,
 }
 
 /// Synthetic join configuration for queries
@@ -596,6 +623,14 @@ fn default_bootstrap_buffer_size() -> usize {
     10000
 }
 
+fn default_outbox_capacity() -> usize {
+    crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY
+}
+
+fn default_bootstrap_timeout_secs() -> u64 {
+    300
+}
+
 // Conversion implementations for QueryJoin types
 impl From<QueryJoinKeyConfig> for drasi_core::models::QueryJoinKey {
     fn from(config: QueryJoinKeyConfig) -> Self {
@@ -612,5 +647,84 @@ impl From<QueryJoinConfig> for drasi_core::models::QueryJoin {
             id: config.id,
             keys: config.keys.into_iter().map(|k| k.into()).collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn btreeset_sources_maintains_sorted_order_and_deduplication() {
+        let mut graph = GraphSchema::default();
+        let schema = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Item".to_string(),
+                properties: Vec::new(),
+            }],
+            relations: Vec::new(),
+        };
+
+        graph.merge_source_schema("charlie", &schema);
+        graph.merge_source_schema("alpha", &schema);
+        graph.merge_source_schema("bravo", &schema);
+        graph.merge_source_schema("alpha", &schema); // duplicate
+
+        let item = graph.nodes.get("Item").unwrap();
+        let sources: Vec<_> = item.sources.iter().cloned().collect();
+        assert_eq!(sources, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn normalize_table_label_strips_schema_prefix() {
+        assert_eq!(normalize_table_label("public.users"), "users");
+        assert_eq!(normalize_table_label("dbo.orders"), "orders");
+        assert_eq!(normalize_table_label("customers"), "customers");
+    }
+
+    #[test]
+    fn merge_source_schema_combines_properties() {
+        let mut graph = GraphSchema::default();
+
+        let schema_a = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![PropertySchema::new("temperature")],
+            }],
+            relations: Vec::new(),
+        };
+        let schema_b = SourceSchema {
+            nodes: vec![NodeSchema {
+                label: "Sensor".to_string(),
+                properties: vec![
+                    PropertySchema {
+                        name: "temperature".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    },
+                    PropertySchema::new("humidity"),
+                ],
+            }],
+            relations: Vec::new(),
+        };
+
+        graph.merge_source_schema("src-a", &schema_a);
+        graph.merge_source_schema("src-b", &schema_b);
+
+        let sensor = graph.nodes.get("Sensor").unwrap();
+        assert_eq!(
+            sensor.sources,
+            BTreeSet::from(["src-a".to_string(), "src-b".to_string()])
+        );
+        assert_eq!(sensor.properties.len(), 2);
+
+        // temperature should have gotten the type from src-b
+        let temp = sensor
+            .properties
+            .iter()
+            .find(|p| p.name == "temperature")
+            .unwrap();
+        assert_eq!(temp.data_type, Some(PropertyType::Float));
     }
 }

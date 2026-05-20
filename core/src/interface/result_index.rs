@@ -78,6 +78,12 @@ impl Default for ResultSequence {
     }
 }
 
+/// Tracks the monotonic output sequence number for a query's result stream.
+///
+/// Each time a query emits a result batch, the sequence is incremented and
+/// persisted so that downstream consumers (reactions) can detect ordering
+/// and gaps. This is separate from the source checkpoint tracking in
+/// [`CheckpointStore`](super::CheckpointStore).
 #[async_trait]
 pub trait ResultSequenceCounter: Send + Sync {
     async fn apply_sequence(&self, sequence: u64, source_change_id: &str)

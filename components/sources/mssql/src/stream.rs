@@ -23,7 +23,8 @@ use crate::lsn::Lsn;
 use crate::types::extract_properties_from_cdc_row;
 use anyhow::{anyhow, Result};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
-use drasi_lib::channels::{ChangeDispatcher, SourceEventWrapper};
+use drasi_lib::channels::SourceEventWrapper;
+use drasi_lib::sources::base::SourceBase;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,9 +50,9 @@ fn classify_error(error: &anyhow::Error) -> MsSqlErrorKind {
 pub async fn run_cdc_stream(
     source_id: String,
     config: MsSqlSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    state_store: Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
+    subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -68,9 +69,9 @@ pub async fn run_cdc_stream(
         match run_cdc_polling_loop(
             &source_id,
             &config,
-            &dispatchers,
-            &state_store,
+            &base,
             &mut shutdown_rx,
+            &subscriber_resume_lsns,
         )
         .await
         {
@@ -135,9 +136,9 @@ pub async fn run_cdc_stream(
 async fn run_cdc_polling_loop(
     source_id: &str,
     config: &MsSqlSourceConfig,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
+    base: &SourceBase,
     shutdown_rx: &mut watch::Receiver<bool>,
+    subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -149,19 +150,42 @@ async fn run_cdc_polling_loop(
     pk_cache.discover_keys(client, config).await?;
     info!("Discovered primary keys for {} tables", config.tables.len());
 
-    // Load last LSN checkpoint from StateStore
-    let mut current_lsn = load_checkpoint(source_id, state_store).await?;
-    info!(
-        "Starting CDC from LSN: {}",
-        current_lsn
-            .as_ref()
-            .map(|l| l.to_hex())
-            .unwrap_or_else(|| "NONE (will use current)".to_string())
-    );
+    // CDC start position is determined entirely by subscriber checkpoints.
+    // The framework checkpoint store (RocksDB/Garnet) persists per-query
+    // source positions; on restart each subscriber communicates its resume
+    // position via subscribe(). We use the minimum across all subscribers.
+    let mut current_lsn: Option<Lsn> = None;
 
     // Track consecutive errors for connection health monitoring
     let mut consecutive_errors = 0u32;
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
+    // Wait for at least one subscriber before entering the CDC polling loop.
+    // On a restart cycle, dispatchers are cleared during stop() so the source
+    // would otherwise dispatch events to an empty list, silently dropping them
+    // while advancing the checkpoint LSN past those changes.
+    tokio::select! {
+        _ = base.wait_for_subscribers() => {
+            debug!("Subscriber(s) registered, starting CDC poll loop for '{source_id}'");
+        }
+        _ = shutdown_rx.wait_for(|v| *v) => {
+            info!("CDC polling loop for source '{source_id}' shutdown while waiting for subscribers");
+            return Ok(());
+        }
+    }
+
+    // Use the minimum subscriber resume position as the CDC start point.
+    // This must happen AFTER wait_for_subscribers because subscriber_resume_lsns is
+    // populated during subscribe(), which triggers the subscriber notification.
+    {
+        let resume_guard = subscriber_resume_lsns.read().await;
+        if let Some(resume_lsn) = resume_guard.values().copied().min() {
+            info!("Using minimum subscriber resume LSN {resume_lsn} as CDC start position");
+            current_lsn = Some(resume_lsn);
+        } else {
+            debug!("No subscriber resume positions; will use configured start_position");
+        }
+    }
 
     // Main polling loop
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
@@ -173,35 +197,13 @@ async fn run_cdc_polling_loop(
             return Ok(());
         }
 
-        let lsn_before = current_lsn;
-
-        match poll_cdc_changes(
-            source_id,
-            config,
-            client,
-            &pk_cache,
-            &mut current_lsn,
-            dispatchers,
-        )
-        .await
-        {
+        match poll_cdc_changes(source_id, config, client, &pk_cache, &mut current_lsn, base).await {
             Ok(change_count) => {
                 // Reset error counter on success
                 consecutive_errors = 0;
 
-                // Save checkpoint if LSN was initialized or if we processed changes
-                let lsn_changed = current_lsn != lsn_before;
-                if change_count > 0 || lsn_changed {
-                    if change_count > 0 {
-                        debug!("Processed {change_count} CDC changes");
-                    }
-                    if lsn_changed && change_count == 0 {
-                        debug!("Initialized LSN checkpoint");
-                    }
-
-                    if let Some(ref lsn) = current_lsn {
-                        save_checkpoint(source_id, lsn, state_store).await?;
-                    }
+                if change_count > 0 {
+                    debug!("Processed {change_count} CDC changes");
                 }
             }
             Err(e) => {
@@ -214,8 +216,7 @@ async fn run_cdc_polling_loop(
                         return Err(e);
                     }
                     MsSqlErrorKind::RecoverableLsn => {
-                        warn!("LSN error detected, clearing checkpoint and restarting from current position");
-                        clear_checkpoint(source_id, state_store).await?;
+                        warn!("LSN error detected, restarting from current position");
                         current_lsn = None;
                         consecutive_errors = 0; // Reset since we handled this
                     }
@@ -257,7 +258,7 @@ async fn poll_cdc_changes(
     client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
     pk_cache: &PrimaryKeyCache,
     current_lsn: &mut Option<Lsn>,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
 ) -> Result<usize> {
     // Get current max LSN from CDC
     let max_lsn = get_max_lsn(client).await?;
@@ -312,10 +313,14 @@ async fn poll_cdc_changes(
         *current_lsn = Some(from_lsn);
     }
 
-    // If from_lsn >= max_lsn, no new changes
-    if from_lsn >= max_lsn {
+    // If from_lsn > max_lsn, no new changes are available.
+    // Note: we use strict `>` rather than `>=` because fn_cdc_get_all_changes
+    // uses inclusive bounds [from_lsn, to_lsn]. When from_lsn == max_lsn there
+    // may still be a change at that exact LSN (e.g. on restart after an offline
+    // update where the new change IS the current max_lsn).
+    if from_lsn > max_lsn {
         debug!(
-            "No new changes: from_lsn {} >= max_lsn {}",
+            "No new changes: from_lsn {} > max_lsn {}",
             from_lsn.to_hex(),
             max_lsn.to_hex()
         );
@@ -328,8 +333,7 @@ async fn poll_cdc_changes(
         max_lsn.to_hex()
     );
 
-    let mut change_count = 0;
-    let mut batch = Vec::new();
+    let mut batch: Vec<SourceEventWrapper> = Vec::new();
 
     // Query each configured table's CDC changes
     for table in &config.tables {
@@ -347,6 +351,7 @@ async fn poll_cdc_changes(
         for row in changes {
             // Extract CDC metadata
             let operation = extract_operation(&row)?;
+            let row_lsn = extract_lsn(&row)?;
 
             // Generate element ID from primary key
             let element_id = pk_cache.generate_element_id(table, &row)?;
@@ -363,7 +368,7 @@ async fn poll_cdc_changes(
                             metadata: ElementMetadata {
                                 reference: ElementReference::new(source_id, &element_id),
                                 labels: Arc::from([Arc::from(label)]),
-                                effective_from: 0, // Will be set by dispatcher
+                                effective_from: 0,
                             },
                             properties,
                         },
@@ -395,42 +400,32 @@ async fn poll_cdc_changes(
                 }
             };
 
-            batch.push(change);
-            change_count += 1;
+            let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+            profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+            let mut wrapper = SourceEventWrapper::with_profiling(
+                source_id.to_string(),
+                drasi_lib::channels::SourceEvent::Change(change),
+                chrono::Utc::now(),
+                profiling,
+            );
+            wrapper.source_position = Some(bytes::Bytes::from(row_lsn.to_bytes()));
+
+            batch.push(wrapper);
         }
     }
 
-    // After processing all changes, update checkpoint to max_lsn
-    // This ensures we don't reprocess the same changes
+    let change_count = batch.len();
+
+    // Dispatch the entire poll cycle's events in one batch to acquire the
+    // dispatchers lock only once, avoiding per-row lock overhead.
+    base.dispatch_events_batch(batch).await?;
+
+    // After processing all changes, advance checkpoint past max_lsn.
+    // fn_cdc_get_all_changes uses inclusive bounds ([from_lsn, to_lsn]),
+    // so we must increment to avoid re-fetching the last processed LSN.
     if change_count > 0 {
-        *current_lsn = Some(max_lsn);
-    }
-
-    // Dispatch all changes in batch
-    if !batch.is_empty() {
-        debug!(
-            "Dispatching {} changes to {} dispatchers",
-            batch.len(),
-            dispatchers.read().await.len()
-        );
-        let dispatchers = dispatchers.read().await;
-        for dispatcher in dispatchers.iter() {
-            for change in &batch {
-                let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                let wrapper = SourceEventWrapper::with_profiling(
-                    source_id.to_string(),
-                    drasi_lib::channels::SourceEvent::Change(change.clone()),
-                    chrono::Utc::now(),
-                    profiling,
-                );
-                dispatcher.dispatch_change(Arc::new(wrapper)).await?;
-            }
-        }
-        debug!("Dispatched all {} changes successfully", batch.len());
-    } else {
-        debug!("No changes to dispatch");
+        *current_lsn = Some(max_lsn.increment().unwrap_or(max_lsn));
     }
 
     Ok(change_count)
@@ -585,56 +580,6 @@ fn extract_lsn(row: &tiberius::Row) -> Result<Lsn> {
     Lsn::from_bytes(lsn_bytes)
 }
 
-/// Load LSN checkpoint from StateStore
-async fn load_checkpoint(
-    source_id: &str,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<Option<Lsn>> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        if let Some(bytes) = store.get(source_id, key).await? {
-            match Lsn::from_bytes(&bytes) {
-                Ok(lsn) => {
-                    info!("Loaded checkpoint LSN: {}", lsn.to_hex());
-                    return Ok(Some(lsn));
-                }
-                Err(e) => {
-                    warn!("Failed to parse stored LSN: {e}, starting fresh");
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Save LSN checkpoint to StateStore
-async fn save_checkpoint(
-    source_id: &str,
-    lsn: &Lsn,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        let bytes = lsn.to_bytes();
-        store.set(source_id, key, bytes).await?;
-        debug!("Saved checkpoint LSN: {}", lsn.to_hex());
-    }
-    Ok(())
-}
-
-/// Clear LSN checkpoint from StateStore
-async fn clear_checkpoint(
-    source_id: &str,
-    state_store: &Option<Arc<dyn drasi_lib::state_store::StateStoreProvider>>,
-) -> Result<()> {
-    if let Some(store) = state_store {
-        let key = "checkpoint.lsn";
-        store.delete(source_id, key).await?;
-        info!("Cleared checkpoint LSN");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,12 +589,6 @@ mod tests {
         let table = "orders";
         let capture_instance = format!("dbo_{table}");
         assert_eq!(capture_instance, "dbo_orders");
-    }
-
-    #[test]
-    fn test_checkpoint_key_format() {
-        let key = "checkpoint.lsn";
-        assert_eq!(key, "checkpoint.lsn");
     }
 
     #[test]

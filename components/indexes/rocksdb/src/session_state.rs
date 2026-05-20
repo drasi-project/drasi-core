@@ -193,6 +193,23 @@ impl RocksDbSessionState {
             ))),
         }
     }
+
+    /// Try `txn_fn` against the active session transaction. If no session is
+    /// active, fall back to `db_fn` which operates on the DB directly.
+    ///
+    /// Read methods use this so they see uncommitted staged writes when a
+    /// session is active, yet still work at startup before any session exists.
+    pub(crate) fn with_txn_or_db<R>(
+        &self,
+        txn_fn: impl FnOnce(&Transaction<'_, OptimisticTransactionDB>) -> Result<R, IndexError>,
+        db_fn: impl FnOnce(&OptimisticTransactionDB) -> Result<R, IndexError>,
+    ) -> Result<R, IndexError> {
+        let guard = self.lock()?;
+        match guard.txn.as_ref() {
+            Some(txn) => txn_fn(txn),
+            None => db_fn(&self.db),
+        }
+    }
 }
 
 impl Drop for RocksDbSessionState {
