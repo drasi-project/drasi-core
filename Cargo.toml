@@ -12,6 +12,7 @@ members = [
 
   # Shared component libraries
   "components/mssql-common",
+  "components/kubernetes-common",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -24,6 +25,7 @@ members = [
   "components/bootstrappers/dataverse",
   "components/bootstrappers/http",
   "components/bootstrappers/sui-deepbook",
+  "components/bootstrappers/kubernetes",
 
   # Source Plugins
   "components/sources/postgres",
@@ -38,6 +40,7 @@ members = [
   "components/sources/dataverse",
   "components/sources/hyperliquid",
   "components/sources/sui-deepbook",
+  "components/sources/kubernetes",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -148,6 +151,9 @@ drasi-mssql-common = { version = "0.2.1", path = "components/mssql-common" }
 drasi-source-ris-live = { version = "0.1.0", path = "components/sources/ris-live" }
 drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
 drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook" }
+drasi-kubernetes-common = { version = "0.1.0", path = "components/kubernetes-common" }
+drasi-source-kubernetes = { version = "0.1.0", path = "components/sources/kubernetes" }
+drasi-bootstrap-kubernetes = { version = "0.1.0", path = "components/bootstrappers/kubernetes" }
 
 [workspace.lints.rust]
 warnings = "deny"
