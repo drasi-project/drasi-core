@@ -133,7 +133,6 @@ impl Source for OracleSource {
         let source_id = self.base.id.clone();
         let config = self.config.clone();
         let base = self.base.clone_shared();
-        let dispatchers = self.base.dispatchers.clone();
         let bootstrap_sync = self.bootstrap_sync.clone();
         let subscriber_resume_scns = self.subscriber_resume_scns.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -146,7 +145,6 @@ impl Source for OracleSource {
             if let Err(error) = stream::run_logminer_stream(
                 source_id.clone(),
                 config,
-                dispatchers,
                 bootstrap_sync,
                 subscriber_resume_scns,
                 base,

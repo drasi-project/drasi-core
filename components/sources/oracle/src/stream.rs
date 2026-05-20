@@ -22,7 +22,7 @@ use anyhow::{anyhow, Result};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::channels::{ChangeDispatcher, SourceEvent, SourceEventWrapper};
+use drasi_lib::channels::{SourceEvent, SourceEventWrapper};
 use drasi_lib::profiling;
 use drasi_lib::sources::base::SourceBase;
 use drasi_oracle_common::{
@@ -61,7 +61,6 @@ struct OracleChangeEvent {
 pub(crate) async fn run_logminer_stream(
     source_id: String,
     config: OracleSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
     base: SourceBase,
@@ -90,9 +89,9 @@ pub(crate) async fn run_logminer_stream(
         match run_stream_session(
             source_id.clone(),
             config.clone(),
-            dispatchers.clone(),
             bootstrap_sync.clone(),
             subscriber_resume_scns.clone(),
+            base.clone_shared(),
             shutdown_rx.clone(),
         )
         .await
@@ -135,9 +134,9 @@ pub(crate) async fn run_logminer_stream(
 async fn run_stream_session(
     source_id: String,
     config: OracleSourceConfig,
-    dispatchers: Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
     bootstrap_sync: Arc<AsyncMutex<BootstrapSyncState>>,
     subscriber_resume_scns: Arc<RwLock<HashMap<String, Scn>>>,
+    base: SourceBase,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<(Vec<SourceChange>, Scn)>();
@@ -157,7 +156,8 @@ async fn run_stream_session(
     });
 
     while let Some((batch, commit_scn)) = rx.recv().await {
-        if let Err(error) = dispatch_batch(&source_id, &dispatchers, batch, commit_scn).await {
+        if let Err(error) = dispatch_batch(&base, batch, commit_scn).await {
+            log::error!("[{source_id}] Dispatch batch failed: {error}");
             drop(rx);
             let _ = worker.await;
             return Err(error);
@@ -170,8 +170,7 @@ async fn run_stream_session(
 }
 
 async fn dispatch_batch(
-    source_id: &str,
-    dispatchers: &Arc<RwLock<Vec<Box<dyn ChangeDispatcher<SourceEventWrapper> + Send + Sync>>>>,
+    base: &SourceBase,
     batch: Vec<SourceChange>,
     commit_scn: Scn,
 ) -> Result<()> {
@@ -180,24 +179,24 @@ async fn dispatch_batch(
     }
 
     let position_bytes = bytes::Bytes::from(commit_scn.to_bytes());
-    let dispatchers = dispatchers.read().await;
-    for dispatcher in dispatchers.iter() {
-        for change in &batch {
+    let events: Vec<SourceEventWrapper> = batch
+        .into_iter()
+        .map(|change| {
             let mut profiling = profiling::ProfilingMetadata::new();
             profiling.source_send_ns = Some(profiling::timestamp_ns());
 
             let mut wrapper = SourceEventWrapper::with_profiling(
-                source_id.to_string(),
-                SourceEvent::Change(change.clone()),
+                base.id.clone(),
+                SourceEvent::Change(change),
                 chrono::Utc::now(),
                 profiling,
             );
             wrapper.source_position = Some(position_bytes.clone());
-            dispatcher.dispatch_change(Arc::new(wrapper)).await?;
-        }
-    }
+            wrapper
+        })
+        .collect();
 
-    Ok(())
+    base.dispatch_events_batch(events).await
 }
 
 fn run_logminer_poll_loop(
