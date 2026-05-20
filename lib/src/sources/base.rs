@@ -802,7 +802,9 @@ impl SourceBase {
         let mut dispatchers = self.dispatchers.write().await;
 
         // Capture WAL head while batcher is blocked (fast in-memory read)
-        let head = wal.head_sequence(source_id).await.unwrap_or(0);
+        let head = wal.head_sequence(source_id).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read WAL head for source '{source_id}': {e}")
+        })?;
 
         // Create dedicated channel for this subscriber
         let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
@@ -825,11 +827,8 @@ impl SourceBase {
                     .into_iter()
                     .filter(|(seq, _)| *seq <= head)
                     .collect::<Vec<_>>(),
-                Err(crate::wal::WalError::PositionUnavailable { .. }) => {
-                    return Err(anyhow::anyhow!(
-                        "WAL position {} unavailable for replay",
-                        resume_seq + 1
-                    ));
+                Err(e @ crate::wal::WalError::PositionUnavailable { .. }) => {
+                    return Err(e.into());
                 }
                 Err(e) => return Err(e.into()),
             }

@@ -154,6 +154,8 @@ pub struct GrpcSource {
     config: GrpcSourceConfig,
     /// WAL provider for durable event persistence (if durability is enabled)
     wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl GrpcSource {
@@ -213,6 +215,7 @@ impl GrpcSource {
             base: SourceBase::new(params)?,
             config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -238,6 +241,7 @@ impl GrpcSource {
             base: SourceBase::new(params)?,
             config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -409,7 +413,7 @@ impl Source for GrpcSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            tokio::spawn(async move {
+            let prune_handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -433,6 +437,7 @@ impl Source for GrpcSource {
                     }
                 }
             });
+            *self.prune_task.write().await = Some(prune_handle);
         }
 
         Ok(())
@@ -440,6 +445,10 @@ impl Source for GrpcSource {
 
     async fn stop(&self) -> Result<()> {
         log_component_stop("gRPC Source", &self.base.id);
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
         self.base.stop_common().await
     }
 
@@ -470,6 +479,12 @@ impl Source for GrpcSource {
                         "gRPC",
                     )
                     .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
             }
         }
         drop(wal_guard);
@@ -1180,6 +1195,7 @@ impl GrpcSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }

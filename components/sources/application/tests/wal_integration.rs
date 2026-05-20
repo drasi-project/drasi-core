@@ -241,15 +241,14 @@ async fn test_capacity_exhaustion_reject_incoming() {
             .unwrap();
     }
 
-    // 17th event — WAL capacity exhausted, application source drops the event
+    // 17th event — WAL capacity exhausted, send returns error to caller
     let props = PropertyMapBuilder::new().with_integer("x", 17).build();
-    handle
-        .send_node_insert("n17", vec!["T"], props)
-        .await
-        .unwrap();
-
-    // Give time for async processing
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let result = handle.send_node_insert("n17", vec!["T"], props).await;
+    assert!(result.is_err(), "Expected capacity exhaustion error");
+    assert!(
+        result.unwrap_err().to_string().contains("capacity exhausted"),
+        "Error should mention capacity exhaustion"
+    );
 
     // WAL should still have only 16 events
     let count = wal.event_count("reject-src").await.unwrap();

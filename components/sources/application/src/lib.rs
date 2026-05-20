@@ -160,6 +160,12 @@ use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
 use tracing::Instrument;
 
+/// Internal event passed through the channel, carrying optional pre-assigned WAL sequence
+struct InternalEvent {
+    change: SourceChange,
+    wal_seq: Option<u64>,
+}
+
 /// Handle for programmatic event injection into an Application Source
 ///
 /// `ApplicationSourceHandle` provides a type-safe API for injecting graph data changes
@@ -167,15 +173,38 @@ use tracing::Instrument;
 /// code into the Drasi continuous query processing pipeline.
 #[derive(Clone)]
 pub struct ApplicationSourceHandle {
-    tx: mpsc::Sender<SourceChange>,
+    tx: mpsc::Sender<InternalEvent>,
     source_id: String,
+    /// Shared WAL reference — populated when the source is started with durability enabled
+    wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
 }
 
 impl ApplicationSourceHandle {
     /// Send a raw source change event
+    ///
+    /// If WAL durability is enabled, the event is persisted to the WAL before
+    /// being acknowledged (returned Ok). This ensures the WAL-before-ACK guarantee.
     pub async fn send(&self, change: SourceChange) -> Result<()> {
+        // WAL append before ACK (if durability is enabled)
+        let wal_seq = {
+            let wal_guard = self.wal.read().await;
+            if let Some(ref wal) = *wal_guard {
+                match wal.append(&self.source_id, &change).await {
+                    Ok(seq) => Some(seq),
+                    Err(WalError::CapacityExhausted(msg)) => {
+                        return Err(anyhow::anyhow!("WAL capacity exhausted: {msg}"));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("WAL append failed: {e}"));
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
         self.tx
-            .send(change)
+            .send(InternalEvent { change, wal_seq })
             .await
             .map_err(|_| anyhow::anyhow!("Failed to send event: channel closed"))?;
         Ok(())
@@ -326,11 +355,13 @@ pub struct ApplicationSource {
     /// Application source configuration
     config: ApplicationSourceConfig,
     /// Receiver for events from handles (taken when processing starts)
-    app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
+    app_rx: Arc<RwLock<Option<mpsc::Receiver<InternalEvent>>>>,
     /// Sender for creating new handles
-    app_tx: mpsc::Sender<SourceChange>,
-    /// WAL provider for durable event persistence (if durability is enabled)
-    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    app_tx: mpsc::Sender<InternalEvent>,
+    /// WAL provider for durable event persistence (shared with handles for WAL-before-ACK)
+    wal: Arc<tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ApplicationSource {
@@ -369,9 +400,13 @@ impl ApplicationSource {
         let params = SourceBaseParams::new(id.clone());
         let (app_tx, app_rx) = mpsc::channel(1000);
 
+        // Shared WAL reference — populated later in start() when durability is enabled
+        let shared_wal = Arc::new(tokio::sync::RwLock::new(None));
+
         let handle = ApplicationSourceHandle {
             tx: app_tx.clone(),
             source_id: id.clone(),
+            wal: shared_wal.clone(),
         };
 
         let source = Self {
@@ -379,21 +414,26 @@ impl ApplicationSource {
             config,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             app_tx,
-            wal: tokio::sync::RwLock::new(None),
+            wal: shared_wal,
+            prune_task: tokio::sync::RwLock::new(None),
         };
 
         Ok((source, handle))
     }
 
     /// Get a new handle for this source
+    ///
+    /// The handle shares the WAL reference with the source, so handles obtained
+    /// before or after `start()` will automatically use WAL when durability is enabled.
     pub fn get_handle(&self) -> ApplicationSourceHandle {
         ApplicationSourceHandle {
             tx: self.app_tx.clone(),
             source_id: self.base.id.clone(),
+            wal: self.wal.clone(),
         }
     }
 
-    async fn process_events(&self, wal: Option<Arc<dyn WalProvider>>) -> Result<()> {
+    async fn process_events(&self) -> Result<()> {
         let mut rx = self
             .app_rx
             .write()
@@ -406,7 +446,7 @@ impl ApplicationSource {
         let reporter = self.base.status_handle();
         let source_id = self.base.id.clone();
 
-        // Get instance_id from context for log routing isolation
+        // Get instance_id from context for log route isolation
         let instance_id = self
             .base
             .context()
@@ -431,41 +471,21 @@ impl ApplicationSource {
                     )
                     .await;
 
-                while let Some(change) = rx.recv().await {
-                    debug!("ApplicationSource '{source_name}' received event: {change:?}");
-
-                    // WAL append before dispatch (if durability enabled)
-                    let wal_seq = if let Some(ref wal) = wal {
-                        match wal.append(&source_name, &change).await {
-                            Ok(seq) => {
-                                trace!("[{source_name}] WAL append succeeded: sequence={seq}");
-                                Some(seq)
-                            }
-                            Err(WalError::CapacityExhausted(_)) => {
-                                warn!("[{source_name}] WAL capacity exhausted, dropping event");
-                                continue;
-                            }
-                            Err(e) => {
-                                error!("[{source_name}] WAL append failed: {e}");
-                                continue;
-                            }
-                        }
-                    } else {
-                        None
-                    };
+                while let Some(event) = rx.recv().await {
+                    debug!("ApplicationSource '{source_name}' received event: {:?}", event.change);
 
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
                     let mut wrapper = SourceEventWrapper::with_profiling(
                         source_name.clone(),
-                        SourceEvent::Change(change),
+                        SourceEvent::Change(event.change),
                         chrono::Utc::now(),
                         profiling,
                     );
 
-                    // Set WAL-assigned sequence and source_position
-                    if let Some(seq) = wal_seq {
+                    // Use pre-assigned WAL sequence from handle (WAL-before-ACK)
+                    if let Some(seq) = event.wal_seq {
                         wrapper.sequence = Some(seq);
                         wrapper.source_position =
                             Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
@@ -570,13 +590,13 @@ impl Source for ApplicationSource {
                 None
             };
 
-        self.process_events(wal_ref.clone()).await?;
+        self.process_events().await?;
 
         // Spawn WAL pruning task if durability is enabled
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            tokio::spawn(async move {
+            let prune_handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -600,6 +620,7 @@ impl Source for ApplicationSource {
                     }
                 }
             });
+            *self.prune_task.write().await = Some(prune_handle);
         }
 
         Ok(())
@@ -614,6 +635,11 @@ impl Source for ApplicationSource {
                 Some("Stopping application source".to_string()),
             )
             .await;
+
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
 
         if let Some(handle) = self.base.task_handle.write().await.take() {
             handle.abort();
@@ -656,6 +682,12 @@ impl Source for ApplicationSource {
                         "Application",
                     )
                     .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
             }
         }
         drop(wal_guard);

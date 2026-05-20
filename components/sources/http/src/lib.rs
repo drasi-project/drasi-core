@@ -294,6 +294,8 @@ pub struct HttpSource {
     adaptive_config: AdaptiveBatchConfig,
     /// WAL provider for durable event persistence (if durability is enabled)
     wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Batch event request that can accept multiple events
@@ -454,6 +456,7 @@ impl HttpSource {
             config,
             adaptive_config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -517,6 +520,7 @@ impl HttpSource {
             config,
             adaptive_config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -625,9 +629,18 @@ impl HttpSource {
                                     idx + 1,
                                     e
                                 );
-                                error_count += 1;
-                                last_error = Some(format!("WAL error: {e}"));
-                                continue;
+                                // WAL durability failure is a server-side error — reject entire batch
+                                return Err((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(EventResponse {
+                                        success: false,
+                                        message: format!(
+                                            "WAL durability failure at event {}: {e}",
+                                            idx + 1
+                                        ),
+                                        error: Some(format!("WAL error: {e}")),
+                                    }),
+                                ));
                             }
                         }
                     } else {
@@ -1300,7 +1313,7 @@ impl Source for HttpSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            tokio::spawn(async move {
+            let prune_handle = tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
                     interval.tick().await;
@@ -1324,6 +1337,7 @@ impl Source for HttpSource {
                     }
                 }
             });
+            *self.prune_task.write().await = Some(prune_handle);
         }
 
         Ok(())
@@ -1338,6 +1352,11 @@ impl Source for HttpSource {
                 Some("Stopping adaptive HTTP source".to_string()),
             )
             .await;
+
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -1384,6 +1403,12 @@ impl Source for HttpSource {
                         "HTTP",
                     )
                     .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
             }
         }
         drop(wal_guard);
@@ -1676,6 +1701,7 @@ impl HttpSourceBuilder {
             config,
             adaptive_config,
             wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
