@@ -194,7 +194,7 @@ impl ReplicationStream {
         self.read_lsn = self.start_lsn.unwrap_or(slot_lsn);
         self.replay_state
             .read_lsn
-            .store(self.read_lsn, Ordering::Relaxed);
+            .store(self.read_lsn, Ordering::Release);
 
         // Build replication options
         let mut options = HashMap::new();
@@ -245,7 +245,7 @@ impl ReplicationStream {
                 self.read_lsn = wal_end;
                 self.replay_state
                     .read_lsn
-                    .store(self.read_lsn, Ordering::Relaxed);
+                    .store(self.read_lsn, Ordering::Release);
                 if reply == 1 {
                     self.send_feedback(true).await?;
                 }
@@ -306,7 +306,7 @@ impl ReplicationStream {
         self.read_lsn = end_lsn;
         self.replay_state
             .read_lsn
-            .store(self.read_lsn, Ordering::Relaxed);
+            .store(self.read_lsn, Ordering::Release);
 
         // Decode the actual WAL message
         let wal_data = &data[24..];
@@ -365,7 +365,7 @@ impl ReplicationStream {
         self.read_lsn = wal_end;
         self.replay_state
             .read_lsn
-            .store(self.read_lsn, Ordering::Relaxed);
+            .store(self.read_lsn, Ordering::Release);
 
         if reply == 1 {
             self.send_feedback(true).await?;

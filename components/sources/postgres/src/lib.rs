@@ -190,7 +190,7 @@ use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
 
 use drasi_lib::channels::{ComponentStatus, DispatchMode, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -209,8 +209,8 @@ pub(crate) struct ReplayState {
 }
 
 impl ReplayState {
-    fn read_lsn(&self) -> u64 {
-        self.read_lsn.load(Ordering::Relaxed)
+    fn current_read_lsn(&self) -> u64 {
+        self.read_lsn.load(Ordering::Acquire)
     }
 }
 
@@ -233,6 +233,8 @@ pub struct PostgresReplicationSource {
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
     /// Shared replay progress for subscribe()/rewind decisions and WAL feedback.
     replay_state: Arc<ReplayState>,
+    /// Serializes subscribe() calls that may restart the replication task.
+    subscribe_lock: Mutex<()>,
 }
 
 fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
@@ -414,6 +416,7 @@ impl PostgresReplicationSource {
             config,
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
     }
 
@@ -440,6 +443,7 @@ impl PostgresReplicationSource {
             config,
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
     }
 }
@@ -581,7 +585,7 @@ impl PostgresReplicationSource {
 
         let _ = conn.identify_system().await?;
         let slot_info = conn
-            .create_replication_slot(&self.config.slot_name, false)
+            .get_replication_slot_info(&self.config.slot_name)
             .await?;
         let _ = conn.close().await;
 
@@ -711,6 +715,10 @@ impl Source for PostgresReplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // Serialize subscribe calls that may restart the replication task to
+        // prevent TOCTOU races between concurrent callers.
+        let _guard = self.subscribe_lock.lock().await;
+
         let mut restart_from = None;
         let mut pause_before_subscribe = false;
 
@@ -738,7 +746,7 @@ impl Source for PostgresReplicationSource {
                 .into());
             }
 
-            let read_lsn = self.replay_state.read_lsn();
+            let read_lsn = self.replay_state.current_read_lsn();
             let is_running = self.base.get_status().await == ComponentStatus::Running;
 
             if !is_running || read_lsn == 0 || resume_lsn < read_lsn {
@@ -1015,6 +1023,7 @@ impl PostgresSourceBuilder {
             config,
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
     }
 }
