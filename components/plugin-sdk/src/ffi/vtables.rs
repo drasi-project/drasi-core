@@ -655,7 +655,7 @@ pub struct WalProviderVtable {
 
     /// Free a read result buffer returned by `read_from_fn`.
     /// The plugin MUST call this after consuming the entries.
-    pub free_read_result_fn: extern "C" fn(entries: *mut FfiWalEntry, count: usize),
+    pub free_read_result_fn: extern "C" fn(entries: *mut FfiWalEntry, count: usize, capacity: usize),
 
     /// Drop the vtable state (called when plugin no longer needs WAL access).
     pub drop_fn: extern "C" fn(state: *mut c_void),

@@ -474,7 +474,6 @@ impl Source for GrpcSource {
                     .subscribe_with_replay(
                         &settings,
                         wal_clone.as_ref(),
-                        &self.base.id,
                         resume_seq,
                         "gRPC",
                     )

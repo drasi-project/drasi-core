@@ -460,8 +460,11 @@ unsafe impl Send for FfiWalAppendResult {}
 /// Result of a WAL operation that returns a u64 value (head_sequence, event_count, prune_up_to).
 #[repr(C)]
 pub struct FfiWalU64Result {
+    /// The returned value on success; 0 on error.
     pub value: u64,
+    /// 0 on success, non-zero on error.
     pub error_code: i32,
+    /// Heap-allocated error message on failure; null on success.
     pub error_msg: *mut c_char,
 }
 
@@ -578,6 +581,8 @@ pub struct FfiWalReadResult {
     pub entries: *mut FfiWalEntry,
     /// Number of entries in the array.
     pub count: usize,
+    /// Allocated capacity of the entries array (needed for correct deallocation).
+    pub capacity: usize,
     /// 0 on success, non-zero on error.
     pub error_code: i32,
     /// Error message (heap-allocated C string), or null on success.
@@ -587,20 +592,24 @@ pub struct FfiWalReadResult {
 impl FfiWalReadResult {
     pub fn ok(entries: Vec<FfiWalEntry>) -> Self {
         let mut entries = entries;
-        let result = Self {
-            entries: entries.as_mut_ptr(),
-            count: entries.len(),
+        let count = entries.len();
+        let capacity = entries.capacity();
+        let ptr = entries.as_mut_ptr();
+        std::mem::forget(entries);
+        Self {
+            entries: ptr,
+            count,
+            capacity,
             error_code: 0,
             error_msg: std::ptr::null_mut(),
-        };
-        std::mem::forget(entries);
-        result
+        }
     }
 
     pub fn empty() -> Self {
         Self {
             entries: std::ptr::null_mut(),
             count: 0,
+            capacity: 0,
             error_code: 0,
             error_msg: std::ptr::null_mut(),
         }
@@ -611,6 +620,7 @@ impl FfiWalReadResult {
         Self {
             entries: std::ptr::null_mut(),
             count: 0,
+            capacity: 0,
             error_code: 1,
             error_msg: c_msg.into_raw(),
         }

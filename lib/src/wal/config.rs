@@ -125,7 +125,7 @@ impl Default for DurabilityConfig {
 }
 
 impl DurabilityConfig {
-    /// Returns `true` if durability is effectively active (field present + enabled).
+    /// Returns `true` if durability is enabled.
     pub fn is_active(&self) -> bool {
         self.enabled
     }

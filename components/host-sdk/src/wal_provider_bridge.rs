@@ -37,19 +37,32 @@ fn ffi_guard<T, F: FnOnce() -> T>(default: T, f: F) -> T {
     }
 }
 
+/// Combined state stored behind the vtable's opaque `state` pointer.
+/// Holds both the provider and the runtime handle captured at build time,
+/// so FFI functions can reuse the host's Tokio runtime instead of creating
+/// a new one per call.
+struct WalBridgeState {
+    provider: Arc<dyn WalProvider>,
+    runtime: tokio::runtime::Handle,
+}
+
 /// Builds a `WalProviderVtable` from a host-side `Arc<dyn WalProvider>`.
 pub struct WalProviderVtableBuilder;
 
 impl WalProviderVtableBuilder {
     /// Build a `WalProviderVtable` that dispatches to the given `WalProvider`.
     ///
-    /// The returned vtable holds an `Arc` clone — the provider stays alive as long
-    /// as the vtable (or any plugin holding it) is alive.
+    /// Captures the current Tokio runtime handle so FFI callbacks can reuse it.
+    /// Must be called from within an active Tokio runtime context.
     pub fn build(provider: Arc<dyn WalProvider>) -> WalProviderVtable {
-        let boxed = Box::new(provider);
-        let state = Box::into_raw(boxed) as *mut c_void;
+        let state = WalBridgeState {
+            provider,
+            runtime: tokio::runtime::Handle::current(),
+        };
+        let boxed = Box::new(state);
+        let state_ptr = Box::into_raw(boxed) as *mut c_void;
         WalProviderVtable {
-            state,
+            state: state_ptr,
             register_fn: wal_register,
             append_fn: wal_append,
             read_from_fn: wal_read_from,
@@ -64,17 +77,12 @@ impl WalProviderVtableBuilder {
     }
 }
 
-fn provider_ref(state: *mut c_void) -> &'static dyn WalProvider {
-    let arc = unsafe { &*(state as *const Arc<dyn WalProvider>) };
-    arc.as_ref()
-}
-
-fn block_on<F: std::future::Future>(f: F) -> Option<F::Output> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    Some(rt.block_on(f))
+/// Clone the provider Arc from the opaque state pointer.
+/// Each FFI call gets its own strong reference, preventing use-after-free
+/// if `drop_fn` is called concurrently.
+fn clone_provider(state: *mut c_void) -> (Arc<dyn WalProvider>, tokio::runtime::Handle) {
+    let bridge_state = unsafe { &*(state as *const WalBridgeState) };
+    (bridge_state.provider.clone(), bridge_state.runtime.clone())
 }
 
 extern "C" fn wal_register(
@@ -84,7 +92,7 @@ extern "C" fn wal_register(
     capacity_policy: u8,
 ) -> FfiResult {
     ffi_guard(FfiResult::err("wal_register: panic".to_string()), || {
-        let provider = provider_ref(state);
+        let (provider, rt) = clone_provider(state);
         let source_id = unsafe { source_id.to_string() };
         let policy = match capacity_policy {
             0 => CapacityPolicy::RejectIncoming,
@@ -95,10 +103,9 @@ extern "C" fn wal_register(
             max_events,
             capacity_policy: policy,
         };
-        match block_on(provider.register(&source_id, config)) {
-            Some(Ok(())) => FfiResult::ok(),
-            Some(Err(e)) => FfiResult::err(e.to_string()),
-            None => FfiResult::err("failed to build runtime for wal_register".to_string()),
+        match rt.block_on(provider.register(&source_id, config)) {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::err(e.to_string()),
         }
     })
 }
@@ -111,20 +118,20 @@ extern "C" fn wal_append(
     ffi_guard(
         FfiWalAppendResult::err("wal_append: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            if event.is_null() {
+                return FfiWalAppendResult::err("wal_append: null event pointer".to_string());
+            }
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
             // Safety: the plugin passes a valid *const SourceChange that it owns.
             // We only borrow it for the duration of this call.
             let source_change = unsafe { &*(event as *const SourceChange) };
-            match block_on(provider.append(&source_id, source_change)) {
-                Some(Ok(seq)) => FfiWalAppendResult::ok(seq),
-                Some(Err(drasi_lib::wal::WalError::CapacityExhausted(_))) => {
+            match rt.block_on(provider.append(&source_id, source_change)) {
+                Ok(seq) => FfiWalAppendResult::ok(seq),
+                Err(drasi_lib::wal::WalError::CapacityExhausted(_)) => {
                     FfiWalAppendResult::capacity_exhausted(&source_id)
                 }
-                Some(Err(e)) => FfiWalAppendResult::err(e.to_string()),
-                None => {
-                    FfiWalAppendResult::err("failed to build runtime for wal_append".to_string())
-                }
+                Err(e) => FfiWalAppendResult::err(e.to_string()),
             }
         },
     )
@@ -138,10 +145,10 @@ extern "C" fn wal_read_from(
     ffi_guard(
         FfiWalReadResult::err("wal_read_from: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
-            match block_on(provider.read_from(&source_id, sequence)) {
-                Some(Ok(events)) => {
+            match rt.block_on(provider.read_from(&source_id, sequence)) {
+                Ok(events) => {
                     if events.is_empty() {
                         return FfiWalReadResult::empty();
                     }
@@ -158,10 +165,7 @@ extern "C" fn wal_read_from(
                         .collect();
                     FfiWalReadResult::ok(ffi_entries)
                 }
-                Some(Err(e)) => FfiWalReadResult::err(e.to_string()),
-                None => {
-                    FfiWalReadResult::err("failed to build runtime for wal_read_from".to_string())
-                }
+                Err(e) => FfiWalReadResult::err(e.to_string()),
             }
         },
     )
@@ -175,14 +179,11 @@ extern "C" fn wal_prune_up_to(
     ffi_guard(
         FfiWalU64Result::err("wal_prune_up_to: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
-            match block_on(provider.prune_up_to(&source_id, sequence)) {
-                Some(Ok(count)) => FfiWalU64Result::ok(count),
-                Some(Err(e)) => FfiWalU64Result::err(e.to_string()),
-                None => {
-                    FfiWalU64Result::err("failed to build runtime for wal_prune_up_to".to_string())
-                }
+            match rt.block_on(provider.prune_up_to(&source_id, sequence)) {
+                Ok(count) => FfiWalU64Result::ok(count),
+                Err(e) => FfiWalU64Result::err(e.to_string()),
             }
         },
     )
@@ -192,14 +193,11 @@ extern "C" fn wal_head_sequence(state: *mut c_void, source_id: FfiStr) -> FfiWal
     ffi_guard(
         FfiWalU64Result::err("wal_head_sequence: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
-            match block_on(provider.head_sequence(&source_id)) {
-                Some(Ok(seq)) => FfiWalU64Result::ok(seq),
-                Some(Err(e)) => FfiWalU64Result::err(e.to_string()),
-                None => FfiWalU64Result::err(
-                    "failed to build runtime for wal_head_sequence".to_string(),
-                ),
+            match rt.block_on(provider.head_sequence(&source_id)) {
+                Ok(seq) => FfiWalU64Result::ok(seq),
+                Err(e) => FfiWalU64Result::err(e.to_string()),
             }
         },
     )
@@ -212,15 +210,12 @@ extern "C" fn wal_oldest_sequence(
     ffi_guard(
         FfiWalOptionalU64Result::err("wal_oldest_sequence: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
-            match block_on(provider.oldest_sequence(&source_id)) {
-                Some(Ok(Some(seq))) => FfiWalOptionalU64Result::some(seq),
-                Some(Ok(None)) => FfiWalOptionalU64Result::none(),
-                Some(Err(e)) => FfiWalOptionalU64Result::err(e.to_string()),
-                None => FfiWalOptionalU64Result::err(
-                    "failed to build runtime for wal_oldest_sequence".to_string(),
-                ),
+            match rt.block_on(provider.oldest_sequence(&source_id)) {
+                Ok(Some(seq)) => FfiWalOptionalU64Result::some(seq),
+                Ok(None) => FfiWalOptionalU64Result::none(),
+                Err(e) => FfiWalOptionalU64Result::err(e.to_string()),
             }
         },
     )
@@ -230,14 +225,11 @@ extern "C" fn wal_event_count(state: *mut c_void, source_id: FfiStr) -> FfiWalU6
     ffi_guard(
         FfiWalU64Result::err("wal_event_count: panic".to_string()),
         || {
-            let provider = provider_ref(state);
+            let (provider, rt) = clone_provider(state);
             let source_id = unsafe { source_id.to_string() };
-            match block_on(provider.event_count(&source_id)) {
-                Some(Ok(count)) => FfiWalU64Result::ok(count),
-                Some(Err(e)) => FfiWalU64Result::err(e.to_string()),
-                None => {
-                    FfiWalU64Result::err("failed to build runtime for wal_event_count".to_string())
-                }
+            match rt.block_on(provider.event_count(&source_id)) {
+                Ok(count) => FfiWalU64Result::ok(count),
+                Err(e) => FfiWalU64Result::err(e.to_string()),
             }
         },
     )
@@ -245,32 +237,31 @@ extern "C" fn wal_event_count(state: *mut c_void, source_id: FfiStr) -> FfiWalU6
 
 extern "C" fn wal_delete_wal(state: *mut c_void, source_id: FfiStr) -> FfiResult {
     ffi_guard(FfiResult::err("wal_delete_wal: panic".to_string()), || {
-        let provider = provider_ref(state);
+        let (provider, rt) = clone_provider(state);
         let source_id = unsafe { source_id.to_string() };
-        match block_on(provider.delete_wal(&source_id)) {
-            Some(Ok(())) => FfiResult::ok(),
-            Some(Err(e)) => FfiResult::err(e.to_string()),
-            None => FfiResult::err("failed to build runtime for wal_delete_wal".to_string()),
+        match rt.block_on(provider.delete_wal(&source_id)) {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::err(e.to_string()),
         }
     })
 }
 
-extern "C" fn wal_free_read_result(entries: *mut FfiWalEntry, count: usize) {
+extern "C" fn wal_free_read_result(entries: *mut FfiWalEntry, count: usize, capacity: usize) {
     if entries.is_null() || count == 0 {
         return;
     }
-    // Reconstruct the Vec to free the buffer memory.
+    // Reconstruct the Vec with correct capacity to free the buffer memory.
     // Note: the SourceChange pointers within entries have already been consumed
     // by the plugin (Box::from_raw), so we only free the entries array itself.
     unsafe {
-        let _ = Vec::from_raw_parts(entries, count, count);
+        let _ = Vec::from_raw_parts(entries, count, capacity);
     }
 }
 
 extern "C" fn wal_drop(state: *mut c_void) {
     if !state.is_null() {
         unsafe {
-            let _ = Box::from_raw(state as *mut Arc<dyn WalProvider>);
+            let _ = Box::from_raw(state as *mut WalBridgeState);
         }
     }
 }

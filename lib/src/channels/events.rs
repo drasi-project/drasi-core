@@ -182,8 +182,7 @@ pub struct SourceChangeEvent {
     pub source_id: String,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// WAL-assigned sequence number (if WAL is enabled).
-    /// Carried through the batcher to set on the final SourceEventWrapper.
+    /// WAL-assigned sequence number, if durability is enabled for this source.
     pub sequence: Option<u64>,
 }
 

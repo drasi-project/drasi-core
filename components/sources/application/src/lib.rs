@@ -680,7 +680,6 @@ impl Source for ApplicationSource {
                     .subscribe_with_replay(
                         &settings,
                         wal_clone.as_ref(),
-                        &self.base.id,
                         resume_seq,
                         "Application",
                     )

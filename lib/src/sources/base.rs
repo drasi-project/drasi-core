@@ -788,7 +788,6 @@ impl SourceBase {
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
         wal: &dyn crate::wal::WalProvider,
-        source_id: &str,
         resume_seq: u64,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
@@ -807,8 +806,8 @@ impl SourceBase {
         let mut dispatchers = self.dispatchers.write().await;
 
         // Capture WAL head while batcher is blocked (fast in-memory read)
-        let head = wal.head_sequence(source_id).await.map_err(|e| {
-            anyhow::anyhow!("Failed to read WAL head for source '{source_id}': {e}")
+        let head = wal.head_sequence(&self.id).await.map_err(|e| {
+            anyhow::anyhow!("Failed to read WAL head for source '{}': {e}", self.id)
         })?;
 
         // Create dedicated channel for this subscriber
@@ -827,7 +826,7 @@ impl SourceBase {
         // Filter to only include events up to the captured head to avoid
         // duplicates with live events that were appended during setup.
         let replay_events = if resume_seq < head {
-            match wal.read_from(source_id, resume_seq.saturating_add(1)).await {
+            match wal.read_from(&self.id, resume_seq.saturating_add(1)).await {
                 Ok(events) => events
                     .into_iter()
                     .filter(|(seq, _)| *seq <= head)

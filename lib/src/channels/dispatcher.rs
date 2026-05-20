@@ -364,6 +364,11 @@ where
 /// Used by WAL-backed transient sources during subscription: replay events
 /// from the WAL are loaded into memory and served first, guaranteeing correct
 /// ordering before live events begin flowing.
+///
+/// **Memory bound**: The replay buffer size is bounded by the WAL's
+/// `max_events` configuration (typically ≤10,000 events). A streaming
+/// approach could reduce peak memory for very large WALs but is not
+/// needed given the bounded capacity.
 pub struct ReplayThenLiveReceiver<T>
 where
     T: Clone + Send + Sync + 'static,

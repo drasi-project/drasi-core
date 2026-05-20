@@ -39,7 +39,10 @@ impl Drop for FfiWalProviderProxy {
     fn drop(&mut self) {
         unsafe {
             let vtable = &*self.vtable;
+            // Free the inner state (Arc<WalBridgeState>)
             (vtable.drop_fn)(vtable.state);
+            // Free the vtable struct itself (allocated via Box::into_raw in source.rs)
+            let _ = Box::from_raw(self.vtable as *mut WalProviderVtable);
         }
     }
 }
@@ -105,7 +108,7 @@ impl WalProvider for FfiWalProviderProxy {
                     events.push((entry.sequence, source_change));
                 }
                 // Free the entries buffer (NOT the SourceChange pointers, we took those)
-                (vtable.free_read_result_fn)(result.entries, result.count);
+                (vtable.free_read_result_fn)(result.entries, result.count, result.capacity);
             }
 
             Ok(events)
