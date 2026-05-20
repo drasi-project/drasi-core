@@ -110,15 +110,17 @@ pub use config::GrpcSourceConfig;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, error, info};
+use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
 use drasi_lib::managers::{log_component_start, log_component_stop};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
 use tracing::Instrument;
 
@@ -150,6 +152,8 @@ pub struct GrpcSource {
     base: SourceBase,
     /// gRPC source configuration
     config: GrpcSourceConfig,
+    /// WAL provider for durable event persistence (if durability is enabled)
+    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
 }
 
 impl GrpcSource {
@@ -208,6 +212,7 @@ impl GrpcSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -232,6 +237,7 @@ impl GrpcSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -278,6 +284,56 @@ impl Source for GrpcSource {
             )
             .await;
 
+        // Initialize WAL if durability is enabled
+        let wal_ref: Option<Arc<dyn WalProvider>> =
+            if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
+                let ctx = self
+                    .base
+                    .context()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+                let wal = ctx.wal_provider.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Durability enabled but no WAL provider configured on DrasiLib")
+                })?;
+                let wal_config = self
+                    .config
+                    .durability
+                    .as_ref()
+                    .expect("durability checked above")
+                    .to_wal_config();
+                wal.register(&self.base.id, wal_config.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to register WAL for source '{}': {}",
+                            self.base.id,
+                            e
+                        )
+                    })?;
+
+                info!(
+                    "[{}] WAL registered: max_events={}, policy={:?}",
+                    self.base.id, wal_config.max_events, wal_config.capacity_policy
+                );
+
+                // Resume sequence counter from WAL head
+                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                if head > 0 {
+                    self.base.set_next_sequence(head);
+                    info!(
+                        "[{}] WAL resumed from persisted state: head={}, next_sequence={}",
+                        self.base.id,
+                        head,
+                        head + 1
+                    );
+                }
+
+                *self.wal.write().await = Some(wal.clone());
+                Some(wal)
+            } else {
+                None
+            };
+
         // Get configuration
         let host = self.config.host.clone();
         let port = self.config.port;
@@ -303,6 +359,7 @@ impl Source for GrpcSource {
             source_id: self.base.id.clone(),
             instance_id: instance_id.clone(),
             dispatchers: self.base.dispatchers.clone(),
+            wal: wal_ref.clone(),
         };
 
         let svc = SourceServiceServer::new(service);
@@ -346,8 +403,36 @@ impl Source for GrpcSource {
         );
 
         *self.base.task_handle.write().await = Some(task);
-        // Note: Running status is set inside the spawned task with the
-        // informative "listening on {addr}" message. No duplicate set here.
+
+        // Spawn WAL pruning task if durability is enabled
+        if let Some(wal) = wal_ref {
+            let base = self.base.clone_shared();
+            let source_id = self.base.id.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Some(confirmed) = base.compute_confirmed_position().await {
+                        if confirmed > 0 {
+                            match wal.prune_up_to(&source_id, confirmed).await {
+                                Ok(pruned) => {
+                                    if pruned > 0 {
+                                        let remaining =
+                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                        debug!(
+                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[{source_id}] WAL prune failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(())
     }
@@ -365,7 +450,49 @@ impl Source for GrpcSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If WAL is enabled and subscriber is resuming, use WAL replay
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
+            // Decode resume_from as big-endian u64 sequence
+            if resume_from.len() >= 8 {
+                let resume_seq =
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(
+                        &settings,
+                        wal_clone.as_ref(),
+                        &self.base.id,
+                        resume_seq,
+                        "gRPC",
+                    )
+                    .await;
+            }
+        }
+        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "gRPC").await
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        // Delete WAL data if durability was enabled
+        let wal_guard = self.wal.read().await;
+        if let Some(ref wal) = *wal_guard {
+            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            if let Err(e) = wal.delete_wal(&self.base.id).await {
+                warn!(
+                    "[{}] Failed to delete WAL during deprovision: {}",
+                    self.base.id, e
+                );
+            }
+        }
+        drop(wal_guard);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -398,6 +525,8 @@ struct GrpcSourceService {
             Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
         >,
     >,
+    /// WAL provider for durable persistence (if durability is enabled)
+    wal: Option<Arc<dyn WalProvider>>,
 }
 
 #[tonic::async_trait]
@@ -411,16 +540,50 @@ impl SourceService for GrpcSourceService {
         if let Some(proto_change) = event_request.event {
             match convert_proto_to_source_change(&proto_change, &self.source_id) {
                 Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let wal_seq = if let Some(ref wal) = self.wal {
+                        match wal.append(&self.source_id, &source_change).await {
+                            Ok(seq) => {
+                                trace!(
+                                    "[{}] WAL append succeeded: sequence={}",
+                                    self.source_id,
+                                    seq
+                                );
+                                Some(seq)
+                            }
+                            Err(WalError::CapacityExhausted(_)) => {
+                                warn!(
+                                    "[{}] WAL capacity exhausted, rejecting event",
+                                    self.source_id
+                                );
+                                return Err(Status::resource_exhausted("WAL capacity exhausted"));
+                            }
+                            Err(e) => {
+                                error!("[{}] WAL append failed: {}", self.source_id, e);
+                                return Err(Status::internal(format!("WAL error: {e}")));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     // Create profiling metadata with timestamps
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventWrapper::with_profiling(
                         self.source_id.clone(),
                         SourceEvent::Change(source_change),
                         chrono::Utc::now(),
                         profiling,
                     );
+
+                    // Set WAL-assigned sequence and source_position
+                    if let Some(seq) = wal_seq {
+                        wrapper.sequence = Some(seq);
+                        wrapper.source_position =
+                            Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                    }
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
@@ -477,6 +640,7 @@ impl SourceService for GrpcSourceService {
         let source_id = self.source_id.clone();
         let instance_id = self.instance_id.clone();
         let dispatchers = self.dispatchers.clone();
+        let wal = self.wal.clone();
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
@@ -494,16 +658,57 @@ impl SourceService for GrpcSourceService {
                 while let Ok(Some(proto_change)) = stream.message().await {
                     match convert_proto_to_source_change(&proto_change, &source_id) {
                         Ok(source_change) => {
+                            // WAL append before dispatch (if durability enabled)
+                            let wal_seq = if let Some(ref wal) = wal {
+                                match wal.append(&source_id, &source_change).await {
+                                    Ok(seq) => {
+                                        trace!(
+                                            "[{source_id}] WAL append succeeded (stream): sequence={seq}"
+                                        );
+                                        Some(seq)
+                                    }
+                                    Err(WalError::CapacityExhausted(_)) => {
+                                        warn!(
+                                            "[{source_id}] WAL capacity exhausted in stream, closing"
+                                        );
+                                        let _ = tx
+                                            .send(Err(Status::resource_exhausted(
+                                                "WAL capacity exhausted",
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "[{source_id}] WAL append failed in stream: {e}"
+                                        );
+                                        let _ = tx
+                                            .send(Err(Status::internal(format!("WAL error: {e}"))))
+                                            .await;
+                                        return;
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
                             // Create profiling metadata with timestamps
                             let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                             profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                            let wrapper = SourceEventWrapper::with_profiling(
+                            let mut wrapper = SourceEventWrapper::with_profiling(
                                 source_id.clone(),
                                 SourceEvent::Change(source_change),
                                 chrono::Utc::now(),
                                 profiling,
                             );
+
+                            // Set WAL-assigned sequence and source_position
+                            if let Some(seq) = wal_seq {
+                                wrapper.sequence = Some(seq);
+                                wrapper.source_position =
+                                    Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                            }
 
                             // Dispatch via helper
                             if let Err(e) = SourceBase::dispatch_from_task(
@@ -848,6 +1053,7 @@ pub struct GrpcSourceBuilder {
     port: u16,
     endpoint: Option<String>,
     timeout_ms: u64,
+    durability: Option<drasi_lib::DurabilityConfig>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -863,6 +1069,7 @@ impl GrpcSourceBuilder {
             port: 50051,
             endpoint: None,
             timeout_ms: 5000,
+            durability: None,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -930,6 +1137,16 @@ impl GrpcSourceBuilder {
         self.port = config.port;
         self.endpoint = config.endpoint;
         self.timeout_ms = config.timeout_ms;
+        self.durability = config.durability;
+        self
+    }
+
+    /// Set the WAL durability configuration.
+    ///
+    /// When enabled, events are persisted to a Write-Ahead Log before
+    /// acknowledging the caller, enabling crash recovery and replay.
+    pub fn with_durability(mut self, config: drasi_lib::DurabilityConfig) -> Self {
+        self.durability = Some(config);
         self
     }
 
@@ -944,6 +1161,7 @@ impl GrpcSourceBuilder {
             port: self.port,
             endpoint: self.endpoint,
             timeout_ms: self.timeout_ms,
+            durability: self.durability,
         };
 
         let mut params = SourceBaseParams::new(&self.id).with_auto_start(self.auto_start);
@@ -960,6 +1178,7 @@ impl GrpcSourceBuilder {
         Ok(GrpcSource {
             base: SourceBase::new(params)?,
             config,
+            wal: tokio::sync::RwLock::new(None),
         })
     }
 }

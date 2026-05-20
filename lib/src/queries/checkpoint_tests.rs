@@ -327,6 +327,7 @@ mod tests {
                 update_tx,
                 state_store: None,
                 identity_provider: None,
+                wal_provider: None,
             })
             .await;
         source.start().await.unwrap();
@@ -393,6 +394,7 @@ mod tests {
                 update_tx,
                 state_store: None,
                 identity_provider: None,
+                wal_provider: None,
             })
             .await;
         source.start().await.unwrap();
@@ -915,6 +917,7 @@ mod tests {
                 update_tx,
                 state_store: None,
                 identity_provider: None,
+                wal_provider: None,
             })
             .await;
         source.start().await.unwrap();

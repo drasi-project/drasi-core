@@ -147,14 +147,16 @@ pub use property_builder::PropertyMapBuilder;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{debug, info, warn};
+use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentStatus, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
 use tracing::Instrument;
 
@@ -327,6 +329,8 @@ pub struct ApplicationSource {
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
     /// Sender for creating new handles
     app_tx: mpsc::Sender<SourceChange>,
+    /// WAL provider for durable event persistence (if durability is enabled)
+    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
 }
 
 impl ApplicationSource {
@@ -375,6 +379,7 @@ impl ApplicationSource {
             config,
             app_rx: Arc::new(RwLock::new(Some(app_rx))),
             app_tx,
+            wal: tokio::sync::RwLock::new(None),
         };
 
         Ok((source, handle))
@@ -388,7 +393,7 @@ impl ApplicationSource {
         }
     }
 
-    async fn process_events(&self) -> Result<()> {
+    async fn process_events(&self, wal: Option<Arc<dyn WalProvider>>) -> Result<()> {
         let mut rx = self
             .app_rx
             .write()
@@ -429,15 +434,42 @@ impl ApplicationSource {
                 while let Some(change) = rx.recv().await {
                     debug!("ApplicationSource '{source_name}' received event: {change:?}");
 
+                    // WAL append before dispatch (if durability enabled)
+                    let wal_seq = if let Some(ref wal) = wal {
+                        match wal.append(&source_name, &change).await {
+                            Ok(seq) => {
+                                trace!("[{source_name}] WAL append succeeded: sequence={seq}");
+                                Some(seq)
+                            }
+                            Err(WalError::CapacityExhausted(_)) => {
+                                warn!("[{source_name}] WAL capacity exhausted, dropping event");
+                                continue;
+                            }
+                            Err(e) => {
+                                error!("[{source_name}] WAL append failed: {e}");
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                     profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                    let wrapper = SourceEventWrapper::with_profiling(
+                    let mut wrapper = SourceEventWrapper::with_profiling(
                         source_name.clone(),
                         SourceEvent::Change(change),
                         chrono::Utc::now(),
                         profiling,
                     );
+
+                    // Set WAL-assigned sequence and source_position
+                    if let Some(seq) = wal_seq {
+                        wrapper.sequence = Some(seq);
+                        wrapper.source_position =
+                            Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                    }
 
                     if let Err(e) = SourceBase::dispatch_from_task(
                         base_dispatchers.clone(),
@@ -488,7 +520,87 @@ impl Source for ApplicationSource {
             )
             .await;
 
-        self.process_events().await?;
+        // Initialize WAL if durability is enabled
+        let wal_ref: Option<Arc<dyn WalProvider>> =
+            if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
+                let ctx = self
+                    .base
+                    .context()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+                let wal = ctx.wal_provider.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Durability enabled but no WAL provider configured on DrasiLib")
+                })?;
+                let wal_config = self
+                    .config
+                    .durability
+                    .as_ref()
+                    .expect("durability checked above")
+                    .to_wal_config();
+                wal.register(&self.base.id, wal_config.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to register WAL for source '{}': {}",
+                            self.base.id,
+                            e
+                        )
+                    })?;
+
+                info!(
+                    "[{}] WAL registered: max_events={}, policy={:?}",
+                    self.base.id, wal_config.max_events, wal_config.capacity_policy
+                );
+
+                // Resume sequence counter from WAL head
+                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                if head > 0 {
+                    self.base.set_next_sequence(head);
+                    info!(
+                        "[{}] WAL resumed from persisted state: head={}, next_sequence={}",
+                        self.base.id,
+                        head,
+                        head + 1
+                    );
+                }
+
+                *self.wal.write().await = Some(wal.clone());
+                Some(wal)
+            } else {
+                None
+            };
+
+        self.process_events(wal_ref.clone()).await?;
+
+        // Spawn WAL pruning task if durability is enabled
+        if let Some(wal) = wal_ref {
+            let base = self.base.clone_shared();
+            let source_id = self.base.id.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Some(confirmed) = base.compute_confirmed_position().await {
+                        if confirmed > 0 {
+                            match wal.prune_up_to(&source_id, confirmed).await {
+                                Ok(pruned) => {
+                                    if pruned > 0 {
+                                        let remaining =
+                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                        debug!(
+                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[{source_id}] WAL prune failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(())
     }
@@ -525,9 +637,51 @@ impl Source for ApplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If WAL is enabled and subscriber is resuming, use WAL replay
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
+            // Decode resume_from as big-endian u64 sequence
+            if resume_from.len() >= 8 {
+                let resume_seq =
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(
+                        &settings,
+                        wal_clone.as_ref(),
+                        &self.base.id,
+                        resume_seq,
+                        "Application",
+                    )
+                    .await;
+            }
+        }
+        drop(wal_guard);
         self.base
             .subscribe_with_bootstrap(&settings, "Application")
             .await
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        // Delete WAL data if durability was enabled
+        let wal_guard = self.wal.read().await;
+        if let Some(ref wal) = *wal_guard {
+            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            if let Err(e) = wal.delete_wal(&self.base.id).await {
+                warn!(
+                    "[{}] Failed to delete WAL during deprovision: {}",
+                    self.base.id, e
+                );
+            }
+        }
+        drop(wal_guard);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

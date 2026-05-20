@@ -765,6 +765,130 @@ impl SourceBase {
             .map(|(bootstrap_receiver, _)| bootstrap_receiver))
     }
 
+    /// Subscribe with WAL replay support.
+    ///
+    /// Creates a streaming channel, captures the WAL head under the dispatchers
+    /// write lock, registers the new dispatcher, then reads WAL events and
+    /// returns a composite receiver that yields replay events first followed by
+    /// live events. This guarantees correct ordering without deadlock.
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - Subscription settings (query_id, resume_from, etc.)
+    /// * `wal` - The WAL provider to read replay events from
+    /// * `source_id` - The source ID registered with the WAL
+    /// * `resume_seq` - The last confirmed sequence; replay starts from resume_seq+1
+    /// * `source_type` - Label for logging (e.g., "HTTP", "gRPC")
+    pub async fn subscribe_with_replay(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        wal: &dyn crate::wal::WalProvider,
+        source_id: &str,
+        resume_seq: u64,
+        source_type: &str,
+    ) -> Result<SubscriptionResponse> {
+        use crate::channels::dispatcher::ReplayThenLiveReceiver;
+
+        // Recover sequence counter from checkpoint
+        self.apply_subscription_settings(settings);
+
+        info!(
+            "Query '{}' subscribing to {} source '{}' with WAL replay from seq {}",
+            settings.query_id, source_type, self.id, resume_seq
+        );
+
+        // Hold dispatchers write lock to block live dispatch during setup.
+        // This ensures no live events reach the new subscriber before replay.
+        let mut dispatchers = self.dispatchers.write().await;
+
+        // Capture WAL head while batcher is blocked (fast in-memory read)
+        let head = wal.head_sequence(source_id).await.unwrap_or(0);
+
+        // Create dedicated channel for this subscriber
+        let dispatcher = crate::channels::dispatcher::ChannelChangeDispatcher::<
+            crate::channels::events::SourceEventWrapper,
+        >::new(self.dispatch_buffer_capacity);
+        let live_receiver = dispatcher.create_receiver().await?;
+
+        // Add dispatcher to live list — after lock release, live events flow to it
+        dispatchers.push(Box::new(dispatcher));
+        drop(dispatchers);
+
+        self.subscriber_notify.notify_one();
+
+        // Read WAL events (after releasing lock — I/O can be slow).
+        // Filter to only include events up to the captured head to avoid
+        // duplicates with live events that were appended during setup.
+        let replay_events = if resume_seq < head {
+            match wal.read_from(source_id, resume_seq.saturating_add(1)).await {
+                Ok(events) => events
+                    .into_iter()
+                    .filter(|(seq, _)| *seq <= head)
+                    .collect::<Vec<_>>(),
+                Err(crate::wal::WalError::PositionUnavailable { .. }) => {
+                    return Err(anyhow::anyhow!(
+                        "WAL position {} unavailable for replay",
+                        resume_seq + 1
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Build replay wrappers
+        let replay_wrappers: std::collections::VecDeque<
+            std::sync::Arc<crate::channels::events::SourceEventWrapper>,
+        > = replay_events
+            .into_iter()
+            .map(|(seq, change)| {
+                std::sync::Arc::new(crate::channels::events::SourceEventWrapper {
+                    source_id: self.id.clone(),
+                    event: crate::channels::events::SourceEvent::Change(change),
+                    timestamp: chrono::Utc::now(),
+                    sequence: Some(seq),
+                    source_position: Some(bytes::Bytes::from(seq.to_be_bytes().to_vec())),
+                    profiling: None,
+                })
+            })
+            .collect();
+
+        let replay_count = replay_wrappers.len();
+        info!(
+            "[{}] WAL replay: {} events (seq {}..={})",
+            self.id,
+            replay_count,
+            resume_seq + 1,
+            head
+        );
+
+        // Composite receiver: replay first, then live
+        let composite: Box<
+            dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
+        > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
+
+        // Position handle
+        let position_handle = if settings.request_position_handle {
+            let handle = self.create_position_handle(&settings.query_id).await;
+            if let Some(last_seq) = settings.last_sequence {
+                handle.store(last_seq, Ordering::Release);
+            }
+            Some(handle)
+        } else {
+            None
+        };
+
+        Ok(SubscriptionResponse {
+            query_id: settings.query_id.clone(),
+            source_id: self.id.clone(),
+            receiver: composite,
+            bootstrap_receiver: None,
+            position_handle,
+            bootstrap_result_receiver: None,
+        })
+    }
+
     /// Handle bootstrap subscription logic.
     ///
     /// Returns the bootstrap event receiver and a oneshot receiver for the
@@ -931,8 +1055,14 @@ impl SourceBase {
             }
         }
 
-        // Framework assigns the monotonic sequence
-        wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+        // Framework assigns the monotonic sequence (skip if pre-set by WAL)
+        if let Some(seq) = wrapper.sequence {
+            // Pre-set by WAL — advance counter to maintain monotonicity
+            self.next_sequence
+                .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
+        } else {
+            wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+        }
 
         // Record sequence→source_position mapping for confirmed-position lookups.
         if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {
@@ -1025,7 +1155,13 @@ impl SourceBase {
                 }
             }
 
-            wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+            // Framework assigns the monotonic sequence (skip if pre-set by WAL)
+            if let Some(seq) = wrapper.sequence {
+                self.next_sequence
+                    .fetch_max(seq.saturating_add(1), Ordering::Relaxed);
+            } else {
+                wrapper.sequence = Some(self.next_sequence.fetch_add(1, Ordering::Relaxed));
+            }
 
             // Record sequence→source_position mapping for confirmed-position lookups.
             if let (Some(seq), Some(ref pos)) = (wrapper.sequence, &wrapper.source_position) {

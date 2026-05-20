@@ -2699,6 +2699,7 @@ fn build_source_runtime_context(
         update_tx,
         state_store,
         identity_provider,
+        wal_provider: None,
     };
     (ctx, status_rx)
 }

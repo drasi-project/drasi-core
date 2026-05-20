@@ -358,6 +358,48 @@ where
     }
 }
 
+/// A composite receiver that yields pre-loaded replay events first, then
+/// delegates to a live channel receiver.
+///
+/// Used by WAL-backed transient sources during subscription: replay events
+/// from the WAL are loaded into memory and served first, guaranteeing correct
+/// ordering before live events begin flowing.
+pub struct ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    replay: std::collections::VecDeque<Arc<T>>,
+    live: Box<dyn ChangeReceiver<T>>,
+}
+
+impl<T> ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Create a new composite receiver.
+    ///
+    /// `replay` events are served in order before delegating to `live`.
+    pub fn new(
+        replay: std::collections::VecDeque<Arc<T>>,
+        live: Box<dyn ChangeReceiver<T>>,
+    ) -> Self {
+        Self { replay, live }
+    }
+}
+
+#[async_trait]
+impl<T> ChangeReceiver<T> for ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    async fn recv(&mut self) -> Result<Arc<T>> {
+        if let Some(event) = self.replay.pop_front() {
+            return Ok(event);
+        }
+        self.live.recv().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

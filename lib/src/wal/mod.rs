@@ -22,6 +22,6 @@ mod config;
 mod error;
 mod traits;
 
-pub use config::{CapacityPolicy, WriteAheadLogConfig, MIN_MAX_EVENTS};
+pub use config::{CapacityPolicy, DurabilityConfig, WriteAheadLogConfig, MIN_MAX_EVENTS};
 pub use error::WalError;
 pub use traits::WalProvider;

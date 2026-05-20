@@ -873,6 +873,7 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
                 .as_ref()
                 .map(|w| map_webhook_config(w, &mapper))
                 .transpose()?,
+            durability: None,
         };
 
         let mut source = HttpSourceBuilder::new(id)

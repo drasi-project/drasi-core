@@ -91,6 +91,7 @@ impl SourcePluginDescriptor for GrpcSourceDescriptor {
             port: mapper.resolve_typed(&dto.port)?,
             endpoint: mapper.resolve_optional(&dto.endpoint)?,
             timeout_ms: mapper.resolve_typed(&dto.timeout_ms)?,
+            durability: None,
         };
 
         let mut source = GrpcSourceBuilder::new(id)

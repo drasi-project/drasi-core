@@ -182,6 +182,9 @@ pub struct SourceChangeEvent {
     pub source_id: String,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// WAL-assigned sequence number (if WAL is enabled).
+    /// Carried through the batcher to set on the final SourceEventWrapper.
+    pub sequence: Option<u64>,
 }
 
 /// Control events from sources for query coordination
