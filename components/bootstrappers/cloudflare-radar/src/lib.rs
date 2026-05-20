@@ -23,7 +23,9 @@ pub use config::{CategoryConfig, CloudflareRadarBootstrapConfig};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use log::{info, warn};
 use mapping::{
@@ -56,6 +58,12 @@ pub struct CloudflareRadarBootstrapProviderBuilder {
     config: CloudflareRadarBootstrapConfig,
 }
 
+impl Default for CloudflareRadarBootstrapProviderBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CloudflareRadarBootstrapProviderBuilder {
     pub fn new() -> Self {
         Self {
@@ -84,7 +92,7 @@ impl CloudflareRadarBootstrapProviderBuilder {
             "domain_rankings" => self.config.categories.domain_rankings = enabled,
             "dns" => self.config.categories.dns = enabled,
             _ => {
-                log::warn!("Unknown Cloudflare Radar category: '{}'", name);
+                log::warn!("Unknown Cloudflare Radar category: '{name}'");
             }
         }
         self
@@ -167,7 +175,7 @@ impl BootstrapProvider for CloudflareRadarBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "[{}] Cloudflare Radar bootstrap started for query {}",
             context.source_id, request.query_id
@@ -459,7 +467,12 @@ impl BootstrapProvider for CloudflareRadarBootstrapProvider {
             context.source_id, total_events
         );
 
-        Ok(total_events)
+        Ok(BootstrapResult {
+            event_count: total_events,
+            last_sequence: None,
+            sequences_aligned: false,
+            source_position: None,
+        })
     }
 }
 
@@ -467,7 +480,7 @@ fn build_client(api_token: &str) -> Result<Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_token))?,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_token}"))?,
     );
 
     let client = Client::builder()
@@ -488,10 +501,7 @@ async fn fetch_cloudflare<T: DeserializeOwned>(client: &Client, url: &str) -> Re
                 if attempt >= 4 {
                     return Err(err.into());
                 }
-                warn!(
-                    "Cloudflare API request failed ({}); retrying in {:?}",
-                    err, delay
-                );
+                warn!("Cloudflare API request failed ({err}); retrying in {delay:?}");
                 sleep(delay).await;
                 delay *= 2;
                 continue;

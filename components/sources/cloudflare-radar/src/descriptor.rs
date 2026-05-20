@@ -21,7 +21,7 @@ use utoipa::OpenApi;
 // ── DTO types ────────────────────────────────────────────────────────────────
 
 /// Category configuration DTO.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema, Default)]
 #[schema(as = source::cloudflare_radar::CategoryConfig)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CategoryConfigDto {
@@ -43,35 +43,17 @@ pub struct CategoryConfigDto {
     pub dns: bool,
 }
 
-impl Default for CategoryConfigDto {
-    fn default() -> Self {
-        Self {
-            outages: false,
-            bgp_hijacks: false,
-            bgp_leaks: false,
-            http_traffic: false,
-            attacks_l7: false,
-            attacks_l3: false,
-            domain_rankings: false,
-            dns: false,
-        }
-    }
-}
-
 /// Start behavior DTO.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema, Default)]
 #[schema(as = source::cloudflare_radar::StartBehavior)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StartBehaviorDto {
+    #[default]
     StartFromNow,
     StartFromBeginning,
-    StartFromTimestamp { timestamp: i64 },
-}
-
-impl Default for StartBehaviorDto {
-    fn default() -> Self {
-        StartBehaviorDto::StartFromNow
-    }
+    StartFromTimestamp {
+        timestamp: i64,
+    },
 }
 
 fn default_api_base_url() -> ConfigValue<String> {
