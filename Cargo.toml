@@ -27,6 +27,8 @@ members = [
   "components/bootstrappers/dataverse",
   "components/bootstrappers/mysql",
   "components/bootstrappers/http",
+  "components/bootstrappers/open511",
+  "components/bootstrappers/gtfs-rt",
   "components/bootstrappers/sui-deepbook",
   "components/bootstrappers/kubernetes",
   "components/bootstrappers/oracle",
@@ -42,6 +44,8 @@ members = [
   "components/sources/ris-live",
   "components/sources/mssql",
   "components/sources/dataverse",
+  "components/sources/open511",
+  "components/sources/gtfs-rt",
   "components/sources/mysql",
   "components/sources/hyperliquid",
   "components/sources/sui-deepbook",
@@ -170,6 +174,7 @@ drasi-bootstrap-kubernetes = { version = "0.1.0", path = "components/bootstrappe
 drasi-source-oracle = { version = "0.1.0", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.0", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.0", path = "components/oracle-common" }
+drasi-source-gtfs-rt = { version = "0.1.0", path = "components/sources/gtfs-rt" }
 
 [workspace.lints.rust]
 warnings = "deny"
