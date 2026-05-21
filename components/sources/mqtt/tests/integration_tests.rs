@@ -33,9 +33,7 @@ use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_reaction_application::ApplicationReactionHandle;
-use drasi_source_mqtt::config::{
-    InjectId, MappingEntity, MappingProperties, MqttTopicConfig, TopicMapping,
-};
+use drasi_source_mqtt::config::{MappingEntity, MappingProperties, MqttTopicConfig, TopicMapping};
 use drasi_source_mqtt::MqttSource;
 use drasi_source_mqtt::{
     config::{MqttSourceConfig, MqttTransportMode},
@@ -724,7 +722,7 @@ async fn test_mqtt_query_results() -> Result<()> {
             properties: MappingProperties {
                 mode: drasi_source_mqtt::config::MappingMode::PayloadAsField,
                 field_name: Some("reading".to_string()),
-                inject_id: Some(InjectId::True),
+                inject_id: Some(true),
                 inject: vec![
                     HashMap::from([("floor".to_string(), "{floor}".to_string())]),
                     HashMap::from([("room".to_string(), "{room}".to_string())]),
@@ -922,7 +920,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
                 properties: MappingProperties {
                     mode: drasi_source_mqtt::config::MappingMode::PayloadSpread,
                     field_name: None,
-                    inject_id: Some(InjectId::True),
+                    inject_id: Some(true),
                     inject: vec![],
                 },
                 nodes: vec![],
@@ -937,7 +935,7 @@ async fn test_mqtt_query_results_with_using_input_data() -> Result<()> {
                 properties: MappingProperties {
                     mode: drasi_source_mqtt::config::MappingMode::PayloadSpread,
                     field_name: None,
-                    inject_id: Some(InjectId::True),
+                    inject_id: Some(true),
                     inject: vec![
                         HashMap::from([("floor".to_string(), "{floor}".to_string())]),
                         HashMap::from([("room".to_string(), "{room}".to_string())]),
@@ -1153,7 +1151,7 @@ async fn test_full_pipeline_with_application_reaction() -> Result<()> {
             properties: MappingProperties {
                 mode: drasi_source_mqtt::config::MappingMode::PayloadAsField,
                 field_name: Some("reading".to_string()),
-                inject_id: Some(InjectId::True),
+                inject_id: Some(true),
                 inject: vec![
                     HashMap::from([("floor".to_string(), "{floor}".to_string())]),
                     HashMap::from([("room".to_string(), "{room}".to_string())]),

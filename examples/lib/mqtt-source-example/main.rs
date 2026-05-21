@@ -60,11 +60,21 @@ topic_mappings:
         id: "{room}"
     relations:
       - label: "LOCATED_IN_FLOOR"
-        from: "{room}"
-        to: "{floor}"
+        from: 
+            label: "ROOM"
+            id: "{room}"
+        to: 
+            label: "FLOOR"
+            id: "{floor}"
+        id: "{room}-to-{floor}"
       - label: "LOCATED_IN_ROOM"
-        from: "{device}"
-        to: "{room}"
+        from: 
+            label: "DEVICE"
+            id: "{device}"
+        to: 
+            label: "ROOM"
+            id: "{room}"
+        id: "{device}-to-{room}"
 event_channel_capacity: 20
 keep_alive: 5
 conn_timeout: 5
@@ -162,16 +172,16 @@ transport:
     });
 
     println!("\n┌────────────────────────────────────────────┐");
-    println!("│ Temperature Monitor Started!               │");
-    println!("├────────────────────────────────────────────┤");
-    println!("│ MQTT Source: localhost:8883               │");
-    println!("│   Topics: sensors/temperature, building/#  │");
-    println!("├────────────────────────────────────────────┤");
-    println!("│ Results API: http://localhost:8080         │");
-    println!("│   GET /queries/floor_readings/results      │");
-    println!("├────────────────────────────────────────────┤");
-    println!("│ Press Ctrl+C to stop                       │");
-    println!("└────────────────────────────────────────────┘\n");
+    println!("│ Temperature Monitor Started!                 │");
+    println!("├──────────────────────────────────────────────┤");
+    println!("│ MQTT Source: localhost:8883                  │");
+    println!("│  Topics: sensors/temperature, building/+/+/+ │");
+    println!("├──────────────────────────────────────────────┤");
+    println!("│ Results API: http://localhost:8080           │");
+    println!("│   GET /queries/:id/results                   │");
+    println!("├──────────────────────────────────────────────┤");
+    println!("│ Press Ctrl+C to stop                         │");
+    println!("└──────────────────────────────────────────────┘\n");
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
