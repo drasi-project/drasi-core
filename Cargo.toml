@@ -203,6 +203,7 @@ drasi-bootstrap-kafka = { version = "0.1.4", path = "components/bootstrappers/ka
 drasi-source-gtfs-rt = { version = "0.1.5", path = "components/sources/gtfs-rt" }
 drasi-bootstrap-gtfs-rt = { version = "0.1.5", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-mqtt = { version = "0.1.0", path = "components/sources/mqtt" }
+drasi-batching-common = { version = "0.1.0", path = "components/batching-common" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
 drasi-source-neo4j = { version = "0.1.3", path = "components/sources/neo4j" }
