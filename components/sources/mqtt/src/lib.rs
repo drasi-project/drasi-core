@@ -29,6 +29,7 @@ use drasi_batching_common::AdaptiveBatchConfig;
 use std::time::Duration;
 
 use drasi_lib::channels::*;
+use drasi_lib::Source;
 mod mqtt;
 mod pattern;
 mod processor;
@@ -469,7 +470,7 @@ mod tests {
                 clean_start: None,
                 max_incoming_packet_size: None,
                 max_outgoing_packet_size: None,
-                conn_timeout: Some(10_000),
+                conn_timeout: Some(10),
                 connect_properties: None,
                 subscribe_properties: None,
                 adaptive_max_batch_size: None,
@@ -604,7 +605,7 @@ mod tests {
                 .with_host("api.example.com")
                 .with_port(9000)
                 .with_topic("/webhook")
-                .with_timeout_ms(5000)
+                .with_timeout_ms(5)
                 .build()
                 .await;
 
@@ -617,7 +618,7 @@ mod tests {
                 unwrapped_source.config().topics[0].topic,
                 "/webhook".to_string()
             );
-            assert_eq!(unwrapped_source.config().conn_timeout, Some(5000));
+            assert_eq!(unwrapped_source.config().conn_timeout, Some(5));
         }
 
         #[tokio::test]
