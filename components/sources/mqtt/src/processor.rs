@@ -253,7 +253,7 @@ impl MqttProcessor {
                 break;
             }
 
-            let timestamp = match change {
+            let timestamp = match &change {
                 MqttSourceChange::Update { timestamp, .. } => timestamp.unwrap_or_else(|| {
                     let now = std::time::SystemTime::now();
                     now.duration_since(std::time::UNIX_EPOCH)
