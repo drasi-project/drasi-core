@@ -170,10 +170,14 @@ fn convert_json_to_element_value(
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(ElementValue::Integer(i))
+            } else if n.as_u64().is_some() {
+                Err(anyhow::anyhow!(
+                    "Unsigned number {n} exceeds maximum integer value"
+                ))
             } else if let Some(f) = n.as_f64() {
                 Ok(ElementValue::Float(OrderedFloat(f)))
             } else {
-                Err(anyhow::anyhow!("Unsupported number type"))
+                Err(anyhow::anyhow!("Unsupported number type {n}"))
             }
         }
         serde_json::Value::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),

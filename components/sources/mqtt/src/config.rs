@@ -217,19 +217,10 @@ pub enum MappingMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum InjectId {
-    #[serde(rename = "true")]
-    True,
-    #[serde(rename = "false")]
-    False,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct MappingProperties {
     pub mode: MappingMode,
     pub field_name: Option<String>,
-    pub inject_id: Option<InjectId>,
+    pub inject_id: Option<bool>,
     /// JSON object mapping topic variables to graph properties
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inject: Vec<HashMap<String, String>>,
@@ -413,7 +404,7 @@ pub struct MqttSourceConfig {
 
     //...... MQTT v5 specific config parameters (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conn_timeout: Option<u64>, // Connection timeout in milliseconds for MQTT v5
+    pub conn_timeout: Option<u64>, // Connection timeout in seconds for MQTT v5
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_properties: Option<MqttConnectProperties>, // MQTT v5 connect properties
@@ -916,7 +907,7 @@ impl Default for MqttSourceConfig {
             clean_start: None,
             max_incoming_packet_size: None,
             max_outgoing_packet_size: None,
-            conn_timeout: Some(5000),
+            conn_timeout: Some(5),
             connect_properties: None,
             subscribe_properties: None,
             adaptive_max_batch_size: None,
@@ -962,7 +953,7 @@ mod tests {
                 mode,
                 field_name: field_name.map(str::to_string),
                 inject: vec![HashMap::from([("room".to_string(), "{room}".to_string())])],
-                inject_id: Some(InjectId::True),
+                inject_id: Some(true),
             },
             nodes: vec![MappingNode {
                 label: "FLOOR".to_string(),
@@ -1006,7 +997,7 @@ mod tests {
             clean_start: Some(true),
             max_incoming_packet_size: None,
             max_outgoing_packet_size: None,
-            conn_timeout: Some(5000),
+            conn_timeout: Some(5),
             connect_properties: None,
             subscribe_properties: Some(MqttSubscribeProperties {
                 id: Some(7),
@@ -1030,7 +1021,7 @@ mod tests {
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 1883);
         assert_eq!(config.event_channel_capacity, 20);
-        assert_eq!(config.conn_timeout, Some(5000));
+        assert_eq!(config.conn_timeout, Some(5));
         assert_eq!(default_qos(), MqttQoS::ONE);
         assert_eq!(MqttQoS::default(), MqttQoS::ONE);
         assert!(config.topics.is_empty());

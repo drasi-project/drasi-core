@@ -15,7 +15,7 @@
 //! MQTT source plugin descriptor and configuration DTOs.
 
 use crate::config::{
-    InjectId, MappingEntity, MappingMode, MappingNode, MappingProperties, MappingRelation,
+    MappingEntity, MappingMode, MappingNode, MappingProperties, MappingRelation,
     MappingRelationEndpoint, MqttConnectProperties, MqttQoS, MqttSourceConfig,
     MqttSubscribeProperties, MqttTopicConfig, MqttTransportMode, TopicMapping,
 };
@@ -395,11 +395,7 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
                 properties: MappingProperties {
                     mode: m.properties.mode.into_runtime(),
                     field_name: m.properties.field_name,
-                    inject_id: match m.properties.inject_id {
-                        Some(true) => Some(InjectId::True),
-                        Some(false) => Some(InjectId::False),
-                        None => None,
-                    },
+                    inject_id: m.properties.inject_id,
                     inject: m.properties.inject,
                 },
                 nodes: m

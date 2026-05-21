@@ -137,7 +137,7 @@ impl ToMqttPacket for rumqttc::v5::Event {
     fn to_mqtt_packet(self) -> Option<MqttPacket> {
         if let rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::Publish(p)) = self {
             Some(MqttPacket {
-                topic: str::from_utf8(&p.topic).unwrap_or_default().to_string(),
+                topic: String::from_utf8_lossy(&p.topic).into_owned(),
                 payload: p.payload,
                 timestamp: chrono::Utc::now().timestamp_millis() as u64,
             })
@@ -295,7 +295,7 @@ impl MqttConnection {
                                     self.set_mqtt_options_v5_security(&mut event_loop_v5.options).await.unwrap_or_else(|e| {
                                         error!("Failed to update MQTT options with security credentials: {e:?}");
                                     });
-                                    doubler *= 2; // exponential backoff
+                                    doubler = (doubler * 2).min(256); // exponential backoff with a maximum limit
                                 }
                             }
                         }
@@ -351,7 +351,7 @@ impl MqttConnection {
                                     self.set_mqtt_options_v3_security(&mut event_loop_v3.mqtt_options).await.unwrap_or_else(|e| {
                                         error!("Failed to update MQTT options with security credentials: {e:?}");
                                     });
-                                    doubler *= 2; // exponential backoff
+                                    doubler = (doubler * 2).min(256); // exponential backoff with a maximum limit
                                 }
                             }
                         }
