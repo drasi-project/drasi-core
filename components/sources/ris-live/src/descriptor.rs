@@ -116,34 +116,35 @@ impl SourcePluginDescriptor for RisLiveSourceDescriptor {
         let dto: RisLiveSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let websocket_url = mapper.resolve_string(&dto.websocket_url)?;
-        let client_name = mapper.resolve_optional_string(&dto.client_name)?;
-        let host = mapper.resolve_optional_string(&dto.host)?;
-        let message_type = mapper.resolve_optional_string(&dto.message_type)?;
-        let prefixes = dto
-            .prefixes
-            .as_deref()
-            .map(|values| mapper.resolve_string_vec(values))
-            .transpose()?;
-        let more_specific = mapper.resolve_optional(&dto.more_specific)?;
-        let less_specific = mapper.resolve_optional(&dto.less_specific)?;
-        let path = mapper.resolve_optional_string(&dto.path)?;
-        let peer = mapper.resolve_optional_string(&dto.peer)?;
-        let require = mapper.resolve_optional_string(&dto.require)?;
-        let include_peer_state = mapper.resolve_typed(&dto.include_peer_state)?;
-        let reconnect_delay_secs = mapper.resolve_typed(&dto.reconnect_delay_secs)?;
-        let clear_state_on_start = mapper.resolve_typed(&dto.clear_state_on_start)?;
+        let websocket_url = mapper.resolve_string(&dto.websocket_url).await?;
+        let client_name = mapper.resolve_optional_string(&dto.client_name).await?;
+        let host = mapper.resolve_optional_string(&dto.host).await?;
+        let message_type = mapper.resolve_optional_string(&dto.message_type).await?;
+        let prefixes = if let Some(values) = dto.prefixes.as_deref() {
+            Some(mapper.resolve_string_vec(values).await?)
+        } else {
+            None
+        };
+        let more_specific = mapper.resolve_optional(&dto.more_specific).await?;
+        let less_specific = mapper.resolve_optional(&dto.less_specific).await?;
+        let path = mapper.resolve_optional_string(&dto.path).await?;
+        let peer = mapper.resolve_optional_string(&dto.peer).await?;
+        let require = mapper.resolve_optional_string(&dto.require).await?;
+        let include_peer_state = mapper.resolve_typed(&dto.include_peer_state).await?;
+        let reconnect_delay_secs = mapper.resolve_typed(&dto.reconnect_delay_secs).await?;
+        let clear_state_on_start = mapper.resolve_typed(&dto.clear_state_on_start).await?;
 
         // Precedence: start_from_timestamp > start_from_beginning > default (Now).
         // start_from_now is accepted in the DTO for explicit configuration but
         // is equivalent to the default behavior.
         let start_from =
-            if let Some(timestamp) = mapper.resolve_optional(&dto.start_from_timestamp)? {
+            if let Some(timestamp) = mapper.resolve_optional(&dto.start_from_timestamp).await? {
                 StartFrom::Timestamp {
                     timestamp_ms: timestamp,
                 }
             } else if mapper
-                .resolve_optional(&dto.start_from_beginning)?
+                .resolve_optional(&dto.start_from_beginning)
+                .await?
                 .unwrap_or(false)
             {
                 StartFrom::Beginning

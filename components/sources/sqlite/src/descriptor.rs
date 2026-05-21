@@ -159,14 +159,14 @@ impl SourcePluginDescriptor for SqliteSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let path = match &dto.path {
-            Some(cv) => Some(mapper.resolve_string(cv)?),
+            Some(cv) => Some(mapper.resolve_string(cv).await?),
             None => None,
         };
 
         let rest_api = match &dto.rest_api {
             Some(rest_dto) => Some(RestApiConfig {
-                host: mapper.resolve_string(&rest_dto.host)?,
-                port: mapper.resolve_typed(&rest_dto.port)?,
+                host: mapper.resolve_string(&rest_dto.host).await?,
+                port: mapper.resolve_typed(&rest_dto.port).await?,
             }),
             None => None,
         };

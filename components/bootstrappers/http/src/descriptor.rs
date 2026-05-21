@@ -347,10 +347,13 @@ fn map_content_type_override(dto: &ContentTypeOverrideDto) -> ContentTypeOverrid
     }
 }
 
-fn map_auth_config(dto: &AuthConfigDto, resolver: &DtoMapper) -> Result<AuthConfig, MappingError> {
+async fn map_auth_config(
+    dto: &AuthConfigDto,
+    resolver: &DtoMapper,
+) -> Result<AuthConfig, MappingError> {
     match dto {
         AuthConfigDto::Bearer { token_env } => Ok(AuthConfig::Bearer {
-            token_env: resolver.resolve_string(token_env)?,
+            token_env: resolver.resolve_string(token_env).await?,
         }),
         AuthConfigDto::ApiKey {
             location,
@@ -358,15 +361,15 @@ fn map_auth_config(dto: &AuthConfigDto, resolver: &DtoMapper) -> Result<AuthConf
             value_env,
         } => Ok(AuthConfig::ApiKey {
             location: map_api_key_location(location),
-            name: resolver.resolve_string(name)?,
-            value_env: resolver.resolve_string(value_env)?,
+            name: resolver.resolve_string(name).await?,
+            value_env: resolver.resolve_string(value_env).await?,
         }),
         AuthConfigDto::Basic {
             username_env,
             password_env,
         } => Ok(AuthConfig::Basic {
-            username_env: resolver.resolve_string(username_env)?,
-            password_env: resolver.resolve_optional_string(password_env)?,
+            username_env: resolver.resolve_string(username_env).await?,
+            password_env: resolver.resolve_optional_string(password_env).await?,
         }),
         AuthConfigDto::OAuth2ClientCredentials {
             token_url,
@@ -374,15 +377,15 @@ fn map_auth_config(dto: &AuthConfigDto, resolver: &DtoMapper) -> Result<AuthConf
             client_secret_env,
             scopes,
         } => Ok(AuthConfig::OAuth2ClientCredentials {
-            token_url: resolver.resolve_string(token_url)?,
-            client_id_env: resolver.resolve_string(client_id_env)?,
-            client_secret_env: resolver.resolve_string(client_secret_env)?,
-            scopes: resolver.resolve_string_vec(scopes)?,
+            token_url: resolver.resolve_string(token_url).await?,
+            client_id_env: resolver.resolve_string(client_id_env).await?,
+            client_secret_env: resolver.resolve_string(client_secret_env).await?,
+            scopes: resolver.resolve_string_vec(scopes).await?,
         }),
     }
 }
 
-fn map_pagination_config(
+async fn map_pagination_config(
     dto: &PaginationConfigDto,
     resolver: &DtoMapper,
 ) -> Result<PaginationConfig, MappingError> {
@@ -393,10 +396,10 @@ fn map_pagination_config(
             page_size,
             total_path,
         } => Ok(PaginationConfig::OffsetLimit {
-            offset_param: resolver.resolve_string(offset_param)?,
-            limit_param: resolver.resolve_string(limit_param)?,
-            page_size: resolver.resolve_typed(page_size)?,
-            total_path: resolver.resolve_optional_string(total_path)?,
+            offset_param: resolver.resolve_string(offset_param).await?,
+            limit_param: resolver.resolve_string(limit_param).await?,
+            page_size: resolver.resolve_typed(page_size).await?,
+            total_path: resolver.resolve_optional_string(total_path).await?,
         }),
         PaginationConfigDto::PageNumber {
             page_param,
@@ -404,10 +407,10 @@ fn map_pagination_config(
             page_size,
             total_pages_path,
         } => Ok(PaginationConfig::PageNumber {
-            page_param: resolver.resolve_string(page_param)?,
-            page_size_param: resolver.resolve_string(page_size_param)?,
-            page_size: resolver.resolve_typed(page_size)?,
-            total_pages_path: resolver.resolve_optional_string(total_pages_path)?,
+            page_param: resolver.resolve_string(page_param).await?,
+            page_size_param: resolver.resolve_string(page_size_param).await?,
+            page_size: resolver.resolve_typed(page_size).await?,
+            total_pages_path: resolver.resolve_optional_string(total_pages_path).await?,
         }),
         PaginationConfigDto::Cursor {
             cursor_param,
@@ -416,112 +419,118 @@ fn map_pagination_config(
             page_size_param,
             page_size,
         } => Ok(PaginationConfig::Cursor {
-            cursor_param: resolver.resolve_string(cursor_param)?,
-            cursor_path: resolver.resolve_string(cursor_path)?,
-            has_more_path: resolver.resolve_optional_string(has_more_path)?,
-            page_size_param: resolver.resolve_optional_string(page_size_param)?,
-            page_size: resolver.resolve_optional(page_size)?,
+            cursor_param: resolver.resolve_string(cursor_param).await?,
+            cursor_path: resolver.resolve_string(cursor_path).await?,
+            has_more_path: resolver.resolve_optional_string(has_more_path).await?,
+            page_size_param: resolver.resolve_optional_string(page_size_param).await?,
+            page_size: resolver.resolve_optional(page_size).await?,
         }),
         PaginationConfigDto::LinkHeader {
             page_size_param,
             page_size,
         } => Ok(PaginationConfig::LinkHeader {
-            page_size_param: resolver.resolve_optional_string(page_size_param)?,
-            page_size: resolver.resolve_optional(page_size)?,
+            page_size_param: resolver.resolve_optional_string(page_size_param).await?,
+            page_size: resolver.resolve_optional(page_size).await?,
         }),
         PaginationConfigDto::NextUrl {
             next_url_path,
             base_url,
         } => Ok(PaginationConfig::NextUrl {
-            next_url_path: resolver.resolve_string(next_url_path)?,
-            base_url: resolver.resolve_optional_string(base_url)?,
+            next_url_path: resolver.resolve_string(next_url_path).await?,
+            base_url: resolver.resolve_optional_string(base_url).await?,
         }),
     }
 }
 
-fn map_element_template(
+async fn map_element_template(
     dto: &ElementTemplateDto,
     resolver: &DtoMapper,
 ) -> Result<ElementTemplate, MappingError> {
     Ok(ElementTemplate {
-        id: resolver.resolve_string(&dto.id)?,
-        labels: resolver.resolve_string_vec(&dto.labels)?,
+        id: resolver.resolve_string(&dto.id).await?,
+        labels: resolver.resolve_string_vec(&dto.labels).await?,
         properties: dto.properties.clone(),
-        from: resolver.resolve_optional_string(&dto.from)?,
-        to: resolver.resolve_optional_string(&dto.to)?,
+        from: resolver.resolve_optional_string(&dto.from).await?,
+        to: resolver.resolve_optional_string(&dto.to).await?,
     })
 }
 
-fn map_element_mapping(
+async fn map_element_mapping(
     dto: &ElementMappingConfigDto,
     resolver: &DtoMapper,
 ) -> Result<ElementMappingConfig, MappingError> {
     Ok(ElementMappingConfig {
         element_type: map_element_type(&dto.element_type),
-        template: map_element_template(&dto.template, resolver)?,
+        template: map_element_template(&dto.template, resolver).await?,
     })
 }
 
-fn map_response_config(
+async fn map_response_config(
     dto: &ResponseConfigDto,
     resolver: &DtoMapper,
 ) -> Result<ResponseConfig, MappingError> {
+    let mut mappings = Vec::with_capacity(dto.mappings.len());
+    for mapping in &dto.mappings {
+        mappings.push(map_element_mapping(mapping, resolver).await?);
+    }
+
     Ok(ResponseConfig {
-        items_path: resolver.resolve_string(&dto.items_path)?,
+        items_path: resolver.resolve_string(&dto.items_path).await?,
         content_type: dto.content_type.as_ref().map(map_content_type_override),
-        mappings: dto
-            .mappings
-            .iter()
-            .map(|m| map_element_mapping(m, resolver))
-            .collect::<Result<Vec<_>, _>>()?,
+        mappings,
     })
 }
 
-fn map_endpoint_config(
+async fn map_endpoint_config(
     dto: &EndpointConfigDto,
     resolver: &DtoMapper,
 ) -> Result<EndpointConfig, MappingError> {
+    let mut headers = HashMap::with_capacity(dto.headers.len());
+    for (key, value) in &dto.headers {
+        headers.insert(key.clone(), resolver.resolve_string(value).await?);
+    }
+
+    let auth = match &dto.auth {
+        Some(auth) => Some(map_auth_config(auth, resolver).await?),
+        None => None,
+    };
+
+    let pagination = match &dto.pagination {
+        Some(pagination) => Some(map_pagination_config(pagination, resolver).await?),
+        None => None,
+    };
+
     Ok(EndpointConfig {
-        url: resolver.resolve_string(&dto.url)?,
+        url: resolver.resolve_string(&dto.url).await?,
         method: map_http_method(&dto.method),
-        headers: dto
-            .headers
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), resolver.resolve_string(v)?)))
-            .collect::<Result<HashMap<_, _>, MappingError>>()?,
+        headers,
         body: dto.body.clone(),
-        auth: dto
-            .auth
-            .as_ref()
-            .map(|a| map_auth_config(a, resolver))
-            .transpose()?,
-        pagination: dto
-            .pagination
-            .as_ref()
-            .map(|p| map_pagination_config(p, resolver))
-            .transpose()?,
-        response: map_response_config(&dto.response, resolver)?,
+        auth,
+        pagination,
+        response: map_response_config(&dto.response, resolver).await?,
     })
 }
 
-fn map_config(
+async fn map_config(
     dto: &HttpBootstrapConfigDto,
     resolver: &DtoMapper,
 ) -> Result<HttpBootstrapConfig, MappingError> {
+    let mut endpoints = Vec::with_capacity(dto.endpoints.len());
+    for endpoint in &dto.endpoints {
+        endpoints.push(map_endpoint_config(endpoint, resolver).await?);
+    }
+
+    let max_pages = match &dto.max_pages {
+        Some(value) => Some(resolver.resolve_typed(value).await?),
+        None => None,
+    };
+
     Ok(HttpBootstrapConfig {
-        endpoints: dto
-            .endpoints
-            .iter()
-            .map(|e| map_endpoint_config(e, resolver))
-            .collect::<Result<Vec<_>, _>>()?,
-        timeout_seconds: resolver.resolve_typed(&dto.timeout_seconds)?,
-        max_retries: resolver.resolve_typed(&dto.max_retries)?,
-        retry_delay_ms: resolver.resolve_typed(&dto.retry_delay_ms)?,
-        max_pages: dto
-            .max_pages
-            .as_ref()
-            .map(|v| resolver.resolve_typed(v))
-            .transpose()?,
+        endpoints,
+        timeout_seconds: resolver.resolve_typed(&dto.timeout_seconds).await?,
+        max_retries: resolver.resolve_typed(&dto.max_retries).await?,
+        retry_delay_ms: resolver.resolve_typed(&dto.retry_delay_ms).await?,
+        max_pages,
     })
 }
 
@@ -583,6 +592,7 @@ impl BootstrapPluginDescriptor for HttpBootstrapDescriptor {
 
         let mapper = DtoMapper::new();
         let config = map_config(&dto, &mapper)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to resolve HTTP bootstrap config: {e}"))?;
 
         config.validate()?;

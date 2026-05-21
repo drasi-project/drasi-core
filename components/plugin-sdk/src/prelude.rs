@@ -23,7 +23,7 @@
 //! This re-exports:
 //!
 //! - Configuration types: [`ConfigValue`], type aliases, schema wrappers
-//! - Mapping infrastructure: [`DtoMapper`], [`ConfigMapper`], [`MappingError`]
+//! - Mapping infrastructure: [`DtoMapper`], [`MappingError`]
 //! - Resolver types: [`ValueResolver`], [`ResolverError`]
 //! - Descriptor traits: [`SourcePluginDescriptor`], [`ReactionPluginDescriptor`],
 //!   [`BootstrapPluginDescriptor`]
@@ -39,7 +39,7 @@ pub use crate::config_value::{
 };
 
 // Mapping infrastructure
-pub use crate::mapper::{ConfigMapper, DtoMapper, MappingError};
+pub use crate::mapper::{DtoMapper, MappingError};
 
 // Resolver types
 pub use crate::resolver::{
@@ -50,7 +50,7 @@ pub use crate::resolver::{
 // Plugin descriptor traits
 pub use crate::descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SourcePluginDescriptor,
+    SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 // Registration

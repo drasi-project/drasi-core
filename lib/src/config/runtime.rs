@@ -242,6 +242,8 @@ pub struct RuntimeConfig {
     pub state_store_provider: Arc<dyn StateStoreProvider>,
     /// Optional identity provider for credential injection into sources/reactions
     pub identity_provider: Option<Arc<dyn IdentityProvider>>,
+    /// Optional secret store provider for resolving `ConfigValue::Secret` references
+    pub secret_store_provider: Option<Arc<dyn crate::secret_store::SecretStoreProvider>>,
     /// Query configurations (sources/reactions are now instance-only)
     pub queries: Vec<QueryConfig>,
     /// Original global priority queue capacity (before applying to queries)
@@ -268,6 +270,13 @@ impl std::fmt::Debug for RuntimeConfig {
                     .identity_provider
                     .as_ref()
                     .map(|_| "<dyn IdentityProvider>"),
+            )
+            .field(
+                "secret_store_provider",
+                &self
+                    .secret_store_provider
+                    .as_ref()
+                    .map(|_| "<dyn SecretStoreProvider>"),
             )
             .field("queries", &self.queries)
             .field(
@@ -303,11 +312,13 @@ impl RuntimeConfig {
     /// * `index_provider` - Optional index backend plugin for persistent storage
     /// * `state_store_provider` - Optional state store provider for plugin state
     /// * `identity_provider` - Optional identity provider for credential injection
+    /// * `secret_store_provider` - Optional secret store provider for resolving secrets
     pub fn new(
         config: super::schema::DrasiLibConfig,
         index_provider: Option<Arc<dyn IndexBackendPlugin>>,
         state_store_provider: Option<Arc<dyn StateStoreProvider>>,
         identity_provider: Option<Arc<dyn IdentityProvider>>,
+        secret_store_provider: Option<Arc<dyn crate::secret_store::SecretStoreProvider>>,
         default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     ) -> Self {
         // Preserve original global defaults for config snapshot round-tripping
@@ -348,6 +359,7 @@ impl RuntimeConfig {
             index_factory,
             state_store_provider,
             identity_provider,
+            secret_store_provider,
             queries,
             global_priority_queue_capacity,
             global_dispatch_buffer_capacity,
@@ -359,6 +371,6 @@ impl RuntimeConfig {
 
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiLibConfig) -> Self {
-        Self::new(config, None, None, None, None)
+        Self::new(config, None, None, None, None, None)
     }
 }

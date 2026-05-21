@@ -228,15 +228,18 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let config = PostgresSourceConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            database: mapper.resolve_string(&dto.database)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            database: mapper.resolve_string(&dto.database).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
             tables: dto.tables.clone(),
             slot_name: dto.slot_name.clone(),
             publication_name: dto.publication_name.clone(),
-            ssl_mode: mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode)?.into(),
+            ssl_mode: mapper
+                .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                .await?
+                .into(),
             table_keys: dto
                 .table_keys
                 .iter()

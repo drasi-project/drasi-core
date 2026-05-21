@@ -121,19 +121,22 @@ impl SourcePluginDescriptor for DataverseSourceDescriptor {
         let dto: DataverseSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let environment_url = mapper.resolve_string(&dto.environment_url)?;
+        let environment_url = mapper.resolve_string(&dto.environment_url).await?;
         let tenant_id = mapper
-            .resolve_optional_string(&dto.tenant_id)?
+            .resolve_optional_string(&dto.tenant_id)
+            .await?
             .unwrap_or_default();
         let client_id = mapper
-            .resolve_optional_string(&dto.client_id)?
+            .resolve_optional_string(&dto.client_id)
+            .await?
             .unwrap_or_default();
         let client_secret = mapper
-            .resolve_optional_string(&dto.client_secret)?
+            .resolve_optional_string(&dto.client_secret)
+            .await?
             .unwrap_or_default();
-        let min_interval_ms = mapper.resolve_typed(&dto.min_interval_ms)?;
-        let max_interval_seconds = mapper.resolve_typed(&dto.max_interval_seconds)?;
-        let api_version = mapper.resolve_string(&dto.api_version)?;
+        let min_interval_ms = mapper.resolve_typed(&dto.min_interval_ms).await?;
+        let max_interval_seconds = mapper.resolve_typed(&dto.max_interval_seconds).await?;
+        let api_version = mapper.resolve_string(&dto.api_version).await?;
 
         let config = DataverseSourceConfig {
             environment_url,

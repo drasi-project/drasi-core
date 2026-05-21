@@ -37,8 +37,7 @@ pub(crate) fn resolve_identity_provider(
         .map(|guard| guard.clone())
         .unwrap_or_else(|poisoned| {
             log::error!(
-                "{}: identity_provider mutex poisoned; recovering inner value",
-                component_label
+                "{component_label}: identity_provider mutex poisoned; recovering inner value",
             );
             poisoned.into_inner().clone()
         })

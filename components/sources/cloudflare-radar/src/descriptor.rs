@@ -176,12 +176,12 @@ impl SourcePluginDescriptor for CloudflareRadarSourceDescriptor {
         };
 
         let mut builder = CloudflareRadarSourceBuilder::new(id)
-            .with_api_token(mapper.resolve_string(&dto.api_token)?)
-            .with_api_base_url(mapper.resolve_string(&dto.api_base_url)?)
-            .with_poll_interval_secs(mapper.resolve_typed(&dto.poll_interval_secs)?)
-            .with_ranking_limit(mapper.resolve_typed(&dto.ranking_limit)?)
-            .with_analytics_date_range(mapper.resolve_string(&dto.analytics_date_range)?)
-            .with_event_date_range(mapper.resolve_string(&dto.event_date_range)?)
+            .with_api_token(mapper.resolve_string(&dto.api_token).await?)
+            .with_api_base_url(mapper.resolve_string(&dto.api_base_url).await?)
+            .with_poll_interval_secs(mapper.resolve_typed(&dto.poll_interval_secs).await?)
+            .with_ranking_limit(mapper.resolve_typed(&dto.ranking_limit).await?)
+            .with_analytics_date_range(mapper.resolve_string(&dto.analytics_date_range).await?)
+            .with_event_date_range(mapper.resolve_string(&dto.event_date_range).await?)
             .with_start_behavior(start_behavior)
             .with_auto_start(auto_start);
 

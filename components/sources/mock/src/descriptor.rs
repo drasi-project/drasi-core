@@ -108,7 +108,7 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
             DataTypeDto::Generic => DataType::Generic,
         };
 
-        let interval_ms: u64 = mapper.resolve_typed(&dto.interval_ms)?;
+        let interval_ms: u64 = mapper.resolve_typed(&dto.interval_ms).await?;
 
         let mut source = MockSourceBuilder::new(id)
             .with_data_type(data_type)
