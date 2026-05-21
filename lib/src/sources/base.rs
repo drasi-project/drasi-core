@@ -517,6 +517,9 @@ impl SourceBase {
     /// Handles:
     /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
     ///   across restarts.
+    /// - Clearing stale sequence→position mappings when the counter advances, so
+    ///   that `compute_confirmed_source_position()` cannot map a position handle to
+    ///   a WAL position that predates the subscriber's actual checkpoint.
     pub fn apply_subscription_settings(
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
@@ -531,6 +534,16 @@ impl SourceBase {
                     "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
                     self.id, next, last_seq
                 );
+                // The counter jumped forward, meaning sequences currently in the
+                // position map were assigned before this subscriber's checkpoint
+                // was created. Those mappings are stale and would cause
+                // compute_confirmed_source_position() to return incorrect
+                // positions. Clear the map synchronously (try_write avoids
+                // async in a non-async fn; contention here is near-zero since
+                // dispatching is paused during subscribe).
+                if let Ok(mut map) = self.sequence_position_map.try_write() {
+                    map.clear();
+                }
             }
         }
     }
