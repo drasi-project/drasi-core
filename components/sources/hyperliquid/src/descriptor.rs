@@ -178,7 +178,11 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
         let mut builder = HyperliquidSourceBuilder::new(id)
             .with_network(network)
             .with_auto_start(auto_start)
-            .with_funding_poll_interval_secs(mapper.resolve_typed(&dto.funding_poll_interval_secs).await?)
+            .with_funding_poll_interval_secs(
+                mapper
+                    .resolve_typed(&dto.funding_poll_interval_secs)
+                    .await?,
+            )
             .with_mid_prices(mapper.resolve_typed(&dto.enable_mid_prices).await?)
             .with_trades(mapper.resolve_typed(&dto.enable_trades).await?)
             .with_order_book(mapper.resolve_typed(&dto.enable_order_book).await?)

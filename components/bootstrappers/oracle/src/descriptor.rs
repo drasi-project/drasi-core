@@ -145,7 +145,12 @@ impl BootstrapPluginDescriptor for OracleBootstrapDescriptor {
             .with_user(mapper.resolve_string(&dto.user).await?)
             .with_password(mapper.resolve_string(&dto.password).await?)
             .with_tables(dto.tables)
-            .with_ssl_mode(mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode).await?.into());
+            .with_ssl_mode(
+                mapper
+                    .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                    .await?
+                    .into(),
+            );
 
         for table_key in dto.table_keys {
             builder = builder.with_table_key(table_key.table, table_key.key_columns);

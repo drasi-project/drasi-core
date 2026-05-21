@@ -167,9 +167,8 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
         }
 
         if let Some(filename_template) = dto.filename_template {
-            builder = builder.with_filename_template(
-                mapper.resolve_string(&filename_template).await?,
-            );
+            builder =
+                builder.with_filename_template(mapper.resolve_string(&filename_template).await?);
         }
 
         if let Some(default_template) = &dto.default_template {

@@ -160,9 +160,8 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
             builder = builder.with_fifo_queue(mapper.resolve_typed(fifo_queue).await?);
         }
         if let Some(group_id_template) = &dto.message_group_id_template {
-            builder = builder.with_message_group_id_template(
-                mapper.resolve_string(group_id_template).await?,
-            );
+            builder = builder
+                .with_message_group_id_template(mapper.resolve_string(group_id_template).await?);
         }
         if let Some(access_key_id) = &dto.access_key_id {
             match &dto.secret_access_key {

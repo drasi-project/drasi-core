@@ -121,8 +121,9 @@ impl BootstrapPluginDescriptor for HereTrafficBootstrapDescriptor {
         let auth = resolve_bootstrap_auth(&dto, &mapper).await?;
         let bounding_box = mapper.resolve_string(&dto.bounding_box).await?;
         let endpoints = dto.endpoints.into_iter().map(Endpoint::from).collect();
-        let incident_match_distance_meters =
-            mapper.resolve_typed(&dto.incident_match_distance_meters).await?;
+        let incident_match_distance_meters = mapper
+            .resolve_typed(&dto.incident_match_distance_meters)
+            .await?;
 
         let mut config = match &auth {
             AuthMethod::ApiKey { api_key } => HereTrafficConfig::new(api_key.clone(), bounding_box),

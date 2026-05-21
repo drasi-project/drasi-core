@@ -137,10 +137,8 @@ impl SourcePluginDescriptor for RisLiveSourceDescriptor {
         // Precedence: start_from_timestamp > start_from_beginning > default (Now).
         // start_from_now is accepted in the DTO for explicit configuration but
         // is equivalent to the default behavior.
-        let start_from = if let Some(timestamp) = mapper
-            .resolve_optional(&dto.start_from_timestamp)
-            .await?
-        {
+        let start_from =
+            if let Some(timestamp) = mapper.resolve_optional(&dto.start_from_timestamp).await? {
                 StartFrom::Timestamp {
                     timestamp_ms: timestamp,
                 }

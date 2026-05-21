@@ -286,7 +286,10 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
         let database: String = mapper.resolve_string(&dto.database).await?;
         let user: String = mapper.resolve_string(&dto.user).await?;
         let password: String = mapper.resolve_string(&dto.password).await?;
-        let ssl_mode: SslMode = mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode).await?.into();
+        let ssl_mode: SslMode = mapper
+            .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+            .await?
+            .into();
         let mut server_id: u32 = mapper.resolve_typed(&dto.server_id).await?;
         if server_id == 0 {
             // Auto-generate a deterministic server_id from the source instance ID.
@@ -297,8 +300,9 @@ impl SourcePluginDescriptor for MySqlSourceDescriptor {
             let hash = hasher.finish();
             server_id = ((hash & 0x7FFF_FFFE) as u32) + 1; // range [1, 2^31-1]
         }
-        let heartbeat_interval_seconds: u64 =
-            mapper.resolve_typed(&dto.heartbeat_interval_seconds).await?;
+        let heartbeat_interval_seconds: u64 = mapper
+            .resolve_typed(&dto.heartbeat_interval_seconds)
+            .await?;
         let start_position: StartPosition = mapper
             .resolve_typed::<StartPositionDto>(&dto.start_position)
             .await?

@@ -244,7 +244,12 @@ impl SourcePluginDescriptor for OracleSourceDescriptor {
                     .await?
                     .into(),
             )
-            .with_ssl_mode(mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode).await?.into())
+            .with_ssl_mode(
+                mapper
+                    .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                    .await?
+                    .into(),
+            )
             .with_auto_start(auto_start);
 
         for table_key in dto.table_keys {

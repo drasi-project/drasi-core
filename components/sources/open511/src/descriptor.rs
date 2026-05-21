@@ -239,14 +239,14 @@ impl SourcePluginDescriptor for Open511SourceDescriptor {
             .resolve_typed::<InitialCursorBehaviorDto>(&dto.initial_cursor_behavior)
             .await?
         {
-                InitialCursorBehaviorDto::StartFromBeginning => {
-                    InitialCursorBehavior::StartFromBeginning
-                }
-                InitialCursorBehaviorDto::StartFromNow => InitialCursorBehavior::StartFromNow,
-                InitialCursorBehaviorDto::StartFromTimestamp { timestamp_millis } => {
-                    InitialCursorBehavior::StartFromTimestamp { timestamp_millis }
-                }
-            };
+            InitialCursorBehaviorDto::StartFromBeginning => {
+                InitialCursorBehavior::StartFromBeginning
+            }
+            InitialCursorBehaviorDto::StartFromNow => InitialCursorBehavior::StartFromNow,
+            InitialCursorBehaviorDto::StartFromTimestamp { timestamp_millis } => {
+                InitialCursorBehavior::StartFromTimestamp { timestamp_millis }
+            }
+        };
 
         let base_url = mapper.resolve_string(&dto.base_url).await?;
         let status_filter = if let Some(v) = dto.status_filter.as_ref() {

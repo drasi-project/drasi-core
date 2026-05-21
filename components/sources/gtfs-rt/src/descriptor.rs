@@ -155,7 +155,9 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
         };
 
         let config = GtfsRtSourceConfig {
-            trip_updates_url: mapper.resolve_optional_string(&dto.trip_updates_url).await?,
+            trip_updates_url: mapper
+                .resolve_optional_string(&dto.trip_updates_url)
+                .await?,
             vehicle_positions_url: mapper
                 .resolve_optional_string(&dto.vehicle_positions_url)
                 .await?,

@@ -94,8 +94,12 @@ impl BootstrapPluginDescriptor for GtfsRtBootstrapDescriptor {
         let mapper = DtoMapper::new();
 
         let config = GtfsRtBootstrapConfig {
-            trip_updates_url: mapper.resolve_optional_string(&dto.trip_updates_url).await?,
-            vehicle_positions_url: mapper.resolve_optional_string(&dto.vehicle_positions_url).await?,
+            trip_updates_url: mapper
+                .resolve_optional_string(&dto.trip_updates_url)
+                .await?,
+            vehicle_positions_url: mapper
+                .resolve_optional_string(&dto.vehicle_positions_url)
+                .await?,
             alerts_url: mapper.resolve_optional_string(&dto.alerts_url).await?,
             headers: dto.headers,
             timeout_secs: mapper.resolve_typed(&dto.timeout_secs).await?,
