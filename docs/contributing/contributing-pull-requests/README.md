@@ -65,6 +65,37 @@ Fixes: #<issue>
 
 We **squash** pull-requests as part of the merge process, which means that intermediate commits will have their messages appended. We prefer to have a single commit in the git history for each PR.
 
+## Pull request title
+
+All Pull Request titles must start with one of the following prefixes, followed by a colon and a brief description:
+
+```
+<type>(optional scope): <short summary>
+```
+Allowed Types:
+- `feat`: introduces a new feature
+- `fix`: fixes a bug
+- `docs`: documentation-only changes
+- `refactor`: code changes that neither fix a bug nor add a feature
+- `style`: changes that improve code style without affecting behavior
+- `perf`: code changes that improve performance
+- `test`: Adding missing tests or correcting existing tests
+- `build`: Changes that affect the build system or external dependencies
+- `ci`: changes to CI configuration files or scripts
+- `chore`: other changes that do not modify production or test code
+- `revert`: reverts a previous commit
+- `deprecate`: Marks code or features that are planned to be removed
+
+For example, a PR title could be:
+- feat(expr): support Cypher/GQL functions
+- refactor(bootstrap-postgres): remove dependency on drasi-source-postgres
+
+Additional Notes:
+- The scope is optional, but recommended when the change affects a specific component.
+- Use lowercase type names (e.g. feat, not Feat or FEATURE).
+
+For a complete list of conventional commit types and their meanings, refer to [here](https://github.com/commitizen/conventional-commit-types/blob/master/index.json).
+
 ## Automated tests
 
 Our GitHub Actions workflows will run against your pull request to validate the changes. This will run the unit tests, integration tests, and functional tests.
