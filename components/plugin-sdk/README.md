@@ -29,6 +29,8 @@ The SDK defines three plugin categories, each with a corresponding descriptor tr
 | **Source** | `SourcePluginDescriptor` | Ingests data from external systems (databases, APIs, queues) |
 | **Reaction** | `ReactionPluginDescriptor` | Consumes query results and performs side effects (webhooks, logging, stored procedures) |
 | **Bootstrap** | `BootstrapPluginDescriptor` | Provides initial data snapshots so queries start with a complete view |
+| **Identity Provider** | `IdentityProviderPluginDescriptor` | Provides credential resolution for authentication (e.g., Azure AD tokens) |
+| **Secret Store** | `SecretStorePluginDescriptor` | Resolves named secrets from external stores (e.g., Azure Key Vault, file, OS keyring) |
 
 ## Writing a Plugin
 
@@ -98,8 +100,8 @@ impl SourcePluginDescriptor for MySourceDescriptor {
     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
         let dto: MySourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
-        let host = mapper.resolve_string(&dto.host)?;
-        let port = mapper.resolve_typed(&dto.port)?;
+        let host = mapper.resolve_string(&dto.host).await?;
+        let port = mapper.resolve_typed(&dto.port).await?;
         // ... build and return the source
         todo!()
     }
@@ -231,6 +233,7 @@ Dynamic plugins communicate with the host through `#[repr(C)]` vtable structs (s
 | `ffi::tracing_bridge` | Bridges tracing/log events from the plugin to the host via FFI callbacks |
 | `ffi::identity` | FFI types for `IdentityProvider` injection into plugins |
 | `ffi::identity_proxy` | Plugin-side proxy that implements `IdentityProvider` over an FFI vtable |
+| `ffi::secret_store` | FFI types for `SecretStoreProvider` — `FfiGetSecretResult`, `SecretStoreProviderVtable` |
 | `ffi::state_store_proxy` | Plugin-side proxy that implements `StateStoreProvider` over an FFI vtable |
 | `ffi::bootstrap_proxy` | Plugin-side proxy that implements `BootstrapProvider` over an FFI vtable |
 
@@ -305,16 +308,16 @@ Use `DtoMapper` to resolve `ConfigValue` references to their actual values:
 let mapper = DtoMapper::new();
 
 // Resolve to string
-let host: String = mapper.resolve_string(&dto.host)?;
+let host: String = mapper.resolve_string(&dto.host).await?;
 
 // Resolve to typed value (parses string → T via FromStr)
-let port: u16 = mapper.resolve_typed(&dto.port)?;
+let port: u16 = mapper.resolve_typed(&dto.port).await?;
 
 // Resolve optional fields
-let timeout: Option<u32> = mapper.resolve_optional(&dto.timeout_ms)?;
+let timeout: Option<u32> = mapper.resolve_optional(&dto.timeout_ms).await?;
 
 // Resolve a vec of string values
-let tags: Vec<String> = mapper.resolve_string_vec(&dto.tags)?;
+let tags: Vec<String> = mapper.resolve_string_vec(&dto.tags).await?;
 ```
 
 ### Built-in resolvers
@@ -333,8 +336,9 @@ use drasi_plugin_sdk::prelude::*;
 
 struct VaultResolver { /* vault client */ }
 
+#[async_trait]
 impl ValueResolver for VaultResolver {
-    fn resolve_to_string(
+    async fn resolve_to_string(
         &self,
         value: &ConfigValue<String>,
     ) -> Result<String, ResolverError> {
@@ -391,7 +395,7 @@ fn config_schema_name(&self) -> &str {
 | Module | Description |
 |---|---|
 | `config_value` | `ConfigValue<T>` enum, type aliases, and OpenAPI schema wrappers |
-| `descriptor` | Plugin descriptor traits (`SourcePluginDescriptor`, `ReactionPluginDescriptor`, `BootstrapPluginDescriptor`) |
+| `descriptor` | Plugin descriptor traits (`SourcePluginDescriptor`, `ReactionPluginDescriptor`, `BootstrapPluginDescriptor`, `IdentityProviderPluginDescriptor`, `SecretStorePluginDescriptor`) |
 | `ffi` | FFI layer for dynamic plugin loading — vtables, callbacks, proxies, tracing bridge |
 | `mapper` | `DtoMapper` service and `ConfigMapper` trait for DTO-to-domain conversions |
 | `registration` | `PluginRegistration` struct, `SDK_VERSION`, `BUILD_HASH`, and `TOKIO_VERSION` constants |

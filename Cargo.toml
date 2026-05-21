@@ -76,6 +76,11 @@ members = [
   "components/identity/azure",
   "components/identity/aws",
 
+  # Secret Store Plugins
+  "components/secret_stores/file",
+  "components/secret_stores/azure-keyvault",
+  "components/secret_stores/keyring",
+
   # Index Plugins
   "components/indexes/rocksdb",
   "components/indexes/garnet",

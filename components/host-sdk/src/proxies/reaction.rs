@@ -234,7 +234,7 @@ impl Reaction for ReactionProxy {
             context.identity_provider.clone(),
             &format!("Reaction '{}'", self.cached_id),
         )
-        .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip));
+        .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)

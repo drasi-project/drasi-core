@@ -526,6 +526,21 @@ drasi_ffi_primitives::ffi_vtable! {
     }
 }
 
+drasi_ffi_primitives::ffi_vtable! {
+    /// FFI-safe vtable for a SecretStorePluginDescriptor (factory).
+    /// The host calls `create_secret_store_fn` to construct a
+    /// `SecretStoreProviderVtable` from config JSON.
+    pub struct SecretStorePluginVtable {
+        fn kind_fn(state: *const) -> FfiStr,
+        fn config_version_fn(state: *const) -> FfiStr,
+        fn config_schema_json_fn(state: *const) -> FfiOwnedStr,
+        fn config_schema_name_fn(state: *const) -> FfiStr,
+
+        /// Factory: create a SecretStoreProviderVtable from JSON config.
+        fn create_secret_store_fn(state: *mut, config_json: FfiStr) -> *mut super::secret_store::SecretStoreProviderVtable,
+    }
+}
+
 // ============================================================================
 // State store vtable — reverse direction (host → plugin)
 // ============================================================================
@@ -646,4 +661,12 @@ pub struct FfiPluginRegistration {
     // are still layout-compatible with the host.
     pub identity_provider_plugins: *mut IdentityProviderPluginVtable,
     pub identity_provider_plugin_count: usize,
+    pub secret_store_plugins: *mut SecretStorePluginVtable,
+    pub secret_store_plugin_count: usize,
+    /// Host calls this to provide a config value resolver callback.
+    /// The plugin stores both the callback and context, using them in
+    /// `DtoMapper` to resolve `ConfigValue::Secret` and other references
+    /// back through the host.
+    pub set_config_resolver:
+        extern "C" fn(ctx: *mut ::std::ffi::c_void, callback: super::callbacks::ConfigResolverFn),
 }
