@@ -128,4 +128,32 @@ pub trait CheckpointStore: Send + Sync {
     /// Returns `None` if no hash has been written. Called at startup before
     /// any session transaction begins.
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError>;
+
+    /// Write the last persisted result sequence for a query.
+    ///
+    /// Called after outbox and live-results writes succeed, outside any session
+    /// transaction. Records the highest sequence that was durably persisted so
+    /// that recovery can detect outbox gaps (compare with the index's committed
+    /// sequence from `stage_checkpoint`).
+    ///
+    /// Standalone commit — does not require an active session.
+    ///
+    /// Default: no-op (volatile backends that don't track result sequences).
+    async fn write_result_sequence(
+        &self,
+        _query_id: &str,
+        _sequence: u64,
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// Read the last committed result sequence for a query.
+    ///
+    /// Returns `None` if no result sequence has been written.
+    /// Used during crash recovery to determine the outbox replay point.
+    ///
+    /// Default: returns `None` (volatile backends).
+    async fn read_result_sequence(&self, _query_id: &str) -> Result<Option<u64>, IndexError> {
+        Ok(None)
+    }
 }

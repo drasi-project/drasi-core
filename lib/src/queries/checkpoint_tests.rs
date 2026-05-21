@@ -1466,6 +1466,8 @@ mod tests {
                     session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
+                live_results_writer: None,
+                outbox_writer: None,
             })
         }
 
@@ -2530,6 +2532,8 @@ mod tests {
                     session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
+                live_results_writer: None,
+                outbox_writer: None,
             })
         }
 
@@ -3018,6 +3022,8 @@ mod orchestration_tests {
                     session_control: Arc::new(NoOpSessionControl),
                 },
                 checkpoint_store: Some(checkpoint_store),
+                live_results_writer: None,
+                outbox_writer: None,
             })
         }
 

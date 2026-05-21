@@ -25,12 +25,24 @@ use super::vtables::SnapshotFetcherVtable;
 
 /// Plugin-side proxy: wraps a host-provided `SnapshotFetcherVtable` into a local
 /// `SnapshotFetcher` implementation.
+///
+/// On drop, invokes the vtable's `drop_fn` to release the host-side
+/// `Arc<dyn SnapshotFetcher>` state.
 pub struct FfiSnapshotFetcherProxy {
     pub(crate) vtable: *const SnapshotFetcherVtable,
 }
 
 unsafe impl Send for FfiSnapshotFetcherProxy {}
 unsafe impl Sync for FfiSnapshotFetcherProxy {}
+
+impl Drop for FfiSnapshotFetcherProxy {
+    fn drop(&mut self) {
+        if !self.vtable.is_null() {
+            let vtable = unsafe { &*self.vtable };
+            (vtable.drop_fn)(vtable.state);
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl drasi_lib::SnapshotFetcher for FfiSnapshotFetcherProxy {

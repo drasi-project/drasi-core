@@ -26,7 +26,7 @@ use drasi_core::{
     evaluation::functions::FunctionRegistry,
     evaluation::variable_value::VariableValue,
     in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore,
-    interface::CheckpointStore,
+    interface::{CheckpointStore, LiveResultsWriter, OutboxWriter},
     middleware::MiddlewareTypeRegistry,
     query::{ContinuousQuery, QueryBuilder},
 };
@@ -176,12 +176,17 @@ enum BootstrapPhase {
 /// Shared between the regular event processing path and the future queue drain path.
 /// Uses `QueryOutputState` for O(1) result-set updates keyed by `row_signature`,
 /// increments the sequence counter, and pushes to the outbox ring buffer.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_query_results(
     results: &[QueryPartEvaluationContext],
     source_id: &str,
     query_id: &str,
     output_state: &RwLock<QueryOutputState>,
     dispatchers: &RwLock<Vec<Box<dyn ChangeDispatcher<QueryResult> + Send + Sync>>>,
+    outbox_writer: &Option<Arc<dyn OutboxWriter>>,
+    live_results_writer: &Option<Arc<dyn LiveResultsWriter>>,
+    checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
+    outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
 ) {
     // Convert Drasi results to our QueryResult format, filtering out Noops
@@ -206,13 +211,16 @@ async fn dispatch_query_results(
                 before,
                 after,
                 row_signature,
-            } => Some(ResultDiff::Update {
-                data: convert_query_variables_to_json(after),
-                before: convert_query_variables_to_json(before),
-                after: convert_query_variables_to_json(after),
-                grouping_keys: None,
-                row_signature: *row_signature,
-            }),
+            } => {
+                let after_json = convert_query_variables_to_json(after);
+                Some(ResultDiff::Update {
+                    data: after_json.clone(),
+                    before: convert_query_variables_to_json(before),
+                    after: after_json,
+                    grouping_keys: None,
+                    row_signature: *row_signature,
+                })
+            }
             // NOTE: When a group empties (last contributor removed), core emits
             // Aggregation { default_after: true, .. } with identity values (count:0,
             // sum:0, etc.) rather than Removing. Proper empty-group → Delete detection
@@ -273,6 +281,128 @@ async fn dispatch_query_results(
         state.advance_sequence_and_push(query_result)
     };
 
+    // Persist to outbox and live results writers if available (best-effort).
+    // These writes are NOT transactional with the index updates — on crash between
+    // index commit and outbox write, reactions will re-read from checkpoint sequence.
+    let mut outbox_ok = true;
+    if let Some(writer) = outbox_writer {
+        // Serialize the QueryResult for the outbox using MessagePack (compact binary)
+        match rmp_serde::to_vec(arc_result.as_ref()) {
+            Ok(data) => {
+                if let Err(e) = writer.append(query_id, arc_result.sequence, &data).await {
+                    warn!(
+                        "Query '{query_id}' failed to persist result seq={} to outbox: {e}",
+                        arc_result.sequence
+                    );
+                    outbox_ok = false;
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Query '{query_id}' failed to serialize result seq={} for outbox: {e}",
+                    arc_result.sequence
+                );
+                outbox_ok = false;
+            }
+        }
+
+        // Trim the persistent outbox to the configured capacity
+        if outbox_ok {
+            if let Err(e) = writer.trim_to_capacity(query_id, outbox_capacity).await {
+                warn!("Query '{query_id}' failed to trim persistent outbox: {e}");
+            }
+        }
+    }
+
+    let mut live_results_ok = true;
+    if let Some(writer) = live_results_writer {
+        use drasi_core::interface::RowMutation;
+
+        // Build serialized row data from the QueryResult's results (the diffs were moved
+        // into arc_result, so we read from there).
+        let serialized_data: Vec<(u64, Option<Vec<u8>>)> = arc_result
+            .results
+            .iter()
+            .filter_map(|diff| match diff {
+                ResultDiff::Add {
+                    data,
+                    row_signature,
+                } => match rmp_serde::to_vec(data) {
+                    Ok(serialized) => Some((*row_signature, Some(serialized))),
+                    Err(e) => {
+                        warn!(
+                            "Query '{query_id}' failed to serialize Add row (sig={row_signature}) for live results: {e}"
+                        );
+                        None
+                    }
+                },
+                ResultDiff::Update {
+                    after,
+                    row_signature,
+                    ..
+                } => match rmp_serde::to_vec(after) {
+                    Ok(serialized) => Some((*row_signature, Some(serialized))),
+                    Err(e) => {
+                        warn!(
+                            "Query '{query_id}' failed to serialize Update row (sig={row_signature}) for live results: {e}"
+                        );
+                        None
+                    }
+                },
+                ResultDiff::Aggregation {
+                    after,
+                    row_signature,
+                    ..
+                } => match rmp_serde::to_vec(after) {
+                    Ok(serialized) => Some((*row_signature, Some(serialized))),
+                    Err(e) => {
+                        warn!(
+                            "Query '{query_id}' failed to serialize Aggregation row (sig={row_signature}) for live results: {e}"
+                        );
+                        None
+                    }
+                },
+                ResultDiff::Delete { row_signature, .. } => Some((*row_signature, None)),
+                ResultDiff::Noop => None,
+            })
+            .collect();
+
+        let row_mutations: Vec<RowMutation<'_>> = serialized_data
+            .iter()
+            .map(|(sig, data)| RowMutation {
+                row_signature: *sig,
+                data: data.as_deref(),
+            })
+            .collect();
+
+        if !row_mutations.is_empty() {
+            if let Err(e) = writer.apply_mutations(query_id, &row_mutations).await {
+                warn!(
+                    "Query '{query_id}' failed to persist live results for seq={}: {e}",
+                    arc_result.sequence
+                );
+                live_results_ok = false;
+            }
+        }
+    }
+
+    // Record the last persisted result sequence only if BOTH the outbox and
+    // live-results writes succeeded. Otherwise recovery may see this sequence
+    // as durable while the actual data is missing.
+    if outbox_ok && live_results_ok {
+        if let Some(store) = checkpoint_store {
+            if let Err(e) = store
+                .write_result_sequence(query_id, arc_result.sequence)
+                .await
+            {
+                warn!(
+                    "Query '{query_id}' failed to write result sequence {}: {e}",
+                    arc_result.sequence
+                );
+            }
+        }
+    }
+
     debug!(
         "Query '{query_id}' sending {} results to reactions (seq={})",
         arc_result.results.len(),
@@ -314,6 +444,10 @@ pub struct DrasiQuery {
     future_queue_source: Arc<RwLock<Option<Arc<FutureQueueSource>>>>,
     // Persisted checkpoint_store across stop/start cycles for checkpoint recovery
     checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
+    // Persistent outbox writer for reaction replay (from index backend)
+    outbox_writer: Arc<RwLock<Option<Arc<dyn OutboxWriter>>>>,
+    // Persistent live results writer for snapshot recovery (from index backend)
+    live_results_writer: Arc<RwLock<Option<Arc<dyn LiveResultsWriter>>>>,
     // Configurable bootstrap timeout for fetch APIs
     bootstrap_timeout: std::time::Duration,
     // Resolved recovery policy: per-query → global default → Strict
@@ -361,6 +495,8 @@ impl DrasiQuery {
             middleware_registry,
             future_queue_source: Arc::new(RwLock::new(None)),
             checkpoint_store: Arc::new(RwLock::new(None)),
+            outbox_writer: Arc::new(RwLock::new(None)),
+            live_results_writer: Arc::new(RwLock::new(None)),
             bootstrap_timeout,
             resolved_recovery_policy,
             subscribed_source_ids: Arc::new(RwLock::new(Vec::new())),
@@ -608,6 +744,8 @@ impl Query for DrasiQuery {
             // data directory, the old handle must be released before we can
             // open a new one.  Checkpoint data is already persisted on disk.
             *self.checkpoint_store.write().await = None;
+            *self.outbox_writer.write().await = None;
+            *self.live_results_writer.write().await = None;
 
             let created = index_factory
                 .build(backend_ref, &self.base.config.id)
@@ -624,6 +762,9 @@ impl Query for DrasiQuery {
                 }
             };
 
+            // Store persistent writers if provided by the backend
+            *self.outbox_writer.write().await = created.outbox_writer;
+            *self.live_results_writer.write().await = created.live_results_writer;
             // Hold references for potential clearing before passing to builder
             element_index = Some(created.set.element_index.clone());
             archive_index = Some(created.set.archive_index.clone());
@@ -1505,10 +1646,11 @@ impl Query for DrasiQuery {
                                                     }
                                                 }
                                                 QueryPartEvaluationContext::Updating { before, after, row_signature } => {
+                                                    let after_json = convert_query_variables_to_json(after);
                                                     ResultDiff::Update {
-                                                        data: convert_query_variables_to_json(after),
+                                                        data: after_json.clone(),
                                                         before: convert_query_variables_to_json(before),
-                                                        after: convert_query_variables_to_json(after),
+                                                        after: after_json,
                                                         grouping_keys: None,
                                                         row_signature: *row_signature,
                                                     }
@@ -1809,6 +1951,8 @@ impl Query for DrasiQuery {
         // Spawn event processor task that reads from priority queue
         let continuous_query_for_processor = continuous_query.clone();
         let checkpoint_store_for_processor = checkpoint_store.clone();
+        let checkpoint_store_for_dispatch: Option<Arc<dyn CheckpointStore>> =
+            Some(checkpoint_store.clone());
         let base_dispatchers = self.base.dispatchers.clone();
         let query_id = self.base.config.id.clone();
         let output_state = self.output_state.clone();
@@ -1818,6 +1962,9 @@ impl Query for DrasiQuery {
         let reporter_for_processor = self.base.status_handle();
         let fq_source_for_processor = Arc::clone(&future_queue_source);
         let position_handles_for_processor = position_handles;
+        let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
+        let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
+        let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
         let source_ids_for_processor: Vec<String> = self
             .base
             .config
@@ -1982,6 +2129,10 @@ impl Query for DrasiQuery {
                                                         &query_id,
                                                         &output_state,
                                                         &base_dispatchers,
+                                                        &outbox_writer_for_processor,
+                                                        &live_results_writer_for_processor,
+                                                        &checkpoint_store_for_dispatch,
+                                                        outbox_capacity_for_processor,
                                                         profiling,
                                                     )
                                                     .await;
@@ -2049,6 +2200,10 @@ impl Query for DrasiQuery {
                                                     &query_id,
                                                     &output_state,
                                                     &base_dispatchers,
+                                                    &outbox_writer_for_processor,
+                                                    &live_results_writer_for_processor,
+                                                    &checkpoint_store_for_dispatch,
+                                                    outbox_capacity_for_processor,
                                                     profiling,
                                                 )
                                                 .await;
@@ -2196,6 +2351,66 @@ impl Query for DrasiQuery {
             let state = self.output_state.read().await;
             (state.clone_results(), state.as_of_sequence())
         };
+
+        // If in-memory state has results, return them directly
+        if !results_clone.is_empty() || as_of_sequence > 0 {
+            return Ok(SnapshotResponse::new(
+                results_clone,
+                as_of_sequence,
+                self.config_hash,
+            ));
+        }
+
+        // In-memory state is empty at sequence 0 — try persistent live results
+        let query_id = &self.base.config.id;
+        let live_writer = self.live_results_writer.read().await;
+        if let Some(writer) = live_writer.as_ref() {
+            let cp_store = self.checkpoint_store.read().await;
+            let persisted_seq = if let Some(store) = cp_store.as_ref() {
+                match store.read_result_sequence(query_id).await {
+                    Ok(Some(seq)) => seq,
+                    Ok(None) => 0,
+                    Err(e) => {
+                        warn!("Query '{query_id}' failed to read persisted result sequence: {e}");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
+            if persisted_seq > 0 {
+                match writer.read_snapshot(query_id).await {
+                    Ok(rows) => {
+                        let mut results = im::HashMap::new();
+                        for (sig, data) in &rows {
+                            match rmp_serde::from_slice::<serde_json::Value>(data) {
+                                Ok(value) => {
+                                    results.insert(*sig, value);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Query '{query_id}' failed to deserialize live results row (sig={sig}): {e}"
+                                    );
+                                }
+                            }
+                        }
+                        // Return with persisted_seq even if rows is empty
+                        // (all rows deleted is a valid state).
+                        return Ok(SnapshotResponse::new(
+                            results,
+                            persisted_seq,
+                            self.config_hash,
+                        ));
+                    }
+                    Err(e) => {
+                        warn!("Query '{query_id}' failed to read persistent live results: {e}");
+                    }
+                }
+            }
+        }
+
+        // Nothing in persistent storage either — return empty
         Ok(SnapshotResponse::new(
             results_clone,
             as_of_sequence,
