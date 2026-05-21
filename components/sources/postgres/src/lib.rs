@@ -204,14 +204,80 @@ use tracing::Instrument;
 /// received so far). The `subscribe()` method reads this to decide whether a
 /// new subscriber can be served from the current stream position or if a rewind
 /// is needed.
-#[derive(Default)]
 pub(crate) struct ReplayState {
     pub(crate) read_lsn: AtomicU64,
+    /// Maximum `flush_lsn` that `send_feedback()` may report to PostgreSQL.
+    ///
+    /// Set to the replay start LSN during `pause_replication_for_restart()` to
+    /// prevent the slot's `restart_lsn` from advancing past the position that
+    /// other (not-yet-subscribed) queries will need.  `u64::MAX` means "no
+    /// fence" (normal operation).
+    pub(crate) flush_fence_lsn: AtomicU64,
+    /// UNIX epoch seconds when the fence was last set. Used for auto-clearing
+    /// the fence after [`FENCE_TIMEOUT_SECS`] as a safety fallback.
+    pub(crate) fence_set_epoch_secs: AtomicU64,
+}
+
+/// Duration (in seconds) after which the flush fence auto-clears.
+///
+/// This is a safety fallback for deployments where no explicit
+/// `on_subscriptions_complete()` signal arrives (e.g., FFI plugin usage).
+/// During normal startup all queries subscribe within a few seconds; the
+/// timeout must be generous enough to cover slow-starting deployments.
+const FENCE_TIMEOUT_SECS: u64 = 60;
+
+impl Default for ReplayState {
+    fn default() -> Self {
+        Self {
+            read_lsn: AtomicU64::new(0),
+            flush_fence_lsn: AtomicU64::new(u64::MAX),
+            fence_set_epoch_secs: AtomicU64::new(0),
+        }
+    }
 }
 
 impl ReplayState {
     fn current_read_lsn(&self) -> u64 {
         self.read_lsn.load(Ordering::Acquire)
+    }
+
+    /// Set the flush fence to prevent `send_feedback()` from advancing
+    /// `flush_lsn` past `lsn`.
+    fn set_flush_fence(&self, lsn: u64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.flush_fence_lsn.store(lsn, Ordering::Release);
+        self.fence_set_epoch_secs.store(now_secs, Ordering::Release);
+    }
+
+    /// Clear the flush fence, allowing normal `flush_lsn` advancement.
+    fn clear_flush_fence(&self) {
+        self.flush_fence_lsn.store(u64::MAX, Ordering::Release);
+    }
+
+    /// Returns the effective fence value, auto-clearing if the timeout has
+    /// elapsed. Returns `u64::MAX` if no fence is active.
+    fn effective_flush_fence(&self) -> u64 {
+        let fence = self.flush_fence_lsn.load(Ordering::Acquire);
+        if fence == u64::MAX {
+            return u64::MAX;
+        }
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let set_secs = self.fence_set_epoch_secs.load(Ordering::Acquire);
+        if now_secs.saturating_sub(set_secs) > FENCE_TIMEOUT_SECS {
+            // Timeout expired — auto-clear
+            self.flush_fence_lsn.store(u64::MAX, Ordering::Release);
+            u64::MAX
+        } else {
+            fence
+        }
     }
 }
 
@@ -564,6 +630,12 @@ impl PostgresReplicationSource {
         // from the old stream, causing flush_lsn feedback to advance the
         // slot's restart_lsn past other queries' checkpoints.
         self.base.clear_sequence_position_map().await;
+
+        // Set the flush fence to prevent send_feedback() from advancing
+        // flush_lsn past start_lsn. This protects subscribers that haven't
+        // connected yet — their checkpoint is at (or near) start_lsn, so the
+        // slot must retain WAL from that point.
+        self.replay_state.set_flush_fence(start_lsn);
     }
 
     async fn resume_replication_from(&self, start_lsn: u64) -> Result<()> {
@@ -824,6 +896,16 @@ impl Source for PostgresReplicationSource {
         self.base
             .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
             .await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        self.base.remove_position_handle(query_id).await;
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        // Release the flush fence so that send_feedback() can advance flush_lsn
+        // based on the natural min-watermark of all registered position handles.
+        self.replay_state.clear_flush_fence();
     }
 
     async fn set_bootstrap_provider(

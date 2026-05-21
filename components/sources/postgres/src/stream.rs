@@ -671,10 +671,20 @@ impl ReplicationStream {
                 None => 0, // No confirmed position yet — don't advance
             };
 
+            // Apply the flush fence: during the subscription window after a
+            // replay restart, cap flush_lsn to prevent the slot's restart_lsn
+            // from advancing past positions that pending subscribers still need.
+            let fence = self.replay_state.effective_flush_fence();
+            let (effective_lsn, was_clamped) = if fence < u64::MAX && confirmed_lsn > fence {
+                (fence, true)
+            } else {
+                (confirmed_lsn, false)
+            };
+
             let status = StandbyStatusUpdate {
                 write_lsn: self.read_lsn,
-                flush_lsn: confirmed_lsn,
-                apply_lsn: confirmed_lsn,
+                flush_lsn: effective_lsn,
+                apply_lsn: effective_lsn,
                 reply_requested,
             };
 
@@ -682,18 +692,22 @@ impl ReplicationStream {
             self.last_feedback_time = std::time::Instant::now();
 
             // Prune the sequence→position map up to the confirmed sequence
-            // now that feedback was successfully sent.
-            if confirmed_lsn > 0 {
+            // now that feedback was successfully sent. Skip pruning when the
+            // fence clamped flush_lsn — Postgres hasn't actually acknowledged
+            // the full confirmed position, so we must retain map entries for
+            // accurate re-computation after the fence lifts.
+            if !was_clamped && effective_lsn > 0 {
                 if let Some(confirmed_seq) = self.base.compute_confirmed_position().await {
                     self.base.prune_position_map(confirmed_seq).await;
                 }
             }
 
             trace!(
-                "[{}] Sent feedback: write_lsn={:x}, flush_lsn={:x}",
+                "[{}] Sent feedback: write_lsn={:x}, flush_lsn={:x}{}",
                 self.source_id,
                 self.read_lsn,
-                confirmed_lsn
+                effective_lsn,
+                if was_clamped { " (fenced)" } else { "" }
             );
         }
 
