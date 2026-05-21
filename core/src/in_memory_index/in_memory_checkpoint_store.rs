@@ -131,11 +131,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
         Ok(*data)
     }
 
-    async fn write_result_sequence(
-        &self,
-        query_id: &str,
-        sequence: u64,
-    ) -> Result<(), IndexError> {
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
         let mut data = self.result_sequences.write().await;
         data.insert(query_id.to_string(), sequence);
         Ok(())

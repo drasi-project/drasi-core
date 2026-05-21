@@ -777,8 +777,7 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
         loop {
             match event_rx.recv().await {
                 Ok(event)
-                    if event.component_id == "rec"
-                        && event.status == ComponentStatus::Error =>
+                    if event.component_id == "rec" && event.status == ComponentStatus::Error =>
                 {
                     return event;
                 }
