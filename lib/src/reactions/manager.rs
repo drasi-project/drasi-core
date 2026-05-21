@@ -1043,12 +1043,12 @@ impl ReactionManager {
                                 // This catches drops that don't manifest as broadcast lag
                                 // (e.g., outbox overflow while reaction was stopping).
                                 if last_forwarded_seq > 0
-                                    && query_result.sequence > last_forwarded_seq + 1
+                                    && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
                                     log::warn!(
                                         "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
                                          expected seq={}, got seq={}",
-                                        last_forwarded_seq + 1,
+                                        last_forwarded_seq.saturating_add(1),
                                         query_result.sequence
                                     );
                                     match Self::handle_broadcast_gap(

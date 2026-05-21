@@ -707,11 +707,9 @@ async fn test_runtime_gap_detection_broadcast_lag() -> Result<()> {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Wait for the forwarder to process what it can.
-    // With AutoSkipGap, it should skip the gap and continue.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
     // Verify that live delivery still works after the gap.
+    // With AutoSkipGap, the forwarder skips the gap and resumes.
+    // wait_for_count has its own timeout — no bare sleep needed.
     insert_person(&handle, "p-after-gap", "AfterGap", 99).await?;
     let after = receiver.wait_for_count(1, Duration::from_secs(5)).await;
     assert_eq!(
@@ -759,6 +757,8 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
             .await?,
     );
 
+    let mut event_rx = core.subscribe_all_component_events();
+
     core.start().await?;
 
     // Confirm initial delivery works.
@@ -771,8 +771,25 @@ async fn test_runtime_gap_strict_policy_stops_reaction() -> Result<()> {
         insert_person(&handle, &format!("p-flood-{i}"), &format!("Flood-{i}"), i).await?;
     }
 
-    // Give time for the forwarder to detect the gap and exit.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait deterministically for the reaction to transition to Error state
+    // (the supervisor fires this after the forwarder breaks on Strict gap).
+    let error_event = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match event_rx.recv().await {
+                Ok(event)
+                    if event.component_id == "rec"
+                        && event.status == ComponentStatus::Error =>
+                {
+                    return event;
+                }
+                Ok(_) => continue,
+                Err(_) => panic!("Event channel closed while waiting for Error status"),
+            }
+        }
+    })
+    .await
+    .expect("Timed out waiting for reaction to reach Error status");
+    assert_eq!(error_event.status, ComponentStatus::Error);
 
     // After strict gap failure, new events should NOT be delivered.
     insert_person(&handle, "p-after", "After", 99).await?;

@@ -14,13 +14,14 @@
 
 //! Garnet/Redis implementation of [`OutboxWriter`].
 //!
-//! Uses a Redis sorted set per query for ordered sequence access:
-//! - Key: `outbox:{<query_id>}` (hash-tagged for cluster compatibility)
-//! - Score: sequence number (u64 as f64)
-//! - Member: `{sequence_u64}:{data_bytes}` (sequence prefix for uniqueness)
+//! Uses two Redis data structures per query:
+//! - Sorted set `outbox:{<query_id>}` for ordered sequence tracking
+//!   (member = sequence number as string, score = sequence as f64)
+//! - Hash `outbox_data:{<query_id>}` for raw data storage
+//!   (field = sequence number as string, value = raw bytes)
 //!
-//! Since sorted set members must be unique and we need to store arbitrary bytes,
-//! members are stored as: `{sequence_be_hex}:{base64(data)}`.
+//! Keys are hash-tagged (`{<query_id>}`) for Redis Cluster slot compatibility.
+//! Note: u64 sequences above 2^53 lose precision when stored as f64 scores.
 
 use async_trait::async_trait;
 use drasi_core::interface::{IndexError, OutboxWriter};
@@ -64,7 +65,9 @@ impl OutboxWriter for GarnetOutboxWriter {
         let data_key = self.data_key();
         let seq_str = sequence.to_string();
 
-        // Add sequence to sorted set (score = sequence for ordering)
+        // Add sequence to sorted set (score = sequence for ordering).
+        // Note: f64 scores lose precision above 2^53, but outbox sequences
+        // are monotonically increasing from 0 and won't reach that magnitude.
         con.zadd::<&str, f64, &str, ()>(&outbox_key, &seq_str, sequence as f64)
             .await
             .map_err(IndexError::other)?;
