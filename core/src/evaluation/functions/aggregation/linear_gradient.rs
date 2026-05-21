@@ -227,6 +227,16 @@ impl AggregatingFunction for LinearGradient {
             Float::from_f64(result).unwrap_or_default(),
         ))
     }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::Value(ValueAccumulator::LinearGradient { count, .. }) => Ok(*count == 0),
+            _ => Err(FunctionError {
+                function_name: "LinearGradient".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            }),
+        }
+    }
 }
 
 fn extract_parameter(p: &VariableValue, index: u64) -> Result<f64, FunctionError> {

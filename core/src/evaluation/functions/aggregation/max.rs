@@ -555,6 +555,22 @@ impl AggregatingFunction for Max {
             }),
         };
     }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::LazySortedSet(set) => {
+                let head = set.get_head().await.map_err(|e| FunctionError {
+                    function_name: "Max".to_string(),
+                    error: FunctionEvaluationError::IndexError(e),
+                })?;
+                Ok(head.is_none())
+            }
+            _ => Err(FunctionError {
+                function_name: "Max".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            }),
+        }
+    }
 }
 
 impl Debug for Max {

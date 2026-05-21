@@ -619,14 +619,12 @@ impl ContinuousQuery {
                     after,
                     grouping_keys,
                     default_before,
-                    default_after,
                     ..
                 } => QueryPartEvaluationContext::Aggregation {
                     before,
                     after,
                     grouping_keys,
                     default_before,
-                    default_after,
                     row_signature: cc.after_grouping_hash,
                 },
                 QueryPartEvaluationContext::Noop => QueryPartEvaluationContext::Noop,
@@ -787,7 +785,6 @@ impl CollapsedAggregationResults {
             after,
             grouping_keys,
             default_before,
-            default_after,
             ..
         } = context
         {
@@ -810,7 +807,6 @@ impl CollapsedAggregationResults {
                                 QueryPartEvaluationContext::Aggregation {
                                     before: existing_before,
                                     default_before,
-                                    default_after,
                                     after,
                                     grouping_keys,
                                     row_signature: after_key,
@@ -829,7 +825,6 @@ impl CollapsedAggregationResults {
                                 after,
                                 grouping_keys,
                                 default_before,
-                                default_after,
                                 row_signature: after_key,
                             },
                             before_key,
@@ -864,14 +859,12 @@ impl CollapsedAggregationResults {
                     after,
                     grouping_keys,
                     default_before,
-                    default_after,
                     ..
                 } => QueryPartEvaluationContext::Aggregation {
                     before,
                     after,
                     grouping_keys,
                     default_before,
-                    default_after,
                     row_signature: after_key,
                 },
                 other => other,

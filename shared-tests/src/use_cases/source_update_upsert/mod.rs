@@ -734,7 +734,6 @@ pub async fn test_aggregation_with_upserts(config: &(impl QueryTestConfig + Send
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec!["status".to_string()],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                     "status" => VariableValue::from(json!("active")),
                     "count" => VariableValue::from(json!(0))

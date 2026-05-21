@@ -23,8 +23,8 @@ pub struct StoredValueAccumulatorContainer {
 
 #[derive(PartialEq, Clone, ::prost::Oneof)]
 pub enum StoredValueAccumulator {
-    #[prost(double, tag = "1")]
-    Sum(f64),
+    #[prost(message, tag = "1")]
+    Sum(StoredSum),
 
     #[prost(message, tag = "2")]
     Avg(StoredAverage),
@@ -57,6 +57,14 @@ impl StoredValueAccumulator {
 }
 
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct StoredSum {
+    #[prost(double, tag = "1")]
+    pub value: f64,
+    #[prost(uint64, tag = "2")]
+    pub contributors: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct StoredAverage {
     #[prost(double, tag = "1")]
     pub sum: f64,
@@ -81,7 +89,13 @@ pub struct StoredLinearGradient {
 impl From<ValueAccumulator> for StoredValueAccumulator {
     fn from(acc: ValueAccumulator) -> Self {
         match acc {
-            ValueAccumulator::Sum { value } => StoredValueAccumulator::Sum(value),
+            ValueAccumulator::Sum {
+                value,
+                contributors,
+            } => StoredValueAccumulator::Sum(StoredSum {
+                value,
+                contributors,
+            }),
             ValueAccumulator::Avg { sum, count } => {
                 StoredValueAccumulator::Avg(StoredAverage { sum, count })
             }
@@ -112,7 +126,10 @@ impl From<ValueAccumulator> for StoredValueAccumulator {
 impl From<StoredValueAccumulator> for ValueAccumulator {
     fn from(val: StoredValueAccumulator) -> Self {
         match val {
-            StoredValueAccumulator::Sum(value) => ValueAccumulator::Sum { value },
+            StoredValueAccumulator::Sum(sum) => ValueAccumulator::Sum {
+                value: sum.value,
+                contributors: sum.contributors,
+            },
             StoredValueAccumulator::Avg(avg) => ValueAccumulator::Avg {
                 sum: avg.sum,
                 count: avg.count,

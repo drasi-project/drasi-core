@@ -140,6 +140,18 @@ impl AggregatingFunction for Collect {
 
         Ok((&ElementValue::List(list.clone())).into())
     }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::Value(ValueAccumulator::Value(ElementValue::List(list))) => {
+                Ok(list.is_empty())
+            }
+            _ => Err(FunctionError {
+                function_name: "Collect".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            }),
+        }
+    }
 }
 
 impl Debug for Collect {

@@ -43,7 +43,10 @@ impl AggregatingFunction for Sum {
         _grouping_keys: &Vec<VariableValue>,
         _index: Arc<dyn ResultIndex>,
     ) -> Accumulator {
-        Accumulator::Value(ValueAccumulator::Sum { value: 0.0 })
+        Accumulator::Value(ValueAccumulator::Sum {
+            value: 0.0,
+            contributors: 0,
+        })
     }
 
     fn accumulator_is_lazy(&self) -> bool {
@@ -63,8 +66,11 @@ impl AggregatingFunction for Sum {
             });
         }
 
-        let accumulator = match accumulator {
-            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
+        let (value, contributors) = match accumulator {
+            Accumulator::Value(super::ValueAccumulator::Sum {
+                value,
+                contributors,
+            }) => (value, contributors),
             _ => {
                 return Err(FunctionError {
                     function_name: "Sum".to_string(),
@@ -75,7 +81,7 @@ impl AggregatingFunction for Sum {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator += match n.as_f64() {
+                let delta = match n.as_f64() {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -84,7 +90,9 @@ impl AggregatingFunction for Sum {
                         })
                     }
                 };
-                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                *contributors += 1;
+                *value += delta;
+                Ok(VariableValue::Float(match Float::from_f64(*value) {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -95,7 +103,7 @@ impl AggregatingFunction for Sum {
                 }))
             }
             VariableValue::Integer(n) => {
-                *accumulator += match n.as_i64() {
+                let delta = match n.as_i64() {
                     Some(n) => n as f64,
                     None => {
                         return Err(FunctionError {
@@ -104,7 +112,9 @@ impl AggregatingFunction for Sum {
                         })
                     }
                 };
-                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                *contributors += 1;
+                *value += delta;
+                Ok(VariableValue::Float(match Float::from_f64(*value) {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -115,14 +125,16 @@ impl AggregatingFunction for Sum {
                 }))
             }
             VariableValue::Duration(d) => {
-                *accumulator += d.duration().num_milliseconds() as f64;
+                let delta = d.duration().num_milliseconds() as f64;
+                *contributors += 1;
+                *value += delta;
                 Ok(VariableValue::Duration(Duration::new(
-                    ChronoDuration::milliseconds(*accumulator as i64),
+                    ChronoDuration::milliseconds(*value as i64),
                     0,
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*value) {
                 Some(n) => n,
                 None => {
                     return Err(FunctionError {
@@ -150,8 +162,11 @@ impl AggregatingFunction for Sum {
                 error: FunctionEvaluationError::InvalidArgumentCount,
             });
         }
-        let accumulator = match accumulator {
-            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
+        let (value, contributors) = match accumulator {
+            Accumulator::Value(super::ValueAccumulator::Sum {
+                value,
+                contributors,
+            }) => (value, contributors),
             _ => {
                 return Err(FunctionError {
                     function_name: "Sum".to_string(),
@@ -162,7 +177,7 @@ impl AggregatingFunction for Sum {
 
         match &args[0] {
             VariableValue::Float(n) => {
-                *accumulator -= match n.as_f64() {
+                let delta = match n.as_f64() {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -171,7 +186,9 @@ impl AggregatingFunction for Sum {
                         })
                     }
                 };
-                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                *contributors = contributors.saturating_sub(1);
+                *value -= delta;
+                Ok(VariableValue::Float(match Float::from_f64(*value) {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -182,7 +199,7 @@ impl AggregatingFunction for Sum {
                 }))
             }
             VariableValue::Integer(n) => {
-                *accumulator -= match n.as_i64() {
+                let delta = match n.as_i64() {
                     Some(n) => n as f64,
                     None => {
                         return Err(FunctionError {
@@ -191,7 +208,9 @@ impl AggregatingFunction for Sum {
                         })
                     }
                 };
-                Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+                *contributors = contributors.saturating_sub(1);
+                *value -= delta;
+                Ok(VariableValue::Float(match Float::from_f64(*value) {
                     Some(n) => n,
                     None => {
                         return Err(FunctionError {
@@ -202,14 +221,16 @@ impl AggregatingFunction for Sum {
                 }))
             }
             VariableValue::Duration(d) => {
-                *accumulator -= d.duration().num_milliseconds() as f64;
+                let delta = d.duration().num_milliseconds() as f64;
+                *contributors = contributors.saturating_sub(1);
+                *value -= delta;
                 Ok(VariableValue::Duration(Duration::new(
-                    ChronoDuration::milliseconds(*accumulator as i64),
+                    ChronoDuration::milliseconds(*value as i64),
                     0,
                     0,
                 )))
             }
-            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*accumulator) {
+            VariableValue::Null => Ok(VariableValue::Float(match Float::from_f64(*value) {
                 Some(n) => n,
                 None => {
                     return Err(FunctionError {
@@ -238,7 +259,7 @@ impl AggregatingFunction for Sum {
             });
         }
         let accumulator_value = match accumulator {
-            Accumulator::Value(super::ValueAccumulator::Sum { value }) => value,
+            Accumulator::Value(super::ValueAccumulator::Sum { value, .. }) => value,
             _ => {
                 return Err(FunctionError {
                     function_name: "Sum".to_string(),
@@ -289,6 +310,18 @@ impl AggregatingFunction for Sum {
             _ => Err(FunctionError {
                 function_name: "Sum".to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
+            }),
+        }
+    }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::Value(ValueAccumulator::Sum { contributors, .. }) => {
+                Ok(*contributors == 0)
+            }
+            _ => Err(FunctionError {
+                function_name: "Sum".to_string(),
+                error: FunctionEvaluationError::CorruptData,
             }),
         }
     }

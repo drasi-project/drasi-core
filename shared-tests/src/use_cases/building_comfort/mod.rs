@@ -238,7 +238,6 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 &result,
                 &QueryPartEvaluationContext::Aggregation {
                     default_before: false,
-                    default_after: false,
                     before: Some(variablemap!(
                       "FloorId" =>  VariableValue::from(json!("floor_01_01")),
                       "ComfortLevel" =>  VariableValue::from(json!(50))
@@ -263,7 +262,6 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 &QueryPartEvaluationContext::Aggregation {
                     grouping_keys: vec!["BuildingId".into()],
                     default_before: false,
-                    default_after: false,
                     before: Some(variablemap!(
                       "BuildingId" => VariableValue::from(json!("building_01")),
                       "ComfortLevel" => VariableValue::from(json!(50.0))
@@ -409,7 +407,6 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 &QueryPartEvaluationContext::Aggregation {
                     grouping_keys: vec!["FloorId".into()],
                     default_before: false,
-                    default_after: false,
                     before: Some(variablemap!(
                       "FloorId" => VariableValue::from(json!("floor_01_01")),
                       "ComfortLevel" => VariableValue::from(json!(51.0))
@@ -432,7 +429,6 @@ pub async fn building_comfort_use_case(config: &(impl QueryTestConfig + Send)) {
                 &QueryPartEvaluationContext::Aggregation {
                     grouping_keys: vec!["BuildingId".into()],
                     default_before: false,
-                    default_after: false,
                     before: Some(variablemap!(
                       "BuildingId" => VariableValue::from(json!("building_01")),
                       "ComfortLevel" => VariableValue::from(json!(50.5))

@@ -284,6 +284,16 @@ impl AggregatingFunction for Avg {
             }),
         }
     }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::Value(ValueAccumulator::Avg { count, .. }) => Ok(*count == 0),
+            _ => Err(FunctionError {
+                function_name: "Avg".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            }),
+        }
+    }
 }
 
 impl Debug for Avg {

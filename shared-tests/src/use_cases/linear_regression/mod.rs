@@ -145,7 +145,6 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                     "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
                 )),
@@ -177,7 +176,6 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: true,
                 before: Some(variablemap!(
                     "Gradient" => VariableValue::Float(Float::from_f64(6.771428571428571).unwrap())
                 )),
@@ -209,7 +207,6 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: false,
-                default_after: true,
                 before: Some(variablemap!(
                     "Gradient" => VariableValue::Float(Float::from_f64(6.972972972972973).unwrap())
                 )),
@@ -365,7 +362,6 @@ pub async fn linear_gradient(config: &(impl QueryTestConfig + Send)) {
             &QueryPartEvaluationContext::Aggregation {
                 grouping_keys: vec![],
                 default_before: true,
-                default_after: false,
                 before: Some(variablemap!(
                     "Gradient" => VariableValue::Float(Float::from_f64(1.5).unwrap())
                 )),

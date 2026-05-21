@@ -101,6 +101,7 @@ pub trait AggregatingFunction: Debug + Send + Sync {
         args: Vec<VariableValue>,
         accumulator: &Accumulator,
     ) -> Result<VariableValue, FunctionError>;
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError>;
     fn accumulator_is_lazy(&self) -> bool;
 }
 

@@ -127,6 +127,16 @@ impl AggregatingFunction for Count {
             };
         Ok(VariableValue::Integer(Integer::from(*value)))
     }
+
+    async fn is_at_identity(&self, accumulator: &Accumulator) -> Result<bool, FunctionError> {
+        match accumulator {
+            Accumulator::Value(ValueAccumulator::Count { value }) => Ok(*value == 0),
+            _ => Err(FunctionError {
+                function_name: "Count".to_string(),
+                error: FunctionEvaluationError::CorruptData,
+            }),
+        }
+    }
 }
 
 impl Debug for Count {
