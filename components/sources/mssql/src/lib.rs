@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! Microsoft SQL Server CDC Source for Drasi
 //!
@@ -96,7 +97,7 @@ use drasi_lib::schema::{
 };
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
-use drasi_lib::state_store::StateStoreProvider;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
@@ -114,17 +115,20 @@ pub struct MsSqlSource {
     /// Base source implementation (handles dispatching, status, etc.)
     base: SourceBase,
 
-    /// State store for LSN persistence
-    state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
-
     /// CDC polling task handle
     task_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 
-    /// Shutdown signal sender for graceful shutdown
-    shutdown_tx: watch::Sender<bool>,
+    /// Shutdown signal sender for graceful shutdown.
+    /// Recreated on each `start()` so the CDC task always gets a clean
+    /// receiver without stale shutdown notifications from a prior `stop()`.
+    shutdown_tx: Arc<RwLock<watch::Sender<bool>>>,
 
-    /// Shutdown signal receiver (cloned for each task)
-    shutdown_rx: watch::Receiver<bool>,
+    /// Per-subscriber resume positions.
+    /// When a query subscribes with resume_from bytes, we deserialize to an LSN
+    /// and store it keyed by query_id. The CDC stream reads the minimum to
+    /// decide where to start polling from. Entries are removed when a query
+    /// calls `remove_position_handle`.
+    subscriber_resume_lsns: Arc<RwLock<HashMap<String, Lsn>>>,
 
     /// Best-effort cached schema populated from SQL Server catalog metadata.
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
@@ -216,16 +220,15 @@ impl MsSqlSource {
         let params = SourceBaseParams::new(&source_id);
 
         // Create shutdown channel (false = running, true = shutdown)
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         Ok(Self {
             source_id,
             config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx,
-            shutdown_rx,
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }
@@ -356,6 +359,11 @@ impl Source for MsSqlSource {
         self.base.set_status(ComponentStatus::Starting, None).await;
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
 
+        // Create a brand-new shutdown channel so the CDC task gets a pristine
+        // receiver with no stale notifications from a prior stop() cycle.
+        let (new_tx, shutdown_rx) = watch::channel(false);
+        *self.shutdown_tx.write().await = new_tx;
+
         match introspect_mssql_schema(&self.config).await {
             Ok(Some(schema)) => {
                 if let Ok(mut cached) = self.cached_schema.write() {
@@ -373,18 +381,17 @@ impl Source for MsSqlSource {
 
         let config = self.config.clone();
         let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
-        let state_store = self.state_store.read().await.clone();
-        let shutdown_rx = self.shutdown_rx.clone();
+        let base = self.base.clone_shared();
+        let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
             if let Err(e) = stream::run_cdc_stream(
                 source_id.clone(),
                 config,
-                dispatchers,
-                state_store,
+                base,
                 shutdown_rx,
+                subscriber_resume_lsns,
             )
             .await
             {
@@ -407,7 +414,7 @@ impl Source for MsSqlSource {
         log::info!("MS SQL source '{}' stopping", self.base.id);
 
         // Signal the CDC polling loop to stop gracefully
-        if let Err(e) = self.shutdown_tx.send(true) {
+        if let Err(e) = self.shutdown_tx.read().await.send(true) {
             log::warn!("Failed to send shutdown signal: {e}");
         }
 
@@ -427,6 +434,15 @@ impl Source for MsSqlSource {
             }
         }
 
+        // Clear stale dispatchers so a subsequent start()+subscribe() cycle
+        // does not race. Without this, the CDC loop could dispatch events to
+        // old dead receivers, silently dropping them while advancing the LSN.
+        self.base.clear_dispatchers().await;
+
+        // Clear stale resume LSNs — they will be repopulated by subscribe()
+        // on the next lifecycle with fresh checkpoint data.
+        self.subscriber_resume_lsns.write().await.clear();
+
         // Clear cached schema so a subsequent start() re-introspects
         if let Ok(mut cached) = self.cached_schema.write() {
             *cached = None;
@@ -441,6 +457,30 @@ impl Source for MsSqlSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<drasi_lib::channels::SubscriptionResponse> {
+        // If the subscriber has a resume_from position, deserialize it to an
+        // LSN and store it keyed by query_id. The CDC stream computes the min
+        // across all active subscribers to decide where to start polling from.
+        if let Some(ref resume_bytes) = settings.resume_from {
+            match Lsn::from_bytes(resume_bytes) {
+                Ok(lsn) => {
+                    log::info!(
+                        "Subscriber '{}' requesting resume from LSN {} on source '{}'",
+                        settings.query_id,
+                        lsn,
+                        self.base.id
+                    );
+                    let mut guard = self.subscriber_resume_lsns.write().await;
+                    guard.insert(settings.query_id.clone(), lsn);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to deserialize resume_from bytes to LSN for subscriber '{}': {e}",
+                        settings.query_id
+                    );
+                }
+            }
+        }
+
         self.base
             .subscribe_with_bootstrap(&settings, "MS SQL")
             .await
@@ -452,12 +492,10 @@ impl Source for MsSqlSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context.clone()).await;
-
-        // Store state store if provided
-        if let Some(state_store) = context.state_store {
-            *self.state_store.write().await = Some(state_store);
-            log::debug!("State store injected into MS SQL source '{}'", self.base.id);
-        }
+        // MSSQL LSNs are 10-byte big-endian — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
     }
 
     async fn set_bootstrap_provider(
@@ -465,6 +503,13 @@ impl Source for MsSqlSource {
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
         self.base.set_bootstrap_provider(provider).await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        // Remove the per-subscriber resume LSN so the CDC stream no longer
+        // pins its start position on behalf of this query.
+        self.subscriber_resume_lsns.write().await.remove(query_id);
+        self.base.remove_position_handle(query_id).await;
     }
 }
 
@@ -601,16 +646,15 @@ impl MsSqlSourceBuilder {
         }
 
         // Create shutdown channel (false = running, true = shutdown)
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         Ok(MsSqlSource {
             source_id,
             config: self.config,
             base: SourceBase::new(params)?,
-            state_store: Arc::new(RwLock::new(None)),
             task_handle: Arc::new(RwLock::new(None)),
-            shutdown_tx,
-            shutdown_rx,
+            shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
+            subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
         })
     }

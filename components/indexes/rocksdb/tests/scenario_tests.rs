@@ -671,4 +671,139 @@ mod checkpoint_tests {
         shared_tests::sequence_counter::result_sequence_counter(&subject).await;
         session_control.commit().await.unwrap();
     }
+
+    /// Verifies that checkpoints staged inside a session can be read back
+    /// WITHOUT an active session. This is the exact startup scenario:
+    /// a previous run stages & commits checkpoints, then on restart the
+    /// query manager reads them before opening any session.
+    #[tokio::test]
+    async fn checkpoint_read_outside_session() {
+        use bytes::Bytes;
+
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        // --- Stage checkpoints inside a session and commit ---
+        session_control.begin().await.unwrap();
+
+        let pos_pg = Bytes::from_static(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        subject
+            .stage_checkpoint("source-pg", 10, Some(&pos_pg))
+            .await
+            .unwrap();
+
+        let pos_mssql = Bytes::from(vec![0xAA; 20]);
+        subject
+            .stage_checkpoint("source-mssql", 20, Some(&pos_mssql))
+            .await
+            .unwrap();
+
+        session_control.commit().await.unwrap();
+        // Session is now closed — no active transaction
+
+        // --- Read individual checkpoints without a session ---
+        let cp_pg = subject
+            .read_checkpoint("source-pg")
+            .await
+            .expect("read_checkpoint should succeed without a session")
+            .expect("expected checkpoint for source-pg");
+        assert_eq!(cp_pg.sequence, 10);
+        assert_eq!(cp_pg.source_position.as_ref(), Some(&pos_pg));
+
+        let cp_mssql = subject
+            .read_checkpoint("source-mssql")
+            .await
+            .expect("read_checkpoint should succeed without a session")
+            .expect("expected checkpoint for source-mssql");
+        assert_eq!(cp_mssql.sequence, 20);
+        assert_eq!(cp_mssql.source_position.as_ref(), Some(&pos_mssql));
+
+        // Non-existent source returns None
+        let cp_none = subject
+            .read_checkpoint("source-nonexistent")
+            .await
+            .expect("read_checkpoint should succeed without a session");
+        assert!(cp_none.is_none());
+
+        // --- Read all checkpoints without a session ---
+        let all = subject
+            .read_all_checkpoints()
+            .await
+            .expect("read_all_checkpoints should succeed without a session");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["source-pg"].sequence, 10);
+        assert_eq!(all["source-pg"].source_position.as_ref(), Some(&pos_pg));
+        assert_eq!(all["source-mssql"].sequence, 20);
+        assert_eq!(
+            all["source-mssql"].source_position.as_ref(),
+            Some(&pos_mssql)
+        );
+    }
+
+    /// Verifies that config hash can be written inside a session and read
+    /// back without a session, and that clear_checkpoints works without
+    /// a session.
+    #[tokio::test]
+    async fn config_hash_and_clear_outside_session() {
+        use bytes::Bytes;
+
+        let config = RocksDbQueryConfig::new();
+        let query_id = format!("test-{}", Uuid::new_v4());
+        let options = RocksIndexOptions {
+            archive_enabled: false,
+            direct_io: false,
+        };
+        let db = open_unified_db(&config.url, &query_id, &options).unwrap();
+        let session_state = Arc::new(RocksDbSessionState::new(db.clone()));
+        let session_control = Arc::new(RocksDbSessionControl::new(session_state.clone()));
+        let subject = RocksDbCheckpointStore::new(db, session_state);
+
+        // --- Write config hash (does not require a session) ---
+        subject
+            .write_config_hash(42)
+            .await
+            .expect("write_config_hash should succeed without a session");
+
+        // --- Read config hash without a session ---
+        let hash = subject
+            .read_config_hash()
+            .await
+            .expect("read_config_hash should succeed without a session");
+        assert_eq!(hash, Some(42));
+
+        // --- Stage a checkpoint, commit, then clear without a session ---
+        session_control.begin().await.unwrap();
+        let pos = Bytes::from_static(&[0xFF; 10]);
+        subject
+            .stage_checkpoint("src-1", 5, Some(&pos))
+            .await
+            .unwrap();
+        session_control.commit().await.unwrap();
+
+        // Verify it's there
+        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        assert!(cp.is_some());
+
+        // Clear without a session
+        subject
+            .clear_checkpoints()
+            .await
+            .expect("clear_checkpoints should succeed without a session");
+
+        // Verify everything is gone
+        let cp = subject.read_checkpoint("src-1").await.unwrap();
+        assert!(cp.is_none());
+        let all = subject.read_all_checkpoints().await.unwrap();
+        assert!(all.is_empty());
+        let hash = subject.read_config_hash().await.unwrap();
+        assert!(hash.is_none());
+    }
 }

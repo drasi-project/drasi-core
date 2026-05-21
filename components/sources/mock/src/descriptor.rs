@@ -74,14 +74,21 @@ impl SourcePluginDescriptor for MockSourceDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = MockSourceSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "source.mock.MockSourceConfig")
+            .expect("root schema not found")
+            .field("dataType", |f| f.order(1))
+            .field("intervalMs", |f| f.order(2).placeholder("5000"))
+            .annotate()
     }
 
     async fn create_source(

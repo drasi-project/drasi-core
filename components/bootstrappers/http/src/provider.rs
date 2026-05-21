@@ -468,6 +468,7 @@ impl BootstrapProvider for HttpBootstrapProvider {
             event_count: total_events as usize,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: None,
         })
     }
 }

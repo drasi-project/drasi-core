@@ -97,14 +97,21 @@ impl ReactionPluginDescriptor for LogReactionDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = LogReactionSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "reaction.log.LogReactionConfig")
+            .expect("root schema not found")
+            .field("defaultTemplate", |f| f.order(1))
+            .field("routes", |f| f.order(2))
+            .annotate()
     }
 
     async fn create_reaction(

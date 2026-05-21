@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! # Drasi Plugin SDK
 //!
@@ -211,6 +212,7 @@ pub mod mapper;
 pub mod prelude;
 pub mod registration;
 pub mod resolver;
+pub mod schema_ui;
 
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;

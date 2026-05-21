@@ -344,6 +344,7 @@ impl BootstrapProvider for ScriptFileBootstrapProvider {
             event_count: count,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: None,
         })
     }
 }

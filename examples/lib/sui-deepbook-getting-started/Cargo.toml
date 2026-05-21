@@ -1,0 +1,22 @@
+[package]
+name = "sui-deepbook-getting-started"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DrasiLib getting-started example for Sui DeepBook source"
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-sui-deepbook = { path = "../../../components/sources/sui-deepbook" }
+drasi-reaction-sse = { path = "../../../components/reactions/sse" }
+tokio = { version = "1.6", features = ["full"] }
+anyhow = "1.0"
+env_logger = "0.11"
+axum = "0.7"
+log = "0.4"
+
+[[bin]]
+name = "sui-deepbook-getting-started"
+path = "main.rs"

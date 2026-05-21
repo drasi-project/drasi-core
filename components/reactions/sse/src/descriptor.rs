@@ -166,14 +166,31 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = SseReactionSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "reaction.sse.SseReactionConfig")
+            .expect("root schema not found")
+            .field("host", |f| {
+                f.group("Server").order(1).placeholder("0.0.0.0")
+            })
+            .field("port", |f| f.group("Server").order(2).placeholder("8082"))
+            .field("ssePath", |f| {
+                f.group("Server").order(3).placeholder("/events")
+            })
+            .field("heartbeatIntervalMs", |f| {
+                f.group("Server").order(4).placeholder("30000")
+            })
+            .field("defaultTemplate", |f| f.group("Templates").order(1))
+            .field("routes", |f| f.group("Templates").order(2))
+            .annotate()
     }
 
     async fn create_reaction(
