@@ -191,6 +191,7 @@ drasi-bootstrap-oracle = { version = "0.1.0", path = "components/bootstrappers/o
 drasi-oracle-common = { version = "0.1.2", path = "components/oracle-common" }
 drasi-source-gtfs-rt = { version = "0.1.0", path = "components/sources/gtfs-rt" }
 drasi-source-mqtt = { version = "0.1.0", path = "components/sources/mqtt" }
+drasi-batching-common = { version = "0.1.0", path = "components/batching-common" }
 drasi-bootstrap-gtfs-rt = { version = "0.1.0", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
