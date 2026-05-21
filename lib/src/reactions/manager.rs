@@ -457,14 +457,46 @@ impl ReactionManager {
             bootstrap_queries.push((query_id.to_string(), query.clone()));
             Ok(cp)
         } else {
-            // No snapshot needed — just record the current sequence.
-            // If the query is not running or hasn't bootstrapped yet, start from 0.
+            // No snapshot needed — replay any outbox entries produced during this
+            // startup cycle (e.g., from source replay) and record the checkpoint.
+            // Without this replay, results produced before the reaction subscribes
+            // to the broadcast channel would be silently skipped.
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
-                    info!(
-                        "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
-                        resp.latest_sequence
-                    );
+                    if resp.results.is_empty() {
+                        info!(
+                            "[{reaction_id}] Fresh start for query '{query_id}' — fetch_outbox(0) returned latest_seq={}",
+                            resp.latest_sequence
+                        );
+                    } else {
+                        info!(
+                            "[{reaction_id}] Fresh start for query '{query_id}' — replaying {} outbox entries (latest_seq={})",
+                            resp.results.len(),
+                            resp.latest_sequence
+                        );
+                        let mut last_ok_seq = 0u64;
+                        for entry in &resp.results {
+                            let result = (*entry).as_ref().clone();
+                            match reaction.enqueue_query_result(result).await {
+                                Ok(()) => last_ok_seq = entry.sequence,
+                                Err(e) => {
+                                    warn!(
+                                        "[{reaction_id}] Failed to replay outbox entry for query \
+                                         '{query_id}' seq={}: {e}",
+                                        entry.sequence
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        if last_ok_seq != resp.latest_sequence {
+                            info!(
+                                "[{reaction_id}] Partial outbox replay for query '{query_id}' — \
+                                 replayed up to seq={last_ok_seq}, latest_seq={}",
+                                resp.latest_sequence
+                            );
+                        }
+                    }
                     resp.latest_sequence
                 }
                 Err(FetchError::OutboxGap(gap)) => {
