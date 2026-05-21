@@ -155,8 +155,8 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
             HyperliquidNetworkDto::Mainnet => HyperliquidNetwork::Mainnet,
             HyperliquidNetworkDto::Testnet => HyperliquidNetwork::Testnet,
             HyperliquidNetworkDto::Custom { rest_url, ws_url } => {
-                let rest_url = mapper.resolve_typed(&rest_url)?;
-                let ws_url = mapper.resolve_typed(&ws_url)?;
+                let rest_url = mapper.resolve_typed(&rest_url).await?;
+                let ws_url = mapper.resolve_typed(&ws_url).await?;
                 HyperliquidNetwork::Custom { rest_url, ws_url }
             }
         };
@@ -170,7 +170,7 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
             InitialCursorDto::StartFromBeginning => InitialCursor::StartFromBeginning,
             InitialCursorDto::StartFromNow => InitialCursor::StartFromNow,
             InitialCursorDto::StartFromTimestamp { timestamp } => {
-                let ts = mapper.resolve_typed(&timestamp)?;
+                let ts = mapper.resolve_typed(&timestamp).await?;
                 InitialCursor::StartFromTimestamp { timestamp: ts }
             }
         };
@@ -178,12 +178,12 @@ impl SourcePluginDescriptor for HyperliquidSourceDescriptor {
         let mut builder = HyperliquidSourceBuilder::new(id)
             .with_network(network)
             .with_auto_start(auto_start)
-            .with_funding_poll_interval_secs(mapper.resolve_typed(&dto.funding_poll_interval_secs)?)
-            .with_mid_prices(mapper.resolve_typed(&dto.enable_mid_prices)?)
-            .with_trades(mapper.resolve_typed(&dto.enable_trades)?)
-            .with_order_book(mapper.resolve_typed(&dto.enable_order_book)?)
-            .with_liquidations(mapper.resolve_typed(&dto.enable_liquidations)?)
-            .with_funding_rates(mapper.resolve_typed(&dto.enable_funding_rates)?);
+            .with_funding_poll_interval_secs(mapper.resolve_typed(&dto.funding_poll_interval_secs).await?)
+            .with_mid_prices(mapper.resolve_typed(&dto.enable_mid_prices).await?)
+            .with_trades(mapper.resolve_typed(&dto.enable_trades).await?)
+            .with_order_book(mapper.resolve_typed(&dto.enable_order_book).await?)
+            .with_liquidations(mapper.resolve_typed(&dto.enable_liquidations).await?)
+            .with_funding_rates(mapper.resolve_typed(&dto.enable_funding_rates).await?);
 
         builder = match coins {
             CoinSelection::Specific { coins } => builder.with_coins(coins),

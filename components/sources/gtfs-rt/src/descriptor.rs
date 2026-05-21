@@ -155,13 +155,15 @@ impl SourcePluginDescriptor for GtfsRtSourceDescriptor {
         };
 
         let config = GtfsRtSourceConfig {
-            trip_updates_url: mapper.resolve_optional_string(&dto.trip_updates_url)?,
-            vehicle_positions_url: mapper.resolve_optional_string(&dto.vehicle_positions_url)?,
-            alerts_url: mapper.resolve_optional_string(&dto.alerts_url)?,
-            poll_interval_secs: mapper.resolve_typed(&dto.poll_interval_secs)?,
+            trip_updates_url: mapper.resolve_optional_string(&dto.trip_updates_url).await?,
+            vehicle_positions_url: mapper
+                .resolve_optional_string(&dto.vehicle_positions_url)
+                .await?,
+            alerts_url: mapper.resolve_optional_string(&dto.alerts_url).await?,
+            poll_interval_secs: mapper.resolve_typed(&dto.poll_interval_secs).await?,
             headers: dto.headers,
-            timeout_secs: mapper.resolve_typed(&dto.timeout_secs)?,
-            language: mapper.resolve_string(&dto.language)?,
+            timeout_secs: mapper.resolve_typed(&dto.timeout_secs).await?,
+            language: mapper.resolve_string(&dto.language).await?,
             initial_cursor_mode,
         };
 

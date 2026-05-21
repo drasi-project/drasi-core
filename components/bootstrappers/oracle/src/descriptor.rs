@@ -139,13 +139,13 @@ impl BootstrapPluginDescriptor for OracleBootstrapDescriptor {
         let mapper = DtoMapper::new();
 
         let mut builder = OracleBootstrapProvider::builder()
-            .with_host(mapper.resolve_string(&dto.host)?)
-            .with_port(mapper.resolve_typed(&dto.port)?)
-            .with_service(mapper.resolve_string(&dto.service)?)
-            .with_user(mapper.resolve_string(&dto.user)?)
-            .with_password(mapper.resolve_string(&dto.password)?)
+            .with_host(mapper.resolve_string(&dto.host).await?)
+            .with_port(mapper.resolve_typed(&dto.port).await?)
+            .with_service(mapper.resolve_string(&dto.service).await?)
+            .with_user(mapper.resolve_string(&dto.user).await?)
+            .with_password(mapper.resolve_string(&dto.password).await?)
             .with_tables(dto.tables)
-            .with_ssl_mode(mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode)?.into());
+            .with_ssl_mode(mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode).await?.into());
 
         for table_key in dto.table_keys {
             builder = builder.with_table_key(table_key.table, table_key.key_columns);

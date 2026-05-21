@@ -126,11 +126,11 @@ impl BootstrapPluginDescriptor for MySqlBootstrapDescriptor {
             .collect();
 
         let config = MySqlBootstrapConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            database: mapper.resolve_string(&dto.database)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            database: mapper.resolve_string(&dto.database).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
             tables: dto.tables,
             table_keys,
         };

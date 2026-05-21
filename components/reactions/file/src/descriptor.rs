@@ -159,7 +159,7 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(output_path) = dto.output_path {
-            builder = builder.with_output_path(mapper.resolve_string(&output_path)?);
+            builder = builder.with_output_path(mapper.resolve_string(&output_path).await?);
         }
 
         if let Some(write_mode) = dto.write_mode {
@@ -167,7 +167,9 @@ impl ReactionPluginDescriptor for FileReactionDescriptor {
         }
 
         if let Some(filename_template) = dto.filename_template {
-            builder = builder.with_filename_template(mapper.resolve_string(&filename_template)?);
+            builder = builder.with_filename_template(
+                mapper.resolve_string(&filename_template).await?,
+            );
         }
 
         if let Some(default_template) = &dto.default_template {
