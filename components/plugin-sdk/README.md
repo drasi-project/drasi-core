@@ -397,7 +397,7 @@ fn config_schema_name(&self) -> &str {
 | `config_value` | `ConfigValue<T>` enum, type aliases, and OpenAPI schema wrappers |
 | `descriptor` | Plugin descriptor traits (`SourcePluginDescriptor`, `ReactionPluginDescriptor`, `BootstrapPluginDescriptor`, `IdentityProviderPluginDescriptor`, `SecretStorePluginDescriptor`) |
 | `ffi` | FFI layer for dynamic plugin loading — vtables, callbacks, proxies, tracing bridge |
-| `mapper` | `DtoMapper` service and `ConfigMapper` trait for DTO-to-domain conversions |
+| `mapper` | `DtoMapper` service for resolving `ConfigValue` references in DTOs |
 | `registration` | `PluginRegistration` struct, `SDK_VERSION`, `BUILD_HASH`, and `TOKIO_VERSION` constants |
 | `resolver` | `ValueResolver` trait and built-in implementations |
 | `prelude` | Convenience re-exports for plugin authors |

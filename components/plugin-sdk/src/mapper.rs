@@ -51,26 +51,6 @@
 //! }
 //! ```
 //!
-//! # The ConfigMapper Pattern
-//!
-//! For complex mappings, implement the [`ConfigMapper`] trait to encapsulate the
-//! conversion logic:
-//!
-//! ```rust,ignore
-//! use drasi_plugin_sdk::prelude::*;
-//!
-//! struct MyConfigMapper;
-//!
-//! impl ConfigMapper<MySourceConfigDto, MySourceConfig> for MyConfigMapper {
-//!     fn map(&self, dto: &MySourceConfigDto, resolver: &DtoMapper) -> Result<MySourceConfig, MappingError> {
-//!         Ok(MySourceConfig {
-//!             host: resolver.resolve_string(&dto.host)?,
-//!             port: resolver.resolve_typed(&dto.port)?,
-//!             timeout: resolver.resolve_optional(&dto.timeout_ms)?,
-//!         })
-//!     }
-//! }
-//! ```
 
 use crate::config_value::ConfigValue;
 use crate::resolver::{
@@ -88,14 +68,6 @@ pub enum MappingError {
     #[error("Failed to resolve config value: {0}")]
     ResolutionError(#[from] ResolverError),
 
-    /// No mapper was found for the given config type.
-    #[error("No mapper found for config type: {0}")]
-    NoMapperFound(String),
-
-    /// The mapper received a DTO type it doesn't handle.
-    #[error("Mapper type mismatch")]
-    MapperTypeMismatch,
-
     /// Source creation failed.
     #[error("Failed to create source: {0}")]
     SourceCreationError(String),
@@ -107,21 +79,6 @@ pub enum MappingError {
     /// A configuration value was invalid.
     #[error("Invalid value: {0}")]
     InvalidValue(String),
-}
-
-/// Trait for converting a specific DTO config type to its domain model.
-///
-/// Implement this trait when you have a complex mapping between a DTO and its
-/// corresponding domain type. The `resolver` parameter provides access to
-/// [`DtoMapper`] for resolving [`ConfigValue`] references.
-///
-/// # Type Parameters
-///
-/// - `TDto` — The DTO (Data Transfer Object) type from the API layer.
-/// - `TDomain` — The domain model type used internally by the plugin.
-pub trait ConfigMapper<TDto, TDomain>: Send + Sync {
-    /// Convert a DTO to its domain model, resolving any config value references.
-    fn map(&self, dto: &TDto, resolver: &DtoMapper) -> Result<TDomain, MappingError>;
 }
 
 /// Main mapping service that resolves [`ConfigValue`] references in plugin DTOs.
@@ -262,15 +219,6 @@ impl DtoMapper {
         }
         Ok(result)
     }
-
-    /// Map a DTO using a [`ConfigMapper`] implementation.
-    pub fn map_with<TDto, TDomain>(
-        &self,
-        dto: &TDto,
-        mapper: &impl ConfigMapper<TDto, TDomain>,
-    ) -> Result<TDomain, MappingError> {
-        mapper.map(dto, self)
-    }
 }
 
 impl Default for DtoMapper {
@@ -381,41 +329,6 @@ mod tests {
 
         let result = mapper.resolve_string_vec(&values).await.expect("resolve");
         assert_eq!(result, vec!["a", "b"]);
-    }
-
-    #[tokio::test]
-    async fn test_config_mapper_trait() {
-        struct TestMapper;
-
-        #[derive(Debug)]
-        struct TestDto {
-            host: ConfigValue<String>,
-        }
-
-        struct TestDomain {
-            host: String,
-        }
-
-        impl ConfigMapper<TestDto, TestDomain> for TestMapper {
-            fn map(&self, dto: &TestDto, resolver: &DtoMapper) -> Result<TestDomain, MappingError> {
-                // ConfigMapper::map is still sync; it cannot call async resolve_* directly.
-                // For this test, we only test with Static values which don't actually need async.
-                match &dto.host {
-                    ConfigValue::Static(s) => Ok(TestDomain { host: s.clone() }),
-                    _ => Err(MappingError::InvalidValue(
-                        "only static in test".to_string(),
-                    )),
-                }
-            }
-        }
-
-        let mapper = DtoMapper::new();
-        let dto = TestDto {
-            host: ConfigValue::Static("localhost".to_string()),
-        };
-
-        let domain = mapper.map_with(&dto, &TestMapper).expect("map");
-        assert_eq!(domain.host, "localhost");
     }
 
     #[tokio::test]

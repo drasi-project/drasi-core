@@ -176,7 +176,7 @@
 //! - [`config_value`] — The [`ConfigValue<T>`](config_value::ConfigValue) enum for
 //!   configuration fields that support static values, environment variables, and secrets.
 //! - [`resolver`] — Value resolvers that convert config references to actual values.
-//! - [`mapper`] — The [`DtoMapper`](mapper::DtoMapper) service and [`ConfigMapper`](mapper::ConfigMapper)
+//! - [`mapper`] — The [`DtoMapper`](mapper::DtoMapper) service and mapping errors
 //!   trait for DTO-to-domain conversions.
 //! - [`descriptor`] — Plugin descriptor traits
 //!   ([`SourcePluginDescriptor`](descriptor::SourcePluginDescriptor),
@@ -220,7 +220,7 @@ pub use descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
     SourcePluginDescriptor,
 };
-pub use mapper::{ConfigMapper, DtoMapper, MappingError};
+pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
