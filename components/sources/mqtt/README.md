@@ -23,7 +23,7 @@ The MQTT source connects to an MQTT broker, subscribes to one or more topics, ma
 ```rust
 use drasi_source_mqtt::{MqttQoS, MqttSource};
 use drasi_source_mqtt::config::{
-    InjectId, MappingEntity, MappingMode, MappingNode, MappingProperties, TopicMapping,
+    MappingEntity, MappingMode, MappingNode, MappingProperties, TopicMapping,
 };
 use std::collections::HashMap;
 
@@ -40,7 +40,7 @@ let source = MqttSource::builder("mqtt-source")
         properties: MappingProperties {
             mode: MappingMode::PayloadAsField,
             field_name: Some("payload".to_string()),
-            inject_id: Some(InjectId::True),
+            inject_id: Some(true),
             inject: vec![HashMap::from([("room".to_string(), "{room}".to_string())])],
         },
         nodes: vec![MappingNode {
@@ -50,7 +50,7 @@ let source = MqttSource::builder("mqtt-source")
         relations: vec![],
     }])
     .with_adaptive_enabled(true)
-    .build()?;
+    .build().await?;
 ```
 
   ### Builder Options
@@ -62,7 +62,7 @@ let source = MqttSource::builder("mqtt-source")
   | `with_host(host)` | MQTT broker hostname |
   | `with_port(port)` | MQTT broker port |
   | `with_client_id(client_id)` | MQTT client_id sent on CONNECT (falls back to source_id when omitted) |
-  | `with_topic(topic)` | Replace topic list with one topic using default QoS |
+  | `with_topic(topic)` | Append one topic to the topic list using default QoS |
   | `with_topic_config(topic, qos)` | Add one topic subscription with explicit QoS |
   | `with_topics(topics)` | Set full topic subscription list |
   | `with_topic_mappings(topic_mappings)` | Set topic-to-graph mappings |

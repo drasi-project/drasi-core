@@ -227,7 +227,7 @@ impl MqttConnection {
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         mut event_loop: MqttEventLoopWrapper,
         config: &MqttSourceConfig,
-        mut processer_tx: tokio::sync::mpsc::Sender<MqttPacket>,
+        mut processor_tx: tokio::sync::mpsc::Sender<MqttPacket>,
     ) -> anyhow::Result<()> {
         self.subscribe_to_topics(config)
             .await
@@ -274,7 +274,7 @@ impl MqttConnection {
                             Ok(event) => {
                                 let packet = event.to_mqtt_packet();
                                 if let Some(packet) = packet {
-                                    if let Err(e) = processer_tx.send(packet).await {
+                                    if let Err(e) = processor_tx.send(packet).await {
                                             error!("Failed to send MQTT packet to processor: {e:?}");
                                     }
                                 }
@@ -330,7 +330,7 @@ impl MqttConnection {
                             Ok(event) => {
                                 let packet = event.to_mqtt_packet();
                                 if let Some(packet) = packet {
-                                    if let Err(e) = processer_tx.send(packet).await {
+                                    if let Err(e) = processor_tx.send(packet).await {
                                             error!("Failed to send MQTT packet to processor: {e:?}");
                                     }
                                 }
