@@ -72,6 +72,13 @@ pub struct SourceBaseParams {
     pub dispatch_mode: Option<DispatchMode>,
     /// Dispatch buffer capacity - defaults to 1000
     pub dispatch_buffer_capacity: Option<usize>,
+    /// Optional state store provider to set during construction.
+    ///
+    /// When set, takes precedence over any state store provided via the runtime
+    /// context during `initialize()`. This differs from `bootstrap_provider` which
+    /// is never overwritten by context — only `state_store` and `identity_provider`
+    /// have context-provided fallback behavior.
+    pub state_store: Option<Arc<dyn StateStoreProvider>>,
     /// Optional bootstrap provider to set during construction
     pub bootstrap_provider: Option<Box<dyn BootstrapProvider + 'static>>,
     /// Whether this source should auto-start - defaults to true
@@ -84,6 +91,10 @@ impl std::fmt::Debug for SourceBaseParams {
             .field("id", &self.id)
             .field("dispatch_mode", &self.dispatch_mode)
             .field("dispatch_buffer_capacity", &self.dispatch_buffer_capacity)
+            .field(
+                "state_store",
+                &self.state_store.as_ref().map(|_| "<StateStoreProvider>"),
+            )
             .field(
                 "bootstrap_provider",
                 &self.bootstrap_provider.as_ref().map(|_| "<provider>"),
@@ -100,6 +111,7 @@ impl SourceBaseParams {
             id: id.into(),
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
+            state_store: None,
             bootstrap_provider: None,
             auto_start: true,
         }
@@ -114,6 +126,15 @@ impl SourceBaseParams {
     /// Set the dispatch buffer capacity
     pub fn with_dispatch_buffer_capacity(mut self, capacity: usize) -> Self {
         self.dispatch_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the state store provider
+    ///
+    /// This is typically used when constructing sources outside of DrasiLib
+    /// and you want to provide a persistent store for checkpointing.
+    pub fn with_state_store(mut self, store: Arc<dyn StateStoreProvider>) -> Self {
+        self.state_store = Some(store);
         self
     }
 
@@ -240,7 +261,7 @@ impl SourceBase {
         }
         // For channel mode, dispatchers will be created on-demand when subscribing
 
-        // Initialize bootstrap provider if provided (no async needed at construction time)
+        // Initialize providers if provided (no async needed at construction time)
         let bootstrap_provider = params
             .bootstrap_provider
             .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
@@ -253,7 +274,7 @@ impl SourceBase {
             status_handle: ComponentStatusHandle::new(&params.id),
             dispatchers: Arc::new(RwLock::new(dispatchers)),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
-            state_store: Arc::new(RwLock::new(None)), // Extracted from context
+            state_store: Arc::new(RwLock::new(params.state_store)), // Extracted from context
             task_handle: Arc::new(RwLock::new(None)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             bootstrap_provider: Arc::new(RwLock::new(bootstrap_provider)),
@@ -271,6 +292,11 @@ impl SourceBase {
     /// Get whether this source should auto-start
     pub fn get_auto_start(&self) -> bool {
         self.auto_start
+    }
+
+    /// Get this source's dispatch mode.
+    pub fn get_dispatch_mode(&self) -> DispatchMode {
+        self.dispatch_mode
     }
 
     /// Set the original raw config JSON for lossless persistence roundtrips.
@@ -327,8 +353,12 @@ impl SourceBase {
         // Wire the status handle to the graph update channel
         self.status_handle.wire(context.update_tx.clone()).await;
 
+        // Store state_store from context only if not already set programmatically
         if let Some(state_store) = context.state_store.as_ref() {
-            *self.state_store.write().await = Some(state_store.clone());
+            let mut guard = self.state_store.write().await;
+            if guard.is_none() {
+                *guard = Some(state_store.clone());
+            }
         }
 
         // Store identity provider from context if not already set programmatically
@@ -645,6 +675,17 @@ impl SourceBase {
         // Recover sequence counter from checkpoint before anything else
         self.apply_subscription_settings(settings);
 
+        self.subscribe_with_bootstrap_context(settings, source_type, HashMap::new())
+            .await
+    }
+
+    /// Subscribe to this source with optional bootstrap context properties.
+    pub async fn subscribe_with_bootstrap_context(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<SubscriptionResponse> {
         info!(
             "Query '{}' subscribing to {} source '{}' (bootstrap: {}, resume_from: {:?}, request_handle: {})",
             settings.query_id,
@@ -690,7 +731,7 @@ impl SourceBase {
             (None, None)
         } else if settings.enable_bootstrap {
             match self
-                .handle_bootstrap_subscription(settings, source_type)
+                .handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
                 .await?
             {
                 Some((event_rx, result_rx)) => (Some(event_rx), Some(result_rx)),
@@ -728,6 +769,19 @@ impl SourceBase {
         })
     }
 
+    /// Create only the bootstrap receiver for a subscription.
+    pub async fn create_bootstrap_receiver(
+        &self,
+        settings: &crate::config::SourceSubscriptionSettings,
+        source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
+    ) -> Result<Option<BootstrapEventReceiver>> {
+        Ok(self
+            .handle_bootstrap_subscription(settings, source_type, bootstrap_properties)
+            .await?
+            .map(|(bootstrap_receiver, _)| bootstrap_receiver))
+    }
+
     /// Handle bootstrap subscription logic.
     ///
     /// Returns the bootstrap event receiver and a oneshot receiver for the
@@ -736,6 +790,7 @@ impl SourceBase {
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
+        bootstrap_properties: HashMap<String, serde_json::Value>,
     ) -> Result<
         Option<(
             BootstrapEventReceiver,
@@ -752,10 +807,18 @@ impl SourceBase {
             );
 
             // Create bootstrap context
-            let context = BootstrapContext::new_minimal(
-                self.id.clone(), // server_id
-                self.id.clone(), // source_id
-            );
+            let context = if bootstrap_properties.is_empty() {
+                BootstrapContext::new_minimal(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                )
+            } else {
+                BootstrapContext::with_properties(
+                    self.id.clone(), // server_id
+                    self.id.clone(), // source_id
+                    bootstrap_properties,
+                )
+            };
 
             // Create bootstrap channel
             let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel(1000);
