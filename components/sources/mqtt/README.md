@@ -69,7 +69,7 @@ let source = MqttSource::builder("mqtt-source")
   | `with_timeout_ms(timeout)` | Set MQTT v5 connection timeout |
   | `with_channel_capacity(capacity)` | Event channel capacity |
   | `with_max_retries(max_retries)` | Max retries inside in the event loop upon failure. |
-  | `with_base_retry_delay_secs(delay_sec)` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff)|
+  | `with_base_retry_delay_secs(delay_sec)` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256)|
   | `with_transport(transport)` | TCP or TLS transport configuration |
   | `with_request_channel_capacity(capacity)` | Internal request channel capacity |
   | `with_max_inflight(max_inflight)` | Max in-flight outgoing messages |
@@ -141,7 +141,7 @@ sources:
 | `topic_mappings` | Topic-to-graph mapping rules. Every `pattern` must be reachable by at least one `topics[]` filter; otherwise validation fails up-front rather than silently dropping messages at runtime. | none |
 | `event_channel_capacity` | Event channel capacity | `20` |
 | `max_retries` | Max retries inside in the event loop upon failure. | `8` |
-| `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff)| `1` |
+| `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256)| `1` |
 | `transport` | `tcp` or `tls` transport settings | `tcp` |
 | `request_channel_capacity` | Internal request channel capacity | none |
 | `max_inflight` | Max in-flight outgoing messages | none |
@@ -149,7 +149,7 @@ sources:
 | `clean_start` | MQTT clean session/start behavior | none |
 | `max_incoming_packet_size` | MQTT v3 max incoming packet size | none |
 | `max_outgoing_packet_size` | MQTT v3 max outgoing packet size | none |
-| `conn_timeout` | MQTT v5 connection timeout in ms | `5000` |
+| `conn_timeout` | MQTT v5 connection timeout in seconds | `5` |
 | `connect_properties` | MQTT v5 connect properties | none |
 | `subscribe_properties` | MQTT v5 subscribe properties | none |
 | `identity_provider` | Identity-provider authentication | none |

@@ -212,7 +212,7 @@ impl MqttProcessor {
 
                         // send to the batcher
                         Self::send_to_batcher(
-                            &source_id.clone(),
+                            &source_id,
                             &batch_tx,
                             source_changes,
                             &cancellation_token,

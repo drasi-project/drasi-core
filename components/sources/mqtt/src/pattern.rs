@@ -19,7 +19,7 @@ use matchit::{Params, Router};
 use crate::schema::MqttSourceChange;
 use crate::utils::MqttPacket;
 use crate::{
-    config::{InjectId, MappingMode, MappingNode, MappingRelation, TopicMapping},
+    config::{MappingMode, MappingNode, MappingRelation, TopicMapping},
     MqttElement,
 };
 use log::{error, info};
@@ -154,7 +154,7 @@ impl PatternMatcher {
             }
         }
 
-        if let Some(InjectId::True) = &mapping.properties.inject_id {
+        if let Some(true) = &mapping.properties.inject_id {
             properties.insert(
                 "id".to_string(),
                 serde_json::Value::String(entity_id.to_string()),
@@ -355,7 +355,7 @@ mod tests {
                     ("floor".to_string(), "{floor}".to_string()),
                     ("room".to_string(), "{room}".to_string()),
                 ])],
-                inject_id: Some(InjectId::True),
+                inject_id: Some(true),
             },
             nodes: vec![
                 MappingNode {
