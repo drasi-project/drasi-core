@@ -744,6 +744,8 @@ impl Query for DrasiQuery {
             // data directory, the old handle must be released before we can
             // open a new one.  Checkpoint data is already persisted on disk.
             *self.checkpoint_store.write().await = None;
+            *self.outbox_writer.write().await = None;
+            *self.live_results_writer.write().await = None;
 
             let created = index_factory
                 .build(backend_ref, &self.base.config.id)
