@@ -24,3 +24,7 @@ WHER = "WHER"
 UPDAT = "UPDAT"
 # Intentional substring used in assert!(...contains("entit")) tests
 entit = "entit"
+# German street name in example data
+Unter = "Unter"
+# Method name in mysql binlog library (TableMapEvent::get_tme)
+tme = "tme"
