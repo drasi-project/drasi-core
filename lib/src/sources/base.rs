@@ -489,6 +489,21 @@ impl SourceBase {
         *map = keep;
     }
 
+    /// Clear the entire sequence→position map.
+    ///
+    /// Call this when restarting replication for replay so that stale
+    /// sequence→position entries from the pre-replay stream cannot cause
+    /// `compute_confirmed_source_position()` to return positions that no
+    /// longer correspond to the current subscribers' checkpoints.  Without
+    /// this, a keepalive feedback sent by the new replication task could
+    /// advance `flush_lsn` (and thus the slot's `restart_lsn`) past the
+    /// checkpoints of queries that have not yet subscribed, causing
+    /// `PositionUnavailable` for subsequent subscribers.
+    pub async fn clear_sequence_position_map(&self) {
+        let mut map = self.sequence_position_map.write().await;
+        map.clear();
+    }
+
     /// Reset the sequence counter, typically after recovering from a checkpoint.
     /// The next dispatched event will receive `sequence + 1`.
     pub fn set_next_sequence(&self, sequence: u64) {

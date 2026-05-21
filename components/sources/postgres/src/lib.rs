@@ -557,6 +557,13 @@ impl PostgresReplicationSource {
             .await;
 
         self.abort_replication_task().await;
+
+        // Clear stale sequence→position mappings from the pre-replay stream.
+        // Without this, compute_confirmed_source_position() could map a
+        // position handle (initialized with last_sequence) to a WAL position
+        // from the old stream, causing flush_lsn feedback to advance the
+        // slot's restart_lsn past other queries' checkpoints.
+        self.base.clear_sequence_position_map().await;
     }
 
     async fn resume_replication_from(&self, start_lsn: u64) -> Result<()> {
