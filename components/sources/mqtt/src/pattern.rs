@@ -22,7 +22,7 @@ use crate::{
     config::{MappingMode, MappingNode, MappingRelation, TopicMapping},
     MqttElement,
 };
-use log::{error, info};
+use log::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub struct PatternMatcher {
@@ -32,6 +32,7 @@ pub struct PatternMatcher {
 impl PatternMatcher {
     pub fn new(topic_mappings: &Vec<TopicMapping>) -> Self {
         let mut router = Router::new();
+        let mut inserted_mappings = 0;
         for mapping in topic_mappings {
             if let Err(e) = router.insert(&mapping.pattern, mapping.clone()) {
                 error!(
@@ -39,9 +40,12 @@ impl PatternMatcher {
                     mapping.pattern, e
                 );
             } else {
-                info!("Inserted topic mapping pattern: {}", mapping.pattern);
+                debug!("Inserted topic mapping pattern: {}", mapping.pattern);
+                inserted_mappings += 1;
             }
         }
+        info!("Successfully inserted {inserted_mappings} topic mapping patterns");
+
         Self { router }
     }
 
