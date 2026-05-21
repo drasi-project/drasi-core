@@ -32,6 +32,7 @@ use crate::managers::{ComponentLogKey, ComponentLogRegistry};
 use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
+use crate::wal::WalProvider;
 
 // Convert JSON value to ElementValue
 pub fn convert_json_to_element_value(value: &Value) -> ElementValue {
@@ -75,6 +76,7 @@ pub struct SourceManager {
     instance_id: String,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
     identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
+    wal_provider: Arc<RwLock<Option<Arc<dyn WalProvider>>>>,
     log_registry: Arc<ComponentLogRegistry>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
@@ -102,6 +104,7 @@ impl SourceManager {
             instance_id: instance_id.into(),
             state_store: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
+            wal_provider: Arc::new(RwLock::new(None)),
             log_registry,
             graph,
             update_tx,
@@ -120,6 +123,14 @@ impl SourceManager {
     /// This allows sources to obtain authentication credentials when they are added.
     pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
         *self.identity_provider.write().await = Some(identity_provider);
+    }
+
+    /// Inject the WAL provider (called after DrasiLib is fully constructed)
+    ///
+    /// This allows transient sources to persist events to a Write-Ahead Log
+    /// for crash recovery and replay.
+    pub async fn inject_wal_provider(&self, wal_provider: Arc<dyn WalProvider>) {
+        *self.wal_provider.write().await = Some(wal_provider);
     }
 
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
@@ -153,6 +164,7 @@ impl SourceManager {
             None,
         );
         context.identity_provider = self.identity_provider.read().await.clone();
+        context.wal_provider = self.wal_provider.read().await.clone();
 
         // Initialize the source with its runtime context
         source.initialize(context).await;
@@ -307,6 +319,7 @@ impl SourceManager {
             let graph = &self.graph;
             let instance_id = &self.instance_id;
             let state_store = &self.state_store;
+            let wal_provider = &self.wal_provider;
             let update_tx = &self.update_tx;
 
             crate::managers::lifecycle_helpers::reconfigure_component::<Arc<dyn Source>, _, _, _>(
@@ -317,13 +330,14 @@ impl SourceManager {
                 || async {},
                 || async {
                     let new_source: Arc<dyn Source> = Arc::new(new_source);
-                    let context = SourceRuntimeContext::new(
+                    let mut context = SourceRuntimeContext::new(
                         instance_id,
                         &id,
                         state_store.read().await.clone(),
                         update_tx.clone(),
                         None,
                     );
+                    context.wal_provider = wal_provider.read().await.clone();
                     new_source.initialize(context).await;
 
                     let mut g = graph.write().await;

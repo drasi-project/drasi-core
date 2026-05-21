@@ -74,6 +74,7 @@ use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction as ReactionTrait;
 use crate::sources::Source as SourceTrait;
 use crate::state_store::StateStoreProvider;
+use crate::wal::WalProvider;
 use drasi_core::models::SourceMiddlewareConfig;
 
 // ============================================================================
@@ -140,6 +141,7 @@ pub struct DrasiLibBuilder {
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
+    wal_provider: Option<Arc<dyn WalProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
@@ -164,6 +166,7 @@ impl DrasiLibBuilder {
             index_provider: None,
             state_store_provider: None,
             identity_provider: None,
+            wal_provider: None,
             default_recovery_policy: None,
         }
     }
@@ -264,6 +267,31 @@ impl DrasiLibBuilder {
     /// ```
     pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
         self.identity_provider = Some(provider);
+        self
+    }
+
+    /// Set the Write-Ahead Log provider for transient source durability.
+    ///
+    /// WAL providers enable transient sources (HTTP, gRPC, Application) to persist
+    /// incoming events before acknowledging the caller. This enables crash recovery
+    /// and replay for persistent queries subscribing to those sources.
+    ///
+    /// If no WAL provider is set, transient sources cannot enable durability and
+    /// will operate in their default fire-and-forget mode.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_wal_redb::RedbWalProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let wal = RedbWalProvider::new("/data/wal");
+    /// let core = DrasiLib::builder()
+    ///     .with_wal_provider(Arc::new(wal))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_wal_provider(mut self, provider: Arc<dyn WalProvider>) -> Self {
+        self.wal_provider = Some(provider);
         self
     }
 
@@ -412,6 +440,12 @@ impl DrasiLibBuilder {
             .inject_state_store(state_store.clone())
             .await;
         core.reaction_manager.inject_state_store(state_store).await;
+
+        // Inject WAL provider into SourceManager (if configured)
+        // This allows transient sources to persist events for crash recovery
+        if let Some(wal_provider) = self.wal_provider {
+            core.source_manager.inject_wal_provider(wal_provider).await;
+        }
 
         // Register the component graph source BEFORE initialize (which loads query config).
         // Queries reference sources, so sources must exist in the graph first.

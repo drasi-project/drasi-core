@@ -25,6 +25,7 @@ mod tests {
     ) -> (ApplicationSource, crate::ApplicationSourceHandle) {
         let config = ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         };
 
         ApplicationSource::new(id, config).expect("Failed to create application source")

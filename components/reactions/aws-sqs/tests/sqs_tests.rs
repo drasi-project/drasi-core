@@ -190,6 +190,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
         "app-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
     let query = Query::cypher("sensor-query")
@@ -318,6 +319,7 @@ async fn test_sqs_reaction_aggregation_query() -> Result<()> {
         "app-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
     let query = Query::cypher("agg-query")

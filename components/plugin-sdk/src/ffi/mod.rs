@@ -39,6 +39,7 @@ pub mod tracing_bridge;
 pub mod types;
 pub mod vtable_gen;
 pub mod vtables;
+pub mod wal_provider_proxy;
 
 // Re-export commonly used types at the ffi module level
 pub use callbacks::{
@@ -70,6 +71,7 @@ pub use vtables::{
     FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
     FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
     ReactionVtable, SnapshotFetcherVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    WalProviderVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
@@ -80,3 +82,4 @@ pub use identity::{
 pub use identity_proxy::FfiIdentityProviderProxy;
 pub use snapshot_fetcher_proxy::FfiSnapshotFetcherProxy;
 pub use state_store_proxy::FfiStateStoreProxy;
+pub use wal_provider_proxy::FfiWalProviderProxy;
