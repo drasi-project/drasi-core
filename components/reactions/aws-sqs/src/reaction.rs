@@ -14,9 +14,9 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use aws_config::Region;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{types::MessageAttributeValue, Client};
-use aws_types::region::Region;
 use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use serde_json::{Map, Value};
@@ -237,10 +237,8 @@ impl SqsReaction {
         let attr = MessageAttributeValue::builder()
             .data_type("String")
             .string_value(value.into())
-            .build();
-        if attr.string_value().is_none() || attr.data_type().is_none() {
-            return Err(anyhow!("failed to build SQS message attribute"));
-        }
+            .build()
+            .map_err(|e| anyhow!("failed to build SQS message attribute: {e}"))?;
         Ok(attr)
     }
 
