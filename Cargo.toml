@@ -33,6 +33,7 @@ members = [
   "components/bootstrappers/kubernetes",
   "components/bootstrappers/oracle",
   "components/bootstrappers/here-traffic",
+  "components/bootstrappers/cloudflare-radar",
 
   # Source Plugins
   "components/sources/postgres",
@@ -53,6 +54,7 @@ members = [
   "components/sources/kubernetes",
   "components/sources/oracle",
   "components/sources/here-traffic",
+  "components/sources/cloudflare-radar",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -155,11 +157,13 @@ drasi-source-mssql = { version = "0.2.1", path = "components/sources/mssql" }
 drasi-bootstrap-mssql = { version = "0.2.1", path = "components/bootstrappers/mssql" }
 drasi-bootstrap-here-traffic = { version = "0.1.0", path = "components/bootstrappers/here-traffic" }
 drasi-bootstrap-postgres = { version = "0.2.1", path = "components/bootstrappers/postgres" }
+drasi-bootstrap-cloudflare-radar = { version = "0.1.0", path = "components/bootstrappers/cloudflare-radar" }
 drasi-reaction-application = { version = "0.3.1", path = "components/reactions/application" }
 drasi-source-postgres = { version = "0.2.1", path = "components/sources/postgres" }
 drasi-source-here-traffic = { version = "0.1.0", path = "components/sources/here-traffic" }
 drasi-source-application = { version = "0.2.1", path = "components/sources/application" }
 drasi-source-hyperliquid = { version = "0.1.0", path = "components/sources/hyperliquid" }
+drasi-source-cloudflare-radar = { version = "0.1.0", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.1", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.1", path = "components/reactions/http" }
 drasi-reaction-grpc = { version = "0.3.1", path = "components/reactions/grpc" }
