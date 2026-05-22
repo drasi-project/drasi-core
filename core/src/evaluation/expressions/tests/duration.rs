@@ -741,7 +741,7 @@ async fn test_duration_in_days_date_and_epoch() {
 }
 
 #[tokio::test]
-async fn test_accesing_components_from_functions() {
+async fn test_accessing_components_from_functions() {
     let expr = "duration.inDays(date('2023-12-01'), datetime({epochSeconds: 1697661665})).days";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 

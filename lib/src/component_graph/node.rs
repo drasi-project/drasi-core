@@ -57,7 +57,7 @@ pub type ComponentUpdateSender = mpsc::Sender<ComponentUpdate>;
 /// Owned by the graph update loop task, which is the sole consumer.
 pub type ComponentUpdateReceiver = mpsc::Receiver<ComponentUpdate>;
 
-/// A clonable handle for reading, writing, and reporting component status.
+/// A cloneable handle for reading, writing, and reporting component status.
 ///
 /// `ComponentStatusHandle` owns the component's local status (`Arc<RwLock<ComponentStatus>>`)
 /// **and** the mpsc sender to the graph update loop. This means a single cloned handle is

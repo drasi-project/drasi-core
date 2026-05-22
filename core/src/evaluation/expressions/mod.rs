@@ -1825,7 +1825,7 @@ impl ExpressionEvaluator {
                         Ok(value) => value,
                         Err(_) => {
                             return Err(FunctionEvaluationError::InvalidType {
-                                expected: "valid identifier expresssion".to_string(),
+                                expected: "valid identifier expression".to_string(),
                             })
                         }
                     };

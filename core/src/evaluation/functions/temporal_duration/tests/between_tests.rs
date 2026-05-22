@@ -399,7 +399,7 @@ async fn test_between_zoned_time_zoned_date_time() {
 }
 
 #[tokio::test]
-async fn test_betweeen_local_date_time_date() {
+async fn test_between_local_date_time_date() {
     let between_local_date_time_date = Between {};
     let binding = QueryVariables::new();
     let context =
