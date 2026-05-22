@@ -25,6 +25,7 @@ use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{log_component_error, ComponentLogKey, ComponentLogRegistry};
+use crate::metrics::{LifecycleMetrics, ReactionMetrics};
 use crate::queries::output_state::FetchError;
 use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
@@ -33,6 +34,9 @@ use crate::reactions::snapshot_fetcher::InProcessSnapshotFetcher;
 use crate::reactions::{QueryProvider, Reaction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
+
+/// Key for per-reaction per-query metrics: `(reaction_id, query_id)`.
+type MetricsKey = (String, String);
 
 pub struct ReactionManager {
     instance_id: String,
@@ -53,6 +57,10 @@ pub struct ReactionManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Per-(reaction, query) metrics for observability.
+    reaction_metrics: Arc<RwLock<HashMap<MetricsKey, Arc<ReactionMetrics>>>>,
+    /// Global lifecycle metrics shared across all reactions.
+    lifecycle_metrics: Arc<LifecycleMetrics>,
 }
 
 impl ReactionManager {
@@ -77,6 +85,8 @@ impl ReactionManager {
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
             graph,
             update_tx,
+            reaction_metrics: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_metrics: Arc::new(LifecycleMetrics::new()),
         }
     }
 
@@ -228,6 +238,9 @@ impl ReactionManager {
             let store = self.state_store.read().await;
             match store.as_ref() {
                 None => {
+                    self.lifecycle_metrics
+                        .startup_rejection_durable_no_store
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but no state store is configured",
@@ -235,6 +248,9 @@ impl ReactionManager {
                     ));
                 }
                 Some(s) if !s.is_durable() => {
+                    self.lifecycle_metrics
+                        .startup_rejection_durable_on_volatile
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but the configured state store is volatile",
@@ -247,6 +263,9 @@ impl ReactionManager {
 
         // Rule 2: snapshot + AutoSkipGap is contradictory
         if needs_snapshot && policy == ReactionRecoveryPolicy::AutoSkipGap {
+            self.lifecycle_metrics
+                .startup_rejection_snapshot_skip_gap
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=true is incompatible with \
                  AutoSkipGap recovery policy (cannot skip gap if snapshot is required)",
@@ -256,6 +275,9 @@ impl ReactionManager {
 
         // Rule 3: !snapshot + AutoReset is contradictory
         if !needs_snapshot && policy == ReactionRecoveryPolicy::AutoReset {
+            self.lifecycle_metrics
+                .startup_rejection_no_snapshot_auto_reset
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=false is incompatible with \
                  AutoReset recovery policy (AutoReset re-bootstraps from a snapshot)",
@@ -353,6 +375,9 @@ impl ReactionManager {
                         crate::queries::compute_config_hash(query.get_config());
                     if cp.config_hash != current_config_hash {
                         // Hash mismatch → treat as gap → apply recovery policy.
+                        self.lifecycle_metrics
+                            .hash_mismatch_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         info!(
                             "[{reaction_id}] Config hash mismatch for query '{query_id}': \
                              checkpoint={}, current={}",
@@ -447,8 +472,21 @@ impl ReactionManager {
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
+        // Get metrics for this (reaction, query) pair
+        let metrics_key = (reaction_id.to_string(), query_id.to_string());
+        let metrics = {
+            let mut metrics_map = self.reaction_metrics.write().await;
+            metrics_map
+                .entry(metrics_key)
+                .or_insert_with(|| Arc::new(ReactionMetrics::new()))
+                .clone()
+        };
+
         if reaction.needs_snapshot_on_fresh_start() {
             info!("[{reaction_id}] Fresh start for query '{query_id}' — fetching snapshot");
+            metrics
+                .fetch_snapshot_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let snapshot = query.fetch_snapshot().await.map_err(|e| {
                 anyhow::anyhow!("Failed to fetch snapshot for query '{query_id}': {e}")
             })?;
@@ -463,6 +501,9 @@ impl ReactionManager {
         } else {
             // No snapshot needed — just record the current sequence.
             // If the query is not running or hasn't bootstrapped yet, start from 0.
+            metrics
+                .fetch_outbox_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     info!(
@@ -522,6 +563,15 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
     ) -> Result<ReactionCheckpoint> {
+        // Instrument fetch_outbox call
+        {
+            let metrics_key = (reaction_id.to_string(), query_id.to_string());
+            let metrics_map = self.reaction_metrics.read().await;
+            if let Some(m) = metrics_map.get(&metrics_key) {
+                m.fetch_outbox_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
                 // Replay outbox entries by enqueuing them.
@@ -606,6 +656,13 @@ impl ReactionManager {
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
+        // Get metrics for instrumentation
+        let metrics_key = (reaction_id.to_string(), query_id.to_string());
+        let metrics = {
+            let metrics_map = self.reaction_metrics.read().await;
+            metrics_map.get(&metrics_key).cloned()
+        };
+
         match policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
                 "Reaction '{reaction_id}': Strict recovery policy — cannot recover from \
@@ -616,6 +673,10 @@ impl ReactionManager {
                     "[{reaction_id}] AutoReset for query '{query_id}' — \
                      fetching fresh snapshot"
                 );
+                if let Some(ref m) = metrics {
+                    m.fetch_snapshot_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let snapshot = query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset: failed to fetch snapshot for query '{query_id}': {e}"
@@ -627,6 +688,11 @@ impl ReactionManager {
                     config_hash,
                 };
 
+                // Record successful auto-reset in lifecycle metrics
+                self.lifecycle_metrics
+                    .auto_reset_completions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
                 Ok(cp)
             }
@@ -637,6 +703,10 @@ impl ReactionManager {
                 );
 
                 // Get current sequence from the query.
+                if let Some(ref m) = metrics {
+                    m.fetch_outbox_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
@@ -983,6 +1053,16 @@ impl ReactionManager {
             let subscription = query.subscribe(reaction_id.to_string()).await?;
             let mut receiver = subscription.receiver;
 
+            // Create or retrieve per-(reaction, query) metrics
+            let metrics_key = (reaction_id.to_string(), query_id.clone());
+            let forwarder_metrics = {
+                let mut metrics_map = self.reaction_metrics.write().await;
+                metrics_map
+                    .entry(metrics_key)
+                    .or_insert_with(|| Arc::new(ReactionMetrics::new()))
+                    .clone()
+            };
+
             let reaction = reaction.clone();
             let query_id_clone = query_id.clone();
             let reaction_id_owned = reaction_id.to_string();
@@ -991,6 +1071,7 @@ impl ReactionManager {
             let state_store_clone = state_store.clone();
             let checkpoints = shared_checkpoints.clone();
             let bootstrap_mutex = bootstrap_mutex.clone();
+            let lifecycle_metrics = self.lifecycle_metrics.clone();
 
             let span = tracing::info_span!(
                 "reaction_forwarder",
@@ -1032,6 +1113,10 @@ impl ReactionManager {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
+                                    forwarder_metrics.dedup_skip_count.fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
                                         query_result.sequence
@@ -1045,6 +1130,11 @@ impl ReactionManager {
                                 if last_forwarded_seq > 0
                                     && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
+                                    forwarder_metrics.gap_detection_count.fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    forwarder_metrics.record_recovery_trigger(&policy);
                                     log::warn!(
                                         "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
                                          expected seq={}, got seq={}",
@@ -1060,6 +1150,7 @@ impl ReactionManager {
                                         &state_store_clone,
                                         &checkpoints,
                                         &bootstrap_mutex,
+                                        &forwarder_metrics,
                                     )
                                     .await
                                     {
@@ -1108,12 +1199,20 @@ impl ReactionManager {
                                     };
                                     let cp = ReactionCheckpoint { sequence: seq, config_hash };
                                     checkpoints.write().await.insert(query_id_clone.clone(), cp);
+
+                                    // Update reaction metrics: checkpoint position
+                                    forwarder_metrics.record_checkpoint(seq, seq);
                                 }
                             }
                             Err(e) => {
                                 let error_str = e.to_string();
                                 if error_str.contains("lagged") {
                                     // §6: Broadcast gap detected.
+                                    forwarder_metrics.gap_detection_count.fetch_add(
+                                        1,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    forwarder_metrics.record_recovery_trigger(&policy);
                                     log::warn!(
                                         "[{reaction_id_owned}] Broadcast lag for query '{query_id_clone}': {error_str}"
                                     );
@@ -1126,6 +1225,7 @@ impl ReactionManager {
                                         &state_store_clone,
                                         &checkpoints,
                                         &bootstrap_mutex,
+                                        &forwarder_metrics,
                                     )
                                     .await
                                     {
@@ -1209,6 +1309,7 @@ impl ReactionManager {
     /// - `Strict`: return error (forwarder will break)
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
+    #[allow(clippy::too_many_arguments)]
     async fn handle_broadcast_gap(
         reaction_id: &str,
         query_id: &str,
@@ -1218,6 +1319,7 @@ impl ReactionManager {
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
         bootstrap_mutex: &Arc<tokio::sync::Mutex<()>>,
+        forwarder_metrics: &Arc<ReactionMetrics>,
     ) -> Result<()> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
@@ -1231,6 +1333,9 @@ impl ReactionManager {
                 let _guard = bootstrap_mutex.lock().await;
 
                 log::info!("[{reaction_id}] AutoReset on broadcast gap for query '{query_id}'");
+                forwarder_metrics
+                    .fetch_snapshot_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let snapshot = query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset broadcast gap: failed to fetch snapshot for '{query_id}': {e}"
@@ -1270,6 +1375,9 @@ impl ReactionManager {
             }
             ReactionRecoveryPolicy::AutoSkipGap => {
                 log::info!("[{reaction_id}] AutoSkipGap on broadcast gap for query '{query_id}'");
+                forwarder_metrics
+                    .fetch_outbox_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
@@ -1325,6 +1433,26 @@ impl ReactionManager {
                 handle.abort();
             }
         }
+    }
+
+    /// Get the per-(reaction, query) metrics for a specific reaction.
+    ///
+    /// Returns a map from query_id to its metrics snapshot.
+    pub async fn get_reaction_metrics(
+        &self,
+        reaction_id: &str,
+    ) -> HashMap<String, crate::metrics::ReactionMetricsSnapshot> {
+        let metrics = self.reaction_metrics.read().await;
+        metrics
+            .iter()
+            .filter(|((rid, _), _)| rid == reaction_id)
+            .map(|((_, qid), m)| (qid.clone(), m.snapshot()))
+            .collect()
+    }
+
+    /// Get the global lifecycle metrics.
+    pub fn lifecycle_metrics(&self) -> &Arc<LifecycleMetrics> {
+        &self.lifecycle_metrics
     }
 }
 
@@ -1888,6 +2016,7 @@ mod tests {
             &None,
             &checkpoints,
             &bootstrap_mutex,
+            &Arc::new(ReactionMetrics::new()),
         )
         .await;
 
@@ -1921,6 +2050,7 @@ mod tests {
             &None,
             &checkpoints,
             &bootstrap_mutex,
+            &Arc::new(ReactionMetrics::new()),
         )
         .await;
 
@@ -1970,6 +2100,7 @@ mod tests {
             &None,
             &checkpoints,
             &bootstrap_mutex,
+            &Arc::new(ReactionMetrics::new()),
         )
         .await;
 
@@ -2139,6 +2270,7 @@ mod tests {
             &None,
             &checkpoints,
             &bootstrap_mutex,
+            &Arc::new(ReactionMetrics::new()),
         )
         .await;
 
@@ -2266,6 +2398,7 @@ mod tests {
             &None,
             &checkpoints,
             &bootstrap_mutex,
+            &Arc::new(ReactionMetrics::new()),
         )
         .await;
 
@@ -2306,6 +2439,8 @@ mod tests {
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         // Launch two concurrent gap recoveries for different query IDs.
+        let metrics_q1 = Arc::new(ReactionMetrics::new());
+        let metrics_q2 = Arc::new(ReactionMetrics::new());
         let (r1, r2) = tokio::join!(
             ReactionManager::handle_broadcast_gap(
                 "r1",
@@ -2316,6 +2451,7 @@ mod tests {
                 &None,
                 &checkpoints,
                 &bootstrap_mutex,
+                &metrics_q1,
             ),
             ReactionManager::handle_broadcast_gap(
                 "r1",
@@ -2326,6 +2462,7 @@ mod tests {
                 &None,
                 &checkpoints,
                 &bootstrap_mutex,
+                &metrics_q2,
             ),
         );
 

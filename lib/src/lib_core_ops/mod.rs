@@ -26,6 +26,7 @@
 //! - `graph_ops`: Component graph operations (snapshot, dependencies, impact analysis)
 
 mod graph_ops;
+mod metrics_ops;
 mod query_ops;
 mod reaction_ops;
 mod source_ops;

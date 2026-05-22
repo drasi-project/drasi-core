@@ -52,6 +52,7 @@ use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
 use crate::sources::Source;
+use crate::metrics::QueryOutputMetrics;
 use crate::sources::SourceManager;
 use tracing::Instrument;
 
@@ -161,6 +162,13 @@ pub trait Query: Send + Sync {
     /// Blocks until bootstrap completes, with the same timeout/error semantics as
     /// `fetch_snapshot`.
     async fn fetch_outbox(&self, after_sequence: u64) -> Result<OutboxResponse, FetchError>;
+
+    /// Get the query's output metrics (outbox health, sequence rate, snapshot tracking).
+    ///
+    /// Returns `None` for query implementations that don't support metrics.
+    fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
+        None
+    }
 }
 
 /// Bootstrap phase tracking for each source
@@ -188,6 +196,7 @@ async fn dispatch_query_results(
     checkpoint_store: &Option<Arc<dyn CheckpointStore>>,
     outbox_capacity: usize,
     profiling: crate::profiling::ProfilingMetadata,
+    output_metrics: &Arc<QueryOutputMetrics>,
 ) {
     // Convert Drasi results to our QueryResult format, filtering out Noops
     let converted_results: Vec<ResultDiff> = results
@@ -250,6 +259,7 @@ async fn dispatch_query_results(
     // push to outbox, and get back the Arc for zero-copy dispatch — all in one
     // write-lock acquisition.
     let arc_result = {
+        let tx_start = std::time::Instant::now();
         let mut state = output_state.write().await;
         state.apply_diffs(&converted_results);
 
@@ -278,7 +288,27 @@ async fn dispatch_query_results(
             profiling,
         );
 
-        state.advance_sequence_and_push(query_result)
+        let result = state.advance_sequence_and_push(query_result);
+
+        // Update query output metrics
+        let duration_ns = tx_start.elapsed().as_nanos() as u64;
+        output_metrics.record_transaction_duration_ns(duration_ns);
+        output_metrics
+            .result_seq_advances
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        output_metrics
+            .live_results_count
+            .store(state.results_len(), std::sync::atomic::Ordering::Relaxed);
+        let earliest_seq = state
+            .outbox_earliest_seq()
+            .unwrap_or(0);
+        output_metrics.update_outbox(
+            state.outbox_len(),
+            earliest_seq,
+            state.as_of_sequence(),
+        );
+
+        result
     };
 
     // Persist to outbox and live results writers if available (best-effort).
@@ -454,6 +484,8 @@ pub struct DrasiQuery {
     resolved_recovery_policy: crate::recovery::RecoveryPolicy,
     // Track which source IDs we subscribed to, for cleanup in stop()
     subscribed_source_ids: Arc<RwLock<Vec<String>>>,
+    // Per-query output metrics (outbox, sequence, snapshot health)
+    output_metrics: Arc<QueryOutputMetrics>,
 }
 
 impl DrasiQuery {
@@ -500,6 +532,7 @@ impl DrasiQuery {
             bootstrap_timeout,
             resolved_recovery_policy,
             subscribed_source_ids: Arc::new(RwLock::new(Vec::new())),
+            output_metrics: Arc::new(QueryOutputMetrics::new()),
         })
     }
 
@@ -1965,6 +1998,7 @@ impl Query for DrasiQuery {
         let outbox_writer_for_processor = self.outbox_writer.read().await.clone();
         let live_results_writer_for_processor = self.live_results_writer.read().await.clone();
         let outbox_capacity_for_processor = self.output_state.read().await.outbox_capacity();
+        let output_metrics_for_processor = self.output_metrics.clone();
         let source_ids_for_processor: Vec<String> = self
             .base
             .config
@@ -2134,6 +2168,7 @@ impl Query for DrasiQuery {
                                                         &checkpoint_store_for_dispatch,
                                                         outbox_capacity_for_processor,
                                                         profiling,
+                                                        &output_metrics_for_processor,
                                                     )
                                                     .await;
                                                 }
@@ -2205,6 +2240,7 @@ impl Query for DrasiQuery {
                                                     &checkpoint_store_for_dispatch,
                                                     outbox_capacity_for_processor,
                                                     profiling,
+                                                    &output_metrics_for_processor,
                                                 )
                                                 .await;
                                             }
@@ -2347,6 +2383,11 @@ impl Query for DrasiQuery {
         // This ensures reactions don't observe a partial result set during initialization.
         self.wait_until_running().await?;
 
+        // Track snapshot clone creation
+        self.output_metrics
+            .active_snapshot_clones
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let (results_clone, as_of_sequence) = {
             let state = self.output_state.read().await;
             (state.clone_results(), state.as_of_sequence())
@@ -2434,6 +2475,10 @@ impl Query for DrasiQuery {
             results,
             config_hash: self.config_hash,
         })
+    }
+
+    fn output_metrics(&self) -> Option<Arc<QueryOutputMetrics>> {
+        Some(self.output_metrics.clone())
     }
 }
 

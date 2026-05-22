@@ -772,6 +772,59 @@ impl InspectionAPI {
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
+
+    // ============================================================================
+    // Metrics Inspection Methods
+    // ============================================================================
+
+    /// Get per-query output metrics for a specific query.
+    ///
+    /// Returns `None` if the query is not found or has no metrics attached.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_query_output_metrics(
+        &self,
+        query_id: &str,
+    ) -> crate::error::Result<Option<crate::metrics::QueryOutputMetricsSnapshot>> {
+        self.state_guard.require_initialized()?;
+        let instance = self
+            .query_manager
+            .get_query_instance(query_id)
+            .await
+            .ok();
+        match instance {
+            Some(q) => Ok(q.output_metrics().map(|m| m.snapshot())),
+            None => Ok(None),
+        }
+    }
+
+    /// Get per-reaction metrics for a specific reaction.
+    ///
+    /// Returns a map from query_id to its `ReactionMetricsSnapshot`.
+    /// Returns an empty map if no metrics exist for the reaction.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_reaction_metrics(
+        &self,
+        reaction_id: &str,
+    ) -> crate::error::Result<std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>>
+    {
+        self.state_guard.require_initialized()?;
+        Ok(self.reaction_manager.get_reaction_metrics(reaction_id).await)
+    }
+
+    /// Get global lifecycle metrics.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_lifecycle_metrics(
+        &self,
+    ) -> crate::error::Result<crate::metrics::LifecycleMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        Ok(self.reaction_manager.lifecycle_metrics().snapshot())
+    }
 }
 
 #[cfg(test)]
