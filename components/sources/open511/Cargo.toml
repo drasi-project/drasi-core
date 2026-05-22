@@ -16,6 +16,7 @@
 name = "drasi-source-open511"
 version = "0.1.1"
 edition = "2021"
+publish = false
 authors = ["Drasi Project"]
 description = "Open511 polling source plugin for Drasi"
 license = "Apache-2.0"
