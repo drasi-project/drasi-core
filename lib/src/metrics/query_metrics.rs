@@ -69,7 +69,9 @@ impl QueryOutputMetrics {
             .store(duration_ns, Ordering::Relaxed);
 
         // Update max using compare-exchange loop
-        let mut current_max = self.outer_transaction_duration_ns_max.load(Ordering::Relaxed);
+        let mut current_max = self
+            .outer_transaction_duration_ns_max
+            .load(Ordering::Relaxed);
         while duration_ns > current_max {
             match self
                 .outer_transaction_duration_ns_max
@@ -88,7 +90,8 @@ impl QueryOutputMetrics {
     /// Update outbox metrics after a push/pop cycle.
     pub fn update_outbox(&self, size: usize, earliest_seq: u64, latest_seq: u64) {
         self.outbox_size.store(size, Ordering::Relaxed);
-        self.outbox_earliest_seq.store(earliest_seq, Ordering::Relaxed);
+        self.outbox_earliest_seq
+            .store(earliest_seq, Ordering::Relaxed);
         self.outbox_latest_seq.store(latest_seq, Ordering::Relaxed);
     }
 

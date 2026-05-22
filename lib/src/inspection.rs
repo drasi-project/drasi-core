@@ -788,17 +788,17 @@ impl InspectionAPI {
         query_id: &str,
     ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
         self.state_guard.require_initialized()?;
-        let instance = self
-            .query_manager
-            .get_query_instance(query_id)
-            .await
-            .ok();
+        let instance = self.query_manager.get_query_instance(query_id).await.ok();
         match instance {
             Some(q) => match q.output_metrics() {
                 Some(m) => Ok(m.snapshot()),
-                None => Err(crate::error::DrasiError::component_not_found("query", query_id)),
+                None => Err(crate::error::DrasiError::component_not_found(
+                    "query", query_id,
+                )),
             },
-            None => Err(crate::error::DrasiError::component_not_found("query", query_id)),
+            None => Err(crate::error::DrasiError::component_not_found(
+                "query", query_id,
+            )),
         }
     }
 
@@ -812,10 +812,14 @@ impl InspectionAPI {
     pub async fn get_reaction_metrics(
         &self,
         reaction_id: &str,
-    ) -> crate::error::Result<std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>>
-    {
+    ) -> crate::error::Result<
+        std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
+    > {
         self.state_guard.require_initialized()?;
-        Ok(self.reaction_manager.get_reaction_metrics(reaction_id).await)
+        Ok(self
+            .reaction_manager
+            .get_reaction_metrics(reaction_id)
+            .await)
     }
 
     /// Get global lifecycle metrics.

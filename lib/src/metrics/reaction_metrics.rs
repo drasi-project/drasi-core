@@ -91,9 +91,7 @@ impl ReactionMetrics {
             gap_detection_count: self.gap_detection_count.load(Ordering::Relaxed),
             recovery_strict_count: self.recovery_strict_count.load(Ordering::Relaxed),
             recovery_auto_reset_count: self.recovery_auto_reset_count.load(Ordering::Relaxed),
-            recovery_auto_skip_gap_count: self
-                .recovery_auto_skip_gap_count
-                .load(Ordering::Relaxed),
+            recovery_auto_skip_gap_count: self.recovery_auto_skip_gap_count.load(Ordering::Relaxed),
             fetch_snapshot_count: self.fetch_snapshot_count.load(Ordering::Relaxed),
             fetch_outbox_count: self.fetch_outbox_count.load(Ordering::Relaxed),
         }

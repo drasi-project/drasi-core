@@ -44,6 +44,7 @@ use crate::managers::{
     log_component_error, log_component_start, log_component_stop, ComponentLogKey,
     ComponentLogRegistry,
 };
+use crate::metrics::QueryOutputMetrics;
 use crate::queries::label_extractor::{LabelExtractor, QueryLabels};
 use crate::queries::output_state::{
     FetchError, OutboxGap, OutboxResponse, QueryOutputState, SnapshotResponse,
@@ -52,7 +53,6 @@ use crate::queries::PriorityQueue;
 use crate::queries::QueryBase;
 use crate::sources::FutureQueueSource;
 use crate::sources::Source;
-use crate::metrics::QueryOutputMetrics;
 use crate::sources::SourceManager;
 use tracing::Instrument;
 
@@ -299,14 +299,8 @@ async fn dispatch_query_results(
         output_metrics
             .live_results_count
             .store(state.results_len(), std::sync::atomic::Ordering::Relaxed);
-        let earliest_seq = state
-            .outbox_earliest_seq()
-            .unwrap_or(0);
-        output_metrics.update_outbox(
-            state.outbox_len(),
-            earliest_seq,
-            state.as_of_sequence(),
-        );
+        let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
+        output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
         result
     };

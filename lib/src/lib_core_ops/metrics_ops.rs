@@ -21,7 +21,9 @@ use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::lib_core::DrasiLib;
-use crate::metrics::{LifecycleMetricsSnapshot, QueryOutputMetricsSnapshot, ReactionMetricsSnapshot};
+use crate::metrics::{
+    LifecycleMetricsSnapshot, QueryOutputMetricsSnapshot, ReactionMetricsSnapshot,
+};
 
 impl DrasiLib {
     /// Get per-query output metrics for a specific query.
