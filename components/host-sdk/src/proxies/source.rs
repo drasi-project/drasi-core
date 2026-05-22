@@ -481,7 +481,7 @@ impl Source for SourceProxy {
             context.identity_provider.clone(),
             &format!("Source '{}'", self.cached_id),
         )
-        .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip));
+        .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)

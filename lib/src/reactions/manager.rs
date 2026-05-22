@@ -405,6 +405,27 @@ impl ReactionManager {
             }
         }
 
+        // 5. Persist checkpoints AFTER bootstrap succeeds — a crash before this
+        //    point will re-trigger bootstrap on next start (safe).
+        if let Some(store) = state_store.as_ref() {
+            for (query_id, cp) in &initial_checkpoints {
+                if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
+                    store.as_ref(),
+                    reaction_id,
+                    query_id,
+                    cp,
+                )
+                .await
+                {
+                    log::warn!(
+                        "[{reaction_id}] Failed to persist checkpoint for query '{query_id}' \
+                         at seq={}: {e}",
+                        cp.sequence
+                    );
+                }
+            }
+        }
+
         // Publish the computed checkpoints so forwarders can filter stale events.
         *shared_checkpoints.write().await = initial_checkpoints;
 
@@ -436,23 +457,6 @@ impl ReactionManager {
                 sequence: snapshot.as_of_sequence,
                 config_hash,
             };
-
-            // Persist the checkpoint.
-            if let Some(store) = state_store.as_ref() {
-                crate::reactions::checkpoint::write_checkpoint(
-                    store.as_ref(),
-                    reaction_id,
-                    query_id,
-                    &cp,
-                )
-                .await?;
-            } else {
-                log::debug!(
-                    "[{reaction_id}] No state store — checkpoint for query '{query_id}' \
-                     not persisted (seq={})",
-                    cp.sequence
-                );
-            }
 
             bootstrap_queries.push((query_id.to_string(), query.clone()));
             Ok(cp)
@@ -654,16 +658,6 @@ impl ReactionManager {
                     sequence: snapshot.as_of_sequence,
                     config_hash,
                 };
-
-                if let Some(store) = state_store.as_ref() {
-                    crate::reactions::checkpoint::write_checkpoint(
-                        store.as_ref(),
-                        reaction_id,
-                        query_id,
-                        &cp,
-                    )
-                    .await?;
-                }
 
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
                 Ok(cp)
@@ -1057,6 +1051,9 @@ impl ReactionManager {
                         cps.get(&query_id_clone).map(|cp| cp.sequence).unwrap_or(0)
                     };
 
+                    // Track the last forwarded sequence for gap detection.
+                    let mut last_forwarded_seq = initial_seq;
+
                     log::debug!(
                         "[{reaction_id_owned}] Started result forwarder for query '{query_id_clone}' \
                          (initial_seq={initial_seq})"
@@ -1068,11 +1065,60 @@ impl ReactionManager {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
                                     log::debug!(
-                                        "[{reaction_id_owned}] Skipping seq={} <= initial_seq={initial_seq} for query '{query_id_clone}'",
+                                        "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
                                         query_result.sequence
                                     );
                                     continue;
                                 }
+
+                                // §6: Detect sequence gaps (incoming seq > expected next).
+                                // This catches drops that don't manifest as broadcast lag
+                                // (e.g., outbox overflow while reaction was stopping).
+                                if last_forwarded_seq > 0
+                                    && query_result.sequence > last_forwarded_seq.saturating_add(1)
+                                {
+                                    log::warn!(
+                                        "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
+                                         expected seq={}, got seq={}",
+                                        last_forwarded_seq.saturating_add(1),
+                                        query_result.sequence
+                                    );
+                                    match Self::handle_broadcast_gap(
+                                        &reaction_id_owned,
+                                        &query_id_clone,
+                                        &reaction,
+                                        &query_clone,
+                                        policy,
+                                        &state_store_clone,
+                                        &checkpoints,
+                                        &bootstrap_mutex,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            // After gap recovery, update checkpoint from the shared map
+                                            // (handle_broadcast_gap updates it).
+                                            let cps = checkpoints.read().await;
+                                            last_forwarded_seq = cps
+                                                .get(&query_id_clone)
+                                                .map(|cp| cp.sequence)
+                                                .unwrap_or(last_forwarded_seq);
+                                            // Re-evaluate this event against the updated checkpoint.
+                                            if query_result.sequence <= last_forwarded_seq {
+                                                continue;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "[{reaction_id_owned}] Recovery failed for sequence gap \
+                                                 on query '{query_id_clone}': {e}"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                last_forwarded_seq = query_result.sequence;
                                 let seq = query_result.sequence;
                                 let result = Arc::try_unwrap(query_result)
                                     .unwrap_or_else(|arc| (*arc).clone());
@@ -1081,26 +1127,19 @@ impl ReactionManager {
                                         "[{reaction_id_owned}] Failed to enqueue result from query '{query_id_clone}': {e}"
                                     );
                                 } else {
-                                    // Advance checkpoint so outbox catchup on restart
-                                    // won't replay already-delivered events.
+                                    // Advance in-memory checkpoint so forwarder tracks
+                                    // position (skip stale events on reconnect).
+                                    // NOTE: We do NOT persist to durable storage here.
+                                    // The reaction should persist its checkpoint after
+                                    // successfully processing the event. This prevents
+                                    // permanent skipping if the process crashes between
+                                    // enqueue and handler processing.
                                     let config_hash = {
                                         let cps = checkpoints.read().await;
                                         cps.get(&query_id_clone).map(|cp| cp.config_hash).unwrap_or(0)
                                     };
                                     let cp = ReactionCheckpoint { sequence: seq, config_hash };
-                                    checkpoints.write().await.insert(query_id_clone.clone(), cp.clone());
-                                    if let Some(store) = state_store_clone.as_ref() {
-                                        if let Err(e) = crate::reactions::checkpoint::write_checkpoint(
-                                            store.as_ref(),
-                                            &reaction_id_owned,
-                                            &query_id_clone,
-                                            &cp,
-                                        ).await {
-                                            log::warn!(
-                                                "[{reaction_id_owned}] Failed to persist checkpoint for query '{query_id_clone}' at seq={seq}: {e}"
-                                            );
-                                        }
-                                    }
+                                    checkpoints.write().await.insert(query_id_clone.clone(), cp);
                                 }
                             }
                             Err(e) => {
@@ -1235,6 +1274,18 @@ impl ReactionManager {
                     config_hash,
                 };
 
+                // Invoke bootstrap hook BEFORE persisting checkpoint — a crash
+                // during bootstrap will re-trigger recovery on next start.
+                let ctx = BootstrapContext::new(
+                    query_id.to_string(),
+                    true,
+                    query.clone(),
+                    reaction_id.to_string(),
+                    state_store.clone(),
+                );
+                reaction.bootstrap(ctx).await?;
+
+                // Bootstrap succeeded — now safe to persist checkpoint.
                 if let Some(store) = state_store.as_ref() {
                     crate::reactions::checkpoint::write_checkpoint(
                         store.as_ref(),
@@ -1246,16 +1297,6 @@ impl ReactionManager {
                 }
 
                 checkpoints.write().await.insert(query_id.to_string(), cp);
-
-                // Invoke bootstrap hook for this query.
-                let ctx = BootstrapContext::new(
-                    query_id.to_string(),
-                    true,
-                    query.clone(),
-                    reaction_id.to_string(),
-                    state_store.clone(),
-                );
-                reaction.bootstrap(ctx).await?;
 
                 Ok(())
             }
@@ -2035,6 +2076,312 @@ mod tests {
             3,
             "Expected exactly 3 new events, got {} (stale events should be filtered)",
             results.len()
+        );
+    }
+
+    // ========================================================================
+    // §7 Bootstrap failure and concurrent gap recovery tests
+    // ========================================================================
+
+    /// MockQuery variant whose `fetch_snapshot` returns an error.
+    struct FailingMockQuery {
+        config: QueryConfig,
+    }
+
+    impl FailingMockQuery {
+        fn new() -> Self {
+            Self {
+                config: QueryConfig {
+                    id: "q1".to_string(),
+                    query: "MATCH (n) RETURN n".to_string(),
+                    query_language: crate::config::schema::QueryLanguage::Cypher,
+                    middleware: vec![],
+                    sources: vec![],
+                    auto_start: true,
+                    joins: None,
+                    enable_bootstrap: true,
+                    bootstrap_buffer_size: 10000,
+                    priority_queue_capacity: None,
+                    dispatch_buffer_capacity: None,
+                    dispatch_mode: None,
+                    storage_backend: None,
+                    recovery_policy: None,
+                    bootstrap_timeout_secs: 300,
+                    outbox_capacity: 1000,
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::queries::Query for FailingMockQuery {
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Running
+        }
+        fn get_config(&self) -> &QueryConfig {
+            &self.config
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        async fn subscribe(&self, _reaction_id: String) -> Result<QuerySubscriptionResponse> {
+            Err(anyhow::anyhow!("not supported"))
+        }
+        async fn fetch_snapshot(&self) -> Result<SnapshotResponse, FetchError> {
+            Err(FetchError::NotRunning {
+                status: ComponentStatus::Error,
+            })
+        }
+        async fn fetch_outbox(&self, _after_sequence: u64) -> Result<OutboxResponse, FetchError> {
+            Ok(OutboxResponse {
+                results: vec![],
+                latest_sequence: 0,
+                config_hash: 0,
+            })
+        }
+    }
+
+    /// Test: AutoReset bootstrap fails because snapshot fetch errors.
+    /// The handle_broadcast_gap should propagate the error without leaving
+    /// a stale checkpoint in the map.
+    #[tokio::test]
+    async fn auto_reset_bootstrap_failure_propagates_error() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(FailingMockQuery::new());
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into()])
+                .with_snapshot_on_fresh(true)
+                .with_policy(ReactionRecoveryPolicy::AutoReset),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        let result = ReactionManager::handle_broadcast_gap(
+            "r1",
+            "q1",
+            &reaction_trait,
+            &query,
+            ReactionRecoveryPolicy::AutoReset,
+            &None,
+            &checkpoints,
+            &bootstrap_mutex,
+        )
+        .await;
+
+        // Should fail because fetch_snapshot returns error.
+        assert!(
+            result.is_err(),
+            "AutoReset should fail when snapshot fetch errors"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("failed to fetch snapshot"),
+            "Error should mention snapshot failure: {msg}"
+        );
+
+        // No checkpoint should be written on failure.
+        assert!(
+            checkpoints.read().await.is_empty(),
+            "No checkpoint should be set when bootstrap fails"
+        );
+
+        // bootstrap() should NOT have been called (failed before reaching it).
+        assert_eq!(
+            reaction.bootstrap_count.load(Ordering::SeqCst),
+            0,
+            "bootstrap() should not be called when snapshot fetch fails"
+        );
+    }
+
+    /// MockReaction variant whose `bootstrap()` always returns an error.
+    struct FailingBootstrapReaction {
+        id: String,
+        queries: Vec<String>,
+        policy: ReactionRecoveryPolicy,
+        status_handle: ComponentStatusHandle,
+        enqueued: Arc<Mutex<Vec<QueryResult>>>,
+        bootstrap_count: Arc<AtomicUsize>,
+    }
+
+    impl FailingBootstrapReaction {
+        fn new(id: &str, queries: Vec<String>) -> Self {
+            Self {
+                id: id.to_string(),
+                queries,
+                policy: ReactionRecoveryPolicy::AutoReset,
+                status_handle: ComponentStatusHandle::new(id),
+                enqueued: Arc::new(Mutex::new(Vec::new())),
+                bootstrap_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Reaction for FailingBootstrapReaction {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn type_name(&self) -> &str {
+            "test-failing-bootstrap"
+        }
+        fn properties(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+        fn query_ids(&self) -> Vec<String> {
+            self.queries.clone()
+        }
+        fn auto_start(&self) -> bool {
+            false
+        }
+        async fn initialize(&self, ctx: crate::context::ReactionRuntimeContext) {
+            self.status_handle.wire(ctx.update_tx.clone()).await;
+        }
+        async fn start(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Running, None)
+                .await;
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            self.status_handle
+                .set_status(ComponentStatus::Stopped, None)
+                .await;
+            Ok(())
+        }
+        async fn status(&self) -> ComponentStatus {
+            self.status_handle.get_status().await
+        }
+        fn is_durable(&self) -> bool {
+            false
+        }
+        fn needs_snapshot_on_fresh_start(&self) -> bool {
+            true
+        }
+        fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+            self.policy
+        }
+        async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+            self.enqueued.lock().await.push(result);
+            Ok(())
+        }
+        async fn bootstrap(
+            &self,
+            _ctx: crate::reactions::bootstrap_context::BootstrapContext,
+        ) -> Result<()> {
+            self.bootstrap_count.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("Simulated bootstrap failure"))
+        }
+    }
+
+    /// Test: AutoReset with successful snapshot fetch but bootstrap() hook failure.
+    /// The error should propagate and no checkpoint should be persisted.
+    #[tokio::test]
+    async fn auto_reset_bootstrap_hook_failure_propagates_error() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction = Arc::new(FailingBootstrapReaction::new("r1", vec!["q1".into()]));
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        let result = ReactionManager::handle_broadcast_gap(
+            "r1",
+            "q1",
+            &reaction_trait,
+            &query,
+            ReactionRecoveryPolicy::AutoReset,
+            &None,
+            &checkpoints,
+            &bootstrap_mutex,
+        )
+        .await;
+
+        // Should fail because bootstrap() returns error.
+        assert!(result.is_err(), "Should fail when bootstrap hook errors");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Simulated bootstrap failure"),
+            "Error should contain bootstrap failure message: {msg}"
+        );
+
+        // No checkpoint should be persisted on bootstrap failure.
+        assert!(
+            checkpoints.read().await.is_empty(),
+            "No checkpoint should be set when bootstrap hook fails"
+        );
+
+        // bootstrap() was called once (and failed).
+        assert_eq!(
+            reaction.bootstrap_count.load(Ordering::SeqCst),
+            1,
+            "bootstrap() should have been called once before failing"
+        );
+    }
+
+    /// Test: Concurrent multi-query gap recovery is serialized by the bootstrap mutex.
+    /// Two concurrent AutoReset gap recoveries should not interleave bootstrap calls.
+    #[tokio::test]
+    async fn concurrent_gap_recovery_serialized_by_mutex() {
+        let query: Arc<dyn crate::queries::Query> = Arc::new(MockQuery::new(42, 100));
+        let reaction = Arc::new(
+            MockReaction::new("r1", vec!["q1".into(), "q2".into()])
+                .with_snapshot_on_fresh(true)
+                .with_policy(ReactionRecoveryPolicy::AutoReset),
+        );
+        let reaction_trait: Arc<dyn Reaction> = reaction.clone();
+        let checkpoints = Arc::new(RwLock::new(HashMap::new()));
+        let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
+
+        // Launch two concurrent gap recoveries for different query IDs.
+        let (r1, r2) = tokio::join!(
+            ReactionManager::handle_broadcast_gap(
+                "r1",
+                "q1",
+                &reaction_trait,
+                &query,
+                ReactionRecoveryPolicy::AutoReset,
+                &None,
+                &checkpoints,
+                &bootstrap_mutex,
+            ),
+            ReactionManager::handle_broadcast_gap(
+                "r1",
+                "q2",
+                &reaction_trait,
+                &query,
+                ReactionRecoveryPolicy::AutoReset,
+                &None,
+                &checkpoints,
+                &bootstrap_mutex,
+            ),
+        );
+
+        assert!(
+            r1.is_ok(),
+            "First gap recovery should succeed: {:?}",
+            r1.err()
+        );
+        assert!(
+            r2.is_ok(),
+            "Second gap recovery should succeed: {:?}",
+            r2.err()
+        );
+
+        // Both checkpoints should be set.
+        let cps = checkpoints.read().await;
+        assert!(cps.contains_key("q1"), "Checkpoint for q1 should exist");
+        assert!(cps.contains_key("q2"), "Checkpoint for q2 should exist");
+
+        // Bootstrap should have been called exactly twice (once per query, serialized).
+        assert_eq!(
+            reaction.bootstrap_count.load(Ordering::SeqCst),
+            2,
+            "bootstrap() should be called exactly twice (serialized by mutex)"
         );
     }
 }

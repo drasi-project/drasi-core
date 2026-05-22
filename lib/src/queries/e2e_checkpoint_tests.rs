@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use serial_test::serial;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::channels::events::SourceEventWrapper;
@@ -334,6 +335,7 @@ async fn wait_for_status(core: &DrasiLib, component_id: &str, expected: Componen
 
 /// Full lifecycle: build → start → feed events → stop → restart → verify resume_from.
 #[tokio::test]
+#[serial]
 async fn test_e2e_checkpoint_round_trip() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-rt", &tmp_dir, None).await.unwrap();
@@ -401,6 +403,7 @@ async fn test_e2e_checkpoint_round_trip() {
 
 /// Volatile query (no storage backend) should never send resume_from.
 #[tokio::test]
+#[serial]
 async fn test_e2e_volatile_query_no_checkpoints() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-vol", &tmp_dir, None).await.unwrap();
@@ -438,6 +441,7 @@ async fn test_e2e_volatile_query_no_checkpoints() {
 
 /// Persistent query + volatile source (supports_replay=false) → rejected.
 #[tokio::test]
+#[serial]
 async fn test_e2e_persistent_query_volatile_source_rejected() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-compat", &tmp_dir, None).await.unwrap();
@@ -460,6 +464,7 @@ async fn test_e2e_persistent_query_volatile_source_rejected() {
 
 /// Strict policy + PositionUnavailable → query goes to Error state.
 #[tokio::test]
+#[serial]
 async fn test_e2e_strict_policy_position_unavailable() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-strict", &tmp_dir, None).await.unwrap();
@@ -482,6 +487,7 @@ async fn test_e2e_strict_policy_position_unavailable() {
 
 /// AutoReset + PositionUnavailable → wipes state and re-bootstraps.
 #[tokio::test]
+#[serial]
 async fn test_e2e_auto_reset_position_unavailable() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-reset", &tmp_dir, None).await.unwrap();
@@ -519,6 +525,7 @@ async fn test_e2e_auto_reset_position_unavailable() {
 
 /// remove_query() clears persistent state so re-adding starts fresh.
 #[tokio::test]
+#[serial]
 async fn test_e2e_remove_query_clears_persistent_state() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-remove", &tmp_dir, None).await.unwrap();
@@ -563,6 +570,7 @@ async fn test_e2e_remove_query_clears_persistent_state() {
 
 /// stop() releases position handles on the source.
 #[tokio::test]
+#[serial]
 async fn test_e2e_stop_releases_position_handles() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-handles", &tmp_dir, None).await.unwrap();
@@ -596,6 +604,7 @@ async fn test_e2e_stop_releases_position_handles() {
 
 /// Config change (different query string) triggers full re-bootstrap instead of resume.
 #[tokio::test]
+#[serial]
 async fn test_e2e_config_change_triggers_rebootstrap() {
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let core = build_e2e_lib("e2e-cfghash", &tmp_dir, None).await.unwrap();

@@ -49,7 +49,7 @@ drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
 [dev-dependencies]
-drasi-source-application = { path = "../../sources/application" }
+drasi-source-application = { workspace = true }
 eventsource-stream = "0.2"
 futures = "0.3"
 reqwest = { version = "0.11", features = ["stream", "json"] }

@@ -148,27 +148,27 @@ impl ReactionPluginDescriptor for SqsReactionDescriptor {
         let mut builder = SqsReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_queue_url(mapper.resolve_string(&dto.queue_url)?);
+            .with_queue_url(mapper.resolve_string(&dto.queue_url).await?);
 
         if let Some(region) = &dto.region {
-            builder = builder.with_region(mapper.resolve_string(region)?);
+            builder = builder.with_region(mapper.resolve_string(region).await?);
         }
         if let Some(endpoint_url) = &dto.endpoint_url {
-            builder = builder.with_endpoint_url(mapper.resolve_string(endpoint_url)?);
+            builder = builder.with_endpoint_url(mapper.resolve_string(endpoint_url).await?);
         }
         if let Some(fifo_queue) = &dto.fifo_queue {
-            builder = builder.with_fifo_queue(mapper.resolve_typed(fifo_queue)?);
+            builder = builder.with_fifo_queue(mapper.resolve_typed(fifo_queue).await?);
         }
         if let Some(group_id_template) = &dto.message_group_id_template {
-            builder =
-                builder.with_message_group_id_template(mapper.resolve_string(group_id_template)?);
+            builder = builder
+                .with_message_group_id_template(mapper.resolve_string(group_id_template).await?);
         }
         if let Some(access_key_id) = &dto.access_key_id {
             match &dto.secret_access_key {
                 Some(secret_access_key) => {
                     builder = builder.with_credentials(
-                        mapper.resolve_string(access_key_id)?,
-                        mapper.resolve_string(secret_access_key)?,
+                        mapper.resolve_string(access_key_id).await?,
+                        mapper.resolve_string(secret_access_key).await?,
                     );
                 }
                 None => {

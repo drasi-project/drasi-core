@@ -251,19 +251,19 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {
-            let resolved = mapper.resolve_string(host)?;
+            let resolved = mapper.resolve_string(host).await?;
             log::debug!("[{id}] Resolved host: {resolved}");
             builder = builder.with_host(resolved);
         }
 
         if let Some(ref port) = dto.port {
-            let resolved = mapper.resolve_typed(port)?;
+            let resolved = mapper.resolve_typed(port).await?;
             log::debug!("[{id}] Resolved port: {resolved}");
             builder = builder.with_port(resolved);
         }
 
         if let Some(ref token) = dto.bearer_token {
-            let resolved = mapper.resolve_string(token)?;
+            let resolved = mapper.resolve_string(token).await?;
             log::debug!("[{id}] Bearer token configured ({} chars)", resolved.len());
             builder = builder.with_bearer_token(resolved);
         }
@@ -301,8 +301,8 @@ impl ReactionPluginDescriptor for McpReactionDescriptor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_config_value_resolution() {
+    #[tokio::test]
+    async fn test_config_value_resolution() {
         let env_var = format!("MCP_TEST_PORT_{}", std::process::id());
         std::env::set_var(&env_var, "3456");
         let dto = McpReactionConfigDto {
@@ -318,9 +318,13 @@ mod tests {
         };
 
         let mapper = DtoMapper::new();
-        let port = mapper.resolve_typed(dto.port.as_ref().unwrap()).unwrap();
+        let port = mapper
+            .resolve_typed(dto.port.as_ref().unwrap())
+            .await
+            .unwrap();
         let token = mapper
             .resolve_string(dto.bearer_token.as_ref().unwrap())
+            .await
             .unwrap();
 
         assert_eq!(port, 3456);

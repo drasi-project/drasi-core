@@ -128,7 +128,10 @@ impl BootstrapPluginDescriptor for SuiDeepBookBootstrapDescriptor {
         let dto: SuiDeepBookBootstrapConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let start_position = match mapper.resolve_typed::<StartPositionDto>(&dto.start_position)? {
+        let start_position = match mapper
+            .resolve_typed::<StartPositionDto>(&dto.start_position)
+            .await?
+        {
             StartPositionDto::Beginning => StartPosition::Beginning,
             StartPositionDto::Now => StartPosition::Now,
             StartPositionDto::Timestamp => {
@@ -138,7 +141,8 @@ impl BootstrapPluginDescriptor for SuiDeepBookBootstrapDescriptor {
                     )
                 })?;
                 let timestamp = mapper
-                    .resolve_string(ts_config)?
+                    .resolve_string(ts_config)
+                    .await?
                     .parse::<i64>()
                     .map_err(|e| anyhow::anyhow!("Invalid startTimestampMs: {e}"))?;
                 StartPosition::Timestamp(timestamp)
@@ -146,10 +150,10 @@ impl BootstrapPluginDescriptor for SuiDeepBookBootstrapDescriptor {
         };
 
         let provider = SuiDeepBookBootstrapProvider::builder()
-            .with_rpc_endpoint(mapper.resolve_string(&dto.rpc_endpoint)?)
-            .with_deepbook_package_id(mapper.resolve_string(&dto.deepbook_package_id)?)
-            .with_request_limit(mapper.resolve_typed(&dto.request_limit)?)
-            .with_max_pages(mapper.resolve_typed(&dto.max_pages)?)
+            .with_rpc_endpoint(mapper.resolve_string(&dto.rpc_endpoint).await?)
+            .with_deepbook_package_id(mapper.resolve_string(&dto.deepbook_package_id).await?)
+            .with_request_limit(mapper.resolve_typed(&dto.request_limit).await?)
+            .with_max_pages(mapper.resolve_typed(&dto.max_pages).await?)
             .with_event_filters(dto.event_filters)
             .with_pools(dto.pools)
             .with_start_position(start_position)

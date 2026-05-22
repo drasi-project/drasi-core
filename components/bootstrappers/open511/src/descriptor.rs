@@ -94,42 +94,42 @@ impl BootstrapPluginDescriptor for Open511BootstrapDescriptor {
         let mapper = DtoMapper::new();
 
         let builder = Open511BootstrapProviderBuilder::new()
-            .with_base_url(mapper.resolve_string(&dto.base_url)?)
-            .with_request_timeout_secs(mapper.resolve_typed(&dto.request_timeout_secs)?)
-            .with_page_size(mapper.resolve_typed(&dto.page_size)?);
+            .with_base_url(mapper.resolve_string(&dto.base_url).await?)
+            .with_request_timeout_secs(mapper.resolve_typed(&dto.request_timeout_secs).await?)
+            .with_page_size(mapper.resolve_typed(&dto.page_size).await?);
 
         let builder = if let Some(status_filter) = dto.status_filter {
-            builder.with_status_filter(mapper.resolve_string(&status_filter)?)
+            builder.with_status_filter(mapper.resolve_string(&status_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(severity_filter) = dto.severity_filter {
-            builder.with_severity_filter(mapper.resolve_string(&severity_filter)?)
+            builder.with_severity_filter(mapper.resolve_string(&severity_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(event_type_filter) = dto.event_type_filter {
-            builder.with_event_type_filter(mapper.resolve_string(&event_type_filter)?)
+            builder.with_event_type_filter(mapper.resolve_string(&event_type_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(area_id_filter) = dto.area_id_filter {
-            builder.with_area_id_filter(mapper.resolve_string(&area_id_filter)?)
+            builder.with_area_id_filter(mapper.resolve_string(&area_id_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(road_name_filter) = dto.road_name_filter {
-            builder.with_road_name_filter(mapper.resolve_string(&road_name_filter)?)
+            builder.with_road_name_filter(mapper.resolve_string(&road_name_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(jurisdiction_filter) = dto.jurisdiction_filter {
-            builder.with_jurisdiction_filter(mapper.resolve_string(&jurisdiction_filter)?)
+            builder.with_jurisdiction_filter(mapper.resolve_string(&jurisdiction_filter).await?)
         } else {
             builder
         };
         let builder = if let Some(bbox_filter) = dto.bbox_filter {
-            builder.with_bbox_filter(mapper.resolve_string(&bbox_filter)?)
+            builder.with_bbox_filter(mapper.resolve_string(&bbox_filter).await?)
         } else {
             builder
         };

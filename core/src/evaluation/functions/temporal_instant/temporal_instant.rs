@@ -92,7 +92,7 @@ impl ScalarFunction for Date {
                         error: FunctionEvaluationError::InvalidArgument(0),
                     });
                 }
-                let result = create_date_from_componet(o.clone()).await;
+                let result = create_date_from_component(o.clone()).await;
                 match result {
                     Ok(date) => Ok(date),
                     Err(e) => Err(FunctionError {
@@ -169,7 +169,7 @@ impl ScalarFunction for LocalTime {
                         error: FunctionEvaluationError::InvalidArgument(0),
                     });
                 }
-                let result = create_time_from_componet(o.clone()).await;
+                let result = create_time_from_component(o.clone()).await;
                 match result {
                     Ok(time) => Ok(time),
                     Err(e) => Err(FunctionError {
@@ -301,7 +301,7 @@ impl ScalarFunction for LocalDateTime {
                     return Ok(VariableValue::LocalDateTime(local.naive_local()));
                 }
 
-                let date_result = match create_date_from_componet(o.clone()).await {
+                let date_result = match create_date_from_component(o.clone()).await {
                     Ok(date) => date,
                     Err(e) => {
                         return Err(FunctionError {
@@ -310,7 +310,7 @@ impl ScalarFunction for LocalDateTime {
                         })
                     }
                 };
-                let time_result = match create_time_from_componet(o.clone()).await {
+                let time_result = match create_time_from_component(o.clone()).await {
                     Ok(time) => time,
                     Err(e) => {
                         return Err(FunctionError {
@@ -445,7 +445,7 @@ impl ScalarFunction for Time {
                     )));
                 }
 
-                let result = create_time_from_componet(o.clone()).await;
+                let result = create_time_from_component(o.clone()).await;
                 match result {
                     Ok(time) => {
                         let dummy_date = *temporal_constants::EPOCH_NAIVE_DATE;
@@ -658,7 +658,7 @@ impl ScalarFunction for DateTime {
                         zoned_time, None,
                     )));
                 }
-                let naive_date = match create_date_from_componet(o.clone()).await {
+                let naive_date = match create_date_from_component(o.clone()).await {
                     Ok(date) => match date.as_date() {
                         Some(date) => date,
                         None => {
@@ -679,7 +679,7 @@ impl ScalarFunction for DateTime {
                         })
                     }
                 };
-                let result = create_time_from_componet(o.clone()).await;
+                let result = create_time_from_component(o.clone()).await;
                 match result {
                     Ok(time) => {
                         let local_time =
@@ -761,7 +761,7 @@ impl ScalarFunction for DateTime {
     }
 }
 
-async fn create_date_from_componet(
+async fn create_date_from_component(
     o: BTreeMap<String, VariableValue>,
 ) -> Result<VariableValue, FunctionEvaluationError> {
     let year = match o.get("year") {
@@ -914,7 +914,7 @@ async fn create_date_time_from_epoch(o: BTreeMap<String, VariableValue>) -> Opti
     None
 }
 
-async fn create_time_from_componet(
+async fn create_time_from_component(
     o: BTreeMap<String, VariableValue>,
 ) -> Result<VariableValue, FunctionEvaluationError> {
     let hour = match o.get("hour") {

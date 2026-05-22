@@ -231,19 +231,25 @@ impl SourcePluginDescriptor for OracleSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let mut builder = OracleSourceBuilder::new(id)
-            .with_host(mapper.resolve_string(&dto.host)?)
-            .with_port(mapper.resolve_typed(&dto.port)?)
-            .with_service(mapper.resolve_string(&dto.service)?)
-            .with_user(mapper.resolve_string(&dto.user)?)
-            .with_password(mapper.resolve_string(&dto.password)?)
+            .with_host(mapper.resolve_string(&dto.host).await?)
+            .with_port(mapper.resolve_typed(&dto.port).await?)
+            .with_service(mapper.resolve_string(&dto.service).await?)
+            .with_user(mapper.resolve_string(&dto.user).await?)
+            .with_password(mapper.resolve_string(&dto.password).await?)
             .with_tables(dto.tables)
-            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms)?)
+            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms).await?)
             .with_start_position(
                 mapper
-                    .resolve_typed::<StartPositionDto>(&dto.start_position)?
+                    .resolve_typed::<StartPositionDto>(&dto.start_position)
+                    .await?
                     .into(),
             )
-            .with_ssl_mode(mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode)?.into())
+            .with_ssl_mode(
+                mapper
+                    .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                    .await?
+                    .into(),
+            )
             .with_auto_start(auto_start);
 
         for table_key in dto.table_keys {

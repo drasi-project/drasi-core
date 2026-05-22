@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-lib"
-version = "0.8.1"
+version = "0.8.4"
 edition.workspace = true
 authors = ["Drasi Project"]
 description = "Embedded Drasi for in-process data change processing using continuous queries"
@@ -87,6 +87,7 @@ futures = "0.3"
 fnv = "1.0.7"
 im = { workspace = true }
 bincode = "1.3"
+rmp-serde = "1"
 
 
 

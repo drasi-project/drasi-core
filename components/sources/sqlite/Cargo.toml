@@ -55,7 +55,7 @@ hyper = "1.0"
 tower-http = { version = "0.5", features = ["trace"] }
 
 [dev-dependencies]
-drasi-bootstrap-sqlite = { path = "../../bootstrappers/sqlite" }
+drasi-bootstrap-sqlite = { workspace = true }
 drasi-reaction-application.workspace = true
 tokio-test = "0.4"
 tempfile = "3"

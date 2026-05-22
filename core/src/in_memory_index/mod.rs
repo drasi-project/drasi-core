@@ -15,4 +15,6 @@
 pub mod in_memory_checkpoint_store;
 pub mod in_memory_element_index;
 pub mod in_memory_future_queue;
+pub mod in_memory_live_results_writer;
+pub mod in_memory_outbox_writer;
 pub mod in_memory_result_index;

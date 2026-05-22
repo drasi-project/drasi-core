@@ -33,7 +33,7 @@ workspace = true
 drasi-core.workspace = true
 drasi-lib.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-oracle-common = { path = "../../oracle-common", package = "drasi-oracle-common" }
+drasi-oracle-common = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
@@ -47,13 +47,13 @@ tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 
 [dev-dependencies]
-drasi-bootstrap-oracle = { path = "../../bootstrappers/oracle" }
-drasi-index-rocksdb = { path = "../../indexes/rocksdb" }
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-bootstrap-oracle = { workspace = true }
+drasi-index-rocksdb = { workspace = true }
+drasi-reaction-application = { workspace = true }
 env_logger = "0.10.0"
 serial_test = "3.0"
 tempfile = "3.0"
-testcontainers = "0.26"
+testcontainers = "0.27"
 tokio-test = "0.4"
 
 [features]
