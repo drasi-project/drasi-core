@@ -16,6 +16,7 @@
 name = "drasi-bootstrap-open511"
 version = "0.1.0"
 edition = "2021"
+publish = false
 authors = ["Drasi Project"]
 description = "Open511 bootstrap provider plugin for Drasi"
 license = "Apache-2.0"

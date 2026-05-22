@@ -16,6 +16,7 @@
 name = "drasi-source-here-traffic"
 version = "0.1.0"
 edition = "2021"
+publish = false
 authors = ["Drasi Project"]
 description = "HERE Traffic API source plugin for Drasi"
 license = "Apache-2.0"
