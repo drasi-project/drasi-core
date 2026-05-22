@@ -182,13 +182,6 @@ pub struct DashboardReactionConfigDto {
     #[schema(value_type = Option<ConfigValueU64>)]
     pub heartbeat_interval_ms: Option<ConfigValue<u64>>,
 
-    /// Optional base URL for the DrasiLib results API (e.g., "http://localhost:8080").
-    /// When set, the dashboard proxies initial query data from this API
-    /// so widgets populate immediately with bootstrap data.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<ConfigValueString>)]
-    pub results_api_url: Option<ConfigValue<String>>,
-
     /// Optional priority queue capacity for change event processing.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
@@ -262,10 +255,6 @@ impl From<&crate::config::DashboardReactionConfig> for DashboardReactionConfigDt
             host: Some(ConfigValue::Static(config.host.clone())),
             port: Some(ConfigValue::Static(config.port)),
             heartbeat_interval_ms: Some(ConfigValue::Static(config.heartbeat_interval_ms)),
-            results_api_url: config
-                .results_api_url
-                .as_ref()
-                .map(|u| ConfigValue::Static(u.clone())),
             priority_queue_capacity: None,
             predefined_dashboards: Vec::new(),
         }
@@ -343,9 +332,6 @@ impl ReactionPluginDescriptor for DashboardReactionDescriptor {
         if let Some(ref heartbeat_interval_ms) = dto.heartbeat_interval_ms {
             builder = builder
                 .with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat_interval_ms).await?);
-        }
-        if let Some(ref results_api_url) = dto.results_api_url {
-            builder = builder.with_results_api_url(mapper.resolve_string(results_api_url).await?);
         }
         if let Some(ref priority_queue_capacity) = dto.priority_queue_capacity {
             let capacity: u64 = mapper.resolve_typed(priority_queue_capacity).await?;

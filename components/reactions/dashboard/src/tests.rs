@@ -80,7 +80,6 @@ fn test_dashboard_config_serialization() {
         host: "localhost".to_string(),
         port: 5050,
         heartbeat_interval_ms: 15_000,
-        results_api_url: None,
     };
 
     let serialized = serde_json::to_string(&config).expect("config should serialize");
@@ -166,7 +165,6 @@ fn test_schema_config_has_all_properties() {
         "host",
         "port",
         "heartbeatIntervalMs",
-        "resultsApiUrl",
         "priorityQueueCapacity",
         "predefinedDashboards",
     ];
@@ -229,7 +227,6 @@ fn test_dto_deserialize_minimal_config() {
     assert!(dto.host.is_none());
     assert!(dto.port.is_none());
     assert!(dto.heartbeat_interval_ms.is_none());
-    assert!(dto.results_api_url.is_none());
     assert!(dto.priority_queue_capacity.is_none());
     assert!(dto.predefined_dashboards.is_empty());
 }
@@ -276,7 +273,6 @@ fn test_dto_deserialize_full_config() {
     assert!(dto.host.is_some());
     assert!(dto.port.is_some());
     assert!(dto.heartbeat_interval_ms.is_some());
-    assert!(dto.results_api_url.is_some());
     assert!(dto.priority_queue_capacity.is_some());
     assert_eq!(dto.predefined_dashboards.len(), 1);
 
