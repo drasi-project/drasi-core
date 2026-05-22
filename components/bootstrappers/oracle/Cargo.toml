@@ -33,7 +33,7 @@ workspace = true
 drasi-core.workspace = true
 drasi-lib.workspace = true
 drasi-plugin-sdk = { workspace = true }
-drasi-oracle-common = { path = "../../oracle-common" }
+drasi-oracle-common = { workspace = true }
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"

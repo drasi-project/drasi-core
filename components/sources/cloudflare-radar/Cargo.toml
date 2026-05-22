@@ -48,7 +48,7 @@ url = "2"
 tokio-test = "0.4"
 testcontainers = "0.27"
 drasi-bootstrap-cloudflare-radar.workspace = true
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-reaction-application = { workspace = true }
 env_logger = "0.11"
 
 [features]

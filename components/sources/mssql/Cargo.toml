@@ -55,10 +55,10 @@ bytes = "1"
 env_logger = "0.11"
 tokio-test = "0.4"
 testcontainers = "0.27"
-drasi-bootstrap-mssql = { path = "../../bootstrappers/mssql" }
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-bootstrap-mssql = { workspace = true }
+drasi-reaction-application = { workspace = true }
 drasi-index-rocksdb = { workspace = true }
-drasi-host-sdk = { path = "../../host-sdk" }
+drasi-host-sdk = { workspace = true }
 drasi-plugin-sdk = { workspace = true }
 tempfile = "3"
 bytes = "1"

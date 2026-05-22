@@ -188,6 +188,10 @@ drasi-source-oracle = { version = "0.1.0", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.0", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.1", path = "components/oracle-common" }
 drasi-source-gtfs-rt = { version = "0.1.0", path = "components/sources/gtfs-rt" }
+drasi-bootstrap-gtfs-rt = { version = "0.1.0", path = "components/bootstrappers/gtfs-rt" }
+drasi-source-open511 = { version = "0.1.0", path = "components/sources/open511" }
+drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }
+drasi-bootstrap-sqlite = { version = "0.1.1", path = "components/bootstrappers/sqlite" }
 
 [workspace.lints.rust]
 warnings = "deny"

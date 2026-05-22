@@ -34,7 +34,7 @@ drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-drasi-source-gtfs-rt = { path = "../../sources/gtfs-rt" }
+drasi-source-gtfs-rt = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"

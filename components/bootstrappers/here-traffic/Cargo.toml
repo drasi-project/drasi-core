@@ -33,7 +33,7 @@ workspace = true
 drasi-core.workspace = true
 drasi-lib.workspace = true
 drasi-plugin-sdk.workspace = true
-drasi-source-here-traffic = { path = "../../sources/here-traffic" }
+drasi-source-here-traffic = { workspace = true }
 utoipa.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
