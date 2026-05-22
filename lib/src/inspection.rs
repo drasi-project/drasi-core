@@ -786,7 +786,7 @@ impl InspectionAPI {
     pub async fn get_query_output_metrics(
         &self,
         query_id: &str,
-    ) -> crate::error::Result<Option<crate::metrics::QueryOutputMetricsSnapshot>> {
+    ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
         self.state_guard.require_initialized()?;
         let instance = self
             .query_manager
@@ -794,8 +794,11 @@ impl InspectionAPI {
             .await
             .ok();
         match instance {
-            Some(q) => Ok(q.output_metrics().map(|m| m.snapshot())),
-            None => Ok(None),
+            Some(q) => match q.output_metrics() {
+                Some(m) => Ok(m.snapshot()),
+                None => Err(crate::error::DrasiError::component_not_found("query", query_id)),
+            },
+            None => Err(crate::error::DrasiError::component_not_found("query", query_id)),
         }
     }
 

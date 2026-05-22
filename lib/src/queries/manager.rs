@@ -2383,9 +2383,9 @@ impl Query for DrasiQuery {
         // This ensures reactions don't observe a partial result set during initialization.
         self.wait_until_running().await?;
 
-        // Track snapshot clone creation
+        // Track snapshot fetch invocations
         self.output_metrics
-            .active_snapshot_clones
+            .snapshot_fetch_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let (results_clone, as_of_sequence) = {

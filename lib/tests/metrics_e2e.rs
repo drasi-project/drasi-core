@@ -311,12 +311,7 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
     core.start().await?;
 
     // Initially, metrics should show zero advances
-    let initial_metrics = core.get_query_output_metrics("q1").await?;
-    assert!(
-        initial_metrics.is_some(),
-        "Query q1 should have output metrics"
-    );
-    let initial = initial_metrics.unwrap();
+    let initial = core.get_query_output_metrics("q1").await?;
     assert_eq!(initial.result_seq_advances, 0);
 
     // Insert some data
@@ -329,16 +324,11 @@ async fn query_output_metrics_updated_after_events() -> Result<()> {
     assert_eq!(results.len(), 3, "Should receive 3 events");
 
     // Metrics should now be updated
-    let metrics = core.get_query_output_metrics("q1").await?.unwrap();
+    let metrics = core.get_query_output_metrics("q1").await?;
     assert!(
         metrics.result_seq_advances >= 3,
         "Expected at least 3 sequence advances, got {}",
         metrics.result_seq_advances
-    );
-    assert!(
-        metrics.outer_transaction_count >= 3,
-        "Expected at least 3 outer transactions, got {}",
-        metrics.outer_transaction_count
     );
     assert!(
         metrics.live_results_count == 3,
@@ -470,9 +460,9 @@ async fn lifecycle_metrics_count_startup_rejections() -> Result<()> {
     Ok(())
 }
 
-/// Test: Query output metrics returns None for non-existent query.
+/// Test: Query output metrics returns ComponentNotFound for non-existent query.
 #[tokio::test]
-async fn query_output_metrics_none_for_nonexistent() -> Result<()> {
+async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
     let (mock_source, _handle) = MockSource::new("test-source")?;
 
     let query = Query::cypher("q1")
@@ -492,8 +482,8 @@ async fn query_output_metrics_none_for_nonexistent() -> Result<()> {
 
     core.start().await?;
 
-    let metrics = core.get_query_output_metrics("nonexistent").await?;
-    assert!(metrics.is_none(), "Expected None for non-existent query");
+    let result = core.get_query_output_metrics("nonexistent").await;
+    assert!(result.is_err(), "Expected error for non-existent query");
 
     Ok(())
 }

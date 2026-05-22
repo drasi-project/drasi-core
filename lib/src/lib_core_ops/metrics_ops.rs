@@ -26,26 +26,24 @@ use crate::metrics::{LifecycleMetricsSnapshot, QueryOutputMetricsSnapshot, React
 impl DrasiLib {
     /// Get per-query output metrics for a specific query.
     ///
-    /// Returns `None` if the query is not found or has no metrics attached.
-    ///
     /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the query does not exist.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
     ///
     /// # Example
     /// ```no_run
     /// # use drasi_lib::DrasiLib;
     /// # async fn example(core: &DrasiLib) -> Result<(), Box<dyn std::error::Error>> {
-    /// if let Some(metrics) = core.get_query_output_metrics("my_query").await? {
-    ///     println!("Outbox size: {}", metrics.outbox_size);
-    ///     println!("Sequence advances: {}", metrics.result_seq_advances);
-    /// }
+    /// let metrics = core.get_query_output_metrics("my_query").await?;
+    /// println!("Outbox size: {}", metrics.outbox_size);
+    /// println!("Sequence advances: {}", metrics.result_seq_advances);
     /// # Ok(())
     /// # }
     /// ```
     pub async fn get_query_output_metrics(
         &self,
         query_id: &str,
-    ) -> Result<Option<QueryOutputMetricsSnapshot>> {
+    ) -> Result<QueryOutputMetricsSnapshot> {
         self.inspection.get_query_output_metrics(query_id).await
     }
 

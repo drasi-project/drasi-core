@@ -36,10 +36,8 @@ pub struct QueryOutputMetrics {
     pub outer_transaction_duration_ns_last: AtomicU64,
     /// Maximum outer-transaction duration observed (nanoseconds).
     pub outer_transaction_duration_ns_max: AtomicU64,
-    /// Total number of outer transactions processed.
-    pub outer_transaction_count: AtomicU64,
-    /// Number of active (outstanding) snapshot clones.
-    pub active_snapshot_clones: AtomicUsize,
+    /// Total number of snapshot fetches performed.
+    pub snapshot_fetch_count: AtomicU64,
     /// Age of the oldest outstanding snapshot in milliseconds.
     pub oldest_snapshot_age_ms: AtomicU64,
     /// Mutations accumulated since the oldest snapshot was taken.
@@ -57,8 +55,7 @@ impl QueryOutputMetrics {
             live_results_count: AtomicUsize::new(0),
             outer_transaction_duration_ns_last: AtomicU64::new(0),
             outer_transaction_duration_ns_max: AtomicU64::new(0),
-            outer_transaction_count: AtomicU64::new(0),
-            active_snapshot_clones: AtomicUsize::new(0),
+            snapshot_fetch_count: AtomicU64::new(0),
             oldest_snapshot_age_ms: AtomicU64::new(0),
             mutations_since_oldest_snapshot: AtomicU64::new(0),
         }
@@ -66,12 +63,10 @@ impl QueryOutputMetrics {
 
     /// Record an outer-transaction duration (nanoseconds).
     ///
-    /// Updates last, max, and count atomically.
+    /// Updates last and max atomically.
     pub fn record_transaction_duration_ns(&self, duration_ns: u64) {
         self.outer_transaction_duration_ns_last
             .store(duration_ns, Ordering::Relaxed);
-        self.outer_transaction_count
-            .fetch_add(1, Ordering::Relaxed);
 
         // Update max using compare-exchange loop
         let mut current_max = self.outer_transaction_duration_ns_max.load(Ordering::Relaxed);
@@ -111,8 +106,7 @@ impl QueryOutputMetrics {
             outer_transaction_duration_ns_max: self
                 .outer_transaction_duration_ns_max
                 .load(Ordering::Relaxed),
-            outer_transaction_count: self.outer_transaction_count.load(Ordering::Relaxed),
-            active_snapshot_clones: self.active_snapshot_clones.load(Ordering::Relaxed),
+            snapshot_fetch_count: self.snapshot_fetch_count.load(Ordering::Relaxed),
             oldest_snapshot_age_ms: self.oldest_snapshot_age_ms.load(Ordering::Relaxed),
             mutations_since_oldest_snapshot: self
                 .mutations_since_oldest_snapshot
@@ -137,8 +131,7 @@ pub struct QueryOutputMetricsSnapshot {
     pub live_results_count: usize,
     pub outer_transaction_duration_ns_last: u64,
     pub outer_transaction_duration_ns_max: u64,
-    pub outer_transaction_count: u64,
-    pub active_snapshot_clones: usize,
+    pub snapshot_fetch_count: u64,
     pub oldest_snapshot_age_ms: u64,
     pub mutations_since_oldest_snapshot: u64,
 }
@@ -160,8 +153,7 @@ mod tests {
         assert_eq!(snap.live_results_count, 0);
         assert_eq!(snap.outer_transaction_duration_ns_last, 0);
         assert_eq!(snap.outer_transaction_duration_ns_max, 0);
-        assert_eq!(snap.outer_transaction_count, 0);
-        assert_eq!(snap.active_snapshot_clones, 0);
+        assert_eq!(snap.snapshot_fetch_count, 0);
         assert_eq!(snap.oldest_snapshot_age_ms, 0);
         assert_eq!(snap.mutations_since_oldest_snapshot, 0);
     }
@@ -176,7 +168,6 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.outer_transaction_duration_ns_last, 200);
         assert_eq!(snap.outer_transaction_duration_ns_max, 500);
-        assert_eq!(snap.outer_transaction_count, 3);
     }
 
     #[test]
