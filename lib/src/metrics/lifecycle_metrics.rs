@@ -23,18 +23,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// all reactions in a `ReactionManager`.
 #[derive(Debug)]
 pub struct LifecycleMetrics {
-    /// Durable reaction rejected because no state store is configured.
-    pub startup_rejection_durable_no_store: AtomicU64,
-    /// Durable reaction rejected because state store is volatile.
-    pub startup_rejection_durable_on_volatile: AtomicU64,
-    /// `needs_snapshot_on_fresh_start + AutoSkipGap` rejected.
-    pub startup_rejection_snapshot_skip_gap: AtomicU64,
-    /// `!needs_snapshot_on_fresh_start + AutoReset` rejected.
-    pub startup_rejection_no_snapshot_auto_reset: AtomicU64,
-    /// Number of successful AutoReset recovery completions.
-    pub auto_reset_completions: AtomicU64,
-    /// Number of config hash mismatches detected during bootstrap.
-    pub hash_mismatch_count: AtomicU64,
+    startup_rejection_durable_no_store: AtomicU64,
+    startup_rejection_durable_on_volatile: AtomicU64,
+    startup_rejection_snapshot_skip_gap: AtomicU64,
+    startup_rejection_no_snapshot_auto_reset: AtomicU64,
+    auto_reset_completions: AtomicU64,
+    hash_mismatch_count: AtomicU64,
+}
+
+/// Startup rejection reason for metrics recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupRejectionReason {
+    DurableNoStore,
+    DurableOnVolatile,
+    SnapshotSkipGap,
+    NoSnapshotAutoReset,
 }
 
 impl LifecycleMetrics {
@@ -48,6 +51,38 @@ impl LifecycleMetrics {
             auto_reset_completions: AtomicU64::new(0),
             hash_mismatch_count: AtomicU64::new(0),
         }
+    }
+
+    /// Record a startup rejection.
+    pub fn record_startup_rejection(&self, reason: StartupRejectionReason) {
+        match reason {
+            StartupRejectionReason::DurableNoStore => {
+                self.startup_rejection_durable_no_store
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StartupRejectionReason::DurableOnVolatile => {
+                self.startup_rejection_durable_on_volatile
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StartupRejectionReason::SnapshotSkipGap => {
+                self.startup_rejection_snapshot_skip_gap
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            StartupRejectionReason::NoSnapshotAutoReset => {
+                self.startup_rejection_no_snapshot_auto_reset
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record a successful auto-reset completion.
+    pub fn record_auto_reset_completion(&self) {
+        self.auto_reset_completions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a config hash mismatch detection.
+    pub fn record_hash_mismatch(&self) {
+        self.hash_mismatch_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Take a point-in-time snapshot of all metrics.
@@ -109,12 +144,16 @@ mod tests {
     #[test]
     fn increment_individual_counters() {
         let m = LifecycleMetrics::new();
-        m.startup_rejection_durable_no_store
-            .fetch_add(1, Ordering::Relaxed);
-        m.startup_rejection_durable_on_volatile
-            .fetch_add(2, Ordering::Relaxed);
-        m.auto_reset_completions.fetch_add(3, Ordering::Relaxed);
-        m.hash_mismatch_count.fetch_add(4, Ordering::Relaxed);
+        m.record_startup_rejection(StartupRejectionReason::DurableNoStore);
+        m.record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
+        m.record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
+        m.record_auto_reset_completion();
+        m.record_auto_reset_completion();
+        m.record_auto_reset_completion();
+        m.record_hash_mismatch();
+        m.record_hash_mismatch();
+        m.record_hash_mismatch();
+        m.record_hash_mismatch();
 
         let snap = m.snapshot();
         assert_eq!(snap.startup_rejection_durable_no_store, 1);
@@ -132,7 +171,7 @@ mod tests {
             let m = m.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..1000 {
-                    m.hash_mismatch_count.fetch_add(1, Ordering::Relaxed);
+                    m.record_hash_mismatch();
                 }
             }));
         }

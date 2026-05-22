@@ -27,6 +27,6 @@ pub mod lifecycle_metrics;
 pub mod query_metrics;
 pub mod reaction_metrics;
 
-pub use lifecycle_metrics::{LifecycleMetrics, LifecycleMetricsSnapshot};
+pub use lifecycle_metrics::{LifecycleMetrics, LifecycleMetricsSnapshot, StartupRejectionReason};
 pub use query_metrics::{QueryOutputMetrics, QueryOutputMetricsSnapshot};
-pub use reaction_metrics::{ReactionMetrics, ReactionMetricsSnapshot};
+pub use reaction_metrics::{ReactionMetrics, ReactionMetricsSnapshot, RecoveryPolicyKind};

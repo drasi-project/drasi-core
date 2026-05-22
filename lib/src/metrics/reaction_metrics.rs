@@ -16,30 +16,29 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Recovery policy variant names, decoupled from the domain type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPolicyKind {
+    Strict,
+    AutoReset,
+    AutoSkipGap,
+}
+
 /// Lock-free metrics for a single reaction's subscription to a single query.
 ///
 /// Tracks checkpoint progress, deduplication, gap detection, recovery policy
 /// triggers, and bootstrap API invocation counts.
 #[derive(Debug)]
 pub struct ReactionMetrics {
-    /// Last checkpointed sequence for this query subscription.
-    pub checkpoint_sequence: AtomicU64,
-    /// Gap between query's `as_of_sequence` and this reaction's checkpoint.
-    pub checkpoint_lag: AtomicU64,
-    /// Events skipped because `result.sequence <= checkpoint.sequence`.
-    pub dedup_skip_count: AtomicU64,
-    /// Number of gap detections (sequence jump or broadcast lag).
-    pub gap_detection_count: AtomicU64,
-    /// Times Strict recovery policy was triggered.
-    pub recovery_strict_count: AtomicU64,
-    /// Times AutoReset recovery policy was triggered.
-    pub recovery_auto_reset_count: AtomicU64,
-    /// Times AutoSkipGap recovery policy was triggered.
-    pub recovery_auto_skip_gap_count: AtomicU64,
-    /// Number of `fetch_snapshot` invocations for this subscription.
-    pub fetch_snapshot_count: AtomicU64,
-    /// Number of `fetch_outbox` invocations for this subscription.
-    pub fetch_outbox_count: AtomicU64,
+    checkpoint_sequence: AtomicU64,
+    checkpoint_lag: AtomicU64,
+    dedup_skip_count: AtomicU64,
+    gap_detection_count: AtomicU64,
+    recovery_strict_count: AtomicU64,
+    recovery_auto_reset_count: AtomicU64,
+    recovery_auto_skip_gap_count: AtomicU64,
+    fetch_snapshot_count: AtomicU64,
+    fetch_outbox_count: AtomicU64,
 }
 
 impl ReactionMetrics {
@@ -66,20 +65,40 @@ impl ReactionMetrics {
     }
 
     /// Record a recovery policy trigger.
-    pub fn record_recovery_trigger(&self, policy: &crate::recovery::ReactionRecoveryPolicy) {
+    pub fn record_recovery_trigger(&self, policy: RecoveryPolicyKind) {
         match policy {
-            crate::recovery::ReactionRecoveryPolicy::Strict => {
+            RecoveryPolicyKind::Strict => {
                 self.recovery_strict_count.fetch_add(1, Ordering::Relaxed);
             }
-            crate::recovery::ReactionRecoveryPolicy::AutoReset => {
+            RecoveryPolicyKind::AutoReset => {
                 self.recovery_auto_reset_count
                     .fetch_add(1, Ordering::Relaxed);
             }
-            crate::recovery::ReactionRecoveryPolicy::AutoSkipGap => {
+            RecoveryPolicyKind::AutoSkipGap => {
                 self.recovery_auto_skip_gap_count
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Record a dedup skip (already-seen sequence).
+    pub fn record_dedup_skip(&self) {
+        self.dedup_skip_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a broadcast gap detection.
+    pub fn record_gap_detection(&self) {
+        self.gap_detection_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a fetch_snapshot invocation.
+    pub fn record_fetch_snapshot(&self) {
+        self.fetch_snapshot_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a fetch_outbox invocation.
+    pub fn record_fetch_outbox(&self) {
+        self.fetch_outbox_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Take a point-in-time snapshot of all metrics.
@@ -121,7 +140,6 @@ pub struct ReactionMetricsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery::ReactionRecoveryPolicy;
     use std::sync::Arc;
     use std::thread;
 
@@ -153,10 +171,10 @@ mod tests {
     #[test]
     fn record_recovery_trigger_increments_correct_variant() {
         let m = ReactionMetrics::new();
-        m.record_recovery_trigger(&ReactionRecoveryPolicy::Strict);
-        m.record_recovery_trigger(&ReactionRecoveryPolicy::AutoReset);
-        m.record_recovery_trigger(&ReactionRecoveryPolicy::AutoReset);
-        m.record_recovery_trigger(&ReactionRecoveryPolicy::AutoSkipGap);
+        m.record_recovery_trigger(RecoveryPolicyKind::Strict);
+        m.record_recovery_trigger(RecoveryPolicyKind::AutoReset);
+        m.record_recovery_trigger(RecoveryPolicyKind::AutoReset);
+        m.record_recovery_trigger(RecoveryPolicyKind::AutoSkipGap);
 
         let snap = m.snapshot();
         assert_eq!(snap.recovery_strict_count, 1);
@@ -173,7 +191,7 @@ mod tests {
             let m = m.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..1000 {
-                    m.dedup_skip_count.fetch_add(1, Ordering::Relaxed);
+                    m.record_dedup_skip();
                 }
             }));
         }

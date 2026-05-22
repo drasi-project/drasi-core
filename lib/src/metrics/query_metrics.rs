@@ -22,26 +22,16 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// outer-transaction duration, and active snapshot clone lifetime.
 #[derive(Debug)]
 pub struct QueryOutputMetrics {
-    /// Current number of entries in the outbox ring buffer.
-    pub outbox_size: AtomicUsize,
-    /// Sequence of the oldest entry in the outbox (0 if empty).
-    pub outbox_earliest_seq: AtomicU64,
-    /// Sequence of the newest entry in the outbox (= `as_of_sequence`).
-    pub outbox_latest_seq: AtomicU64,
-    /// Total number of sequence advances (non-empty diff emissions).
-    pub result_seq_advances: AtomicU64,
-    /// Current cardinality of the live results map.
-    pub live_results_count: AtomicUsize,
-    /// Last outer-transaction duration in nanoseconds.
-    pub outer_transaction_duration_ns_last: AtomicU64,
-    /// Maximum outer-transaction duration observed (nanoseconds).
-    pub outer_transaction_duration_ns_max: AtomicU64,
-    /// Total number of snapshot fetches performed.
-    pub snapshot_fetch_count: AtomicU64,
-    /// Age of the oldest outstanding snapshot in milliseconds.
-    pub oldest_snapshot_age_ms: AtomicU64,
-    /// Mutations accumulated since the oldest snapshot was taken.
-    pub mutations_since_oldest_snapshot: AtomicU64,
+    outbox_size: AtomicUsize,
+    outbox_earliest_seq: AtomicU64,
+    outbox_latest_seq: AtomicU64,
+    result_seq_advances: AtomicU64,
+    live_results_count: AtomicUsize,
+    outer_transaction_duration_ns_last: AtomicU64,
+    outer_transaction_duration_ns_max: AtomicU64,
+    snapshot_fetch_count: AtomicU64,
+    oldest_snapshot_age_ms: AtomicU64,
+    mutations_since_oldest_snapshot: AtomicU64,
 }
 
 impl QueryOutputMetrics {
@@ -93,6 +83,26 @@ impl QueryOutputMetrics {
         self.outbox_earliest_seq
             .store(earliest_seq, Ordering::Relaxed);
         self.outbox_latest_seq.store(latest_seq, Ordering::Relaxed);
+    }
+
+    /// Increment the result sequence advance counter.
+    pub fn record_seq_advance(&self) {
+        self.result_seq_advances.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Store the current live results count.
+    pub fn record_live_results_count(&self, count: usize) {
+        self.live_results_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Increment the snapshot fetch counter.
+    pub fn record_snapshot_fetch(&self) {
+        self.snapshot_fetch_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Load the latest outbox sequence (for checkpoint lag calculation).
+    pub fn load_outbox_latest_seq(&self) -> u64 {
+        self.outbox_latest_seq.load(Ordering::Relaxed)
     }
 
     /// Take a point-in-time snapshot of all metrics.
@@ -193,7 +203,7 @@ mod tests {
             let m = m.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..1000 {
-                    m.result_seq_advances.fetch_add(1, Ordering::Relaxed);
+                    m.record_seq_advance();
                 }
             }));
         }

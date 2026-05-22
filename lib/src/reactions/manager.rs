@@ -25,7 +25,7 @@ use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{log_component_error, ComponentLogKey, ComponentLogRegistry};
-use crate::metrics::{LifecycleMetrics, ReactionMetrics};
+use crate::metrics::{LifecycleMetrics, ReactionMetrics, RecoveryPolicyKind, StartupRejectionReason};
 use crate::queries::output_state::FetchError;
 use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
@@ -37,6 +37,15 @@ use crate::state_store::StateStoreProvider;
 
 /// Key for per-reaction per-query metrics: `(reaction_id, query_id)`.
 type MetricsKey = (String, String);
+
+/// Convert a domain recovery policy to the metrics-level kind enum.
+fn to_policy_kind(policy: &ReactionRecoveryPolicy) -> RecoveryPolicyKind {
+    match policy {
+        ReactionRecoveryPolicy::Strict => RecoveryPolicyKind::Strict,
+        ReactionRecoveryPolicy::AutoReset => RecoveryPolicyKind::AutoReset,
+        ReactionRecoveryPolicy::AutoSkipGap => RecoveryPolicyKind::AutoSkipGap,
+    }
+}
 
 /// Context passed to `handle_broadcast_gap` to avoid excessive parameter counts.
 ///
@@ -254,8 +263,7 @@ impl ReactionManager {
             match store.as_ref() {
                 None => {
                     self.lifecycle_metrics
-                        .startup_rejection_durable_no_store
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        .record_startup_rejection(StartupRejectionReason::DurableNoStore);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but no state store is configured",
@@ -264,8 +272,7 @@ impl ReactionManager {
                 }
                 Some(s) if !s.is_durable() => {
                     self.lifecycle_metrics
-                        .startup_rejection_durable_on_volatile
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        .record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but the configured state store is volatile",
@@ -279,8 +286,7 @@ impl ReactionManager {
         // Rule 2: snapshot + AutoSkipGap is contradictory
         if needs_snapshot && policy == ReactionRecoveryPolicy::AutoSkipGap {
             self.lifecycle_metrics
-                .startup_rejection_snapshot_skip_gap
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .record_startup_rejection(StartupRejectionReason::SnapshotSkipGap);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=true is incompatible with \
                  AutoSkipGap recovery policy (cannot skip gap if snapshot is required)",
@@ -291,8 +297,7 @@ impl ReactionManager {
         // Rule 3: !snapshot + AutoReset is contradictory
         if !needs_snapshot && policy == ReactionRecoveryPolicy::AutoReset {
             self.lifecycle_metrics
-                .startup_rejection_no_snapshot_auto_reset
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .record_startup_rejection(StartupRejectionReason::NoSnapshotAutoReset);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=false is incompatible with \
                  AutoReset recovery policy (AutoReset re-bootstraps from a snapshot)",
@@ -402,9 +407,7 @@ impl ReactionManager {
                         crate::queries::compute_config_hash(query.get_config());
                     if cp.config_hash != current_config_hash {
                         // Hash mismatch → treat as gap → apply recovery policy.
-                        self.lifecycle_metrics
-                            .hash_mismatch_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        self.lifecycle_metrics.record_hash_mismatch();
                         info!(
                             "[{reaction_id}] Config hash mismatch for query '{query_id}': \
                              checkpoint={}, current={}",
@@ -419,6 +422,7 @@ impl ReactionManager {
                                 policy,
                                 &state_store,
                                 &mut bootstrap_queries,
+                                &per_query_metrics,
                             )
                             .await?;
                         initial_checkpoints.insert(query_id.clone(), new_cp);
@@ -503,9 +507,7 @@ impl ReactionManager {
 
         if reaction.needs_snapshot_on_fresh_start() {
             info!("[{reaction_id}] Fresh start for query '{query_id}' — fetching snapshot");
-            metrics
-                .fetch_snapshot_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.record_fetch_snapshot();
             let snapshot = query.fetch_snapshot().await.map_err(|e| {
                 anyhow::anyhow!("Failed to fetch snapshot for query '{query_id}': {e}")
             })?;
@@ -520,9 +522,7 @@ impl ReactionManager {
         } else {
             // No snapshot needed — just record the current sequence.
             // If the query is not running or hasn't bootstrapped yet, start from 0.
-            metrics
-                .fetch_outbox_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.record_fetch_outbox();
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     info!(
@@ -583,9 +583,7 @@ impl ReactionManager {
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
         metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
-        metrics
-            .fetch_outbox_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
                 // Replay outbox entries by enqueuing them.
@@ -641,6 +639,7 @@ impl ReactionManager {
                     policy,
                     state_store,
                     bootstrap_queries,
+                    metrics,
                 )
                 .await
             }
@@ -658,24 +657,19 @@ impl ReactionManager {
     }
 
     /// Apply the recovery policy when a gap or hash mismatch is detected.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_recovery_policy(
         &self,
         reaction_id: &str,
         query_id: &str,
-        reaction: &Arc<dyn Reaction>,
+        _reaction: &Arc<dyn Reaction>,
         query: &Arc<dyn Query>,
         policy: ReactionRecoveryPolicy,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
+        metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
-
-        // Get metrics for instrumentation
-        let metrics_key = (reaction_id.to_string(), query_id.to_string());
-        let metrics = {
-            let metrics_map = self.reaction_metrics.read().await;
-            metrics_map.get(&metrics_key).cloned()
-        };
 
         match policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
@@ -687,10 +681,7 @@ impl ReactionManager {
                     "[{reaction_id}] AutoReset for query '{query_id}' — \
                      fetching fresh snapshot"
                 );
-                if let Some(ref m) = metrics {
-                    m.fetch_snapshot_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                metrics.record_fetch_snapshot();
                 let snapshot = query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset: failed to fetch snapshot for query '{query_id}': {e}"
@@ -703,9 +694,7 @@ impl ReactionManager {
                 };
 
                 // Record successful auto-reset in lifecycle metrics
-                self.lifecycle_metrics
-                    .auto_reset_completions
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.lifecycle_metrics.record_auto_reset_completion();
 
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
                 Ok(cp)
@@ -717,10 +706,7 @@ impl ReactionManager {
                 );
 
                 // Get current sequence from the query.
-                if let Some(ref m) = metrics {
-                    m.fetch_outbox_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                metrics.record_fetch_outbox();
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
@@ -1134,10 +1120,7 @@ impl ReactionManager {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
-                                    forwarder_metrics.dedup_skip_count.fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    forwarder_metrics.record_dedup_skip();
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
                                         query_result.sequence
@@ -1151,11 +1134,8 @@ impl ReactionManager {
                                 if last_forwarded_seq > 0
                                     && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
-                                    forwarder_metrics.gap_detection_count.fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    forwarder_metrics.record_recovery_trigger(&policy);
+                                    forwarder_metrics.record_gap_detection();
+                                    forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
                                     log::warn!(
                                         "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
                                          expected seq={}, got seq={}",
@@ -1225,7 +1205,7 @@ impl ReactionManager {
                                     // Update reaction metrics: checkpoint position
                                     let query_latest = query_clone
                                         .output_metrics()
-                                        .map(|m| m.outbox_latest_seq.load(std::sync::atomic::Ordering::Relaxed))
+                                        .map(|m| m.load_outbox_latest_seq())
                                         .unwrap_or(seq);
                                     forwarder_metrics.record_checkpoint(seq, query_latest);
                                 }
@@ -1234,11 +1214,8 @@ impl ReactionManager {
                                 let error_str = e.to_string();
                                 if error_str.contains("lagged") {
                                     // §6: Broadcast gap detected.
-                                    forwarder_metrics.gap_detection_count.fetch_add(
-                                        1,
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
-                                    forwarder_metrics.record_recovery_trigger(&policy);
+                                    forwarder_metrics.record_gap_detection();
+                                    forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
                                     log::warn!(
                                         "[{reaction_id_owned}] Broadcast lag for query '{query_id_clone}': {error_str}"
                                     );
@@ -1354,9 +1331,7 @@ impl ReactionManager {
                     ctx.reaction_id,
                     ctx.query_id
                 );
-                ctx.metrics
-                    .fetch_snapshot_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.metrics.record_fetch_snapshot();
                 let snapshot = ctx.query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset broadcast gap: failed to fetch snapshot for '{}': {e}",
@@ -1404,9 +1379,7 @@ impl ReactionManager {
                     ctx.reaction_id,
                     ctx.query_id
                 );
-                ctx.metrics
-                    .fetch_outbox_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.metrics.record_fetch_outbox();
                 let current_seq = match ctx.query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,

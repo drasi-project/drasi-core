@@ -291,14 +291,10 @@ async fn dispatch_query_results(
         let result = state.advance_sequence_and_push(query_result);
 
         // Update query output metrics
-        let duration_ns = tx_start.elapsed().as_nanos() as u64;
+        let duration_ns = u64::try_from(tx_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
         output_metrics.record_transaction_duration_ns(duration_ns);
-        output_metrics
-            .result_seq_advances
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        output_metrics
-            .live_results_count
-            .store(state.results_len(), std::sync::atomic::Ordering::Relaxed);
+        output_metrics.record_seq_advance();
+        output_metrics.record_live_results_count(state.results_len());
         let earliest_seq = state.outbox_earliest_seq().unwrap_or(0);
         output_metrics.update_outbox(state.outbox_len(), earliest_seq, state.as_of_sequence());
 
@@ -2378,9 +2374,7 @@ impl Query for DrasiQuery {
         self.wait_until_running().await?;
 
         // Track snapshot fetch invocations
-        self.output_metrics
-            .snapshot_fetch_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.output_metrics.record_snapshot_fetch();
 
         let (results_clone, as_of_sequence) = {
             let state = self.output_state.read().await;
