@@ -24,6 +24,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use drasi_lib::reactions::SnapshotFetcher;
 use drasi_lib::StateStoreProvider;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,8 +37,7 @@ pub struct ApiState {
     query_ids: Arc<Vec<String>>,
     state_store: Option<Arc<dyn StateStoreProvider>>,
     snapshot_store: QuerySnapshotStore,
-    results_api_url: Option<String>,
-    results_api_client: Option<reqwest::Client>,
+    snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
 }
 
 impl ApiState {
@@ -46,28 +46,15 @@ impl ApiState {
         query_ids: Vec<String>,
         state_store: Option<Arc<dyn StateStoreProvider>>,
         snapshot_store: QuerySnapshotStore,
+        snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
     ) -> Self {
         Self {
             reaction_id: reaction_id.into(),
             query_ids: Arc::new(query_ids),
             state_store,
             snapshot_store,
-            results_api_url: None,
-            results_api_client: None,
+            snapshot_fetcher,
         }
-    }
-
-    pub fn with_results_api_url(mut self, url: Option<String>) -> Self {
-        if url.is_some() {
-            self.results_api_client = Some(
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()
-                    .expect("failed to build reqwest client"),
-            );
-        }
-        self.results_api_url = url;
-        self
     }
 
     fn storage(&self) -> anyhow::Result<DashboardStorage> {
@@ -289,15 +276,11 @@ async fn get_query_snapshot(
         return Ok(Json(snapshot));
     }
 
-    // Fall back to the results API if configured and local snapshot is empty.
-    if let (Some(base_url), Some(client)) = (&state.results_api_url, &state.results_api_client) {
-        let url = format!(
-            "{}/queries/{}/results",
-            base_url.trim_end_matches('/'),
-            query_id
-        );
-        if let Ok(response) = client.get(&url).send().await {
-            if let Ok(rows) = response.json::<Vec<serde_json::Value>>().await {
+    // Fall back to the internal snapshot fetcher if configured and local snapshot is empty.
+    if let Some(ref fetcher) = state.snapshot_fetcher {
+        if let Ok(stream) = fetcher.fetch_snapshot(&query_id).await {
+            let rows = stream.collect_vec().await;
+            if !rows.is_empty() {
                 return Ok(Json(QuerySnapshot {
                     rows,
                     aggregation: None,
@@ -321,6 +304,7 @@ mod tests {
             vec!["query-1".to_string()],
             Some(store),
             QuerySnapshotStore::new(),
+            None,
         )
     }
 

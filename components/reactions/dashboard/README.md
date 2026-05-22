@@ -20,7 +20,6 @@ let reaction = DashboardReaction::builder("my-dashboard")
     .with_host("0.0.0.0")
     .with_port(3000)
     .with_heartbeat_interval_ms(30_000)
-    .with_results_api_url("http://localhost:8080")
     .build()?;
 ```
 
@@ -31,9 +30,15 @@ let reaction = DashboardReaction::builder("my-dashboard")
 | `host` | `String` | `"0.0.0.0"` | Bind host for HTTP + WebSocket server |
 | `port` | `u16` | `3000` | Bind port |
 | `heartbeat_interval_ms` | `u64` | `30000` | WebSocket heartbeat interval |
-| `results_api_url` | `Option<String>` | `None` | Optional results API URL for snapshot bootstrap |
 | `priority_queue_capacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
 | `queries` | `Vec<String>` | `[]` | Subscribed query IDs |
+
+### Snapshot Fallback
+
+When a client requests the current state of a query via `/api/queries/:id/snapshot` and
+the dashboard's in-memory snapshot is empty (e.g. before any diffs have arrived), the
+dashboard automatically falls back to the host-provided `SnapshotFetcher` API to retrieve
+the query's current result set. This happens transparently — no configuration is needed.
 
 ## Predefined Dashboards
 

@@ -277,13 +277,19 @@ impl Reaction for DashboardReaction {
         });
         self.task_handles.lock().await.push(heartbeat_handle);
 
+        let snapshot_fetcher = self
+            .base
+            .context()
+            .await
+            .and_then(|ctx| ctx.snapshot_fetcher.clone());
+
         let api_state = ApiState::new(
             self.base.id.clone(),
             self.base.queries.clone(),
             self.base.state_store().await,
             self.snapshot_store.clone(),
-        )
-        .with_results_api_url(self.config.results_api_url.clone());
+            snapshot_fetcher,
+        );
         let websocket_hub = self.websocket_hub.clone();
         let query_ids = self.base.queries.clone();
         let server_status_handle = self.base.status_handle();

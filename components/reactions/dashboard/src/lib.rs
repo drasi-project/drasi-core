@@ -34,7 +34,6 @@ pub struct DashboardReactionBuilder {
     host: String,
     port: u16,
     heartbeat_interval_ms: u64,
-    results_api_url: Option<String>,
     priority_queue_capacity: Option<usize>,
     auto_start: bool,
     predefined_dashboards: Vec<DashboardConfig>,
@@ -50,7 +49,6 @@ impl DashboardReactionBuilder {
             host: config.host,
             port: config.port,
             heartbeat_interval_ms: config.heartbeat_interval_ms,
-            results_api_url: None,
             priority_queue_capacity: None,
             auto_start: true,
             predefined_dashboards: Vec::new(),
@@ -100,8 +98,8 @@ impl DashboardReactionBuilder {
     }
 
     /// Set the results API base URL for proxying initial query data.
-    pub fn with_results_api_url(mut self, url: impl Into<String>) -> Self {
-        self.results_api_url = Some(url.into());
+    #[deprecated(note = "The dashboard now uses the internal SnapshotFetcher API automatically")]
+    pub fn with_results_api_url(self, _url: impl Into<String>) -> Self {
         self
     }
 
@@ -118,7 +116,6 @@ impl DashboardReactionBuilder {
         self.host = config.host;
         self.port = config.port;
         self.heartbeat_interval_ms = config.heartbeat_interval_ms;
-        self.results_api_url = config.results_api_url;
         self
     }
 
@@ -128,7 +125,6 @@ impl DashboardReactionBuilder {
             host: self.host,
             port: self.port,
             heartbeat_interval_ms: self.heartbeat_interval_ms,
-            results_api_url: self.results_api_url,
         };
 
         Ok(DashboardReaction::from_builder(
