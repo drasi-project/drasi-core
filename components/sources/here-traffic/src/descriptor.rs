@@ -132,7 +132,7 @@ fn default_start_from() -> ConfigValue<StartFromDto> {
 }
 
 /// Resolve the auth method from DTO fields.
-fn resolve_auth(
+async fn resolve_auth(
     dto: &HereTrafficSourceConfigDto,
     mapper: &DtoMapper,
 ) -> anyhow::Result<AuthMethod> {
@@ -155,10 +155,10 @@ fn resolve_auth(
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("accessKeySecret is required for OAuth"))?;
 
-        let access_key_id = mapper.resolve_string(id)?;
-        let access_key_secret = mapper.resolve_string(secret)?;
+        let access_key_id = mapper.resolve_string(id).await?;
+        let access_key_secret = mapper.resolve_string(secret).await?;
         let token_url = if let Some(url) = &dto.token_url {
-            mapper.resolve_string(url)?
+            mapper.resolve_string(url).await?
         } else {
             "https://account.api.here.com/oauth2/token".to_string()
         };
@@ -171,7 +171,7 @@ fn resolve_auth(
     }
 
     if let Some(api_key_cfg) = &dto.api_key {
-        let api_key = mapper.resolve_string(api_key_cfg)?;
+        let api_key = mapper.resolve_string(api_key_cfg).await?;
         return Ok(AuthMethod::ApiKey { api_key });
     }
 
@@ -220,14 +220,15 @@ impl SourcePluginDescriptor for HereTrafficSourceDescriptor {
         let dto: HereTrafficSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let auth = resolve_auth(&dto, &mapper)?;
-        let bounding_box = mapper.resolve_string(&dto.bounding_box)?;
-        let polling_interval = mapper.resolve_typed(&dto.polling_interval)?;
-        let flow_change_threshold = mapper.resolve_typed(&dto.flow_change_threshold)?;
-        let speed_change_threshold = mapper.resolve_typed(&dto.speed_change_threshold)?;
-        let incident_match_distance_meters =
-            mapper.resolve_typed(&dto.incident_match_distance_meters)?;
-        let start_from: StartFromDto = mapper.resolve_typed(&dto.start_from)?;
+        let auth = resolve_auth(&dto, &mapper).await?;
+        let bounding_box = mapper.resolve_string(&dto.bounding_box).await?;
+        let polling_interval = mapper.resolve_typed(&dto.polling_interval).await?;
+        let flow_change_threshold = mapper.resolve_typed(&dto.flow_change_threshold).await?;
+        let speed_change_threshold = mapper.resolve_typed(&dto.speed_change_threshold).await?;
+        let incident_match_distance_meters = mapper
+            .resolve_typed(&dto.incident_match_distance_meters)
+            .await?;
+        let start_from: StartFromDto = mapper.resolve_typed(&dto.start_from).await?;
 
         let endpoints = dto.endpoints.into_iter().map(Endpoint::from).collect();
 

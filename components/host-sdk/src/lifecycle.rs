@@ -32,6 +32,7 @@ use crate::loader::{load_plugin_from_path, plugin_kind_from_filename, LoadedPlug
 use crate::plugin_registry::PluginRegistry;
 use crate::plugin_types::{PluginCategory, PluginEvent, PluginKindEntry, PluginStatus};
 
+use drasi_plugin_sdk::prelude::SecretStorePluginDescriptor;
 use drasi_plugin_sdk::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
     SourcePluginDescriptor,
@@ -97,6 +98,7 @@ impl PluginLifecycleManager {
         let reactions = std::mem::take(&mut loaded.reaction_plugins);
         let bootstraps = std::mem::take(&mut loaded.bootstrap_plugins);
         let identity_providers = std::mem::take(&mut loaded.identity_provider_plugins);
+        let secret_stores = std::mem::take(&mut loaded.secret_store_plugins);
 
         let mut reg = self.registry.write().await;
 
@@ -146,6 +148,18 @@ impl PluginLifecycleManager {
                 .to_string(),
             });
             reg.register_identity_provider_with_metadata(Arc::new(identity_provider), plugin_id);
+        }
+
+        for secret_store in secret_stores {
+            kinds.push(PluginKindEntry {
+                category: PluginCategory::SecretStore,
+                kind: SecretStorePluginDescriptor::kind(&secret_store).to_string(),
+                config_version: SecretStorePluginDescriptor::config_version(&secret_store)
+                    .to_string(),
+                config_schema_name: SecretStorePluginDescriptor::config_schema_name(&secret_store)
+                    .to_string(),
+            });
+            reg.register_secret_store_with_metadata(Arc::new(secret_store), plugin_id);
         }
 
         drop(reg);

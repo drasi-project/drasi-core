@@ -222,29 +222,29 @@ impl ReactionPluginDescriptor for LokiReactionDescriptor {
         let mut builder = LokiReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_endpoint(mapper.resolve_string(&dto.endpoint)?);
+            .with_endpoint(mapper.resolve_string(&dto.endpoint).await?);
 
         for (key, value) in &dto.labels {
             builder = builder.with_label(key, value);
         }
 
         if let Some(ref tenant_id) = dto.tenant_id {
-            builder = builder.with_tenant_id(mapper.resolve_string(tenant_id)?);
+            builder = builder.with_tenant_id(mapper.resolve_string(tenant_id).await?);
         }
 
         if let Some(ref token) = dto.token {
-            builder = builder.with_token(mapper.resolve_string(token)?);
+            builder = builder.with_token(mapper.resolve_string(token).await?);
         }
 
         if let Some(ref basic_auth) = dto.basic_auth {
             builder = builder.with_basic_auth(
-                mapper.resolve_string(&basic_auth.username)?,
-                mapper.resolve_string(&basic_auth.password)?,
+                mapper.resolve_string(&basic_auth.username).await?,
+                mapper.resolve_string(&basic_auth.password).await?,
             );
         }
 
         if let Some(ref timeout_ms) = dto.timeout_ms {
-            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms)?);
+            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms).await?);
         }
 
         for (query_id, config) in &dto.routes {

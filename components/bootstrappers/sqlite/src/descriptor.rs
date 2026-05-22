@@ -96,7 +96,7 @@ impl BootstrapPluginDescriptor for SqliteBootstrapDescriptor {
         let mut builder = SqliteBootstrapProvider::builder();
 
         if let Some(path_cv) = &dto.path {
-            builder = builder.with_path(mapper.resolve_string(path_cv)?);
+            builder = builder.with_path(mapper.resolve_string(path_cv).await?);
         }
 
         if let Some(tables) = dto.tables {

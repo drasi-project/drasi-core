@@ -118,11 +118,12 @@ impl BootstrapPluginDescriptor for HereTrafficBootstrapDescriptor {
         let dto: HereTrafficBootstrapConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let auth = resolve_bootstrap_auth(&dto, &mapper)?;
-        let bounding_box = mapper.resolve_string(&dto.bounding_box)?;
+        let auth = resolve_bootstrap_auth(&dto, &mapper).await?;
+        let bounding_box = mapper.resolve_string(&dto.bounding_box).await?;
         let endpoints = dto.endpoints.into_iter().map(Endpoint::from).collect();
-        let incident_match_distance_meters =
-            mapper.resolve_typed(&dto.incident_match_distance_meters)?;
+        let incident_match_distance_meters = mapper
+            .resolve_typed(&dto.incident_match_distance_meters)
+            .await?;
 
         let mut config = match &auth {
             AuthMethod::ApiKey { api_key } => HereTrafficConfig::new(api_key.clone(), bounding_box),
@@ -140,7 +141,7 @@ impl BootstrapPluginDescriptor for HereTrafficBootstrapDescriptor {
         config.endpoints = endpoints;
         config.incident_match_distance_meters = incident_match_distance_meters;
         if let Some(base_url) = dto.base_url {
-            config.base_url = mapper.resolve_string(&base_url)?;
+            config.base_url = mapper.resolve_string(&base_url).await?;
         }
 
         let provider = HereTrafficBootstrapProvider::new("here-traffic-bootstrap", config)?;
@@ -148,7 +149,7 @@ impl BootstrapPluginDescriptor for HereTrafficBootstrapDescriptor {
     }
 }
 
-fn resolve_bootstrap_auth(
+async fn resolve_bootstrap_auth(
     dto: &HereTrafficBootstrapConfigDto,
     mapper: &DtoMapper,
 ) -> anyhow::Result<AuthMethod> {
@@ -171,10 +172,10 @@ fn resolve_bootstrap_auth(
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("accessKeySecret is required for OAuth"))?;
 
-        let access_key_id = mapper.resolve_string(id)?;
-        let access_key_secret = mapper.resolve_string(secret)?;
+        let access_key_id = mapper.resolve_string(id).await?;
+        let access_key_secret = mapper.resolve_string(secret).await?;
         let token_url = if let Some(url) = &dto.token_url {
-            mapper.resolve_string(url)?
+            mapper.resolve_string(url).await?
         } else {
             "https://account.api.here.com/oauth2/token".to_string()
         };
@@ -187,7 +188,7 @@ fn resolve_bootstrap_auth(
     }
 
     if let Some(api_key_cfg) = &dto.api_key {
-        let api_key = mapper.resolve_string(api_key_cfg)?;
+        let api_key = mapper.resolve_string(api_key_cfg).await?;
         return Ok(AuthMethod::ApiKey { api_key });
     }
 

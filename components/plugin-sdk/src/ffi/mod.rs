@@ -33,6 +33,7 @@ pub mod callbacks;
 pub mod identity;
 pub mod identity_proxy;
 pub mod metadata;
+pub mod secret_store;
 pub mod snapshot_fetcher_proxy;
 pub mod state_store_proxy;
 pub mod tracing_bridge;
@@ -42,8 +43,8 @@ pub mod vtables;
 
 // Re-export commonly used types at the ffi module level
 pub use callbacks::{
-    FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel, LifecycleCallbackFn,
-    LogCallbackFn,
+    ConfigResolverFn, FfiLifecycleEvent, FfiLifecycleEventType, FfiLogEntry, FfiLogLevel,
+    LifecycleCallbackFn, LogCallbackFn,
 };
 pub use metadata::{
     PluginMetadata, BUILD_TIMESTAMP, FFI_SDK_VERSION, GIT_COMMIT_SHA, TARGET_TRIPLE,
@@ -57,6 +58,7 @@ pub use vtable_gen::{
     build_bootstrap_plugin_vtable, build_bootstrap_provider_vtable,
     build_identity_provider_plugin_vtable, build_identity_provider_vtable_from_boxed,
     build_reaction_plugin_vtable, build_reaction_vtable, build_reaction_vtable_from_boxed,
+    build_secret_store_plugin_vtable, build_secret_store_vtable_from_boxed,
     build_source_plugin_vtable, build_source_vtable, build_source_vtable_from_boxed,
     current_instance_log_ctx, InstanceLogContext,
 };
@@ -69,7 +71,8 @@ pub use vtables::{
     FfiCheckpointResult, FfiOutboxIterator, FfiOutboxIteratorResponse, FfiPluginRegistration,
     FfiResultPushCallbackFn, FfiRuntimeContext, FfiSnapshotIterator, FfiSnapshotIteratorResponse,
     FfiSourceEvent, FfiSubscriptionResponse, IdentityProviderPluginVtable, ReactionPluginVtable,
-    ReactionVtable, SnapshotFetcherVtable, SourcePluginVtable, SourceVtable, StateStoreVtable,
+    ReactionVtable, SecretStorePluginVtable, SnapshotFetcherVtable, SourcePluginVtable,
+    SourceVtable, StateStoreVtable,
 };
 
 pub use bootstrap_proxy::FfiBootstrapProviderProxy;
@@ -78,5 +81,6 @@ pub use identity::{
     IdentityProviderVtable,
 };
 pub use identity_proxy::FfiIdentityProviderProxy;
+pub use secret_store::{FfiGetSecretResult, SecretStoreProviderVtable};
 pub use snapshot_fetcher_proxy::FfiSnapshotFetcherProxy;
 pub use state_store_proxy::FfiStateStoreProxy;

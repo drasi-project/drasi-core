@@ -24,6 +24,7 @@ pub enum PluginCategory {
     Reaction,
     Bootstrap,
     IdentityProvider,
+    SecretStore,
 }
 
 impl std::fmt::Display for PluginCategory {
@@ -33,6 +34,7 @@ impl std::fmt::Display for PluginCategory {
             PluginCategory::Reaction => write!(f, "reaction"),
             PluginCategory::Bootstrap => write!(f, "bootstrap"),
             PluginCategory::IdentityProvider => write!(f, "identity-provider"),
+            PluginCategory::SecretStore => write!(f, "secret_store"),
         }
     }
 }
@@ -109,6 +111,7 @@ mod tests {
             PluginCategory::IdentityProvider.to_string(),
             "identity-provider"
         );
+        assert_eq!(PluginCategory::SecretStore.to_string(), "secret_store");
     }
 
     #[test]
