@@ -41,6 +41,7 @@ struct CheckpointEntry {
 pub struct InMemoryCheckpointStore {
     checkpoints: RwLock<HashMap<String, CheckpointEntry>>,
     config_hash: RwLock<Option<u64>>,
+    result_sequences: RwLock<HashMap<String, u64>>,
 }
 
 impl Default for InMemoryCheckpointStore {
@@ -54,6 +55,7 @@ impl InMemoryCheckpointStore {
         Self {
             checkpoints: RwLock::new(HashMap::new()),
             config_hash: RwLock::new(None),
+            result_sequences: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -113,6 +115,8 @@ impl CheckpointStore for InMemoryCheckpointStore {
         data.clear();
         let mut hash = self.config_hash.write().await;
         *hash = None;
+        let mut seq = self.result_sequences.write().await;
+        seq.clear();
         Ok(())
     }
 
@@ -125,6 +129,17 @@ impl CheckpointStore for InMemoryCheckpointStore {
     async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
         let data = self.config_hash.read().await;
         Ok(*data)
+    }
+
+    async fn write_result_sequence(&self, query_id: &str, sequence: u64) -> Result<(), IndexError> {
+        let mut data = self.result_sequences.write().await;
+        data.insert(query_id.to_string(), sequence);
+        Ok(())
+    }
+
+    async fn read_result_sequence(&self, query_id: &str) -> Result<Option<u64>, IndexError> {
+        let data = self.result_sequences.read().await;
+        Ok(data.get(query_id).copied())
     }
 }
 

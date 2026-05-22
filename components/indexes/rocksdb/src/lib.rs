@@ -34,6 +34,8 @@
 pub mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
+pub mod live_results;
+pub mod outbox;
 mod plugin;
 pub mod result_index;
 mod session_state;
@@ -41,6 +43,8 @@ mod storage_models;
 
 // Re-export the plugin provider and unified DB opener for easy access
 pub use checkpoint::RocksDbCheckpointStore;
+pub use live_results::RocksDbLiveResultsWriter;
+pub use outbox::RocksDbOutboxWriter;
 pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
 
