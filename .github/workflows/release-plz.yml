@@ -88,25 +88,7 @@ jobs:
 
       - name: Publish crates
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
-        run: |
-          # Retry up to 3 times to handle transient failures and dependency ordering issues.
-          # release-plz skips already-published crates (via git tags), so retries are safe
-          # and allow dependent crates to publish after their dependencies land on crates.io.
-          for attempt in 1 2 3; do
-            echo "=== Publish attempt $attempt/3 ==="
-            if release-plz release --git-token "$GITHUB_TOKEN" --backend github; then
-              echo "All crates published successfully."
-              break
-            else
-              if [ $attempt -lt 3 ]; then
-                echo "Some crates failed to publish. Waiting 30s for crates.io index to update before retrying..."
-                sleep 30
-              else
-                echo "::error::Publish failed after 3 attempts"
-                exit 1
-              fi
-            fi
-          done
+        run: release-plz release --git-token "$GITHUB_TOKEN" --backend github
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

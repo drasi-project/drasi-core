@@ -12,10 +12,6 @@ git_release_type = "prod"
 
 # Publishing settings
 publish = true
-# Skip cargo publish verification (build check) since CI already validates builds.
-# This prevents publish failures due to dev-dependency ordering issues where
-# release-plz may try to publish a crate before its dev-deps are on crates.io.
-publish_no_verify = true
 
 # PR settings
 pr_labels = ["release"]
