@@ -24,7 +24,7 @@
 //!
 //! The application source uses a handle-based pattern:
 //! - **`ApplicationSource`**: The source component that processes events
-//! - **`ApplicationSourceHandle`**: A clonable handle for sending events from anywhere in your code
+//! - **`ApplicationSourceHandle`**: A cloneable handle for sending events from anywhere in your code
 //!
 //! # API Overview
 //!

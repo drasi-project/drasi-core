@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use aws_config::Region;
 use aws_sdk_sqs::{types::QueueAttributeName, Client};
-use aws_types::region::Region;
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_aws_sqs::{QueryConfig, SqsReaction, SqsReactionConfig, TemplateSpec};
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
@@ -104,7 +104,7 @@ async fn receive_single_message(
             .send()
             .await?;
 
-        if let Some(messages) = response.messages() {
+        if let Some(messages) = response.messages {
             if let Some(message) = messages.first() {
                 let body = message.body().unwrap_or("{}");
                 let parsed_body: serde_json::Value = serde_json::from_str(body)?;
