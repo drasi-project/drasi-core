@@ -35,13 +35,6 @@ Configuration fields use **camelCase** in JSON/YAML:
 | `priorityQueueCapacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
 | `queries` | `Vec<String>` | `[]` | Subscribed query IDs |
 
-### Snapshot Fallback
-
-When a client requests the current state of a query via `/api/queries/:id/snapshot` and
-the dashboard's in-memory snapshot is empty (e.g. before any diffs have arrived), the
-dashboard automatically falls back to the host-provided `SnapshotFetcher` API to retrieve
-the query's current result set. This happens transparently — no configuration is needed.
-
 ## Predefined Dashboards
 
 You can ship dashboards as part of your reaction configuration using `.with_dashboard()`.
