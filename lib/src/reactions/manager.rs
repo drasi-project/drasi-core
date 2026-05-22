@@ -858,6 +858,13 @@ impl ReactionManager {
 
         // Also abort any remaining subscription tasks after teardown
         self.abort_subscription_tasks(&id).await;
+
+        // Remove metrics entries for this reaction to prevent unbounded memory growth
+        {
+            let mut metrics_map = self.reaction_metrics.write().await;
+            metrics_map.retain(|(rid, _), _| rid != &id);
+        }
+
         Ok(())
     }
 
@@ -1466,16 +1473,28 @@ impl ReactionManager {
     /// Get the per-(reaction, query) metrics for a specific reaction.
     ///
     /// Returns a map from query_id to its metrics snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the reaction does not exist.
     pub async fn get_reaction_metrics(
         &self,
         reaction_id: &str,
-    ) -> HashMap<String, crate::metrics::ReactionMetricsSnapshot> {
+    ) -> Result<HashMap<String, crate::metrics::ReactionMetricsSnapshot>> {
+        // Verify the reaction exists in the component graph
+        let graph = self.graph.read().await;
+        if graph.get_runtime::<Arc<dyn Reaction>>(reaction_id).is_none() {
+            return Err(anyhow::anyhow!(
+                "Reaction '{reaction_id}' not found",
+            ));
+        }
+        drop(graph);
+
         let metrics = self.reaction_metrics.read().await;
-        metrics
+        Ok(metrics
             .iter()
             .filter(|((rid, _), _)| rid == reaction_id)
             .map(|((_, qid), m)| (qid.clone(), m.snapshot()))
-            .collect()
+            .collect())
     }
 
     /// Get the global lifecycle metrics.

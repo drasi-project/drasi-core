@@ -779,9 +779,9 @@ impl InspectionAPI {
 
     /// Get per-query output metrics for a specific query.
     ///
-    /// Returns `None` if the query is not found or has no metrics attached.
-    ///
     /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the query does not exist or
+    /// has no metrics attached.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
     pub async fn get_query_output_metrics(
         &self,
@@ -805,9 +805,9 @@ impl InspectionAPI {
     /// Get per-reaction metrics for a specific reaction.
     ///
     /// Returns a map from query_id to its `ReactionMetricsSnapshot`.
-    /// Returns an empty map if no metrics exist for the reaction.
     ///
     /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the reaction does not exist.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
     pub async fn get_reaction_metrics(
         &self,
@@ -816,10 +816,12 @@ impl InspectionAPI {
         std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
     > {
         self.state_guard.require_initialized()?;
-        Ok(self
-            .reaction_manager
+        self.reaction_manager
             .get_reaction_metrics(reaction_id)
-            .await)
+            .await
+            .map_err(|_| {
+                crate::error::DrasiError::component_not_found("reaction", reaction_id)
+            })
     }
 
     /// Get global lifecycle metrics.

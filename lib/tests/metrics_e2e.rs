@@ -182,7 +182,11 @@ impl RecordingReceiver {
         let mut results = Vec::new();
         let deadline = tokio::time::Instant::now() + dur;
         while results.len() < count {
-            match timeout(deadline - tokio::time::Instant::now(), self.rx.recv()).await {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match timeout(deadline - now, self.rx.recv()).await {
                 Ok(Some(r)) => results.push(r),
                 Ok(None) => break,
                 Err(_) => break,
@@ -388,16 +392,21 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
     let _ = receiver.wait_for_count(2, Duration::from_secs(5)).await;
 
     // Give forwarder time to update checkpoint metrics
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Poll reaction metrics until checkpoint reaches expected value
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut q1_metrics_snap = None;
+    while tokio::time::Instant::now() < deadline {
+        let metrics = core.get_reaction_metrics("rec").await?;
+        if let Some(m) = metrics.get("q1") {
+            if m.checkpoint_sequence >= 2 {
+                q1_metrics_snap = Some(m.clone());
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    // Reaction metrics should show checkpoint progress
-    let metrics = core.get_reaction_metrics("rec").await?;
-    assert!(
-        !metrics.is_empty(),
-        "Expected at least one entry in reaction metrics"
-    );
-
-    let q1_metrics = metrics.get("q1").expect("Expected metrics for query q1");
+    let q1_metrics = q1_metrics_snap.expect("Expected checkpoint_sequence >= 2 within timeout");
     assert!(
         q1_metrics.checkpoint_sequence >= 2,
         "Expected checkpoint_sequence >= 2, got {}",
