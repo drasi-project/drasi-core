@@ -1482,10 +1482,11 @@ impl ReactionManager {
     ) -> Result<HashMap<String, crate::metrics::ReactionMetricsSnapshot>> {
         // Verify the reaction exists in the component graph
         let graph = self.graph.read().await;
-        if graph.get_runtime::<Arc<dyn Reaction>>(reaction_id).is_none() {
-            return Err(anyhow::anyhow!(
-                "Reaction '{reaction_id}' not found",
-            ));
+        if graph
+            .get_runtime::<Arc<dyn Reaction>>(reaction_id)
+            .is_none()
+        {
+            return Err(anyhow::anyhow!("Reaction '{reaction_id}' not found",));
         }
         drop(graph);
 

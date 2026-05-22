@@ -819,9 +819,7 @@ impl InspectionAPI {
         self.reaction_manager
             .get_reaction_metrics(reaction_id)
             .await
-            .map_err(|_| {
-                crate::error::DrasiError::component_not_found("reaction", reaction_id)
-            })
+            .map_err(|_| crate::error::DrasiError::component_not_found("reaction", reaction_id))
     }
 
     /// Get global lifecycle metrics.
