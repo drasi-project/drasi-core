@@ -25,12 +25,14 @@ let reaction = DashboardReaction::builder("my-dashboard")
 
 ### Fields
 
+Configuration fields use **camelCase** in JSON/YAML:
+
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `host` | `String` | `"0.0.0.0"` | Bind host for HTTP + WebSocket server |
 | `port` | `u16` | `3000` | Bind port |
-| `heartbeat_interval_ms` | `u64` | `30000` | WebSocket heartbeat interval |
-| `priority_queue_capacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
+| `heartbeatIntervalMs` | `u64` | `30000` | WebSocket heartbeat interval |
+| `priorityQueueCapacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
 | `queries` | `Vec<String>` | `[]` | Subscribed query IDs |
 
 ### Snapshot Fallback

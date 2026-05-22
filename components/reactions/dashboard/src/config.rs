@@ -30,6 +30,7 @@ fn default_heartbeat_interval_ms() -> u64 {
 
 /// Dashboard reaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct DashboardReactionConfig {
     /// Host to bind the dashboard server.
     #[serde(default = "default_dashboard_host")]
