@@ -97,12 +97,6 @@ impl DashboardReactionBuilder {
         self
     }
 
-    /// Set the results API base URL for proxying initial query data.
-    #[deprecated(note = "The dashboard now uses the internal SnapshotFetcher API automatically")]
-    pub fn with_results_api_url(self, _url: impl Into<String>) -> Self {
-        self
-    }
-
     /// Add a predefined dashboard that will be seeded on startup.
     /// Predefined dashboards are only seeded if they don't already exist in the state store,
     /// so user edits made via the UI are preserved across restarts.

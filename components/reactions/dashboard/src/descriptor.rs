@@ -182,13 +182,6 @@ pub struct DashboardReactionConfigDto {
     #[schema(value_type = Option<ConfigValueU64>)]
     pub heartbeat_interval_ms: Option<ConfigValue<u64>>,
 
-    /// Deprecated: previously used for HTTP-based results API fallback.
-    /// The dashboard now uses the internal SnapshotFetcher API automatically.
-    /// Retained for backwards-compatible deserialization only.
-    #[serde(skip_serializing, default)]
-    #[schema(ignore)]
-    pub results_api_url: Option<ConfigValue<String>>,
-
     /// Optional priority queue capacity for change event processing.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueU64>)]
@@ -262,7 +255,6 @@ impl From<&crate::config::DashboardReactionConfig> for DashboardReactionConfigDt
             host: Some(ConfigValue::Static(config.host.clone())),
             port: Some(ConfigValue::Static(config.port)),
             heartbeat_interval_ms: Some(ConfigValue::Static(config.heartbeat_interval_ms)),
-            results_api_url: None,
             priority_queue_capacity: None,
             predefined_dashboards: Vec::new(),
         }
