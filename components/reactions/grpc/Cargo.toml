@@ -1,4 +1,4 @@
-# Copyright 2025 The Drasi Authors.
+# Copyright 2026 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@
 
 [package]
 name = "drasi-reaction-grpc"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "gRPC reaction plugin for Drasi"
+description = "Unified gRPC reaction plugin for Drasi with configurable fixed and adaptive batching"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
 keywords = ["drasi", "plugin", "reaction", "grpc"]
@@ -45,9 +45,14 @@ chrono = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 prost-types = "0.12"
 ordered-float = "3.0"
+handlebars = "5.1"
 
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
 tonic-build = "0.11"

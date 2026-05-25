@@ -1,4 +1,4 @@
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,73 +12,112 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for gRPC reactions.
+//! Configuration types for the unified gRPC reaction.
 
+use drasi_lib::reactions::common::{
+    AdaptiveBatchConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-fn default_grpc_endpoint() -> String {
+pub(crate) fn default_grpc_endpoint() -> String {
     "grpc://localhost:50052".to_string()
 }
 
-fn default_timeout_ms() -> u64 {
+pub(crate) fn default_timeout_ms() -> u64 {
     5000
 }
 
-fn default_batch_size() -> usize {
+pub(crate) fn default_batch_size() -> usize {
     100
 }
 
-fn default_batch_flush_timeout_ms() -> u64 {
+pub(crate) fn default_batch_flush_timeout_ms() -> u64 {
     1000
 }
 
-fn default_max_retries() -> u32 {
+pub(crate) fn default_max_retries() -> u32 {
     3
 }
 
-fn default_connection_retry_attempts() -> u32 {
+pub(crate) fn default_connection_retry_attempts() -> u32 {
     5
 }
 
-fn default_initial_connection_timeout_ms() -> u64 {
+pub(crate) fn default_initial_connection_timeout_ms() -> u64 {
     10000
 }
 
-/// gRPC reaction configuration
+/// Batching strategy used by the gRPC reaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum BatchingConfig {
+    /// Fixed-size batching — flushes when `batchSize` items have accumulated
+    /// or `batchFlushTimeoutMs` elapses, whichever comes first.
+    #[serde(rename = "fixed")]
+    Fixed {
+        #[serde(default = "default_batch_size", rename = "batchSize")]
+        batch_size: usize,
+        #[serde(
+            default = "default_batch_flush_timeout_ms",
+            rename = "batchFlushTimeoutMs"
+        )]
+        batch_flush_timeout_ms: u64,
+    },
+    /// Throughput-aware adaptive batching.
+    #[serde(rename = "adaptive")]
+    Adaptive(AdaptiveBatchConfig),
+}
+
+impl Default for BatchingConfig {
+    fn default() -> Self {
+        BatchingConfig::Fixed {
+            batch_size: default_batch_size(),
+            batch_flush_timeout_ms: default_batch_flush_timeout_ms(),
+        }
+    }
+}
+
+/// Optional Handlebars-based output template configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputTemplates {
+    /// Default template applied when no per-query override matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_template: Option<QueryConfig>,
+
+    /// Per-query overrides keyed by query id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub routes: HashMap<String, QueryConfig>,
+}
+
+/// Unified gRPC reaction configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct GrpcReactionConfig {
-    /// gRPC server URL
     #[serde(default = "default_grpc_endpoint")]
     pub endpoint: String,
 
-    /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 
-    /// Batch size for bundling events
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-
-    /// Batch flush timeout in milliseconds
-    #[serde(default = "default_batch_flush_timeout_ms")]
-    pub batch_flush_timeout_ms: u64,
-
-    /// Maximum retries for failed requests
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
 
-    /// Connection retry attempts
     #[serde(default = "default_connection_retry_attempts")]
     pub connection_retry_attempts: u32,
 
-    /// Initial connection timeout in milliseconds
     #[serde(default = "default_initial_connection_timeout_ms")]
     pub initial_connection_timeout_ms: u64,
 
-    /// Metadata headers to include in requests
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    #[serde(default)]
+    pub batching: BatchingConfig,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_templates: Option<OutputTemplates>,
 }
 
 impl Default for GrpcReactionConfig {
@@ -86,12 +125,41 @@ impl Default for GrpcReactionConfig {
         Self {
             endpoint: default_grpc_endpoint(),
             timeout_ms: default_timeout_ms(),
-            batch_size: default_batch_size(),
-            batch_flush_timeout_ms: default_batch_flush_timeout_ms(),
             max_retries: default_max_retries(),
             connection_retry_attempts: default_connection_retry_attempts(),
             initial_connection_timeout_ms: default_initial_connection_timeout_ms(),
             metadata: HashMap::new(),
+            batching: BatchingConfig::default(),
+            output_templates: None,
         }
     }
+}
+
+fn empty_routes() -> &'static HashMap<String, QueryConfig> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, QueryConfig>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+impl TemplateRouting<()> for GrpcReactionConfig {
+    fn routes(&self) -> &HashMap<String, QueryConfig> {
+        match self.output_templates.as_ref() {
+            Some(t) => &t.routes,
+            None => empty_routes(),
+        }
+    }
+
+    fn default_template(&self) -> Option<&QueryConfig> {
+        self.output_templates
+            .as_ref()
+            .and_then(|t| t.default_template.as_ref())
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn lookup_template_spec<'a>(
+    cfg: &'a GrpcReactionConfig,
+    query_id: &str,
+    op: OperationType,
+) -> Option<&'a TemplateSpec> {
+    cfg.get_template_spec(query_id, op)
 }
