@@ -1,4 +1,4 @@
-# Copyright 2025 The Drasi Authors.
+# Copyright 2026 The Drasi Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
 
 [package]
 name = "drasi-reaction-http"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "HTTP reaction plugin for Drasi"
+description = "Unified HTTP reaction plugin for Drasi (per-result and adaptive coalesced delivery)"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "reaction", "http"]
+keywords = ["drasi", "plugin", "reaction", "http", "adaptive"]
 categories = ["network-programming"]
 
 [lints]
@@ -31,7 +31,6 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 drasi-lib.workspace = true
-drasi-core.workspace = true
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
@@ -40,15 +39,15 @@ reqwest = { version = "0.11", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-futures = "0.3"
 chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-tokio-stream = "0.1"
-prost-types = "0.12"
-ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
+[dev-dependencies]
+drasi-core.workspace = true
+wiremock = "0.6"
+tokio = { version = "1.0", features = ["full", "test-util"] }
+env_logger = "0.11"
 
 [features]
 # default = []

@@ -97,7 +97,7 @@ jobs:
             --exclude drasi-source-postgres --exclude drasi-source-http --exclude drasi-source-grpc \
             --exclude drasi-source-platform --exclude drasi-source-application --exclude drasi-source-mock \
             --exclude drasi-source-mssql \
-            --exclude drasi-reaction-http --exclude drasi-reaction-http-adaptive \
+            --exclude drasi-reaction-http \
             --exclude drasi-reaction-grpc --exclude drasi-reaction-grpc-adaptive \
             --exclude drasi-reaction-sse --exclude drasi-reaction-platform \
             --exclude drasi-reaction-profiler --exclude drasi-reaction-application \
