@@ -74,7 +74,7 @@ impl MqttProcessor {
         >,
         adaptive_config: AdaptiveBatchConfig,
         cancellation_token: CancellationToken,
-    ) -> anyhow::Result<(JoinHandle<()>)> {
+    ) -> anyhow::Result<JoinHandle<()>> {
         Ok(tokio::spawn(async move {
             Self::run_adaptive_batcher_loop(
                 batch_rx,
@@ -299,5 +299,134 @@ impl MqttProcessor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        MappingEntity, MappingMode, MappingNode, MappingProperties, MappingRelation,
+        MappingRelationEndpoint, TopicMapping,
+    };
+    use crate::MqttElement;
+    use bytes::Bytes;
+
+    fn simple_mapping() -> TopicMapping {
+        TopicMapping {
+            pattern: "sensors/{room}/{device}".to_string(),
+            entity: MappingEntity {
+                label: "Sensor".to_string(),
+                id: "{room}:{device}".to_string(),
+            },
+            properties: MappingProperties {
+                mode: MappingMode::PayloadAsField,
+                field_name: Some("value".to_string()),
+                inject_id: Some(false),
+                inject: vec![],
+            },
+            nodes: vec![MappingNode {
+                label: "Room".to_string(),
+                id: "{room}".to_string(),
+            }],
+            relations: vec![MappingRelation {
+                label: "IN_ROOM".to_string(),
+                id: "{room}:{device}_in_{room}".to_string(),
+                from: MappingRelationEndpoint {
+                    label: "Sensor".to_string(),
+                    id: "{room}:{device}".to_string(),
+                },
+                to: MappingRelationEndpoint {
+                    label: "Room".to_string(),
+                    id: "{room}".to_string(),
+                },
+            }],
+        }
+    }
+
+    fn packet(topic: &str, payload: &[u8], timestamp: u64) -> MqttPacket {
+        MqttPacket {
+            topic: topic.to_string(),
+            payload: Bytes::from(payload.to_vec()),
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn process_matching_topic_returns_source_changes() {
+        let matcher = PatternMatcher::new(&vec![simple_mapping()]);
+        let pkt = packet("sensors/lab1/thermometer", b"22", 9000);
+
+        let changes = MqttProcessor::process(&matcher, &pkt);
+
+        assert_eq!(changes.len(), 3, "expected 3 changes for a matching packet");
+
+        match &changes[0] {
+            MqttSourceChange::Update { element, timestamp } => {
+                assert_eq!(*timestamp, Some(9000));
+                match element {
+                    MqttElement::Node {
+                        id,
+                        labels,
+                        properties,
+                    } => {
+                        assert_eq!(id, "lab1:thermometer");
+                        assert_eq!(labels, &vec!["Sensor".to_string()]);
+                        assert_eq!(
+                            properties.get("value"),
+                            Some(&serde_json::Value::Number(22.into()))
+                        );
+                    }
+                    _ => panic!("first change should be a node"),
+                }
+            }
+        }
+
+        match &changes[1] {
+            MqttSourceChange::Update { element, timestamp } => {
+                assert_eq!(*timestamp, Some(9000));
+                match element {
+                    MqttElement::Node { id, labels, .. } => {
+                        assert_eq!(id, "lab1");
+                        assert_eq!(labels, &vec!["Room".to_string()]);
+                    }
+                    _ => panic!("second change should be a node"),
+                }
+            }
+        }
+
+        match &changes[2] {
+            MqttSourceChange::Update { element, timestamp } => {
+                assert_eq!(*timestamp, Some(9000));
+                match element {
+                    MqttElement::Relation {
+                        id,
+                        labels,
+                        from,
+                        to,
+                        ..
+                    } => {
+                        assert_eq!(id, "lab1:thermometer_in_lab1");
+                        assert_eq!(labels, &vec!["IN_ROOM".to_string()]);
+                        assert_eq!(from, "lab1:thermometer");
+                        assert_eq!(to, "lab1");
+                    }
+                    _ => panic!("third change should be a relation"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn process_unmatched_topic_returns_empty_vec() {
+        let matcher = PatternMatcher::new(&vec![simple_mapping()]);
+        let pkt = packet("telemetry/unknown/device", b"42", 1000);
+
+        let changes = MqttProcessor::process(&matcher, &pkt);
+
+        assert!(
+            changes.is_empty(),
+            "expected empty vec for an unmatched topic, got {changes:?}"
+        );
     }
 }

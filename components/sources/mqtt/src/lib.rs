@@ -171,7 +171,7 @@ impl MqttSourceBuilder {
         self
     }
 
-    pub fn with_timeout_ms(mut self, timeout: u64) -> Self {
+    pub fn with_timeout_s(mut self, timeout: u64) -> Self {
         self.conn_timeout = Some(timeout);
         self
     }
@@ -605,7 +605,7 @@ mod tests {
                 .with_host("api.example.com")
                 .with_port(9000)
                 .with_topic("/webhook")
-                .with_timeout_ms(5)
+                .with_timeout_s(5)
                 .build()
                 .await;
 

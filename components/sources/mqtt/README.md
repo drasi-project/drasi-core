@@ -66,10 +66,10 @@ let source = MqttSource::builder("mqtt-source")
   | `with_topic_config(topic, qos)` | Add one topic subscription with explicit QoS |
   | `with_topics(topics)` | Set full topic subscription list |
   | `with_topic_mappings(topic_mappings)` | Set topic-to-graph mappings |
-  | `with_timeout_ms(timeout)` | Set MQTT v5 connection timeout |
+  | `with_timeout_s(timeout)` | Set MQTT v5 connection timeout in seconds |
   | `with_channel_capacity(capacity)` | Event channel capacity |
   | `with_max_retries(max_retries)` | Max retries inside in the event loop upon failure. |
-  | `with_base_retry_delay_secs(delay_sec)` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256)|
+  | `with_base_retry_delay_secs(delay_sec)` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256) |
   | `with_transport(transport)` | TCP or TLS transport configuration |
   | `with_request_channel_capacity(capacity)` | Internal request channel capacity |
   | `with_max_inflight(max_inflight)` | Max in-flight outgoing messages |
@@ -115,7 +115,7 @@ sources:
           properties:
             mode: payload_as_field
             field_name: payload
-            inject_id: "true"
+            inject_id: true
             inject:
               - room: "{room}"
               - floor: "{floor}"
@@ -141,7 +141,7 @@ sources:
 | `topic_mappings` | Topic-to-graph mapping rules. Every `pattern` must be reachable by at least one `topics[]` filter; otherwise validation fails up-front rather than silently dropping messages at runtime. | none |
 | `event_channel_capacity` | Event channel capacity | `20` |
 | `max_retries` | Max retries inside in the event loop upon failure. | `8` |
-| `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256)| `1` |
+| `base_retry_delay_secs` |  Base delay in seconds for retrying MQTT operations after failure (exponential backoff, doubler capped at 256) | `1` |
 | `transport` | `tcp` or `tls` transport settings | `tcp` |
 | `request_channel_capacity` | Internal request channel capacity | none |
 | `max_inflight` | Max in-flight outgoing messages | none |
@@ -345,7 +345,7 @@ topic_mappings:
     properties:
       mode: payload_as_field
       field_name: "reading"
-      inject_id: "true"
+      inject_id: true
       inject:
       - room: "{room}"
       - floor: "{floor}"

@@ -281,15 +281,15 @@ impl PatternMatcher {
         properties: &serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<String> {
         let mut out = String::with_capacity(s.len());
-        let bytes = s.as_bytes();
+        let bytes = s.chars().collect::<Vec<_>>();
         let mut i = 0;
         while i < bytes.len() {
-            if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'.' {
+            if bytes[i] == '$' && i + 1 < bytes.len() && bytes[i + 1] == '.' {
                 let start = i + 2;
                 let mut end = start;
                 while end < bytes.len() {
                     let c = bytes[end];
-                    if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
                         end += 1;
                     } else {
                         break;
@@ -318,7 +318,7 @@ impl PatternMatcher {
                 out.push_str(&stringified);
                 i = end;
             } else {
-                out.push(bytes[i] as char);
+                out.push(bytes[i]);
                 i += 1;
             }
         }
