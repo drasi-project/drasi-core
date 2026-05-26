@@ -309,16 +309,16 @@ impl MappingModeDto {
 }
 
 impl MqttTransportModeDto {
-    fn into_runtime(self, mapper: &DtoMapper) -> anyhow::Result<MqttTransportMode> {
+    async fn into_runtime(self, mapper: &DtoMapper) -> anyhow::Result<MqttTransportMode> {
         match self {
             MqttTransportModeDto::Tcp => Ok(MqttTransportMode::TCP),
             MqttTransportModeDto::Tls(tls) => Ok(MqttTransportMode::TLS {
-                ca: mapper.resolve_optional(&tls.ca)?,
-                ca_path: mapper.resolve_optional(&tls.ca_path)?,
+                ca: mapper.resolve_optional(&tls.ca).await?,
+                ca_path: mapper.resolve_optional(&tls.ca_path).await?,
                 alpn: tls.alpn,
                 client_auth: tls.client_auth,
-                client_cert_path: mapper.resolve_optional(&tls.client_cert_path)?,
-                client_key_path: mapper.resolve_optional(&tls.client_key_path)?,
+                client_cert_path: mapper.resolve_optional(&tls.client_cert_path).await?,
+                client_key_path: mapper.resolve_optional(&tls.client_key_path).await?,
             }),
         }
     }
@@ -427,14 +427,14 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
 
         let connect_properties = match dto.connect_properties {
             Some(p) => Some(MqttConnectProperties {
-                session_expiry_interval: mapper.resolve_optional(&p.session_expiry_interval)?,
-                receive_maximum: mapper.resolve_optional(&p.receive_maximum)?,
-                max_packet_size: mapper.resolve_optional(&p.max_packet_size)?,
-                topic_alias_max: mapper.resolve_optional(&p.topic_alias_max)?,
-                request_response_info: mapper.resolve_optional(&p.request_response_info)?,
-                request_problem_info: mapper.resolve_optional(&p.request_problem_info)?,
+                session_expiry_interval: mapper.resolve_optional(&p.session_expiry_interval).await?,
+                receive_maximum: mapper.resolve_optional(&p.receive_maximum).await?,
+                max_packet_size: mapper.resolve_optional(&p.max_packet_size).await?,
+                topic_alias_max: mapper.resolve_optional(&p.topic_alias_max).await?,
+                request_response_info: mapper.resolve_optional(&p.request_response_info).await?,
+                request_problem_info: mapper.resolve_optional(&p.request_problem_info).await?,
                 user_properties: p.user_properties,
-                authentication_method: mapper.resolve_optional(&p.authentication_method)?,
+                authentication_method: mapper.resolve_optional(&p.authentication_method).await?,
                 authentication_data: p.authentication_data,
             }),
             None => None,
@@ -442,43 +442,43 @@ impl SourcePluginDescriptor for MqttSourceDescriptor {
 
         let subscribe_properties = match dto.subscribe_properties {
             Some(p) => Some(MqttSubscribeProperties {
-                id: mapper.resolve_optional(&p.id)?,
+                id: mapper.resolve_optional(&p.id).await?,
                 user_properties: p.user_properties,
             }),
             None => None,
         };
 
         let config = MqttSourceConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            client_id: mapper.resolve_optional(&dto.client_id)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            client_id: mapper.resolve_optional(&dto.client_id).await?,
             identity_provider: None,
             topics,
             topic_mappings,
-            event_channel_capacity: mapper.resolve_typed(&dto.event_channel_capacity)?,
-            max_retries: mapper.resolve_optional(&dto.max_retries)?,
-            base_retry_delay_secs: mapper.resolve_optional(&dto.base_retry_delay_secs)?,
+            event_channel_capacity: mapper.resolve_typed(&dto.event_channel_capacity).await?,
+            max_retries: mapper.resolve_optional(&dto.max_retries).await?,
+            base_retry_delay_secs: mapper.resolve_optional(&dto.base_retry_delay_secs).await?,
             transport: match dto.transport {
-                Some(t) => Some(t.into_runtime(&mapper)?),
+                Some(t) => Some(t.into_runtime(&mapper).await?),
                 None => None,
             },
-            request_channel_capacity: mapper.resolve_optional(&dto.request_channel_capacity)?,
-            max_inflight: mapper.resolve_optional(&dto.max_inflight)?,
-            keep_alive: mapper.resolve_optional(&dto.keep_alive)?,
-            clean_start: mapper.resolve_optional(&dto.clean_start)?,
-            max_incoming_packet_size: mapper.resolve_optional(&dto.max_incoming_packet_size)?,
-            max_outgoing_packet_size: mapper.resolve_optional(&dto.max_outgoing_packet_size)?,
-            conn_timeout: mapper.resolve_optional(&dto.conn_timeout)?,
+            request_channel_capacity: mapper.resolve_optional(&dto.request_channel_capacity).await?,
+            max_inflight: mapper.resolve_optional(&dto.max_inflight).await?,
+            keep_alive: mapper.resolve_optional(&dto.keep_alive).await?,
+            clean_start: mapper.resolve_optional(&dto.clean_start).await?,
+            max_incoming_packet_size: mapper.resolve_optional(&dto.max_incoming_packet_size).await?,
+            max_outgoing_packet_size: mapper.resolve_optional(&dto.max_outgoing_packet_size).await?,
+            conn_timeout: mapper.resolve_optional(&dto.conn_timeout).await?,
             connect_properties,
             subscribe_properties,
-            adaptive_max_batch_size: mapper.resolve_optional(&dto.adaptive_max_batch_size)?,
-            adaptive_min_batch_size: mapper.resolve_optional(&dto.adaptive_min_batch_size)?,
-            adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms)?,
-            adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms)?,
-            adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs)?,
-            adaptive_enabled: mapper.resolve_optional(&dto.adaptive_enabled)?,
-            username: mapper.resolve_optional(&dto.username)?,
-            password: mapper.resolve_optional(&dto.password)?,
+            adaptive_max_batch_size: mapper.resolve_optional(&dto.adaptive_max_batch_size).await?,
+            adaptive_min_batch_size: mapper.resolve_optional(&dto.adaptive_min_batch_size).await?,
+            adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms).await?,
+            adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms).await?,
+            adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs).await?,
+            adaptive_enabled: mapper.resolve_optional(&dto.adaptive_enabled).await?,
+            username: mapper.resolve_optional(&dto.username).await?,
+            password: mapper.resolve_optional(&dto.password).await?,
         };
 
         let source = MqttSourceBuilder::new(id)
