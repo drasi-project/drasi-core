@@ -25,7 +25,9 @@ use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{log_component_error, ComponentLogKey, ComponentLogRegistry};
-use crate::metrics::{LifecycleMetrics, ReactionMetrics, RecoveryPolicyKind, StartupRejectionReason};
+use crate::metrics::{
+    LifecycleMetrics, ReactionMetrics, RecoveryPolicyKind, StartupRejectionReason,
+};
 use crate::queries::output_state::FetchError;
 use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
