@@ -54,7 +54,7 @@ pub struct MqttSource {
     /// Adaptive batching configuration for throughput optimization
     adaptive_config: AdaptiveBatchConfig,
     /// Cancellation token for managing shutdown of async tasks
-    shutdown_token: CancellationToken,
+    shutdown_token: RwLock<CancellationToken>,
     /// Join handle for processing loop
     processing_task_handle: RwLock<Option<JoinHandle<()>>>,
     /// Join handle for batching loop
@@ -199,7 +199,7 @@ impl MqttSource {
                 base,
                 config,
                 adaptive_config,
-                shutdown_token: CancellationToken::new(),
+                shutdown_token: RwLock::new(CancellationToken::new()),
                 processing_task_handle: RwLock::new(None),
                 batching_task_handle: RwLock::new(None),
             })
@@ -229,7 +229,7 @@ impl MqttSource {
                 base,
                 config,
                 adaptive_config: adaptive_config_internal,
-                shutdown_token: CancellationToken::new(),
+                shutdown_token: RwLock::new(CancellationToken::new()),
                 processing_task_handle: RwLock::new(None),
                 batching_task_handle: RwLock::new(None),
             })
@@ -252,7 +252,7 @@ impl MqttSource {
             base,
             config,
             adaptive_config,
-            shutdown_token: CancellationToken::new(),
+            shutdown_token: RwLock::new(CancellationToken::new()),
             processing_task_handle: RwLock::new(None),
             batching_task_handle: RwLock::new(None),
         })
@@ -346,6 +346,11 @@ impl Source for MqttSource {
 
         let source_id = self.base.id.clone();
 
+        // create new cancellation token on start (to handle start after stop cases).
+        let new_token = CancellationToken::new();
+        let shutdown_token = new_token.clone();
+        *self.shutdown_token.write().await = new_token;
+
         // Start the subscriber connection and processing loops
         let config = self.config.clone();
         let source_id_for_task = self.id().to_string();
@@ -363,7 +368,7 @@ impl Source for MqttSource {
             source_id.clone(),
             processor_rx,
             batch_tx,
-            self.shutdown_token.clone(),
+            shutdown_token.clone(),
         )?;
 
         // start adaptive batcher task
@@ -374,7 +379,7 @@ impl Source for MqttSource {
             batch_rx,
             dispatchers,
             adaptive_config,
-            self.shutdown_token.clone(),
+            shutdown_token.clone(),
         )?;
 
         *self.processing_task_handle.write().await = Some(processing_join_handle);
@@ -439,6 +444,20 @@ impl Source for MqttSource {
                     .instrument(span),
                 );
                 *self.base.task_handle.write().await = Some(server_handle);
+                *self.base.shutdown_tx.write().await = Some(shutdown_tx);
+
+                // Set Source Status to running
+                self.base
+                    .set_status(
+                        ComponentStatus::Running,
+                        Some(format!(
+                            "MQTT source is connected to broker at {}:{}",
+                            self.config.host, self.config.port
+                        )),
+                    )
+                    .await;
+
+                Ok(())
             }
             Err(error) => {
                 error!("Mqtt task failed for {source_id_for_task}: {error:?}");
@@ -457,24 +476,9 @@ impl Source for MqttSource {
                     handle.abort();
                 }
 
-                return Err(anyhow::anyhow!("Failed to start MQTT source: {error:?}"));
+                Err(anyhow::anyhow!("Failed to start MQTT source: {error:?}"))
             }
         }
-
-        *self.base.shutdown_tx.write().await = Some(shutdown_tx);
-
-        // Set Source Status to running
-        self.base
-            .set_status(
-                ComponentStatus::Running,
-                Some(format!(
-                    "MQTT source is connected to broker at {}:{}",
-                    self.config.host, self.config.port
-                )),
-            )
-            .await;
-
-        Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
@@ -492,10 +496,7 @@ impl Source for MqttSource {
             let _ = tx.send(());
         }
 
-        // stop the processor and adaptive batcher tasks by triggering the cancellation token
-        self.shutdown_token.cancel();
-
-        // wait for the tasks to stop gracefully, with a timeout as upper limit.
+        // wait for the connection task to stop gracefully, with a timeout as upper limit.
         if let Some(handle) = self.base.task_handle.write().await.take() {
             let mut handle = handle;
             if timeout(Duration::from_secs(3), &mut handle).await.is_err() {
@@ -506,6 +507,9 @@ impl Source for MqttSource {
                 handle.abort();
             }
         }
+
+        // stop the processor and adaptive batcher tasks by triggering the cancellation token
+        self.shutdown_token.read().await.cancel();
 
         if let Some(handle) = self.processing_task_handle.write().await.take() {
             let mut handle = handle;
