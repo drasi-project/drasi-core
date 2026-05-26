@@ -235,59 +235,70 @@ impl SourcePluginDescriptor for Open511SourceDescriptor {
         let dto: Open511SourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let initial_cursor_behavior =
-            match mapper.resolve_typed::<InitialCursorBehaviorDto>(&dto.initial_cursor_behavior)? {
-                InitialCursorBehaviorDto::StartFromBeginning => {
-                    InitialCursorBehavior::StartFromBeginning
-                }
-                InitialCursorBehaviorDto::StartFromNow => InitialCursorBehavior::StartFromNow,
-                InitialCursorBehaviorDto::StartFromTimestamp { timestamp_millis } => {
-                    InitialCursorBehavior::StartFromTimestamp { timestamp_millis }
-                }
-            };
+        let initial_cursor_behavior = match mapper
+            .resolve_typed::<InitialCursorBehaviorDto>(&dto.initial_cursor_behavior)
+            .await?
+        {
+            InitialCursorBehaviorDto::StartFromBeginning => {
+                InitialCursorBehavior::StartFromBeginning
+            }
+            InitialCursorBehaviorDto::StartFromNow => InitialCursorBehavior::StartFromNow,
+            InitialCursorBehaviorDto::StartFromTimestamp { timestamp_millis } => {
+                InitialCursorBehavior::StartFromTimestamp { timestamp_millis }
+            }
+        };
+
+        let base_url = mapper.resolve_string(&dto.base_url).await?;
+        let status_filter = if let Some(v) = dto.status_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let severity_filter = if let Some(v) = dto.severity_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let event_type_filter = if let Some(v) = dto.event_type_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let area_id_filter = if let Some(v) = dto.area_id_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let road_name_filter = if let Some(v) = dto.road_name_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let jurisdiction_filter = if let Some(v) = dto.jurisdiction_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
+        let bbox_filter = if let Some(v) = dto.bbox_filter.as_ref() {
+            Some(mapper.resolve_string(v).await?)
+        } else {
+            None
+        };
 
         let config = Open511SourceConfig {
-            base_url: mapper.resolve_string(&dto.base_url)?,
-            poll_interval_secs: mapper.resolve_typed(&dto.poll_interval_secs)?,
-            full_sweep_interval: mapper.resolve_typed(&dto.full_sweep_interval)?,
-            request_timeout_secs: mapper.resolve_typed(&dto.request_timeout_secs)?,
-            page_size: mapper.resolve_typed(&dto.page_size)?,
-            status_filter: dto
-                .status_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            severity_filter: dto
-                .severity_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            event_type_filter: dto
-                .event_type_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            area_id_filter: dto
-                .area_id_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            road_name_filter: dto
-                .road_name_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            jurisdiction_filter: dto
-                .jurisdiction_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            bbox_filter: dto
-                .bbox_filter
-                .as_ref()
-                .map(|v| mapper.resolve_string(v))
-                .transpose()?,
-            auto_delete_archived: mapper.resolve_typed(&dto.auto_delete_archived)?,
+            base_url,
+            poll_interval_secs: mapper.resolve_typed(&dto.poll_interval_secs).await?,
+            full_sweep_interval: mapper.resolve_typed(&dto.full_sweep_interval).await?,
+            request_timeout_secs: mapper.resolve_typed(&dto.request_timeout_secs).await?,
+            page_size: mapper.resolve_typed(&dto.page_size).await?,
+            status_filter,
+            severity_filter,
+            event_type_filter,
+            area_id_filter,
+            road_name_filter,
+            jurisdiction_filter,
+            bbox_filter,
+            auto_delete_archived: mapper.resolve_typed(&dto.auto_delete_archived).await?,
             initial_cursor_behavior,
         };
 

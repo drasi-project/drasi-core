@@ -1240,6 +1240,7 @@ pub(super) fn is_valid_transition(from: &ComponentStatus, to: &ComponentStatus) 
             | (Starting, Running)
             | (Starting, Error)
             | (Starting, Stopped) // aborted start
+            | (Starting, Stopping) // graceful stop during initialization
             | (Running, Stopping)
             | (Running, Stopped) // direct stop (async channel may skip Stopping)
             | (Running, Error)

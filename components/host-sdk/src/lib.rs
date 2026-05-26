@@ -47,8 +47,14 @@ pub use loader::{
     PluginLoaderConfig, PluginMetadataSummary, DEFAULT_PLUGIN_FILE_PATTERNS,
     PLUGIN_BINARY_EXTENSIONS,
 };
+
+// Re-export the ConfigResolverFn type so consumers can build host-side callbacks.
+pub use drasi_plugin_sdk::ffi::ConfigResolverFn;
 pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
+pub use proxies::secret_store::{
+    HostSecretStoreProxy, SecretStorePluginProxy, SecretStoreValueResolverAdapter,
+};
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
 pub use snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 pub use state_store_bridge::StateStoreVtableBuilder;

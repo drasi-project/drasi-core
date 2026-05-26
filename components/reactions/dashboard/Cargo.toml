@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-dashboard"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Dashboard reaction plugin for Drasi"
@@ -47,10 +47,10 @@ uuid = { version = "1.0", features = ["v4"] }
 rust-embed = { version = "8", features = ["axum", "mime-guess"] }
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 drasi-core.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 env_logger = "0.11"
 tokio-test = "0.4"

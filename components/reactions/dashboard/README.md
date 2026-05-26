@@ -20,19 +20,19 @@ let reaction = DashboardReaction::builder("my-dashboard")
     .with_host("0.0.0.0")
     .with_port(3000)
     .with_heartbeat_interval_ms(30_000)
-    .with_results_api_url("http://localhost:8080")
     .build()?;
 ```
 
 ### Fields
 
+Configuration fields use **camelCase** in JSON/YAML:
+
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `host` | `String` | `"0.0.0.0"` | Bind host for HTTP + WebSocket server |
 | `port` | `u16` | `3000` | Bind port |
-| `heartbeat_interval_ms` | `u64` | `30000` | WebSocket heartbeat interval |
-| `results_api_url` | `Option<String>` | `None` | Optional results API URL for snapshot bootstrap |
-| `priority_queue_capacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
+| `heartbeatIntervalMs` | `u64` | `30000` | WebSocket heartbeat interval |
+| `priorityQueueCapacity` | `Option<usize>` | `None` | Maximum pending change events in the priority queue; unbounded if not set |
 | `queries` | `Vec<String>` | `[]` | Subscribed query IDs |
 
 ## Predefined Dashboards

@@ -268,6 +268,7 @@ let config = Query::gql("active-orders")
 | `with_priority_queue_capacity(usize)` | Override instance-level queue capacity | Inherited |
 | `with_dispatch_buffer_capacity(usize)` | Override instance-level buffer size | Inherited |
 | `with_dispatch_mode(DispatchMode)` | `Channel` (backpressure) or `Broadcast` (fanout) | `Channel` |
+| `with_outbox_capacity(usize)` | Number of recent results retained for reaction replay | `1,000` |
 | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
 | `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
@@ -818,6 +819,112 @@ impl Reaction for MyReaction {
 
 **Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-grpc-adaptive`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`.
 
+### Reaction Recovery
+
+Reactions can be stopped and restarted without losing data. The runtime uses a **checkpoint + outbox** mechanism to guarantee at-least-once delivery:
+
+```
+Query emits results ──► Outbox (ring buffer) ──► Forwarder ──► Reaction
+                           │                        │
+                           │  retained N entries     │  tracks last-delivered seq
+                           │                        ▼
+                           │                   Checkpoint Store
+                           │                   (persisted per query)
+                           ▼
+                     On restart: replay from checkpoint
+```
+
+1. Each query retains the last N results in an **outbox** (configurable via `with_outbox_capacity`).
+2. Reactions persist a **checkpoint** (sequence number + config hash) after each delivered result.
+3. On restart, the runtime replays missed results from the outbox starting after the checkpoint.
+4. If the checkpoint falls behind the outbox (gap), the **recovery policy** decides what happens.
+
+#### Recovery Policies
+
+| Policy | Behavior on gap | Use case |
+|--------|----------------|----------|
+| `Strict` (default) | Fail with error — reaction stops | Correctness-critical (financial, audit) |
+| `AutoReset` | Wipe checkpoint, re-bootstrap from full snapshot | Materialized views, caches |
+| `AutoSkipGap` | Skip missing entries, resume from latest | Best-effort delivery (alerts, logs) |
+
+#### Configuring Recovery
+
+Recovery is configured via the `Reaction` trait and `ReactionBaseParams`:
+
+```rust
+use drasi_lib::recovery::ReactionRecoveryPolicy;
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+
+// Per-instance configuration (highest priority):
+let params = ReactionBaseParams::new("my-reaction", vec!["q1".into()])
+    .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
+
+let base = ReactionBase::new(params);
+```
+
+Or override the default in your `Reaction` trait implementation:
+
+```rust
+impl Reaction for MyReaction {
+    // ...
+
+    fn is_durable(&self) -> bool {
+        true  // requires a durable StateStoreProvider
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        true  // triggers bootstrap() on first start with no checkpoint
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::AutoReset
+    }
+
+    async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
+        // Called on fresh start (if needs_snapshot_on_fresh_start=true)
+        // and on AutoReset recovery after a gap.
+        let snapshot = ctx.fetch_snapshot().await?;
+        while let Some(row) = snapshot.next().await {
+            // Process each row...
+        }
+        Ok(())
+    }
+}
+```
+
+#### Reaction Recovery Trait Methods
+
+| Method | Description | Default |
+|--------|-------------|---------|
+| `is_durable()` | Whether a persistent state store is required | `false` |
+| `needs_snapshot_on_fresh_start()` | Whether to bootstrap on first start (no prior checkpoint) | `false` |
+| `default_recovery_policy()` | Fallback policy when not set via `ReactionBaseParams` | `Strict` |
+| `bootstrap(ctx)` | Hook called for initial load or `AutoReset` recovery | no-op |
+
+#### Compatibility Rules
+
+The runtime validates these constraints at startup:
+
+| Condition | Result |
+|-----------|--------|
+| `is_durable=true` + no durable `StateStoreProvider` | Error: cannot persist checkpoints |
+| `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` | Error: contradictory (skip means no snapshot) |
+| `needs_snapshot_on_fresh_start=false` + `AutoReset` | Error: AutoReset requires bootstrap capability |
+
+#### Query Outbox Configuration
+
+The outbox is a bounded ring buffer on the query side:
+
+```rust
+let query = Query::cypher("q1")
+    .query("MATCH (n:Sensor) RETURN n.id, n.value")
+    .from_source("sensors")
+    .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
+    .build();
+```
+
+If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
+
 ### Result Format
 
 Reactions receive `QueryResult` values containing `ResultDiff` items:
@@ -921,6 +1028,7 @@ let core = builder
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
 | `dispatch_mode` | `dispatch_mode` | `Option<DispatchMode>` | `Channel` |
 | `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | In-memory |
+| `outbox_capacity` | `outbox_capacity` | `Option<usize>` | `1,000` |
 | `recovery_policy` | `recoveryPolicy` | `Option<RecoveryPolicy>` | `Strict` (via global default) |
 
 ---

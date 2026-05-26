@@ -103,7 +103,7 @@ pub enum RoomChangeType {
     Co2,
 }
 
-// Implement Distribution for RoomChangeType so we cna generate a random change type.
+// Implement Distribution for RoomChangeType so we can generate a random change type.
 impl Distribution<RoomChangeType> for Standard {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> RoomChangeType {
         match rng.gen_range(0..=2) {

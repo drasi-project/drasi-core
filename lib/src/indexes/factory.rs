@@ -193,6 +193,8 @@ impl IndexFactory {
                 session_control: Arc::new(NoOpSessionControl),
             },
             checkpoint_store: None,
+            outbox_writer: None,
+            live_results_writer: None,
         })
     }
 

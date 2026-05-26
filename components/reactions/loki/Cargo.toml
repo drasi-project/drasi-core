@@ -35,7 +35,7 @@ url = "2"
 dynamic-plugin = []
 
 [dev-dependencies]
-drasi-source-application = { path = "../../../components/sources/application" }
+drasi-source-application = { workspace = true }
 env_logger = "0.10.0"
-testcontainers = "0.26"
+testcontainers = "0.27"
 tokio-test = "0.4"

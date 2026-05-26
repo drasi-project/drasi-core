@@ -3657,7 +3657,7 @@ fn filter_filter_let_filter() {
 }
 
 #[test]
-fn muliple_match_comma_match_where() {
+fn multiple_match_comma_match_where() {
     let query = "MATCH (:Person {name: 'Martin Sheen'})-[:ACTED_IN]->(movie:Movie),
     (director:Person)-[:DIRECTED]->(movie)
     WHERE director.age > 60

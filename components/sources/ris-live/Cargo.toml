@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-ris-live"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "RIPE NCC RIS Live source plugin for Drasi"

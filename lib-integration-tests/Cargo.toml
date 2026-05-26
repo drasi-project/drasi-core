@@ -16,11 +16,12 @@ drasi-source-application.workspace = true
 drasi-reaction-application.workspace = true
 
 tokio = { version = "1.6", features = ["full"] }
-testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tokio-postgres = "0.7"
 async-trait = "0.1"
 chrono = "0.4"
 serde_json = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
+serial_test = "3"

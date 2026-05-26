@@ -1,0 +1,30 @@
+# Typos spell checker configuration
+# https://github.com/crate-ci/typos/blob/master/docs/reference.md
+
+[files]
+# Check Rust source files (comments, identifiers, strings) and markdown/README files
+extend-exclude = [
+    "target/",
+    "Cargo.lock",
+    "*.snap",
+    "test-data/",
+    "dump.rdb",
+    "components/host-sdk/src/registry/cosign.rs",
+    "components/reactions/dashboard/static/",
+]
+
+[default.extend-words]
+AKS = "AKS"
+ba = "ba"
+seh = "seh"
+SEH = "SEH"
+socal = "socal"
+Hashi = "Hashi"
+WHER = "WHER"
+UPDAT = "UPDAT"
+# Intentional substring used in assert!(...contains("entit")) tests
+entit = "entit"
+# German street name in example data
+Unter = "Unter"
+# Method name in mysql binlog library (TableMapEvent::get_tme)
+tme = "tme"

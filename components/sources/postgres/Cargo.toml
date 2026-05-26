@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-postgres"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "PostgreSQL source plugin for Drasi"
@@ -62,11 +62,13 @@ tokio-stream = "0.1"
 prost-types = "0.12"
 
 [dev-dependencies]
-drasi-bootstrap-postgres = { path = "../../bootstrappers/postgres" }
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-bootstrap-postgres = { workspace = true }
+drasi-index-rocksdb = { workspace = true }
+drasi-reaction-application = { workspace = true }
 env_logger = "0.10.0"
 serial_test = "3.0"
-testcontainers = "0.26"
+tempfile = "3"
+testcontainers = "0.27"
 tokio-test = "0.4"
 
 

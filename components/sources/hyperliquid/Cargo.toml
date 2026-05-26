@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-hyperliquid"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Hyperliquid market data source plugin for Drasi"
@@ -52,7 +52,7 @@ utoipa = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-reaction-application = { workspace = true }
 
 [features]
 # default = []

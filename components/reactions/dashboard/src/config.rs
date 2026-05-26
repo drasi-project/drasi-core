@@ -30,6 +30,7 @@ fn default_heartbeat_interval_ms() -> u64 {
 
 /// Dashboard reaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct DashboardReactionConfig {
     /// Host to bind the dashboard server.
     #[serde(default = "default_dashboard_host")]
@@ -42,12 +43,6 @@ pub struct DashboardReactionConfig {
     /// WebSocket heartbeat interval in milliseconds.
     #[serde(default = "default_heartbeat_interval_ms")]
     pub heartbeat_interval_ms: u64,
-
-    /// Optional base URL for the DrasiLib results API (e.g., "http://localhost:8080").
-    /// When set, the dashboard proxies initial query data from this API
-    /// so widgets populate immediately with bootstrap data.
-    #[serde(default)]
-    pub results_api_url: Option<String>,
 }
 
 impl Default for DashboardReactionConfig {
@@ -56,7 +51,6 @@ impl Default for DashboardReactionConfig {
             host: default_dashboard_host(),
             port: default_dashboard_port(),
             heartbeat_interval_ms: default_heartbeat_interval_ms(),
-            results_api_url: None,
         }
     }
 }

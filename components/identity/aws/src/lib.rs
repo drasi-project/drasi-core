@@ -102,10 +102,10 @@ impl IdentityProviderPluginDescriptor for AwsIdentityProviderDescriptor {
         let dto: AwsIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let username = mapper.resolve_string(&dto.username)?;
-        let region = mapper.resolve_optional_string(&dto.region)?;
-        let role_arn = mapper.resolve_optional_string(&dto.role_arn)?;
-        let session_name = mapper.resolve_optional_string(&dto.session_name)?;
+        let username = mapper.resolve_string(&dto.username).await?;
+        let region = mapper.resolve_optional_string(&dto.region).await?;
+        let role_arn = mapper.resolve_optional_string(&dto.role_arn).await?;
+        let session_name = mapper.resolve_optional_string(&dto.session_name).await?;
 
         let provider = if let Some(role_arn) = role_arn {
             AwsIdentityProvider::with_assumed_role(username, role_arn, session_name).await?

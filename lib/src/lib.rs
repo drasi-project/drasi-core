@@ -43,6 +43,9 @@ pub mod context;
 /// State store provider for persistent plugin state
 pub mod state_store;
 
+/// Secret store provider for resolving named secrets at runtime
+pub mod secret_store;
+
 /// Write-Ahead Log plugin contract for transient source crash recovery
 pub mod wal;
 
@@ -202,6 +205,9 @@ pub use indexes::IndexBackendPlugin;
 pub use state_store::{
     MemoryStateStoreProvider, StateStoreError, StateStoreProvider, StateStoreResult,
 };
+
+/// Secret store provider traits and default implementation
+pub use secret_store::{MemorySecretStoreProvider, SecretStoreProvider};
 
 /// Write-Ahead Log plugin contract and configuration types
 pub use wal::{

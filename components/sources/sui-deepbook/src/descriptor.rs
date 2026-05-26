@@ -128,7 +128,10 @@ impl SourcePluginDescriptor for SuiDeepBookSourceDescriptor {
         let dto: SuiDeepBookSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let start_position = match mapper.resolve_typed::<StartPositionDto>(&dto.start_position)? {
+        let start_position = match mapper
+            .resolve_typed::<StartPositionDto>(&dto.start_position)
+            .await?
+        {
             StartPositionDto::Beginning => StartPosition::Beginning,
             StartPositionDto::Now => StartPosition::Now,
             StartPositionDto::Timestamp => {
@@ -138,7 +141,8 @@ impl SourcePluginDescriptor for SuiDeepBookSourceDescriptor {
                     )
                 })?;
                 let timestamp = mapper
-                    .resolve_string(ts_config)?
+                    .resolve_string(ts_config)
+                    .await?
                     .parse::<i64>()
                     .map_err(|e| anyhow::anyhow!("Invalid startTimestampMs: {e}"))?;
                 StartPosition::Timestamp(timestamp)
@@ -146,10 +150,10 @@ impl SourcePluginDescriptor for SuiDeepBookSourceDescriptor {
         };
 
         let source = SuiDeepBookSourceBuilder::new(id)
-            .with_rpc_endpoint(mapper.resolve_string(&dto.rpc_endpoint)?)
-            .with_deepbook_package_id(mapper.resolve_string(&dto.deepbook_package_id)?)
-            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms)?)
-            .with_request_limit(mapper.resolve_typed(&dto.request_limit)?)
+            .with_rpc_endpoint(mapper.resolve_string(&dto.rpc_endpoint).await?)
+            .with_deepbook_package_id(mapper.resolve_string(&dto.deepbook_package_id).await?)
+            .with_poll_interval_ms(mapper.resolve_typed(&dto.poll_interval_ms).await?)
+            .with_request_limit(mapper.resolve_typed(&dto.request_limit).await?)
             .with_event_filters(dto.event_filters.clone())
             .with_pools(dto.pools.clone())
             .with_start_position(start_position)

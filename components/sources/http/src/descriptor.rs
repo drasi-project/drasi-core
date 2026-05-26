@@ -369,160 +369,179 @@ fn map_timestamp_format(dto: &TimestampFormatDto) -> TimestampFormat {
     }
 }
 
-fn map_webhook_config(
+async fn map_webhook_config(
     dto: &WebhookConfigDto,
     resolver: &DtoMapper,
 ) -> Result<WebhookConfig, MappingError> {
+    let cors = if let Some(cors) = dto.cors.as_ref() {
+        Some(map_cors_config(cors, resolver).await?)
+    } else {
+        None
+    };
+
+    let mut routes = Vec::with_capacity(dto.routes.len());
+    for route in &dto.routes {
+        routes.push(map_webhook_route(route, resolver).await?);
+    }
+
     Ok(WebhookConfig {
         error_behavior: map_error_behavior(&dto.error_behavior),
-        cors: dto
-            .cors
-            .as_ref()
-            .map(|c| map_cors_config(c, resolver))
-            .transpose()?,
-        routes: dto
-            .routes
-            .iter()
-            .map(|r| map_webhook_route(r, resolver))
-            .collect::<Result<Vec<_>, _>>()?,
+        cors,
+        routes,
     })
 }
 
-fn map_cors_config(dto: &CorsConfigDto, resolver: &DtoMapper) -> Result<CorsConfig, MappingError> {
+async fn map_cors_config(
+    dto: &CorsConfigDto,
+    resolver: &DtoMapper,
+) -> Result<CorsConfig, MappingError> {
     Ok(CorsConfig {
         enabled: dto.enabled,
-        allow_origins: resolver.resolve_string_vec(&dto.allow_origins)?,
-        allow_methods: resolver.resolve_string_vec(&dto.allow_methods)?,
-        allow_headers: resolver.resolve_string_vec(&dto.allow_headers)?,
-        expose_headers: resolver.resolve_string_vec(&dto.expose_headers)?,
+        allow_origins: resolver.resolve_string_vec(&dto.allow_origins).await?,
+        allow_methods: resolver.resolve_string_vec(&dto.allow_methods).await?,
+        allow_headers: resolver.resolve_string_vec(&dto.allow_headers).await?,
+        expose_headers: resolver.resolve_string_vec(&dto.expose_headers).await?,
         allow_credentials: dto.allow_credentials,
         max_age: dto.max_age,
     })
 }
 
-fn map_webhook_route(
+async fn map_webhook_route(
     dto: &WebhookRouteDto,
     resolver: &DtoMapper,
 ) -> Result<WebhookRoute, MappingError> {
+    let auth = if let Some(auth) = dto.auth.as_ref() {
+        Some(map_auth_config(auth, resolver).await?)
+    } else {
+        None
+    };
+
+    let mut mappings = Vec::with_capacity(dto.mappings.len());
+    for mapping in &dto.mappings {
+        mappings.push(map_webhook_mapping(mapping, resolver).await?);
+    }
+
     Ok(WebhookRoute {
-        path: resolver.resolve_string(&dto.path)?,
+        path: resolver.resolve_string(&dto.path).await?,
         methods: dto.methods.iter().map(map_http_method).collect(),
-        auth: dto
-            .auth
-            .as_ref()
-            .map(|a| map_auth_config(a, resolver))
-            .transpose()?,
+        auth,
         error_behavior: dto.error_behavior.as_ref().map(map_error_behavior),
-        mappings: dto
-            .mappings
-            .iter()
-            .map(|m| map_webhook_mapping(m, resolver))
-            .collect::<Result<Vec<_>, _>>()?,
+        mappings,
     })
 }
 
-fn map_auth_config(dto: &AuthConfigDto, resolver: &DtoMapper) -> Result<AuthConfig, MappingError> {
-    Ok(AuthConfig {
-        signature: dto
-            .signature
-            .as_ref()
-            .map(|s| map_signature_config(s, resolver))
-            .transpose()?,
-        bearer: dto
-            .bearer
-            .as_ref()
-            .map(|b| map_bearer_config(b, resolver))
-            .transpose()?,
-    })
+async fn map_auth_config(
+    dto: &AuthConfigDto,
+    resolver: &DtoMapper,
+) -> Result<AuthConfig, MappingError> {
+    let signature = if let Some(signature) = dto.signature.as_ref() {
+        Some(map_signature_config(signature, resolver).await?)
+    } else {
+        None
+    };
+
+    let bearer = if let Some(bearer) = dto.bearer.as_ref() {
+        Some(map_bearer_config(bearer, resolver).await?)
+    } else {
+        None
+    };
+
+    Ok(AuthConfig { signature, bearer })
 }
 
-fn map_signature_config(
+async fn map_signature_config(
     dto: &SignatureConfigDto,
     resolver: &DtoMapper,
 ) -> Result<SignatureConfig, MappingError> {
     Ok(SignatureConfig {
         algorithm: map_signature_algorithm(&dto.algorithm),
-        secret_env: resolver.resolve_string(&dto.secret_env)?,
-        header: resolver.resolve_string(&dto.header)?,
-        prefix: resolver.resolve_optional_string(&dto.prefix)?,
+        secret_env: resolver.resolve_string(&dto.secret_env).await?,
+        header: resolver.resolve_string(&dto.header).await?,
+        prefix: resolver.resolve_optional_string(&dto.prefix).await?,
         encoding: map_signature_encoding(&dto.encoding),
     })
 }
 
-fn map_bearer_config(
+async fn map_bearer_config(
     dto: &BearerConfigDto,
     resolver: &DtoMapper,
 ) -> Result<BearerConfig, MappingError> {
     Ok(BearerConfig {
-        token_env: resolver.resolve_string(&dto.token_env)?,
+        token_env: resolver.resolve_string(&dto.token_env).await?,
     })
 }
 
-fn map_webhook_mapping(
+async fn map_webhook_mapping(
     dto: &WebhookMappingDto,
     resolver: &DtoMapper,
 ) -> Result<WebhookMapping, MappingError> {
+    let when = if let Some(condition) = dto.when.as_ref() {
+        Some(map_mapping_condition(condition, resolver).await?)
+    } else {
+        None
+    };
+
+    let effective_from = if let Some(effective_from) = dto.effective_from.as_ref() {
+        Some(map_effective_from(effective_from, resolver).await?)
+    } else {
+        None
+    };
+
     Ok(WebhookMapping {
-        when: dto
-            .when
-            .as_ref()
-            .map(|c| map_mapping_condition(c, resolver))
-            .transpose()?,
+        when,
         operation: dto.operation.as_ref().map(map_operation_type),
-        operation_from: resolver.resolve_optional_string(&dto.operation_from)?,
+        operation_from: resolver
+            .resolve_optional_string(&dto.operation_from)
+            .await?,
         operation_map: dto.operation_map.as_ref().map(|m| {
             m.iter()
                 .map(|(k, v)| (k.clone(), map_operation_type(v)))
                 .collect()
         }),
         element_type: map_element_type(&dto.element_type),
-        effective_from: dto
-            .effective_from
-            .as_ref()
-            .map(|e| map_effective_from(e, resolver))
-            .transpose()?,
-        template: map_element_template(&dto.template, resolver)?,
+        effective_from,
+        template: map_element_template(&dto.template, resolver).await?,
     })
 }
 
-fn map_mapping_condition(
+async fn map_mapping_condition(
     dto: &MappingConditionDto,
     resolver: &DtoMapper,
 ) -> Result<MappingCondition, MappingError> {
     Ok(MappingCondition {
-        header: resolver.resolve_optional_string(&dto.header)?,
-        field: resolver.resolve_optional_string(&dto.field)?,
-        equals: resolver.resolve_optional_string(&dto.equals)?,
-        contains: resolver.resolve_optional_string(&dto.contains)?,
-        regex: resolver.resolve_optional_string(&dto.regex)?,
+        header: resolver.resolve_optional_string(&dto.header).await?,
+        field: resolver.resolve_optional_string(&dto.field).await?,
+        equals: resolver.resolve_optional_string(&dto.equals).await?,
+        contains: resolver.resolve_optional_string(&dto.contains).await?,
+        regex: resolver.resolve_optional_string(&dto.regex).await?,
     })
 }
 
-fn map_effective_from(
+async fn map_effective_from(
     dto: &EffectiveFromConfigDto,
     resolver: &DtoMapper,
 ) -> Result<EffectiveFromConfig, MappingError> {
     match dto {
-        EffectiveFromConfigDto::Simple(v) => {
-            Ok(EffectiveFromConfig::Simple(resolver.resolve_string(v)?))
-        }
+        EffectiveFromConfigDto::Simple(v) => Ok(EffectiveFromConfig::Simple(
+            resolver.resolve_string(v).await?,
+        )),
         EffectiveFromConfigDto::Explicit { value, format } => Ok(EffectiveFromConfig::Explicit {
-            value: resolver.resolve_string(value)?,
+            value: resolver.resolve_string(value).await?,
             format: map_timestamp_format(format),
         }),
     }
 }
 
-fn map_element_template(
+async fn map_element_template(
     dto: &ElementTemplateDto,
     resolver: &DtoMapper,
 ) -> Result<ElementTemplate, MappingError> {
     Ok(ElementTemplate {
-        id: resolver.resolve_string(&dto.id)?,
-        labels: resolver.resolve_string_vec(&dto.labels)?,
+        id: resolver.resolve_string(&dto.id).await?,
+        labels: resolver.resolve_string_vec(&dto.labels).await?,
         properties: dto.properties.clone(),
-        from: resolver.resolve_optional_string(&dto.from)?,
-        to: resolver.resolve_optional_string(&dto.to)?,
+        from: resolver.resolve_optional_string(&dto.from).await?,
+        to: resolver.resolve_optional_string(&dto.to).await?,
     })
 }
 
@@ -861,21 +880,25 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let config = HttpSourceConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            endpoint: mapper.resolve_optional(&dto.endpoint)?,
-            timeout_ms: mapper.resolve_typed(&dto.timeout_ms)?,
-            adaptive_max_batch_size: mapper.resolve_optional(&dto.adaptive_max_batch_size)?,
-            adaptive_min_batch_size: mapper.resolve_optional(&dto.adaptive_min_batch_size)?,
-            adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms)?,
-            adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms)?,
-            adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs)?,
-            adaptive_enabled: mapper.resolve_optional(&dto.adaptive_enabled)?,
-            webhooks: dto
-                .webhooks
-                .as_ref()
-                .map(|w| map_webhook_config(w, &mapper))
-                .transpose()?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            endpoint: mapper.resolve_optional(&dto.endpoint).await?,
+            timeout_ms: mapper.resolve_typed(&dto.timeout_ms).await?,
+            adaptive_max_batch_size: mapper
+                .resolve_optional(&dto.adaptive_max_batch_size)
+                .await?,
+            adaptive_min_batch_size: mapper
+                .resolve_optional(&dto.adaptive_min_batch_size)
+                .await?,
+            adaptive_max_wait_ms: mapper.resolve_optional(&dto.adaptive_max_wait_ms).await?,
+            adaptive_min_wait_ms: mapper.resolve_optional(&dto.adaptive_min_wait_ms).await?,
+            adaptive_window_secs: mapper.resolve_optional(&dto.adaptive_window_secs).await?,
+            adaptive_enabled: mapper.resolve_optional(&dto.adaptive_enabled).await?,
+            webhooks: if let Some(webhooks) = dto.webhooks.as_ref() {
+                Some(map_webhook_config(webhooks, &mapper).await?)
+            } else {
+                None
+            },
             durability: dto.durability.clone(),
         };
 
