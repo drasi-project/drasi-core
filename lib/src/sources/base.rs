@@ -501,6 +501,21 @@ impl SourceBase {
         *map = keep;
     }
 
+    /// Clear the entire sequence→position map.
+    ///
+    /// Call this when restarting replication for replay so that stale
+    /// sequence→position entries from the pre-replay stream cannot cause
+    /// `compute_confirmed_source_position()` to return positions that no
+    /// longer correspond to the current subscribers' checkpoints.  Without
+    /// this, a keepalive feedback sent by the new replication task could
+    /// advance `flush_lsn` (and thus the slot's `restart_lsn`) past the
+    /// checkpoints of queries that have not yet subscribed, causing
+    /// `PositionUnavailable` for subsequent subscribers.
+    pub async fn clear_sequence_position_map(&self) {
+        let mut map = self.sequence_position_map.write().await;
+        map.clear();
+    }
+
     /// Reset the sequence counter, typically after recovering from a checkpoint.
     /// The next dispatched event will receive `sequence + 1`.
     pub fn set_next_sequence(&self, sequence: u64) {
@@ -514,6 +529,9 @@ impl SourceBase {
     /// Handles:
     /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
     ///   across restarts.
+    /// - Clearing stale sequence→position mappings when the counter advances, so
+    ///   that `compute_confirmed_source_position()` cannot map a position handle to
+    ///   a WAL position that predates the subscriber's actual checkpoint.
     pub fn apply_subscription_settings(
         &self,
         settings: &crate::config::SourceSubscriptionSettings,
@@ -528,6 +546,16 @@ impl SourceBase {
                     "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
                     self.id, next, last_seq
                 );
+                // The counter jumped forward, meaning sequences currently in the
+                // position map were assigned before this subscriber's checkpoint
+                // was created. Those mappings are stale and would cause
+                // compute_confirmed_source_position() to return incorrect
+                // positions. Clear the map synchronously (try_write avoids
+                // async in a non-async fn; contention here is near-zero since
+                // dispatching is paused during subscribe).
+                if let Ok(mut map) = self.sequence_position_map.try_write() {
+                    map.clear();
+                }
             }
         }
     }
