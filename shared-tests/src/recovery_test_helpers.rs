@@ -16,7 +16,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use drasi_lib::channels::{ComponentEvent, ComponentStatus, QueryResult};
-use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, Reaction, StateStoreProvider};
+use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, QueryConfig, Reaction, StateStoreProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,13 +127,13 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
     }
 }
 
-/// Build a `DrasiLib` instance wired to a `MockSource`, the given reaction, and a durable state store.
+/// Build a `DrasiLib` instance wired to a `MockSource`, the given query, reaction, and a durable state store.
 ///
 /// Returns the core, source handle, and state store (for checkpoint polling).
 pub async fn build_core_with_reaction<R>(
     test_id: &str,
+    query: QueryConfig,
     reaction: R,
-    outbox_capacity: usize,
 ) -> Result<(
     Arc<DrasiLib>,
     MockSourceHandle,
@@ -143,14 +143,7 @@ where
     R: Reaction + 'static,
 {
     let source_id = format!("{test_id}-source");
-    let (mock_source, handle) = crate::mock_source::MockSource::new(source_id.clone())?;
-
-    let query = Query::cypher("q1")
-        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
-        .from_source(source_id)
-        .with_outbox_capacity(outbox_capacity)
-        .auto_start(true)
-        .build();
+    let (mock_source, handle) = crate::mock_source::MockSource::new(source_id)?;
 
     let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
 
@@ -166,6 +159,16 @@ where
     );
 
     Ok((core, handle, state_store))
+}
+
+/// Build the standard Person query used by the recovery test scenarios.
+pub fn person_query(source_id: &str, outbox_capacity: usize) -> QueryConfig {
+    Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+        .from_source(source_id)
+        .with_outbox_capacity(outbox_capacity)
+        .auto_start(true)
+        .build()
 }
 
 /// Poll the state store until a checkpoint exists for the given reaction+query pair.
@@ -312,7 +315,8 @@ pub async fn exercise_autoskipgap_recovery<R>(
 where
     R: Reaction + 'static,
 {
-    let (core, handle, state_store) = build_core_with_reaction(test_id, reaction, 2).await?;
+    let query = person_query(&format!("{test_id}-source"), 2);
+    let (core, handle, state_store) = build_core_with_reaction(test_id, query, reaction).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
     core.start().await?;
@@ -366,7 +370,8 @@ pub async fn exercise_strict_gap_failure<R>(
 where
     R: Reaction + 'static,
 {
-    let (core, handle, state_store) = build_core_with_reaction(test_id, reaction, 2).await?;
+    let query = person_query(&format!("{test_id}-source"), 2);
+    let (core, handle, state_store) = build_core_with_reaction(test_id, query, reaction).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
     core.start().await?;
