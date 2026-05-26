@@ -2092,8 +2092,8 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, FunctionEvaluation
         }
     };
     let quarter = match parts[1].chars().nth(1) {
-        Some(q) => {
-            if q.is_ascii_digit() {
+        Some(q)
+            if q.is_ascii_digit() => {
                 match q.to_digit(10) {
                     Some(q) => q as i32,
                     None => {
@@ -2102,12 +2102,12 @@ async fn parse_quarter_date(date_str: &str) -> Result<String, FunctionEvaluation
                         })
                     }
                 }
-            } else {
+            }
+        Some(_) => {
                 return Err(FunctionEvaluationError::InvalidFormat {
                     expected: temporal_constants::INVALID_DATE_FORMAT_ERROR.to_string(),
                 });
             }
-        }
         None => {
             return Err(FunctionEvaluationError::InvalidFormat {
                 expected: temporal_constants::INVALID_DATE_FORMAT_ERROR.to_string(),
