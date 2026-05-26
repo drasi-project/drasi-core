@@ -16,6 +16,7 @@
 name = "drasi-bootstrap-here-traffic"
 version = "0.1.0"
 edition = "2021"
+publish = false
 authors = ["Drasi Project"]
 description = "HERE Traffic API bootstrap provider for Drasi"
 license = "Apache-2.0"

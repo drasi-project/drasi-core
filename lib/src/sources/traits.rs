@@ -323,6 +323,14 @@ pub trait Source: Send + Sync {
     /// sources can participate in position-handle cleanup.
     async fn remove_position_handle(&self, _query_id: &str) {}
 
+    /// Signal that the initial batch of query subscriptions is complete.
+    ///
+    /// Called by the lifecycle after all auto-start queries have subscribed
+    /// during startup. Sources that hold back feedback during the subscription
+    /// window (e.g., Postgres flush-fence) should release those guards here.
+    ///
+    /// The default is a no-op for sources that do not need startup fencing.
+    async fn on_subscriptions_complete(&self) {}
     /// Set the identity provider for this source.
     ///
     /// This method allows attaching a per-source identity provider after
@@ -420,6 +428,10 @@ impl Source for Box<dyn Source + 'static> {
 
     async fn remove_position_handle(&self, query_id: &str) {
         (**self).remove_position_handle(query_id).await
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        (**self).on_subscriptions_complete().await
     }
 
     async fn set_identity_provider(
