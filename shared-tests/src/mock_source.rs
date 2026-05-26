@@ -80,7 +80,11 @@ impl MockSourceHandle {
     }
 }
 
-/// A simple mock source for testing that allows programmatic event injection
+/// A simple mock source for testing that allows programmatic event injection.
+///
+/// **Note:** This mock does not support restart. Calling `start()` a second time
+/// will fail because the internal receiver is consumed on the first call.
+/// For recovery tests, stop/restart the *reaction* while keeping the source running.
 pub struct MockSource {
     base: SourceBase,
     app_rx: Arc<RwLock<Option<mpsc::Receiver<SourceChange>>>>,
