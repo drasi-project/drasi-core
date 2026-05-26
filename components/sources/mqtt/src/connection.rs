@@ -115,6 +115,12 @@ macro_rules! common_config_to_mqtt_options {
     };
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MqttVersion {
+    V3,
+    V5,
+}
+
 trait ToMqttPacket {
     fn to_mqtt_packet(self) -> Option<MqttPacket>;
 }
@@ -172,7 +178,7 @@ impl MqttConnection {
         config: &MqttSourceConfig,
         identity_provider: Option<Arc<dyn drasi_lib::identity::IdentityProvider>>,
     ) -> anyhow::Result<(Self, MqttEventLoopWrapper)> {
-        let id_v5 = id.into().clone();
+        let id_v5 = id.into();
         let id_v3 = id_v5.clone();
 
         // authentication with the identity provider (higher precedence than static credentials from config if both are provided)
@@ -187,7 +193,7 @@ impl MqttConnection {
         // try Mqtt v5 first
         match Self::mqtt5_connect(id_v5, config, &provider).await {
             Ok((client, event_loop)) => {
-                let mut connection = Self {
+                let connection = Self {
                     client: MqttAsyncClientWrapper::AsyncClientV5(client),
                     identity_provider: provider,
                     config: Some(config.clone()),
@@ -202,7 +208,7 @@ impl MqttConnection {
         // fallback to Mqtt v3.1.1
         match Self::mqttv3_connect(id_v3, config, &provider).await {
             Ok((client_v3, event_loop_v3)) => {
-                let mut connection = Self {
+                let connection = Self {
                     client: MqttAsyncClientWrapper::AsyncClientV3(client_v3),
                     identity_provider: provider,
                     config: Some(config.clone()),
@@ -233,9 +239,9 @@ impl MqttConnection {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to subscribe to topics: {e:?}"))?;
 
-        let mqtt_version: u8 = match &self.client {
-            MqttAsyncClientWrapper::AsyncClientV5(_) => 5,
-            MqttAsyncClientWrapper::AsyncClientV3(_) => 3,
+        let mqtt_version: MqttVersion = match &self.client {
+            MqttAsyncClientWrapper::AsyncClientV5(_) => MqttVersion::V5,
+            MqttAsyncClientWrapper::AsyncClientV3(_) => MqttVersion::V3,
         };
 
         let max_retries = config
@@ -247,7 +253,7 @@ impl MqttConnection {
         let mut error_count = 0;
         let mut doubler = 1;
 
-        if mqtt_version == 5 {
+        if mqtt_version == MqttVersion::V5 {
             let mut event_loop_v5 = match event_loop {
                 MqttEventLoopWrapper::EventLoopV5 { event_loop } => event_loop,
                 _ => {
@@ -275,7 +281,8 @@ impl MqttConnection {
                                 let packet = event.to_mqtt_packet();
                                 if let Some(packet) = packet {
                                     if let Err(e) = processor_tx.send(packet).await {
-                                            error!("Failed to send MQTT packet to processor: {e:?}");
+                                        error!("Failed to send MQTT packet to processor: {e:?}");
+                                        return Err(anyhow::anyhow!("Processor channel closed: {e}"));
                                     }
                                 }
                                 error_count = 0;
@@ -331,7 +338,8 @@ impl MqttConnection {
                                 let packet = event.to_mqtt_packet();
                                 if let Some(packet) = packet {
                                     if let Err(e) = processor_tx.send(packet).await {
-                                            error!("Failed to send MQTT packet to processor: {e:?}");
+                                        error!("Failed to send MQTT packet to processor: {e:?}");
+                                        return Err(anyhow::anyhow!("Processor channel closed: {e}"));
                                     }
                                 }
                                 error_count = 0;
