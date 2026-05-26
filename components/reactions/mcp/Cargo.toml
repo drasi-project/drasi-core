@@ -52,7 +52,7 @@ utoipa = { workspace = true }
 drasi-source-application = { workspace = true }
 eventsource-stream = "0.2"
 futures = "0.3"
-reqwest = { version = "0.11", features = ["stream", "json"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
 tokio-test = "0.4"
 
 [features]
