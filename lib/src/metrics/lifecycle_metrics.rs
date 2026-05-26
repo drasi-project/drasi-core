@@ -115,11 +115,17 @@ impl Default for LifecycleMetrics {
 /// Point-in-time snapshot of [`LifecycleMetrics`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleMetricsSnapshot {
+    /// Rejections due to durable reaction with no state store configured.
     pub startup_rejection_durable_no_store: u64,
+    /// Rejections due to durable reaction with a volatile (non-durable) state store.
     pub startup_rejection_durable_on_volatile: u64,
+    /// Rejections due to `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` policy.
     pub startup_rejection_snapshot_skip_gap: u64,
+    /// Rejections due to `needs_snapshot_on_fresh_start=false` + `AutoReset` policy.
     pub startup_rejection_no_snapshot_auto_reset: u64,
+    /// Number of successful AutoReset completions (full re-bootstrap).
     pub auto_reset_completions: u64,
+    /// Number of configuration hash mismatches detected at startup.
     pub hash_mismatch_count: u64,
 }
 

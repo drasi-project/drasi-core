@@ -137,15 +137,25 @@ impl Default for QueryOutputMetrics {
 /// Point-in-time snapshot of [`QueryOutputMetrics`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOutputMetricsSnapshot {
+    /// Current number of entries in the outbox ring buffer.
     pub outbox_size: usize,
+    /// Sequence of the oldest entry in the outbox (0 if empty).
     pub outbox_earliest_seq: u64,
+    /// Sequence of the newest entry in the outbox (= `as_of_sequence`).
     pub outbox_latest_seq: u64,
+    /// Number of times a new result advanced the sequence counter.
     pub result_seq_advances: u64,
+    /// Current number of live (non-deleted) results tracked by the query.
     pub live_results_count: usize,
+    /// Duration of the most recent outer transaction (nanoseconds).
     pub outer_transaction_duration_ns_last: u64,
+    /// Maximum outer-transaction duration observed (nanoseconds).
     pub outer_transaction_duration_ns_max: u64,
+    /// Number of times a reaction fetched a snapshot from this query.
     pub snapshot_fetch_count: u64,
+    /// Age of the oldest active snapshot clone (milliseconds).
     pub oldest_snapshot_age_ms: u64,
+    /// Number of mutations since the oldest active snapshot was created.
     pub mutations_since_oldest_snapshot: u64,
 }
 

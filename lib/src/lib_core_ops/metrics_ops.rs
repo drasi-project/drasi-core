@@ -52,9 +52,9 @@ impl DrasiLib {
     /// Get per-reaction metrics for a specific reaction.
     ///
     /// Returns a map from query_id to its `ReactionMetricsSnapshot`.
-    /// Returns an empty map if no metrics exist for the reaction.
     ///
     /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the reaction does not exist.
     /// Returns `DrasiError::InvalidState` if the system is not initialized.
     ///
     /// # Example

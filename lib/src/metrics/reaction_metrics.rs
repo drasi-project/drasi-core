@@ -126,14 +126,23 @@ impl Default for ReactionMetrics {
 /// Point-in-time snapshot of [`ReactionMetrics`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionMetricsSnapshot {
+    /// Latest checkpoint sequence persisted for this (reaction, query) pair.
     pub checkpoint_sequence: u64,
+    /// Difference between the query's latest outbox sequence and the checkpoint.
     pub checkpoint_lag: u64,
+    /// Number of events skipped because their sequence was already processed.
     pub dedup_skip_count: u64,
+    /// Number of sequence gaps detected in the broadcast stream.
     pub gap_detection_count: u64,
+    /// Number of times the Strict recovery policy was triggered.
     pub recovery_strict_count: u64,
+    /// Number of times the AutoReset recovery policy was triggered.
     pub recovery_auto_reset_count: u64,
+    /// Number of times the AutoSkipGap recovery policy was triggered.
     pub recovery_auto_skip_gap_count: u64,
+    /// Number of times a full snapshot was fetched during bootstrap/recovery.
     pub fetch_snapshot_count: u64,
+    /// Number of times the outbox was fetched for catchup during bootstrap/recovery.
     pub fetch_outbox_count: u64,
 }
 

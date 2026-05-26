@@ -395,9 +395,11 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
     // Poll reaction metrics until checkpoint reaches expected value
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut q1_metrics_snap = None;
+    let mut last_metrics_debug = String::from("(no metrics read yet)");
     while tokio::time::Instant::now() < deadline {
         let metrics = core.get_reaction_metrics("rec").await?;
         if let Some(m) = metrics.get("q1") {
+            last_metrics_debug = format!("{m:?}");
             if m.checkpoint_sequence >= 2 {
                 q1_metrics_snap = Some(m.clone());
                 break;
@@ -406,7 +408,12 @@ async fn reaction_metrics_show_checkpoint_progress() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let q1_metrics = q1_metrics_snap.expect("Expected checkpoint_sequence >= 2 within timeout");
+    let q1_metrics = q1_metrics_snap.unwrap_or_else(|| {
+        panic!(
+            "Timed out waiting for checkpoint_sequence >= 2 within 5s. \
+             Last metrics state: {last_metrics_debug}"
+        )
+    });
     assert!(
         q1_metrics.checkpoint_sequence >= 2,
         "Expected checkpoint_sequence >= 2, got {}",
@@ -493,6 +500,130 @@ async fn query_output_metrics_error_for_nonexistent() -> Result<()> {
 
     let result = core.get_query_output_metrics("nonexistent").await;
     assert!(result.is_err(), "Expected error for non-existent query");
+
+    Ok(())
+}
+
+/// Test: Reaction metrics returns ComponentNotFound for non-existent reaction.
+#[tokio::test]
+async fn reaction_metrics_error_for_nonexistent() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .auto_start(true)
+        .build();
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("reaction-not-found-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    let result = core.get_reaction_metrics("nonexistent").await;
+    assert!(result.is_err(), "Expected error for non-existent reaction");
+
+    Ok(())
+}
+
+/// Test: Startup rejection for needs_snapshot_on_fresh_start=true + AutoSkipGap.
+#[tokio::test]
+async fn lifecycle_metrics_reject_snapshot_skip_gap() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let (reaction, _receiver) = recording_reaction(
+        "snap-skip-rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::AutoSkipGap,
+        false, // not durable — avoids durable-on-volatile check
+        true,  // needs_snapshot_on_fresh_start = true → contradicts AutoSkipGap
+    );
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("snapshot-skip-gap-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+
+    let start_result = core.start().await;
+    assert!(
+        start_result.is_err(),
+        "Expected start to fail due to snapshot+AutoSkipGap conflict"
+    );
+
+    let lifecycle = core.get_lifecycle_metrics().await?;
+    assert!(
+        lifecycle.startup_rejection_snapshot_skip_gap >= 1,
+        "Expected at least 1 snapshot-skip-gap rejection, got {}",
+        lifecycle.startup_rejection_snapshot_skip_gap
+    );
+
+    Ok(())
+}
+
+/// Test: Startup rejection for needs_snapshot_on_fresh_start=false + AutoReset.
+#[tokio::test]
+async fn lifecycle_metrics_reject_no_snapshot_auto_reset() -> Result<()> {
+    let (mock_source, _handle) = MockSource::new("test-source")?;
+
+    let query = Query::cypher("q1")
+        .query("MATCH (p:Person) RETURN p.name AS name")
+        .from_source("test-source")
+        .with_outbox_capacity(100)
+        .auto_start(true)
+        .build();
+
+    let state_store = Arc::new(DurableMemoryStateStoreProvider::new());
+    let (reaction, _receiver) = recording_reaction(
+        "no-snap-reset-rec",
+        vec!["q1".into()],
+        ReactionRecoveryPolicy::AutoReset,
+        false, // not durable
+        false, // needs_snapshot_on_fresh_start = false → contradicts AutoReset
+    );
+
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("no-snapshot-auto-reset-test")
+            .with_source(mock_source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .with_state_store_provider(state_store)
+            .build()
+            .await?,
+    );
+
+    let start_result = core.start().await;
+    assert!(
+        start_result.is_err(),
+        "Expected start to fail due to !snapshot+AutoReset conflict"
+    );
+
+    let lifecycle = core.get_lifecycle_metrics().await?;
+    assert!(
+        lifecycle.startup_rejection_no_snapshot_auto_reset >= 1,
+        "Expected at least 1 no-snapshot-auto-reset rejection, got {}",
+        lifecycle.startup_rejection_no_snapshot_auto_reset
+    );
 
     Ok(())
 }
