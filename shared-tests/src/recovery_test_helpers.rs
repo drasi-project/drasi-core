@@ -16,7 +16,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use drasi_lib::channels::{ComponentEvent, ComponentStatus, QueryResult};
-use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, Reaction};
+use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, Reaction, StateStoreProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,11 +128,13 @@ impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStoreProvi
 }
 
 /// Build a `DrasiLib` instance wired to a `MockSource`, the given reaction, and a durable state store.
+///
+/// Returns the core, source handle, and state store (for checkpoint polling).
 pub async fn build_core_with_reaction<R>(
     test_id: &str,
     reaction: R,
     outbox_capacity: usize,
-) -> Result<(Arc<DrasiLib>, MockSourceHandle)>
+) -> Result<(Arc<DrasiLib>, MockSourceHandle, Arc<DurableMemoryStateStoreProvider>)>
 where
     R: Reaction + 'static,
 {
@@ -154,12 +156,34 @@ where
             .with_source(mock_source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_state_store_provider(state_store)
+            .with_state_store_provider(state_store.clone())
             .build()
             .await?,
     );
 
-    Ok((core, handle))
+    Ok((core, handle, state_store))
+}
+
+/// Poll the state store until a checkpoint exists for the given reaction+query pair.
+pub async fn wait_for_checkpoint(
+    state_store: &DurableMemoryStateStoreProvider,
+    reaction_id: &str,
+    query_id: &str,
+    timeout_duration: Duration,
+) -> Result<()> {
+    let key = format!("checkpoint:{query_id}");
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        if state_store.contains_key(reaction_id, &key).await? {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "Timed out ({timeout_duration:?}) waiting for checkpoint '{key}' on reaction '{reaction_id}'"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// Wait until a component emits the expected status event.
@@ -205,20 +229,25 @@ pub async fn assert_no_error_event(
                     if event.component_id == component_id
                         && event.status == ComponentStatus::Error =>
                 {
-                    return Some(event);
+                    return Err(anyhow!(
+                        "Reaction {component_id} entered Error state: {}",
+                        event.message.unwrap_or_else(|| "no message".to_string())
+                    ));
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(anyhow!(
+                        "Event channel closed unexpectedly while monitoring {component_id}"
+                    ));
+                }
             }
         }
     })
     .await
     {
-        Ok(Some(event)) => bail!(
-            "Reaction {component_id} entered Error state: {}",
-            event.message.unwrap_or_else(|| "no message".to_string())
-        ),
-        _ => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Ok(Ok(())) => Ok(()), // unreachable, but keeps the compiler happy
+        Err(_) => Ok(()),     // timeout expired with no error event — success
     }
 }
 
@@ -270,7 +299,7 @@ pub async fn exercise_autoskipgap_recovery<R>(
 where
     R: Reaction + 'static,
 {
-    let (core, handle) = build_core_with_reaction(test_id, reaction, 2).await?;
+    let (core, handle, state_store) = build_core_with_reaction(test_id, reaction, 2).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
     core.start().await?;
@@ -283,7 +312,7 @@ where
     .await?;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    wait_for_checkpoint(&state_store, reaction_id, "q1", Duration::from_secs(5)).await?;
 
     stop_reaction_and_wait(&core, reaction_id).await?;
 
@@ -323,7 +352,7 @@ pub async fn exercise_strict_gap_failure<R>(
 where
     R: Reaction + 'static,
 {
-    let (core, handle) = build_core_with_reaction(test_id, reaction, 2).await?;
+    let (core, handle, state_store) = build_core_with_reaction(test_id, reaction, 2).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
     core.start().await?;
@@ -336,7 +365,7 @@ where
     .await?;
 
     insert_person(&handle, "p1", "Alice", 30).await?;
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    wait_for_checkpoint(&state_store, reaction_id, "q1", Duration::from_secs(5)).await?;
 
     stop_reaction_and_wait(&core, reaction_id).await?;
 

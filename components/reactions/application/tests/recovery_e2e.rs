@@ -64,7 +64,7 @@ async fn test_application_reaction_strict_recovery_clean_restart() -> Result<()>
         .await
         .ok_or_else(|| anyhow!("Application receiver already taken"))?;
 
-    let (core, source_handle) =
+    let (core, source_handle, _state_store) =
         build_core_with_reaction("app-clean-recovery", reaction, 100).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
@@ -117,7 +117,7 @@ async fn test_application_reaction_strict_recovery_outbox_catchup() -> Result<()
         .await
         .ok_or_else(|| anyhow!("Application receiver already taken"))?;
 
-    let (core, source_handle) =
+    let (core, source_handle, _state_store) =
         build_core_with_reaction("app-outbox-catchup", reaction, 100).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
@@ -179,7 +179,7 @@ async fn test_application_reaction_sequence_preserved() -> Result<()> {
         .await
         .ok_or_else(|| anyhow!("Application receiver already taken"))?;
 
-    let (core, source_handle) =
+    let (core, source_handle, _state_store) =
         build_core_with_reaction("app-sequence-order", reaction, 100).await?;
     let mut event_rx = core.subscribe_all_component_events();
 
