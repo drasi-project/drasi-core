@@ -24,11 +24,12 @@ pub use drasi_mysql_common::{is_valid_identifier, TableKeyConfig};
 // =============================================================================
 
 /// SSL mode for MySQL connections
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SslMode {
     /// Disable SSL encryption
     Disabled,
     /// Try SSL but allow unencrypted connections.
+    #[default]
     IfAvailable,
     /// Require SSL encryption.
     Require,
@@ -38,29 +39,18 @@ pub enum SslMode {
     RequireVerifyFull,
 }
 
-impl Default for SslMode {
-    fn default() -> Self {
-        Self::IfAvailable
-    }
-}
-
 // =============================================================================
 // Database Table Configuration
 // =============================================================================
 
 /// Where to start the binlog replication stream
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum StartPosition {
     FromStart,
+    #[default]
     FromEnd,
     FromPosition { file: String, position: u32 },
     FromGtid(String),
-}
-
-impl Default for StartPosition {
-    fn default() -> Self {
-        Self::FromEnd
-    }
 }
 
 /// MySQL replication source configuration

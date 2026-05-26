@@ -20,6 +20,7 @@ use drasi_lib::StateStoreProvider;
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::cmp::Reverse;
 use uuid::Uuid;
 
 const DASHBOARD_KEY_PREFIX: &str = "dashboard:";
@@ -185,7 +186,7 @@ impl DashboardStorage {
             }
         }
 
-        dashboards.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        dashboards.sort_by_key(|d| Reverse(d.updated_at));
         Ok(dashboards)
     }
 

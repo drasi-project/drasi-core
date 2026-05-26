@@ -541,7 +541,7 @@ impl DrasiLibBuilder {
             }
             let mut graph = core.component_graph.write().await;
             if let Err(e) =
-                graph.register_bootstrap_provider(&bp_id, metadata, &[source_id.clone()])
+                graph.register_bootstrap_provider(&bp_id, metadata, std::slice::from_ref(&source_id))
             {
                 log::warn!(
                     "Failed to register bootstrap provider metadata for source '{source_id}': {e}"

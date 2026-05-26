@@ -61,7 +61,9 @@ fn default_poll_interval() -> ConfigValue<u64> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::hyperliquid::HyperliquidNetwork)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum HyperliquidNetworkDto {
+    #[default]
     Mainnet,
     Testnet,
     Custom {
@@ -70,39 +72,25 @@ pub enum HyperliquidNetworkDto {
     },
 }
 
-impl Default for HyperliquidNetworkDto {
-    fn default() -> Self {
-        Self::Mainnet
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::hyperliquid::CoinSelection)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum CoinSelectionDto {
     Specific { coins: Vec<String> },
+    #[default]
     All,
-}
-
-impl Default for CoinSelectionDto {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[schema(as = source::hyperliquid::InitialCursor)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub enum InitialCursorDto {
     StartFromBeginning,
+    #[default]
     StartFromNow,
     StartFromTimestamp { timestamp: ConfigValue<i64> },
-}
-
-impl Default for InitialCursorDto {
-    fn default() -> Self {
-        Self::StartFromNow
-    }
 }
 
 #[derive(OpenApi)]

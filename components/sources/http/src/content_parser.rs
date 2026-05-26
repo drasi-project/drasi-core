@@ -159,8 +159,8 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
 
                 stack.push((name, JsonValue::Object(obj)));
             }
-            Ok(Event::End(_)) => {
-                if stack.len() > 1 {
+            Ok(Event::End(_))
+                if stack.len() > 1 => {
                     if let Some((name, value)) = stack.pop() {
                         if let Some((_, JsonValue::Object(parent_obj))) = stack.last_mut() {
                             // Handle repeated elements by converting to array
@@ -178,7 +178,6 @@ fn xml_to_json(xml: &str) -> Result<JsonValue> {
                         }
                     }
                 }
-            }
             Ok(Event::Text(e)) => {
                 let text = e
                     .unescape()
