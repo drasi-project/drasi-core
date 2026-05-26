@@ -10,3 +10,10 @@ on:
 jobs:
   audit:
     uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@rust195
+    with:
+      # rustls-webpki 0.101.7 vulns — transitive from aws-smithy-http-client 1.1.12 (latest)
+      # → hyper-rustls 0.24 → rustls 0.21. No upstream fix available yet.
+      audit-args: >-
+        --ignore RUSTSEC-2026-0098
+        --ignore RUSTSEC-2026-0099
+        --ignore RUSTSEC-2026-0104
