@@ -9,4 +9,4 @@ on:
 
 jobs:
   audit:
-    uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
+    uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@rust195
