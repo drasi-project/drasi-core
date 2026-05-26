@@ -134,7 +134,11 @@ pub async fn build_core_with_reaction<R>(
     test_id: &str,
     reaction: R,
     outbox_capacity: usize,
-) -> Result<(Arc<DrasiLib>, MockSourceHandle, Arc<DurableMemoryStateStoreProvider>)>
+) -> Result<(
+    Arc<DrasiLib>,
+    MockSourceHandle,
+    Arc<DurableMemoryStateStoreProvider>,
+)>
 where
     R: Reaction + 'static,
 {
