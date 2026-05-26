@@ -13,19 +13,21 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use chrono::Utc;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use tokio::time::{interval, sleep};
 
-use super::connection::ReplicationConnection;
+use super::connection::{parse_lsn, ReplicationConnection};
 use super::decoder::PgOutputDecoder;
 use super::protocol::BackendMessage;
 use super::types::{StandbyStatusUpdate, WalMessage};
-use super::PostgresSourceConfig;
+use super::{PostgresSourceConfig, ReplayState};
 use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
 use drasi_lib::channels::{ComponentStatus, SourceEvent, SourceEventWrapper};
 use drasi_lib::component_graph::ComponentStatusHandle;
@@ -36,16 +38,14 @@ pub struct ReplicationStream {
     source_id: String,
     connection: Option<ReplicationConnection>,
     decoder: PgOutputDecoder,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
     #[allow(dead_code)]
     status_handle: ComponentStatusHandle,
-    current_lsn: u64,
+    base: SourceBase,
+    replay_state: Arc<ReplayState>,
+    read_lsn: u64,
+    start_lsn: Option<u64>,
     last_feedback_time: std::time::Instant,
-    pending_transaction: Option<Vec<SourceChange>>,
+    pending_transaction: Option<Vec<(SourceChange, u64)>>,
     relations: HashMap<u32, RelationMapping>,
     table_primary_keys: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
@@ -59,28 +59,24 @@ struct RelationMapping {
 }
 
 impl ReplicationStream {
-    pub fn new(
+    pub(crate) fn new(
         config: PostgresSourceConfig,
         source_id: String,
-        dispatchers: Arc<
-            RwLock<
-                Vec<
-                    Box<
-                        dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync,
-                    >,
-                >,
-            >,
-        >,
         status_handle: ComponentStatusHandle,
+        base: SourceBase,
+        replay_state: Arc<ReplayState>,
+        start_lsn: Option<u64>,
     ) -> Self {
         Self {
             config,
             source_id,
             connection: None,
             decoder: PgOutputDecoder::new(),
-            dispatchers,
             status_handle,
-            current_lsn: 0,
+            base,
+            replay_state,
+            read_lsn: 0,
+            start_lsn,
             last_feedback_time: std::time::Instant::now(),
             pending_transaction: None,
             relations: HashMap::new(),
@@ -92,11 +88,22 @@ impl ReplicationStream {
     // Element IDs are generated from configured table_keys (in config.table_keys),
     // or fall back to using all column values if no keys are configured.
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(
+        &mut self,
+        ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
         info!("Starting replication stream for source {}", self.source_id);
 
         // Connect and setup replication
-        self.connect_and_setup().await?;
+        if let Err(error) = self.connect_and_setup().await {
+            if let Some(tx) = ready_tx {
+                let _ = tx.send(Err(format!("{error:#}")));
+            }
+            return Err(error);
+        }
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(Ok(()));
+        }
 
         // Start streaming loop
         let mut keepalive_interval = interval(Duration::from_secs(10));
@@ -176,13 +183,18 @@ impl ReplicationStream {
             .await?;
         info!("Using replication slot: {slot_info:?}");
 
-        // Parse starting LSN
-        if !slot_info.consistent_point.is_empty() && slot_info.consistent_point != "0/0" {
-            self.current_lsn = parse_lsn(&slot_info.consistent_point)?;
-        } else {
-            // Start from beginning if no consistent point
-            self.current_lsn = 0;
-        }
+        // Parse starting LSN — use explicit start_lsn if provided (replay),
+        // otherwise use the slot's consistent_point.
+        let slot_lsn =
+            if !slot_info.consistent_point.is_empty() && slot_info.consistent_point != "0/0" {
+                parse_lsn(&slot_info.consistent_point)?
+            } else {
+                0
+            };
+        self.read_lsn = self.start_lsn.unwrap_or(slot_lsn);
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         // Build replication options
         let mut options = HashMap::new();
@@ -193,11 +205,14 @@ impl ReplicationStream {
         );
 
         // Start replication
-        conn.start_replication(&self.config.slot_name, Some(self.current_lsn), options)
+        conn.start_replication(&self.config.slot_name, Some(self.read_lsn), options)
             .await?;
 
         self.connection = Some(conn);
-        info!("Replication started from LSN: {:x}", self.current_lsn);
+        info!(
+            "Replication started from read LSN {:x} (slot watermark {:x})",
+            self.read_lsn, slot_lsn
+        );
 
         Ok(())
     }
@@ -227,7 +242,10 @@ impl ReplicationStream {
                 timestamp: _,
                 reply,
             } => {
-                self.current_lsn = wal_end;
+                self.read_lsn = wal_end;
+                self.replay_state
+                    .read_lsn
+                    .store(self.read_lsn, Ordering::Release);
                 if reply == 1 {
                     self.send_feedback(true).await?;
                 }
@@ -284,8 +302,11 @@ impl ReplicationStream {
             data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
 
-        // Update LSN
-        self.current_lsn = end_lsn;
+        // Update read LSN
+        self.read_lsn = end_lsn;
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         // Decode the actual WAL message
         let wal_data = &data[24..];
@@ -341,7 +362,10 @@ impl ReplicationStream {
         ]);
         let reply = data[16];
 
-        self.current_lsn = wal_end;
+        self.read_lsn = wal_end;
+        self.replay_state
+            .read_lsn
+            .store(self.read_lsn, Ordering::Release);
 
         if reply == 1 {
             self.send_feedback(true).await?;
@@ -353,38 +377,15 @@ impl ReplicationStream {
     async fn process_wal_message(&mut self, msg: WalMessage) -> Result<()> {
         match msg {
             WalMessage::Begin(_) => {
-                // Start a new transaction
+                // Start a new transaction — track changes with their LSN
                 self.pending_transaction = Some(Vec::new());
             }
             WalMessage::Commit(tx_info) => {
-                // Commit the transaction
+                // Commit the transaction — stamp all changes with the commit LSN
+                // for atomic checkpoint semantics
                 if let Some(changes) = self.pending_transaction.take() {
-                    // Send all changes in the transaction
-                    for change in changes {
-                        // Create profiling metadata with timestamps
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                    for (change, _) in changes {
+                        self.dispatch_change(change, tx_info.commit_lsn).await;
                     }
                     debug!(
                         "Committed transaction {} with LSN {:x}",
@@ -411,32 +412,9 @@ impl ReplicationStream {
             WalMessage::Insert { relation_id, tuple } => {
                 if let Some(change) = self.convert_insert(relation_id, tuple).await? {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        // No transaction context, send immediately
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -450,31 +428,9 @@ impl ReplicationStream {
                     .await?
                 {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -484,31 +440,9 @@ impl ReplicationStream {
             } => {
                 if let Some(change) = self.convert_delete(relation_id, old_tuple).await? {
                     if let Some(tx) = &mut self.pending_transaction {
-                        tx.push(change);
+                        tx.push((change, self.read_lsn));
                     } else {
-                        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
-                        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
-
-                        let wrapper = SourceEventWrapper::with_profiling(
-                            self.source_id.clone(),
-                            SourceEvent::Change(change),
-                            chrono::Utc::now(),
-                            profiling,
-                        );
-
-                        // Dispatch via helper
-                        if let Err(e) = SourceBase::dispatch_from_task(
-                            self.dispatchers.clone(),
-                            wrapper.clone(),
-                            &self.source_id,
-                        )
-                        .await
-                        {
-                            debug!(
-                                "[{}] Failed to dispatch change (no subscribers): {}",
-                                self.source_id, e
-                            );
-                        }
+                        self.dispatch_change(change, self.read_lsn).await;
                     }
                 }
             }
@@ -714,19 +648,97 @@ impl ReplicationStream {
 
     async fn send_feedback(&mut self, reply_requested: bool) -> Result<()> {
         if let Some(conn) = &mut self.connection {
+            // Use the confirmed source position (min LSN across all query
+            // position handles) for flush_lsn / apply_lsn.  This tells
+            // Postgres that WAL up to this LSN has been durably processed
+            // by all subscribers.  Using read_lsn here would advance the
+            // slot watermark past un-checkpointed query positions, causing
+            // PositionUnavailable on crash+restart.
+            let confirmed_lsn = match self.base.compute_confirmed_source_position().await {
+                Some(bytes) if bytes.len() == 8 => {
+                    let arr: [u8; 8] = bytes[..8].try_into().expect("length already checked");
+                    u64::from_be_bytes(arr)
+                }
+                Some(bytes) => {
+                    warn!(
+                        "[{}] Confirmed source position has unexpected length {} (expected 8); \
+                             not advancing flush_lsn",
+                        self.source_id,
+                        bytes.len()
+                    );
+                    0
+                }
+                None => 0, // No confirmed position yet — don't advance
+            };
+
+            // Apply the flush fence: during the subscription window after a
+            // replay restart, cap flush_lsn to prevent the slot's restart_lsn
+            // from advancing past positions that pending subscribers still need.
+            let fence = self.replay_state.effective_flush_fence();
+            let (effective_lsn, was_clamped) = if fence < u64::MAX && confirmed_lsn > fence {
+                (fence, true)
+            } else {
+                (confirmed_lsn, false)
+            };
+
             let status = StandbyStatusUpdate {
-                write_lsn: self.current_lsn,
-                flush_lsn: self.current_lsn,
-                apply_lsn: self.current_lsn,
+                write_lsn: self.read_lsn,
+                flush_lsn: effective_lsn,
+                apply_lsn: effective_lsn,
                 reply_requested,
             };
 
             conn.send_standby_status(status).await?;
             self.last_feedback_time = std::time::Instant::now();
-            trace!("Sent feedback with LSN: {:x}", self.current_lsn);
+
+            // Prune the sequence→position map up to the confirmed sequence
+            // now that feedback was successfully sent. Skip pruning when the
+            // fence clamped flush_lsn — Postgres hasn't actually acknowledged
+            // the full confirmed position, so we must retain map entries for
+            // accurate re-computation after the fence lifts.
+            if !was_clamped && effective_lsn > 0 {
+                if let Some(confirmed_seq) = self.base.compute_confirmed_position().await {
+                    self.base.prune_position_map(confirmed_seq).await;
+                }
+            }
+
+            trace!(
+                "[{}] Sent feedback: write_lsn={:x}, flush_lsn={:x}{}",
+                self.source_id,
+                self.read_lsn,
+                effective_lsn,
+                if was_clamped { " (fenced)" } else { "" }
+            );
         }
 
         Ok(())
+    }
+
+    /// Dispatch a single change event through the framework's `dispatch_event()`.
+    ///
+    /// Sets `source_position` to the 8-byte big-endian WAL LSN so the checkpoint
+    /// framework can persist the position for recovery/replay.
+    async fn dispatch_change(&self, change: SourceChange, lsn: u64) {
+        let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
+        profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
+
+        let mut wrapper = SourceEventWrapper::with_profiling(
+            self.source_id.clone(),
+            SourceEvent::Change(change),
+            chrono::Utc::now(),
+            profiling,
+        );
+
+        // Attach the WAL LSN as opaque source_position bytes for checkpoint/recovery
+        wrapper.set_source_position(Bytes::from(lsn.to_be_bytes().to_vec()));
+
+        // Use dispatch_event() which stamps the monotonic sequence
+        if let Err(e) = self.base.dispatch_event(wrapper).await {
+            debug!(
+                "[{}] Failed to dispatch change (no subscribers): {}",
+                self.source_id, e
+            );
+        }
     }
 
     #[allow(dead_code)]
@@ -766,18 +778,6 @@ impl ReplicationStream {
 
         Ok(())
     }
-}
-
-fn parse_lsn(lsn_str: &str) -> Result<u64> {
-    let parts: Vec<&str> = lsn_str.split('/').collect();
-    if parts.len() != 2 {
-        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
-    }
-
-    let high = u64::from_str_radix(parts[0], 16)?;
-    let low = u64::from_str_radix(parts[1], 16)?;
-
-    Ok((high << 32) | low)
 }
 
 #[cfg(test)]
