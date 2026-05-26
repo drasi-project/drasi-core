@@ -48,7 +48,10 @@ pub enum HyperliquidNetwork {
     #[default]
     Mainnet,
     Testnet,
-    Custom { rest_url: String, ws_url: String },
+    Custom {
+        rest_url: String,
+        ws_url: String,
+    },
 }
 
 impl HyperliquidNetwork {

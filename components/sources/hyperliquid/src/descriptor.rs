@@ -77,7 +77,9 @@ pub enum HyperliquidNetworkDto {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[derive(Default)]
 pub enum CoinSelectionDto {
-    Specific { coins: Vec<String> },
+    Specific {
+        coins: Vec<String>,
+    },
     #[default]
     All,
 }
@@ -90,7 +92,9 @@ pub enum InitialCursorDto {
     StartFromBeginning,
     #[default]
     StartFromNow,
-    StartFromTimestamp { timestamp: ConfigValue<i64> },
+    StartFromTimestamp {
+        timestamp: ConfigValue<i64>,
+    },
 }
 
 #[derive(OpenApi)]

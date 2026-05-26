@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use drasi_lib::StateStoreProvider;
 use log::error;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::cmp::Reverse;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const DASHBOARD_KEY_PREFIX: &str = "dashboard:";

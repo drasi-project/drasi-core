@@ -49,7 +49,10 @@ pub enum StartPosition {
     FromStart,
     #[default]
     FromEnd,
-    FromPosition { file: String, position: u32 },
+    FromPosition {
+        file: String,
+        position: u32,
+    },
     FromGtid(String),
 }
 
