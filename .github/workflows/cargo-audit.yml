@@ -10,8 +10,3 @@ on:
 jobs:
   audit:
     uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
-    with:
-      audit-args: >-
-        --ignore RUSTSEC-2026-0098
-        --ignore RUSTSEC-2026-0099
-        --ignore RUSTSEC-2026-0104
