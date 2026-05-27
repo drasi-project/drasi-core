@@ -416,7 +416,7 @@ impl Neo4jSourceBuilder {
     }
 
     pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
-        self.poll_interval_ms = poll_interval.as_millis() as u64;
+        self.poll_interval_ms = u64::try_from(poll_interval.as_millis()).unwrap_or(u64::MAX);
         self
     }
 

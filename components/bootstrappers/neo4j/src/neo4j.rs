@@ -16,6 +16,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::Utc;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
@@ -126,6 +127,7 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
         let graph = connect_graph(&self.config).await?;
         let mut total = 0usize;
 
+        let mut bootstrap_cursor: Option<Bytes> = None;
         let mut cursor_stream = graph
             .execute(query("CALL db.cdc.current() YIELD id RETURN id"))
             .await?;
@@ -135,6 +137,7 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
                 "Neo4j bootstrap for source '{}' starting at CDC cursor '{}'",
                 context.source_id, cursor
             );
+            bootstrap_cursor = Some(Bytes::from(cursor));
         }
 
         let node_labels = if request.node_labels.is_empty() {
@@ -163,7 +166,7 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
             event_count: total,
             last_sequence: None,
             sequences_aligned: false,
-            source_position: None,
+            source_position: bootstrap_cursor,
         })
     }
 }
@@ -419,7 +422,10 @@ fn bolt_type_to_value(value: &BoltType) -> Result<drasi_core::models::ElementVal
 }
 
 fn now_ms() -> u64 {
-    Utc::now().timestamp_millis() as u64
+    Utc::now()
+        .timestamp_millis()
+        .try_into()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

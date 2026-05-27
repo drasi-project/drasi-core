@@ -282,7 +282,10 @@ fn get_nested_string(map: &BoltMap, map_key: &str, value_key: &str) -> Option<St
 }
 
 pub fn now_ms() -> u64 {
-    Utc::now().timestamp_millis() as u64
+    Utc::now()
+        .timestamp_millis()
+        .try_into()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
