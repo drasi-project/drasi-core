@@ -83,6 +83,10 @@ pub struct RabbitMQReactionConfig {
     pub tls_cert_path: Option<String>,
     /// Optional PKCS#12 (PFX) client identity file path.
     pub tls_pfx_path: Option<String>,
+    /// Optional password for the PKCS#12 (PFX) identity file.
+    pub tls_pfx_password: Option<String>,
+    /// Maximum number of reconnect attempts before giving up (default: 5).
+    pub max_reconnect_attempts: u32,
     /// Query-specific publish configuration.
     pub query_configs: HashMap<String, QueryPublishConfig>,
 }
@@ -98,6 +102,8 @@ impl Default for RabbitMQReactionConfig {
             tls_enabled: false,
             tls_cert_path: None,
             tls_pfx_path: None,
+            tls_pfx_password: None,
+            max_reconnect_attempts: 5,
             query_configs: HashMap::new(),
         }
     }

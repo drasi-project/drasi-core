@@ -63,7 +63,13 @@ The following values are available in Handlebars templates:
 ## TLS Notes
 
 When `tls_enabled` is true, the connection string must use `amqps://`.
-If `tls_pfx_path` is provided, it must be a PKCS#12 (PFX) identity file (`.p12` or `.pfx`) with an empty password.
+If `tls_pfx_path` is provided, it must be a PKCS#12 (PFX) identity file (`.p12` or `.pfx`).
+Use `tls_pfx_password` to specify the password for the PFX file (defaults to empty if not set).
+
+## Reconnection
+
+The reaction automatically attempts to reconnect on channel disconnection with exponential backoff.
+The maximum number of attempts is controlled by `max_reconnect_attempts` (default: 5).
 
 ## Integration Test
 

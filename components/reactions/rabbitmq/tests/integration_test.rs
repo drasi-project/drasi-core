@@ -15,6 +15,7 @@
 //! Integration test for RabbitMQ reaction using testcontainers.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::channels::ComponentStatus;
 use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_rabbitmq::{
@@ -221,6 +222,8 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         tls_enabled: false,
         tls_cert_path: None,
         tls_pfx_path: None,
+        tls_pfx_password: None,
+        max_reconnect_attempts: 5,
         query_configs: routes,
     };
 
@@ -236,7 +239,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         .await?;
 
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_reaction_running(&core, "test-reaction").await?;
 
     let props = PropertyMapBuilder::new()
         .with_integer("id", 1)
@@ -375,6 +378,8 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         tls_enabled: false,
         tls_cert_path: None,
         tls_pfx_path: None,
+        tls_pfx_password: None,
+        max_reconnect_attempts: 5,
         query_configs: routes,
     };
 
@@ -390,7 +395,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         .await?;
 
     core.start().await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_reaction_running(&core, "agg-reaction").await?;
 
     // Insert first item — aggregation: total=1, total_amount=100
     let props = PropertyMapBuilder::new()
@@ -431,4 +436,22 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
 
     core.stop().await?;
     Ok(())
+}
+
+/// Poll until the reaction reports `ComponentStatus::Running`, with a timeout.
+async fn wait_for_reaction_running(core: &DrasiLib, reaction_id: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(status) = core.get_reaction_status(reaction_id).await {
+            if matches!(status, ComponentStatus::Running) {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Timed out waiting for reaction '{reaction_id}' to reach Running status"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

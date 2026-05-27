@@ -43,6 +43,20 @@ impl RabbitMQReaction {
         RabbitMQReactionBuilder::new(id)
     }
 
+    /// Sanitize a connection string by redacting credentials.
+    pub(crate) fn sanitize_connection_string(conn_str: &str) -> String {
+        // Redact user:pass from amqp://user:pass@host or amqps://user:pass@host
+        if let Some(scheme_end) = conn_str.find("://") {
+            let after_scheme = &conn_str[scheme_end + 3..];
+            if let Some(at_pos) = after_scheme.find('@') {
+                let scheme = &conn_str[..scheme_end + 3];
+                let after_at = &after_scheme[at_pos..];
+                return format!("{scheme}***:***{after_at}");
+            }
+        }
+        conn_str.to_string()
+    }
+
     /// Create a new RabbitMQ reaction.
     pub fn new(
         id: impl Into<String>,
@@ -156,6 +170,7 @@ impl RabbitMQReaction {
     fn build_tls_config(
         cert_path: Option<&str>,
         pfx_path: Option<&str>,
+        pfx_password: Option<&str>,
     ) -> anyhow::Result<lapin::tcp::OwnedTLSConfig> {
         let mut tls_config = lapin::tcp::OwnedTLSConfig::default();
         if let Some(cert_path) = cert_path {
@@ -166,7 +181,7 @@ impl RabbitMQReaction {
             let identity_bytes = fs::read(pfx_path)?;
             tls_config.identity = Some(lapin::tcp::OwnedIdentity {
                 der: identity_bytes,
-                password: String::new(),
+                password: pfx_password.unwrap_or_default().to_string(),
             });
         }
         Ok(tls_config)
@@ -193,6 +208,12 @@ impl RabbitMQReaction {
         );
     }
 
+    /// Test-accessible version of register_helpers.
+    #[cfg(test)]
+    pub(crate) fn register_helpers_for_test(handlebars: &mut Handlebars<'static>) {
+        Self::register_helpers(handlebars);
+    }
+
     /// Establish a connection and channel to RabbitMQ, declaring the exchange.
     #[allow(clippy::too_many_arguments)]
     async fn establish_connection(
@@ -201,6 +222,7 @@ impl RabbitMQReaction {
         tls_enabled: bool,
         tls_cert_path: Option<&str>,
         tls_pfx_path: Option<&str>,
+        tls_pfx_password: Option<&str>,
         exchange_name: &str,
         exchange_type: &ExchangeType,
         exchange_durable: bool,
@@ -209,7 +231,7 @@ impl RabbitMQReaction {
             ConnectionProperties::default().with_connection_name(reaction_name.to_string().into());
 
         let connection = if tls_enabled {
-            let tls_config = Self::build_tls_config(tls_cert_path, tls_pfx_path)?;
+            let tls_config = Self::build_tls_config(tls_cert_path, tls_pfx_path, tls_pfx_password)?;
             Connection::connect_with_config(connection_string, connection_props, tls_config).await?
         } else {
             Connection::connect(connection_string, connection_props).await?
@@ -400,6 +422,8 @@ impl Reaction for RabbitMQReaction {
         let tls_enabled = self.config.tls_enabled;
         let tls_cert_path = self.config.tls_cert_path.clone();
         let tls_pfx_path = self.config.tls_pfx_path.clone();
+        let tls_pfx_password = self.config.tls_pfx_password.clone();
+        let max_reconnect_attempts = self.config.max_reconnect_attempts;
         let priority_queue = self.base.priority_queue.clone();
 
         // Load persisted checkpoints for dedup and progress tracking.
@@ -407,13 +431,16 @@ impl Reaction for RabbitMQReaction {
         let base_clone = self.base.clone_shared();
 
         let processing_task_handle = tokio::spawn(async move {
+            let sanitized_conn = Self::sanitize_connection_string(&connection_string);
+
             // Establish initial connection
-            let (mut _connection, mut channel) = match Self::establish_connection(
+            let (mut connection, mut channel) = match Self::establish_connection(
                 &connection_string,
                 &reaction_name,
                 tls_enabled,
                 tls_cert_path.as_deref(),
                 tls_pfx_path.as_deref(),
+                tls_pfx_password.as_deref(),
                 &exchange_name,
                 &exchange_type,
                 exchange_durable,
@@ -426,7 +453,7 @@ impl Reaction for RabbitMQReaction {
                     status_handle
                         .set_status(
                             ComponentStatus::Error,
-                            Some(format!("Failed to connect: {e}")),
+                            Some(format!("Failed to connect to RabbitMQ broker ({sanitized_conn})")),
                         )
                         .await;
                     return;
@@ -479,7 +506,7 @@ impl Reaction for RabbitMQReaction {
                     info!("[{reaction_name}] Channel disconnected, attempting to reconnect...");
                     let mut reconnected = false;
                     let mut shutdown_requested = false;
-                    for attempt in 1u32..=5 {
+                    for attempt in 1u32..=max_reconnect_attempts {
                         let delay = std::time::Duration::from_secs(2u64.pow(attempt.min(4)));
                         // Respect shutdown signal during backoff sleep
                         tokio::select! {
@@ -491,20 +518,29 @@ impl Reaction for RabbitMQReaction {
                             }
                             _ = tokio::time::sleep(delay) => {}
                         }
-                        match Self::establish_connection(
-                            &connection_string,
-                            &reaction_name,
-                            tls_enabled,
-                            tls_cert_path.as_deref(),
-                            tls_pfx_path.as_deref(),
-                            &exchange_name,
-                            &exchange_type,
-                            exchange_durable,
-                        )
-                        .await
-                        {
+                        // Respect shutdown signal during connection attempt
+                        let conn_result = tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => {
+                                debug!("[{reaction_name}] Shutdown signal received during reconnect attempt");
+                                shutdown_requested = true;
+                                break;
+                            }
+                            r = Self::establish_connection(
+                                &connection_string,
+                                &reaction_name,
+                                tls_enabled,
+                                tls_cert_path.as_deref(),
+                                tls_pfx_path.as_deref(),
+                                tls_pfx_password.as_deref(),
+                                &exchange_name,
+                                &exchange_type,
+                                exchange_durable,
+                            ) => r,
+                        };
+                        match conn_result {
                             Ok((new_conn, new_chan)) => {
-                                _connection = new_conn;
+                                connection = new_conn;
                                 channel = new_chan;
                                 info!(
                                     "[{reaction_name}] Reconnected to RabbitMQ on attempt {attempt}"
@@ -520,12 +556,12 @@ impl Reaction for RabbitMQReaction {
                     if !reconnected {
                         if !shutdown_requested {
                             error!(
-                                "[{reaction_name}] Failed to reconnect after 5 attempts, shutting down"
+                                "[{reaction_name}] Failed to reconnect after {max_reconnect_attempts} attempts, shutting down"
                             );
                             status_handle
                                 .set_status(
                                     ComponentStatus::Error,
-                                    Some("Failed to reconnect after 5 attempts".to_string()),
+                                    Some(format!("Failed to reconnect to RabbitMQ broker ({sanitized_conn}) after {max_reconnect_attempts} attempts")),
                                 )
                                 .await;
                         }
@@ -723,16 +759,6 @@ impl Reaction for RabbitMQReaction {
 
     async fn stop(&self) -> Result<()> {
         self.base.stop_common().await?;
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        self.base
-            .set_status(
-                ComponentStatus::Stopped,
-                Some("RabbitMQ reaction stopped successfully".to_string()),
-            )
-            .await;
-
         Ok(())
     }
 

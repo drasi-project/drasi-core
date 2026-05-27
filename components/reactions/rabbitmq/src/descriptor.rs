@@ -89,6 +89,14 @@ pub struct RabbitMQReactionConfigDto {
     #[schema(value_type = Option<ConfigValueString>)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_pfx_path: Option<ConfigValue<String>>,
+    /// Optional password for the PKCS#12 (PFX) identity file.
+    #[schema(value_type = Option<ConfigValueString>)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_pfx_password: Option<ConfigValue<String>>,
+    /// Maximum number of reconnect attempts (default: 5).
+    #[schema(value_type = Option<ConfigValueU32>)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reconnect_attempts: Option<ConfigValue<u32>>,
     /// Query-specific publish configuration.
     #[serde(default)]
     pub query_configs: HashMap<String, QueryPublishConfigDto>,
@@ -206,7 +214,16 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
                     None => None,
                 };
                 builder = builder.with_tls(tls_cert_path, tls_pfx_path);
+                if let Some(ref tls_pfx_password) = dto.tls_pfx_password {
+                    builder =
+                        builder.with_tls_pfx_password(mapper.resolve_string(tls_pfx_password).await?);
+                }
             }
+        }
+
+        if let Some(ref max_reconnect_attempts) = dto.max_reconnect_attempts {
+            builder = builder
+                .with_max_reconnect_attempts(mapper.resolve_typed(max_reconnect_attempts).await?);
         }
 
         for (query_id, config) in &dto.query_configs {
