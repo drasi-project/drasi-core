@@ -152,13 +152,10 @@ impl ReactionPluginDescriptor for AzureStorageReactionDescriptor {
 
     fn config_schema_json(&self) -> String {
         let api = AzureStorageReactionSchemas::openapi();
-        serde_json::to_string(
-            &api.components
-                .as_ref()
-                .expect("OpenAPI components missing")
-                .schemas,
-        )
-        .expect("failed to serialize schema")
+        api.components
+            .as_ref()
+            .and_then(|c| serde_json::to_string(&c.schemas).ok())
+            .unwrap_or_else(|| "{}".to_string())
     }
 
     async fn create_reaction(

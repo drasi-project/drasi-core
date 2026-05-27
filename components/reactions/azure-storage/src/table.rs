@@ -17,6 +17,7 @@
 use azure_data_tables::clients::TableServiceClientBuilder;
 use azure_data_tables::prelude::TableServiceClient;
 use azure_storage::{CloudLocation, StorageCredentials};
+use log::debug;
 use serde_json::{Map, Value};
 
 #[derive(Clone)]
@@ -58,10 +59,16 @@ impl TableService {
         row_key: &str,
         mut properties: Map<String, Value>,
     ) -> anyhow::Result<()> {
+        if properties.contains_key("PartitionKey") {
+            debug!("upsert_entity: template included 'PartitionKey'; overwriting with computed value");
+        }
         properties.insert(
             "PartitionKey".to_string(),
             Value::String(partition_key.to_string()),
         );
+        if properties.contains_key("RowKey") {
+            debug!("upsert_entity: template included 'RowKey'; overwriting with computed value");
+        }
         properties.insert("RowKey".to_string(), Value::String(row_key.to_string()));
 
         self.client

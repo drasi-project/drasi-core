@@ -384,7 +384,9 @@ impl Reaction for AzureStorageReaction {
                      out: &mut dyn handlebars::Output|
                      -> handlebars::HelperResult {
                         if let Some(value) = h.param(0) {
-                            out.write(&serde_json::to_string(value.value()).unwrap_or_default())?;
+                            let s = serde_json::to_string(value.value())
+                                .map_err(|e| handlebars::RenderErrorReason::Other(e.to_string()))?;
+                            out.write(&s)?;
                         }
                         Ok(())
                     },
