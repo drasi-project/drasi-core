@@ -66,6 +66,8 @@ It supports operation-specific Handlebars templates (`ADD`, `UPDATE`, `DELETE`) 
 | `query_name` | ✅ | ✅ | ✅ |
 | `operation` | ✅ | ✅ | ✅ |
 
+> `data` contains the raw update payload for an UPDATE operation (the full serialized `ResultDiff`).
+
 `{{json ...}}` helper is available to render JSON values safely.
 
 ## Builder Example
@@ -105,4 +107,4 @@ make integration-test
 ## Limitations
 
 - Azure Files/Shares are not supported.
-- Uses the current Azure Rust SDK legacy crate set (`0.21.x`).
+- Uses Azure Rust SDK crates version `0.21.x` (latest stable at time of writing). Future versions may require migration to the unified `azure_sdk` v1 crate.

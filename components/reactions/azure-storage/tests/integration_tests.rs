@@ -329,7 +329,7 @@ async fn test_queue_reaction_aggregation() {
         .with_query("agg-query")
         .with_account_name(AZURITE_ACCOUNT)
         .with_access_key(AZURITE_KEY)
-        .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port))
+        .with_queue_endpoint(format!("http://127.0.0.1:{}", azurite.queue_port)) // DevSkim: ignore DS137138
         .with_target(StorageTarget::Queue {
             queue_name: queue_name.to_string(),
         })

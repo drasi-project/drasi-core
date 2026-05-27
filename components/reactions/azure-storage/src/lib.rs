@@ -15,12 +15,13 @@
 
 //! Azure Storage reaction plugin for Drasi.
 
-pub mod blob;
+pub(crate) mod blob;
 pub mod config;
 pub mod descriptor;
-pub mod queue;
+pub(crate) mod queue;
 pub mod reaction;
-pub mod table;
+pub(crate) mod table;
+pub(crate) mod util;
 
 pub use config::{
     AzureStorageReactionConfig, OperationType, QueryConfig, StorageTarget, TemplateSpec,
@@ -29,7 +30,9 @@ pub use reaction::AzureStorageReaction;
 
 use std::collections::HashMap;
 
-/// Builder for AzureStorageReaction.
+/// Builder for [`AzureStorageReaction`].
+///
+/// Use [`AzureStorageReaction::builder`] as the entry point.
 pub struct AzureStorageReactionBuilder {
     id: String,
     queries: Vec<String>,
@@ -119,6 +122,11 @@ impl AzureStorageReactionBuilder {
         self
     }
 
+    /// Builds the [`AzureStorageReaction`].
+    ///
+    /// # Errors
+    /// Returns an error if required configuration fields (`account_name`, `access_key`, and
+    /// target-specific fields) are empty or invalid.
     pub fn build(self) -> anyhow::Result<AzureStorageReaction> {
         AzureStorageReaction::from_builder(
             self.id,

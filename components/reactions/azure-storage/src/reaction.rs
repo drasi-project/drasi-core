@@ -255,6 +255,13 @@ impl AzureStorageReaction {
             ) => {
                 let partition_key = handlebars.render_template(partition_key_template, &context)?;
                 let row_key = handlebars.render_template(row_key_template, &context)?;
+                for (name, key) in [("partitionKey", &partition_key), ("rowKey", &row_key)] {
+                    if key.is_empty()
+                        || key.chars().any(|c| matches!(c, '/' | '\\' | '#' | '?') || c < ' ')
+                    {
+                        anyhow::bail!("{name} contains invalid characters: {key:?}");
+                    }
+                }
                 if operation == OperationType::Delete {
                     table_service
                         .delete_entity(table_name, &partition_key, &row_key)

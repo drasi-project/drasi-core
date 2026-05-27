@@ -17,21 +17,17 @@
 use azure_storage::{CloudLocation, StorageCredentials};
 use azure_storage_blobs::prelude::{BlobServiceClient, ClientBuilder};
 
+use crate::util::normalize_custom_uri;
+
+/// Thin wrapper around the Azure Blob Storage client.
+///
+/// Provides `put_blob` and `delete_blob` operations used by the reaction handler.
 #[derive(Clone)]
-pub struct BlobService {
+pub(crate) struct BlobService {
     client: BlobServiceClient,
 }
 
 impl BlobService {
-    fn normalize_custom_uri(account_name: &str, uri: &str) -> String {
-        let trimmed = uri.trim_end_matches('/');
-        if trimmed.ends_with(account_name) {
-            trimmed.to_string()
-        } else {
-            format!("{trimmed}/{account_name}")
-        }
-    }
-
     pub fn new(
         account_name: &str,
         credentials: StorageCredentials,
@@ -41,7 +37,7 @@ impl BlobService {
         if let Some(uri) = endpoint {
             builder = builder.cloud_location(CloudLocation::Custom {
                 account: account_name.to_string(),
-                uri: Self::normalize_custom_uri(account_name, uri),
+                uri: normalize_custom_uri(account_name, uri),
             });
         }
         Self {
@@ -49,6 +45,10 @@ impl BlobService {
         }
     }
 
+    /// Uploads `body` as a block blob at `blob_path` in `container_name`.
+    ///
+    /// # Errors
+    /// Returns an error if the Azure Storage call fails (e.g. container not found, auth error).
     pub async fn put_blob(
         &self,
         container_name: &str,

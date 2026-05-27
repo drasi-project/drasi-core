@@ -14,6 +14,7 @@
 
 //! Configuration types for Azure Storage reactions.
 
+use anyhow::Context;
 use drasi_lib::reactions::common::{self, TemplateRouting};
 use std::collections::HashMap;
 
@@ -52,7 +53,7 @@ pub enum StorageTarget {
 }
 
 /// Configuration for Azure Storage reaction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct AzureStorageReactionConfig {
     /// Azure storage account name.
     pub account_name: String,
@@ -70,6 +71,21 @@ pub struct AzureStorageReactionConfig {
     pub routes: HashMap<String, QueryConfig>,
     /// Fallback template routes used when query-specific route is not found.
     pub default_template: Option<QueryConfig>,
+}
+
+impl std::fmt::Debug for AzureStorageReactionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureStorageReactionConfig")
+            .field("account_name", &self.account_name)
+            .field("access_key", &"[REDACTED]")
+            .field("target", &self.target)
+            .field("blob_endpoint", &self.blob_endpoint)
+            .field("queue_endpoint", &self.queue_endpoint)
+            .field("table_endpoint", &self.table_endpoint)
+            .field("routes", &self.routes)
+            .field("default_template", &self.default_template)
+            .finish()
+    }
 }
 
 impl Default for AzureStorageReactionConfig {
@@ -195,6 +211,20 @@ impl AzureStorageReactionConfig {
             }
         }
 
+        for (name, ep) in [
+            ("blob_endpoint", &self.blob_endpoint),
+            ("queue_endpoint", &self.queue_endpoint),
+            ("table_endpoint", &self.table_endpoint),
+        ] {
+            if let Some(url) = ep {
+                let parsed = url::Url::parse(url)
+                    .with_context(|| format!("{name} is not a valid URL"))?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    anyhow::bail!("{name} must use http or https scheme");
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -231,6 +261,89 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_empty_account_name() {
+        let config = AzureStorageReactionConfig {
+            account_name: "  ".to_string(),
+            access_key: "key".to_string(),
+            target: StorageTarget::Queue {
+                queue_name: "events".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_empty_access_key() {
+        let config = AzureStorageReactionConfig {
+            account_name: "acct".to_string(),
+            access_key: "".to_string(),
+            target: StorageTarget::Queue {
+                queue_name: "events".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_empty_queue_name() {
+        let config = AzureStorageReactionConfig {
+            account_name: "acct".to_string(),
+            access_key: "key".to_string(),
+            target: StorageTarget::Queue {
+                queue_name: "".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_empty_blob_container() {
+        let config = AzureStorageReactionConfig {
+            account_name: "acct".to_string(),
+            access_key: "key".to_string(),
+            target: StorageTarget::Blob {
+                container_name: "".to_string(),
+                blob_path_template: "{{after.id}}".to_string(),
+                content_type: "application/json".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_empty_table_name() {
+        let config = AzureStorageReactionConfig {
+            account_name: "acct".to_string(),
+            access_key: "key".to_string(),
+            target: StorageTarget::Table {
+                table_name: "".to_string(),
+                partition_key_template: "{{after.pk}}".to_string(),
+                row_key_template: "{{after.rk}}".to_string(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_invalid_endpoint_scheme() {
+        let config = AzureStorageReactionConfig {
+            account_name: "acct".to_string(),
+            access_key: "key".to_string(),
+            target: StorageTarget::Queue {
+                queue_name: "events".to_string(),
+            },
+            queue_endpoint: Some("ftp://example.com".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 
     #[test]

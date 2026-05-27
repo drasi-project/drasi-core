@@ -18,21 +18,14 @@ use azure_storage::{CloudLocation, StorageCredentials};
 use azure_storage_queues::prelude::QueueServiceClient;
 use azure_storage_queues::QueueServiceClientBuilder;
 
+use crate::util::normalize_custom_uri;
+
 #[derive(Clone)]
-pub struct QueueService {
+pub(crate) struct QueueService {
     client: QueueServiceClient,
 }
 
 impl QueueService {
-    fn normalize_custom_uri(account_name: &str, uri: &str) -> String {
-        let trimmed = uri.trim_end_matches('/');
-        if trimmed.ends_with(account_name) {
-            trimmed.to_string()
-        } else {
-            format!("{trimmed}/{account_name}")
-        }
-    }
-
     pub fn new(
         account_name: &str,
         credentials: StorageCredentials,
@@ -42,7 +35,7 @@ impl QueueService {
         if let Some(uri) = endpoint {
             builder = builder.cloud_location(CloudLocation::Custom {
                 account: account_name.to_string(),
-                uri: Self::normalize_custom_uri(account_name, uri),
+                uri: normalize_custom_uri(account_name, uri),
             });
         }
         Self {
