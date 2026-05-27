@@ -20,7 +20,7 @@ use chrono::Utc;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use log::info;
 use neo4rs::{query, BoltMap, BoltType, ConfigBuilder, Graph};
@@ -120,7 +120,7 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         let graph = connect_graph(&self.config).await?;
         let mut total = 0usize;
 
@@ -157,7 +157,12 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
         )
         .await?;
 
-        Ok(total)
+        Ok(BootstrapResult {
+            event_count: total,
+            last_sequence: None,
+            sequences_aligned: false,
+            source_position: None,
+        })
     }
 }
 

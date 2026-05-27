@@ -109,10 +109,10 @@ impl BootstrapPluginDescriptor for Neo4jBootstrapDescriptor {
         let mapper = DtoMapper::new();
 
         let config = Neo4jBootstrapConfig {
-            uri: mapper.resolve_string(&dto.uri)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
-            database: mapper.resolve_string(&dto.database)?,
+            uri: mapper.resolve_string(&dto.uri).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
+            database: mapper.resolve_string(&dto.database).await?,
             labels: dto.labels,
             rel_types: dto.rel_types,
         };

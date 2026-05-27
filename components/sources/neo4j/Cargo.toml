@@ -50,7 +50,7 @@ drasi-bootstrap-neo4j.workspace = true
 drasi-reaction-application.workspace = true
 env_logger = "0.10.0"
 serial_test = "3.0"
-testcontainers = "0.23"
+testcontainers = "0.27"
 tokio-test = "0.4"
 uuid = { version = "1.0", features = ["v4"] }
 

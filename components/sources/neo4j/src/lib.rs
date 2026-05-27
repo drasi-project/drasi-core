@@ -119,11 +119,11 @@ impl Source for Neo4jSource {
 
         self.config.validate()?;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Starting,
                 Some("Starting Neo4j source".into()),
             )
-            .await?;
+            .await;
 
         let graph = connect_graph(&self.config).await?;
         let selectors = build_selectors(&self.config.labels, &self.config.rel_types);
@@ -185,7 +185,7 @@ impl Source for Neo4jSource {
                                 Ok(None) => {}
                                 Err(e) => {
                                     error!("Neo4j CDC poll failed for source '{source_id}': {e}");
-                                    let _ = base.set_status_with_event(
+                                    base.set_status(
                                         ComponentStatus::Error,
                                         Some(format!("CDC poll failed: {e}")),
                                     ).await;
@@ -200,11 +200,11 @@ impl Source for Neo4jSource {
 
         self.base.set_task_handle(task).await;
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Running,
                 Some("Neo4j CDC polling started".to_string()),
             )
-            .await?;
+            .await;
         Ok(())
     }
 
@@ -216,11 +216,11 @@ impl Source for Neo4jSource {
         }
 
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopping,
                 Some("Stopping Neo4j source".into()),
             )
-            .await?;
+            .await;
         self.base.stop_common().await
     }
 
