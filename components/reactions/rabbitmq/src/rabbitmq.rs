@@ -453,7 +453,9 @@ impl Reaction for RabbitMQReaction {
                     status_handle
                         .set_status(
                             ComponentStatus::Error,
-                            Some(format!("Failed to connect to RabbitMQ broker ({sanitized_conn})")),
+                            Some(format!(
+                                "Failed to connect to RabbitMQ broker ({sanitized_conn})"
+                            )),
                         )
                         .await;
                     return;

@@ -215,8 +215,8 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
                 };
                 builder = builder.with_tls(tls_cert_path, tls_pfx_path);
                 if let Some(ref tls_pfx_password) = dto.tls_pfx_password {
-                    builder =
-                        builder.with_tls_pfx_password(mapper.resolve_string(tls_pfx_password).await?);
+                    builder = builder
+                        .with_tls_pfx_password(mapper.resolve_string(tls_pfx_password).await?);
                 }
             }
         }

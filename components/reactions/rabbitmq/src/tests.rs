@@ -92,10 +92,7 @@ fn test_tls_requires_amqps() {
 #[test]
 fn test_validate_config_rejects_mismatched_route() {
     let mut routes = HashMap::new();
-    routes.insert(
-        "unknown-query".to_string(),
-        QueryPublishConfig::default(),
-    );
+    routes.insert("unknown-query".to_string(), QueryPublishConfig::default());
 
     let config = RabbitMQReactionConfig {
         query_configs: routes,
@@ -126,8 +123,7 @@ fn test_validate_config_accepts_dotted_query_match() {
 
 #[test]
 fn test_sanitize_connection_string_redacts_credentials() {
-    let sanitized =
-        RabbitMQReaction::sanitize_connection_string("amqp://user:pass@host:5672/%2f"); // DevSkim: ignore DS137138
+    let sanitized = RabbitMQReaction::sanitize_connection_string("amqp://user:pass@host:5672/%2f"); // DevSkim: ignore DS137138
     assert_eq!(sanitized, "amqp://***:***@host:5672/%2f");
 }
 
@@ -140,8 +136,9 @@ fn test_sanitize_connection_string_no_credentials() {
 
 #[test]
 fn test_sanitize_connection_string_amqps() {
-    let sanitized =
-        RabbitMQReaction::sanitize_connection_string("amqps://admin:secret@broker.example.com:5671/%2f");
+    let sanitized = RabbitMQReaction::sanitize_connection_string(
+        "amqps://admin:secret@broker.example.com:5671/%2f",
+    );
     assert_eq!(sanitized, "amqps://***:***@broker.example.com:5671/%2f");
 }
 
