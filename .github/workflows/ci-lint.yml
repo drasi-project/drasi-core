@@ -14,5 +14,3 @@ permissions:
 jobs:
   lint:
     uses: drasi-project/.github/.github/workflows/rust-lint.yaml@clippy-flags
-    with:
-      rustflags: "-Dwarnings"
