@@ -130,8 +130,8 @@ async fn test_kafka_source_detects_changes() {
         .await
         .unwrap();
 
-    // Give source time to connect and assign partitions
-    sleep(Duration::from_secs(3)).await;
+    // Give source time to connect and assign partitions (5s for slow CI runners)
+    sleep(Duration::from_secs(5)).await;
 
     // Create producer and send messages
     let producer = create_producer(&bootstrap_servers);
@@ -177,15 +177,12 @@ async fn test_kafka_source_detects_changes() {
         .await
         .expect("Failed to produce message");
 
-    // This should not produce any query diff
+    // This should not produce any query diff — expect a timeout
     let result = tokio::time::timeout(Duration::from_secs(3), subscription.recv()).await;
-    if let Ok(Some(qr)) = result {
-        assert!(
-            qr.results.is_empty(),
-            "order-2 should not match query (total=30), got {:?}",
-            qr.results
-        );
-    }
+    assert!(
+        result.is_err(),
+        "order-2 (total=30) should not match query, but got a diff"
+    );
 
     // INSERT another matching message
     producer
@@ -316,7 +313,8 @@ async fn test_kafka_source_custom_mapping() {
         .await
         .unwrap();
 
-    sleep(Duration::from_secs(3)).await;
+    // Give source time to connect and assign partitions (5s for slow CI runners)
+    sleep(Duration::from_secs(5)).await;
 
     let producer = create_producer(&bootstrap_servers);
 

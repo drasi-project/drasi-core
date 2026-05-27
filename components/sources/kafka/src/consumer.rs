@@ -329,3 +329,158 @@ impl KafkaConsumerTask {
         Ok(SourceChange::Delete { metadata })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AutoOffsetReset;
+    use drasi_lib::sources::SourceBaseParams;
+    use drasi_lib::DispatchMode;
+    use drasi_source_mapping::{ElementTemplate, ElementType, OperationType};
+
+    /// Helper to create a minimal KafkaConsumerTask for testing.
+    fn test_task(mappings: Vec<SourceMapping>) -> KafkaConsumerTask {
+        let config = KafkaSourceConfig {
+            id: "test-source".to_string(),
+            bootstrap_servers: "localhost:9092".to_string(),
+            topic: "test-topic".to_string(),
+            group_id: "test-group".to_string(),
+            node_label: "TestNode".to_string(),
+            mappings: None,
+            security_protocol: None,
+            sasl_mechanism: None,
+            sasl_username: None,
+            sasl_password: None,
+            auto_offset_reset: AutoOffsetReset::Earliest,
+            additional_properties: HashMap::new(),
+        };
+
+        let params =
+            SourceBaseParams::new("test-source").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).expect("SourceBase creation failed");
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        KafkaConsumerTask {
+            config,
+            mappings,
+            engine: Arc::new(SourceMappingEngine::new()),
+            base,
+            source_id: "test-source".to_string(),
+            shutdown_rx,
+            resume_positions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Default mapping: key → id, payload → properties
+    fn default_mapping() -> Vec<SourceMapping> {
+        vec![SourceMapping {
+            when: None,
+            element_type: ElementType::Node,
+            operation: Some(OperationType::Insert),
+            operation_from: None,
+            operation_map: None,
+            effective_from: None,
+            template: ElementTemplate {
+                id: "{{key}}".to_string(),
+                labels: vec!["TestNode".to_string()],
+                properties: None,
+                from: None,
+                to: None,
+            },
+        }]
+    }
+
+    #[test]
+    fn test_process_tombstone_empty_key_returns_error() {
+        let task = test_task(vec![]);
+        let result = task.process_tombstone("");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no key"));
+    }
+
+    #[test]
+    fn test_process_tombstone_valid_key() {
+        let task = test_task(vec![]);
+        let result = task.process_tombstone("order-42").unwrap();
+
+        match result {
+            SourceChange::Delete { metadata } => {
+                assert_eq!(&*metadata.reference.element_id, "order-42");
+                assert_eq!(&*metadata.reference.source_id, "test-source");
+                assert_eq!(&*metadata.labels[0], "TestNode");
+            }
+            _ => panic!("Expected SourceChange::Delete, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_process_message_no_matching_mapping() {
+        // Empty mappings list — no mapping can match
+        let task = test_task(vec![]);
+        let payload = serde_json::json!({"id": "123"});
+        let result = task.process_message(&payload, "key-1", "topic", 0, 0);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No matching mapping"));
+    }
+
+    #[test]
+    fn test_process_message_with_valid_mapping() {
+        let task = test_task(default_mapping());
+        let payload = serde_json::json!({"name": "Widget", "price": 42});
+        let result = task.process_message(&payload, "item-1", "orders", 0, 5);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            SourceChange::Insert { element } => {
+                let meta = match &element {
+                    drasi_core::models::Element::Node { metadata, .. } => metadata,
+                    drasi_core::models::Element::Relation { metadata, .. } => metadata,
+                };
+                assert_eq!(&*meta.reference.element_id, "item-1");
+                assert_eq!(&*meta.labels[0], "TestNode");
+            }
+            other => panic!("Expected Insert, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimum_resume_offsets_no_queries() {
+        let task = test_task(vec![]);
+        let result = task.minimum_resume_offsets(3).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_minimum_resume_offsets_element_wise_minimum() {
+        let task = test_task(vec![]);
+        {
+            let mut positions = task.resume_positions.write().await;
+            positions.insert("query-a".to_string(), vec![10, 5, 8]);
+            positions.insert("query-b".to_string(), vec![7, 9, 3]);
+        }
+
+        let result = task.minimum_resume_offsets(3).await;
+        assert_eq!(result, Some(vec![7, 5, 3]));
+    }
+
+    #[tokio::test]
+    async fn test_minimum_resume_offsets_partition_count_mismatch_skipped() {
+        let task = test_task(vec![]);
+        {
+            let mut positions = task.resume_positions.write().await;
+            // This one has wrong length (2 instead of 3) — should be skipped
+            positions.insert("query-bad".to_string(), vec![1, 2]);
+            positions.insert("query-good".to_string(), vec![5, 5, 5]);
+        }
+
+        let result = task.minimum_resume_offsets(3).await;
+        // Only query-good matches, so result is its offsets
+        assert_eq!(result, Some(vec![5, 5, 5]));
+    }
+}

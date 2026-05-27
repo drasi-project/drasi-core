@@ -977,4 +977,95 @@ mod tests {
             .unwrap();
         assert_eq!(result, "prefix-123");
     }
+
+    #[test]
+    fn test_extract_simple_path_basic() {
+        assert_eq!(
+            extract_simple_path("{{payload.name}}"),
+            Some("payload.name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_simple_path_with_spaces_around_braces() {
+        assert_eq!(
+            extract_simple_path("{{ key }}"),
+            Some("key".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_simple_path_helper_returns_none() {
+        assert_eq!(extract_simple_path("{{#if x}}yes{{/if}}"), None);
+    }
+
+    #[test]
+    fn test_extract_simple_path_with_space_returns_none() {
+        // Contains a space inside — indicates a helper call
+        assert_eq!(extract_simple_path("{{lowercase payload.name}}"), None);
+    }
+
+    #[test]
+    fn test_extract_simple_path_not_template() {
+        assert_eq!(extract_simple_path("plain-text"), None);
+    }
+
+    #[test]
+    fn test_parse_with_format_iso8601() {
+        let result = parse_with_format("2024-01-15T10:30:00Z", &TimestampFormat::Iso8601).unwrap();
+        assert_eq!(result, 1705314600000);
+    }
+
+    #[test]
+    fn test_parse_with_format_unix_seconds() {
+        let result = parse_with_format("1705311000", &TimestampFormat::UnixSeconds).unwrap();
+        assert_eq!(result, 1705311000000);
+    }
+
+    #[test]
+    fn test_parse_with_format_unix_millis() {
+        let result = parse_with_format("1705311000123", &TimestampFormat::UnixMillis).unwrap();
+        assert_eq!(result, 1705311000123);
+    }
+
+    #[test]
+    fn test_parse_with_format_unix_nanos() {
+        let result =
+            parse_with_format("1705311000123456789", &TimestampFormat::UnixNanos).unwrap();
+        assert_eq!(result, 1705311000123);
+    }
+
+    #[test]
+    fn test_parse_with_format_negative_seconds_rejected() {
+        let result = parse_with_format("-100", &TimestampFormat::UnixSeconds);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Negative"));
+    }
+
+    #[test]
+    fn test_parse_timestamp_auto_detect_seconds() {
+        // Under 10 billion → treated as seconds
+        let result = parse_timestamp("1705311000", None).unwrap();
+        assert_eq!(result, 1705311000000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_auto_detect_millis() {
+        // Between 10B and 10T → treated as milliseconds
+        let result = parse_timestamp("1705311000123", None).unwrap();
+        assert_eq!(result, 1705311000123);
+    }
+
+    #[test]
+    fn test_parse_timestamp_auto_detect_nanos() {
+        // Over 10T → treated as nanoseconds
+        let result = parse_timestamp("1705311000123456789", None).unwrap();
+        assert_eq!(result, 1705311000123);
+    }
+
+    #[test]
+    fn test_parse_timestamp_iso8601() {
+        let result = parse_timestamp("2024-01-15T10:30:00Z", None).unwrap();
+        assert_eq!(result, 1705314600000);
+    }
 }

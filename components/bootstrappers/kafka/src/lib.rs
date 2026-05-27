@@ -524,3 +524,84 @@ drasi_plugin_sdk::export_plugin!(
     reaction_descriptors = [],
     bootstrap_descriptors = [descriptor::KafkaBootstrapDescriptor],
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_source_mapping::{ElementTemplate, ElementType, OperationType, SourceMapping};
+
+    fn test_provider() -> KafkaBootstrapProvider {
+        let config = KafkaBootstrapConfig {
+            bootstrap_servers: "localhost:9092".to_string(),
+            topic: "test-topic".to_string(),
+            node_label: "TestNode".to_string(),
+            security_protocol: None,
+            sasl_mechanism: None,
+            sasl_username: None,
+            sasl_password: None,
+            additional_properties: std::collections::HashMap::new(),
+        };
+
+        let mappings = vec![SourceMapping {
+            when: None,
+            element_type: ElementType::Node,
+            operation: Some(OperationType::Insert),
+            operation_from: None,
+            operation_map: None,
+            effective_from: None,
+            template: ElementTemplate {
+                id: "{{key}}".to_string(),
+                labels: vec!["TestNode".to_string()],
+                properties: None,
+                from: None,
+                to: None,
+            },
+        }];
+
+        KafkaBootstrapProvider::new(config, mappings)
+    }
+
+    #[test]
+    fn test_process_message_valid() {
+        let provider = test_provider();
+        let payload = serde_json::json!({"name": "Widget", "price": 42});
+        let result = provider
+            .process_message(&payload, "item-1", "test-topic", 0, 5, "src-1")
+            .unwrap();
+
+        match result {
+            SourceChange::Insert { element } => {
+                let meta = match &element {
+                    drasi_core::models::Element::Node { metadata, .. } => metadata,
+                    drasi_core::models::Element::Relation { metadata, .. } => metadata,
+                };
+                assert_eq!(&*meta.reference.element_id, "item-1");
+                assert_eq!(&*meta.labels[0], "TestNode");
+            }
+            other => panic!("Expected Insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_process_tombstone_valid_key() {
+        let provider = test_provider();
+        let result = provider.process_tombstone("order-99", "src-1").unwrap();
+
+        match result {
+            SourceChange::Delete { metadata } => {
+                assert_eq!(&*metadata.reference.element_id, "order-99");
+                assert_eq!(&*metadata.reference.source_id, "src-1");
+                assert_eq!(&*metadata.labels[0], "TestNode");
+            }
+            other => panic!("Expected Delete, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_process_tombstone_empty_key_returns_error() {
+        let provider = test_provider();
+        let result = provider.process_tombstone("", "src-1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no key"));
+    }
+}
