@@ -30,7 +30,7 @@ use std::fs;
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::Reaction;
+use drasi_lib::{ReactionCheckpoint, ReactionRecoveryPolicy, Reaction};
 
 pub struct RabbitMQReaction {
     base: ReactionBase,
@@ -362,6 +362,14 @@ impl Reaction for RabbitMQReaction {
         self.base.get_auto_start()
     }
 
+    fn is_durable(&self) -> bool {
+        true
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::AutoSkipGap
+    }
+
     async fn initialize(&self, context: drasi_lib::context::ReactionRuntimeContext) {
         self.base.initialize(context).await;
     }
@@ -393,6 +401,10 @@ impl Reaction for RabbitMQReaction {
         let tls_cert_path = self.config.tls_cert_path.clone();
         let tls_pfx_path = self.config.tls_pfx_path.clone();
         let priority_queue = self.base.priority_queue.clone();
+
+        // Load persisted checkpoints for dedup and progress tracking.
+        let initial_checkpoints = self.base.read_all_checkpoints().await.unwrap_or_default();
+        let base_clone = self.base.clone_shared();
 
         let processing_task_handle = tokio::spawn(async move {
             // Establish initial connection
@@ -432,6 +444,8 @@ impl Reaction for RabbitMQReaction {
             let mut handlebars = Handlebars::new();
             Self::register_helpers(&mut handlebars);
 
+            let mut checkpoints = initial_checkpoints;
+
             loop {
                 let query_result_arc = tokio::select! {
                     biased;
@@ -446,6 +460,18 @@ impl Reaction for RabbitMQReaction {
 
                 if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
+                }
+
+                // Dedup: skip events at or before the persisted checkpoint.
+                let seq = query_result.sequence;
+                if let Some(cp) = checkpoints.get(&query_result.query_id) {
+                    if seq <= cp.sequence {
+                        debug!(
+                            "[{reaction_name}] Skipping already-processed event: query={}, seq={seq} (checkpoint={})",
+                            query_result.query_id, cp.sequence
+                        );
+                        continue;
+                    }
                 }
 
                 // Check connection health and reconnect if needed
@@ -553,6 +579,7 @@ impl Reaction for RabbitMQReaction {
                     "[{reaction_name}] Processing {result_count} results from query '{query_name}'"
                 );
 
+                let mut publish_failed = false;
                 for result in &query_result.results {
                     match result {
                         ResultDiff::Add { data, .. } => {
@@ -575,6 +602,7 @@ impl Reaction for RabbitMQReaction {
                                 .await
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
+                                    publish_failed = true;
                                 }
                             }
                         }
@@ -598,6 +626,7 @@ impl Reaction for RabbitMQReaction {
                                 .await
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
+                                    publish_failed = true;
                                 }
                             }
                         }
@@ -626,6 +655,7 @@ impl Reaction for RabbitMQReaction {
                                 .await
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
+                                    publish_failed = true;
                                 }
                             }
                         }
@@ -649,12 +679,30 @@ impl Reaction for RabbitMQReaction {
                                 .await
                                 {
                                     error!("[{reaction_name}] Failed to publish result: {e}");
+                                    publish_failed = true;
                                 }
                             }
                         }
                         ResultDiff::Noop => {
                             debug!("[{reaction_name}] Ignoring noop result");
                         }
+                    }
+                }
+
+                // Advance checkpoint only if all publishes succeeded.
+                if !publish_failed {
+                    let config_hash = checkpoints
+                        .get(query_name)
+                        .map(|cp| cp.config_hash)
+                        .unwrap_or(0);
+                    let cp = ReactionCheckpoint {
+                        sequence: seq,
+                        config_hash,
+                    };
+                    if let Err(e) = base_clone.write_checkpoint(query_name, &cp).await {
+                        error!("[{reaction_name}] Failed to write checkpoint for query '{query_name}': {e}");
+                    } else {
+                        checkpoints.insert(query_name.to_string(), cp);
                     }
                 }
             }
