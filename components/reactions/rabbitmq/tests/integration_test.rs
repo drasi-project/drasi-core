@@ -404,7 +404,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let body: Value = serde_json::from_slice(&delivery.data)?;
     assert_eq!(delivery.routing_key.as_str(), "stats.updated");
     assert_eq!(body["total"], 1);
-    assert_eq!(body["total_amount"], 100);
+    assert_eq!(body["total_amount"], 100.0);
 
     // Insert second item — aggregation: total=2, total_amount=350
     let props = PropertyMapBuilder::new()
@@ -418,7 +418,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let body: Value = serde_json::from_slice(&delivery.data)?;
     assert_eq!(delivery.routing_key.as_str(), "stats.updated");
     assert_eq!(body["total"], 2);
-    assert_eq!(body["total_amount"], 350);
+    assert_eq!(body["total_amount"], 350.0);
 
     // Delete first item — aggregation: total=1, total_amount=250
     handle.send_delete("item-1", vec!["Item"]).await?;
@@ -427,7 +427,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let body: Value = serde_json::from_slice(&delivery.data)?;
     assert_eq!(delivery.routing_key.as_str(), "stats.updated");
     assert_eq!(body["total"], 1);
-    assert_eq!(body["total_amount"], 250);
+    assert_eq!(body["total_amount"], 250.0);
 
     core.stop().await?;
     Ok(())
