@@ -118,8 +118,10 @@ impl KafkaConsumerTask {
         // don't incorrectly encode offset 0.
         let mut current_offsets = if let Some(offsets) = min_resume_offsets {
             offsets
-        } else if matches!(self.config.auto_offset_reset, crate::config::AutoOffsetReset::Latest)
-        {
+        } else if matches!(
+            self.config.auto_offset_reset,
+            crate::config::AutoOffsetReset::Latest
+        ) {
             let mut watermarks = Vec::with_capacity(partition_count);
             for p in 0..partition_count as i32 {
                 let (_, high) = consumer
@@ -355,8 +357,7 @@ mod tests {
             additional_properties: HashMap::new(),
         };
 
-        let params =
-            SourceBaseParams::new("test-source").with_dispatch_mode(DispatchMode::Channel);
+        let params = SourceBaseParams::new("test-source").with_dispatch_mode(DispatchMode::Channel);
         let base = SourceBase::new(params).expect("SourceBase creation failed");
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -395,10 +396,7 @@ mod tests {
         let task = test_task(vec![]);
         let result = task.process_tombstone("");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("no key"));
+        assert!(result.unwrap_err().to_string().contains("no key"));
     }
 
     #[test]

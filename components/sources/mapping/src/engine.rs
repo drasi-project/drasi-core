@@ -179,12 +179,10 @@ impl SourceMappingEngine {
 
         if let Some(ref regex_str) = condition.regex {
             if let Ok(mut cache) = self.regex_cache.lock() {
-                let re = cache
-                    .entry(regex_str.clone())
-                    .or_insert_with(|| {
-                        regex::Regex::new(regex_str)
-                            .unwrap_or_else(|_| regex::Regex::new("(?:)").expect("infallible"))
-                    });
+                let re = cache.entry(regex_str.clone()).or_insert_with(|| {
+                    regex::Regex::new(regex_str)
+                        .unwrap_or_else(|_| regex::Regex::new("(?:)").expect("infallible"))
+                });
                 return re.is_match(&value_str);
             }
             // Mutex poisoned — fall back to one-shot compile
@@ -988,10 +986,7 @@ mod tests {
 
     #[test]
     fn test_extract_simple_path_with_spaces_around_braces() {
-        assert_eq!(
-            extract_simple_path("{{ key }}"),
-            Some("key".to_string())
-        );
+        assert_eq!(extract_simple_path("{{ key }}"), Some("key".to_string()));
     }
 
     #[test]
@@ -1030,8 +1025,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_format_unix_nanos() {
-        let result =
-            parse_with_format("1705311000123456789", &TimestampFormat::UnixNanos).unwrap();
+        let result = parse_with_format("1705311000123456789", &TimestampFormat::UnixNanos).unwrap();
         assert_eq!(result, 1705311000123);
     }
 

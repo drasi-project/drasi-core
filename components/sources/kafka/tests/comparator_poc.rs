@@ -101,33 +101,69 @@ fn poc_multi_subscriber_two_partitions() {
 
     // P0 offset 8 → position (from=0, [9, 5])
     let p0_8 = encode_position(0, &[9, 5]);
-    assert!(!cmp.position_reached(&p0_8, &resume_a), "A already has P0:8 (9>10? NO)");
-    assert!(cmp.position_reached(&p0_8, &resume_b), "B needs P0:8 (9>8? YES)");
+    assert!(
+        !cmp.position_reached(&p0_8, &resume_a),
+        "A already has P0:8 (9>10? NO)"
+    );
+    assert!(
+        cmp.position_reached(&p0_8, &resume_b),
+        "B needs P0:8 (9>8? YES)"
+    );
 
     // P1 offset 5 → position (from=1, [9, 6])
     let p1_5 = encode_position(1, &[9, 6]);
-    assert!(cmp.position_reached(&p1_5, &resume_a), "A needs P1:5 (6>5? YES)");
-    assert!(!cmp.position_reached(&p1_5, &resume_b), "B already has P1:5 (6>7? NO)");
+    assert!(
+        cmp.position_reached(&p1_5, &resume_a),
+        "A needs P1:5 (6>5? YES)"
+    );
+    assert!(
+        !cmp.position_reached(&p1_5, &resume_b),
+        "B already has P1:5 (6>7? NO)"
+    );
 
     // P0 offset 9 → position (from=0, [10, 6])
     let p0_9 = encode_position(0, &[10, 6]);
-    assert!(!cmp.position_reached(&p0_9, &resume_a), "A already has P0:9 (10>10? NO)");
-    assert!(cmp.position_reached(&p0_9, &resume_b), "B needs P0:9 (10>8? YES)");
+    assert!(
+        !cmp.position_reached(&p0_9, &resume_a),
+        "A already has P0:9 (10>10? NO)"
+    );
+    assert!(
+        cmp.position_reached(&p0_9, &resume_b),
+        "B needs P0:9 (10>8? YES)"
+    );
 
     // P1 offset 6 → position (from=1, [10, 7])
     let p1_6 = encode_position(1, &[10, 7]);
-    assert!(cmp.position_reached(&p1_6, &resume_a), "A needs P1:6 (7>5? YES)");
-    assert!(!cmp.position_reached(&p1_6, &resume_b), "B already has P1:6 (7>7? NO)");
+    assert!(
+        cmp.position_reached(&p1_6, &resume_a),
+        "A needs P1:6 (7>5? YES)"
+    );
+    assert!(
+        !cmp.position_reached(&p1_6, &resume_b),
+        "B already has P1:6 (7>7? NO)"
+    );
 
     // P0 offset 10 → position (from=0, [11, 7])
     let p0_10 = encode_position(0, &[11, 7]);
-    assert!(cmp.position_reached(&p0_10, &resume_a), "A needs P0:10 (11>10? YES)");
-    assert!(cmp.position_reached(&p0_10, &resume_b), "B needs P0:10 (11>8? YES)");
+    assert!(
+        cmp.position_reached(&p0_10, &resume_a),
+        "A needs P0:10 (11>10? YES)"
+    );
+    assert!(
+        cmp.position_reached(&p0_10, &resume_b),
+        "B needs P0:10 (11>8? YES)"
+    );
 
     // P1 offset 7 → position (from=1, [11, 8])
     let p1_7 = encode_position(1, &[11, 8]);
-    assert!(cmp.position_reached(&p1_7, &resume_a), "A needs P1:7 (8>5? YES)");
-    assert!(cmp.position_reached(&p1_7, &resume_b), "B needs P1:7 (8>7? YES)");
+    assert!(
+        cmp.position_reached(&p1_7, &resume_a),
+        "A needs P1:7 (8>5? YES)"
+    );
+    assert!(
+        cmp.position_reached(&p1_7, &resume_b),
+        "B needs P1:7 (8>7? YES)"
+    );
 }
 
 /// Tally: A gets [P1:5, P1:6, P0:10, P1:7] = 4 events
@@ -170,13 +206,28 @@ fn poc_single_partition_simple() {
     let resume = encode_position(0, &[5]); // consumed up to offset 4
 
     // Offsets 3,4 (next=4,5): should NOT pass
-    assert!(!cmp.position_reached(&encode_position(0, &[4]), &resume), "offset 3: 4>5? NO");
-    assert!(!cmp.position_reached(&encode_position(0, &[5]), &resume), "offset 4: 5>5? NO");
+    assert!(
+        !cmp.position_reached(&encode_position(0, &[4]), &resume),
+        "offset 3: 4>5? NO"
+    );
+    assert!(
+        !cmp.position_reached(&encode_position(0, &[5]), &resume),
+        "offset 4: 5>5? NO"
+    );
 
     // Offsets 5,6,7 (next=6,7,8): should pass
-    assert!(cmp.position_reached(&encode_position(0, &[6]), &resume), "offset 5: 6>5? YES");
-    assert!(cmp.position_reached(&encode_position(0, &[7]), &resume), "offset 6: 7>5? YES");
-    assert!(cmp.position_reached(&encode_position(0, &[8]), &resume), "offset 7: 8>5? YES");
+    assert!(
+        cmp.position_reached(&encode_position(0, &[6]), &resume),
+        "offset 5: 6>5? YES"
+    );
+    assert!(
+        cmp.position_reached(&encode_position(0, &[7]), &resume),
+        "offset 6: 7>5? YES"
+    );
+    assert!(
+        cmp.position_reached(&encode_position(0, &[8]), &resume),
+        "offset 7: 8>5? YES"
+    );
 }
 
 // ============================================================================

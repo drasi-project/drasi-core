@@ -285,8 +285,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             }
 
             // Use block_in_place so the blocking poll doesn't starve the Tokio runtime.
-            let poll_result =
-                tokio::task::block_in_place(|| consumer.poll(poll_timeout));
+            let poll_result = tokio::task::block_in_place(|| consumer.poll(poll_timeout));
 
             match poll_result {
                 Some(Ok(msg)) => {
