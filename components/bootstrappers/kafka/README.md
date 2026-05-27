@@ -14,12 +14,12 @@
 
 Bootstrap config supports:
 
-- `bootstrap_servers`
+- `bootstrapServers`
 - `topic`
-- `node_label`
+- `nodeLabel`
 - optional `mappings`
-- optional security/SASL settings
-- optional `additional_properties`
+- optional security/SASL settings (`securityProtocol`, `saslMechanism`, `saslUsername`, `saslPassword`)
+- optional `additionalProperties`
 
 When bootstrap config omits values, descriptor creation can fallback to source config fields.
 

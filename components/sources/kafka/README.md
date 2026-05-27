@@ -4,8 +4,8 @@
 
 ## Highlights
 
-- Multi-partition replay position encoding (`[count][offsets...]`)
-- Custom `KafkaPositionComparator` for component-wise replay filtering
+- Multi-partition replay position encoding with per-partition comparator
+- Custom `KafkaPositionComparator` for partition-aware replay filtering
 - Template-based mapping via `drasi-source-mapping`
 - Tombstone (`null` payload) support as Delete events
 - SASL/security protocol passthrough (`security.protocol`, `sasl.*`)
@@ -14,17 +14,17 @@
 
 | Field | Required | Description |
 |---|---|---|
-| `bootstrap_servers` | yes | Kafka brokers (`host:port[,host:port]`) |
+| `bootstrapServers` | yes | Kafka brokers (`host:port[,host:port]`) |
 | `topic` | yes | Topic to consume |
-| `group_id` | yes | Consumer group id |
-| `node_label` | yes | Default node label for default mapping/tombstones |
-| `mappings` | no | Custom mapping list (default: key->id, payload->properties) |
-| `auto_offset_reset` | no | `earliest` (default) or `latest` |
-| `security_protocol` | no | Kafka `security.protocol` |
-| `sasl_mechanism` | no | Kafka `sasl.mechanism` |
-| `sasl_username` | no | Kafka `sasl.username` |
-| `sasl_password` | no | Kafka `sasl.password` |
-| `additional_properties` | no | Extra rdkafka properties |
+| `groupId` | yes | Consumer group id |
+| `nodeLabel` | yes | Default node label for default mapping/tombstones |
+| `mappings` | no | Custom mapping list (default: key→id, payload→properties) |
+| `autoOffsetReset` | no | `earliest` (default) or `latest` |
+| `securityProtocol` | no | Kafka `security.protocol` |
+| `saslMechanism` | no | Kafka `sasl.mechanism` |
+| `saslUsername` | no | Kafka `sasl.username` |
+| `saslPassword` | no | Kafka `sasl.password` |
+| `additionalProperties` | no | Extra rdkafka properties |
 
 ## Testing
 
@@ -39,4 +39,4 @@ Integration tests require Docker.
 
 - If no data arrives, confirm topic/partition assignment and that test data is JSON.
 - If replay behaves unexpectedly, ensure resume positions are valid and partition count matches.
-- For auth issues, verify `security_protocol`/`sasl_*` values are valid for the broker.
+- For auth issues, verify `securityProtocol`/`sasl*` values are valid for the broker.
