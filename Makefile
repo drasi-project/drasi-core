@@ -29,11 +29,16 @@ help:
 	@echo "  merge-manifests-dry-run   - Show what would be merged (no push)"
 	@echo "  help                      - Show this help message"
 
+# Features to enable for clippy linting.
+# We avoid --all-features because bundled-jq triggers a flaky jq source build.
+# The jq feature (system libjq) covers the same Rust code.
+CLIPPY_FEATURES := drasi-middleware/all,drasi-host-sdk/registry,drasi-host-sdk/fetcher,drasi-host-sdk/watcher,drasi-lib/middleware-jq
+
 clippy:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --workspace --all-targets --features "$(CLIPPY_FEATURES)"
 
 clippy-fix:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features --fix
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --workspace --all-targets --features "$(CLIPPY_FEATURES)" --fix
 
 # Build the cdylib plugins required by host-sdk integration tests.
 # These are built individually to avoid feature unification issues.
