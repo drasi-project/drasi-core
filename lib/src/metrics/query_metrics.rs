@@ -30,8 +30,6 @@ pub struct QueryOutputMetrics {
     outer_transaction_duration_ns_last: AtomicU64,
     outer_transaction_duration_ns_max: AtomicU64,
     snapshot_fetch_count: AtomicU64,
-    oldest_snapshot_age_ms: AtomicU64,
-    mutations_since_oldest_snapshot: AtomicU64,
 }
 
 impl QueryOutputMetrics {
@@ -46,8 +44,6 @@ impl QueryOutputMetrics {
             outer_transaction_duration_ns_last: AtomicU64::new(0),
             outer_transaction_duration_ns_max: AtomicU64::new(0),
             snapshot_fetch_count: AtomicU64::new(0),
-            oldest_snapshot_age_ms: AtomicU64::new(0),
-            mutations_since_oldest_snapshot: AtomicU64::new(0),
         }
     }
 
@@ -120,10 +116,6 @@ impl QueryOutputMetrics {
                 .outer_transaction_duration_ns_max
                 .load(Ordering::Relaxed),
             snapshot_fetch_count: self.snapshot_fetch_count.load(Ordering::Relaxed),
-            oldest_snapshot_age_ms: self.oldest_snapshot_age_ms.load(Ordering::Relaxed),
-            mutations_since_oldest_snapshot: self
-                .mutations_since_oldest_snapshot
-                .load(Ordering::Relaxed),
         }
     }
 }
@@ -153,10 +145,6 @@ pub struct QueryOutputMetricsSnapshot {
     pub outer_transaction_duration_ns_max: u64,
     /// Number of times a reaction fetched a snapshot from this query.
     pub snapshot_fetch_count: u64,
-    /// Age of the oldest active snapshot clone (milliseconds).
-    pub oldest_snapshot_age_ms: u64,
-    /// Number of mutations since the oldest active snapshot was created.
-    pub mutations_since_oldest_snapshot: u64,
 }
 
 #[cfg(test)]
@@ -177,8 +165,6 @@ mod tests {
         assert_eq!(snap.outer_transaction_duration_ns_last, 0);
         assert_eq!(snap.outer_transaction_duration_ns_max, 0);
         assert_eq!(snap.snapshot_fetch_count, 0);
-        assert_eq!(snap.oldest_snapshot_age_ms, 0);
-        assert_eq!(snap.mutations_since_oldest_snapshot, 0);
     }
 
     #[test]
