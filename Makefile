@@ -30,10 +30,10 @@ help:
 	@echo "  help                      - Show this help message"
 
 clippy:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features
 
 clippy-fix:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --fix
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features --fix
 
 # Build the cdylib plugins required by host-sdk integration tests.
 # These are built individually to avoid feature unification issues.
