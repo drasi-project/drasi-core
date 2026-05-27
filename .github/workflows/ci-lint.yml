@@ -14,3 +14,5 @@ permissions:
 jobs:
   lint:
     uses: drasi-project/.github/.github/workflows/rust-lint.yaml@main
+    with:
+      rustflags: "-Dwarnings"

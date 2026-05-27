@@ -1,13 +1,9 @@
 # Makefile for Drasi Core
 
-# RUSTFLAGS for Clippy linting (matching ci-lint.yml workflow)
-RUSTFLAGS := -Dwarnings \
-	-W clippy::print_stdout \
-	-W clippy::unwrap_used \
-	-A unused \
-	-A clippy::module_inception \
-	-A clippy::ptr_arg \
-	-A clippy::type_complexity
+# RUSTFLAGS for Clippy linting
+# Lint configuration lives in [workspace.lints] in Cargo.toml;
+# RUSTFLAGS just ensures warnings are errors.
+RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
        build-plugins build-plugins-release list-plugins \
@@ -34,10 +30,10 @@ help:
 	@echo "  help                      - Show this help message"
 
 clippy:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets
 
 clippy-fix:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features --fix
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --fix
 
 # Build the cdylib plugins required by host-sdk integration tests.
 # These are built individually to avoid feature unification issues.
