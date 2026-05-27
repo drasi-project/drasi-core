@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2024 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! Garnet/Redis Index Backend for Drasi
 //!
@@ -33,14 +34,20 @@
 use drasi_core::interface::IndexError;
 use redis::{aio::MultiplexedConnection, cmd, AsyncCommands};
 
+pub mod checkpoint;
 pub mod element_index;
 pub mod future_queue;
+pub mod live_results;
+pub mod outbox;
 mod plugin;
 pub mod result_index;
 pub(crate) mod session_state;
 mod storage_models;
 
 // Re-export the plugin provider for easy access
+pub use checkpoint::GarnetCheckpointStore;
+pub use live_results::GarnetLiveResultsWriter;
+pub use outbox::GarnetOutboxWriter;
 pub use plugin::GarnetIndexProvider;
 pub use session_state::{GarnetSessionControl, GarnetSessionState};
 

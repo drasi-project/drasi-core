@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
+use drasi_lib::schema::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
 use log::{debug, info};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -48,7 +49,7 @@ use tracing::Instrument;
 /// Internal state is protected by `RwLock`.
 pub struct MockSource {
     /// Base source implementation providing dispatchers, status tracking, and lifecycle management.
-    base: SourceBase,
+    pub(crate) base: SourceBase,
 
     /// Configuration specifying data type and generation interval.
     config: MockSourceConfig,
@@ -172,14 +173,84 @@ impl Source for MockSource {
             interval_ms: ConfigValue::Static(self.config.interval_ms),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        let (label, properties) = match &self.config.data_type {
+            DataType::Counter => (
+                "Counter",
+                vec![
+                    PropertySchema {
+                        name: "value".to_string(),
+                        data_type: Some(PropertyType::Integer),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "timestamp".to_string(),
+                        data_type: Some(PropertyType::Timestamp),
+                        description: None,
+                    },
+                ],
+            ),
+            DataType::SensorReading { .. } => (
+                "SensorReading",
+                vec![
+                    PropertySchema {
+                        name: "sensor_id".to_string(),
+                        data_type: Some(PropertyType::String),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "temperature".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "humidity".to_string(),
+                        data_type: Some(PropertyType::Float),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "timestamp".to_string(),
+                        data_type: Some(PropertyType::Timestamp),
+                        description: None,
+                    },
+                ],
+            ),
+            DataType::Generic => (
+                "Generic",
+                vec![
+                    PropertySchema {
+                        name: "value".to_string(),
+                        data_type: Some(PropertyType::Integer),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "message".to_string(),
+                        data_type: Some(PropertyType::String),
+                        description: None,
+                    },
+                    PropertySchema {
+                        name: "timestamp".to_string(),
+                        data_type: Some(PropertyType::Timestamp),
+                        description: None,
+                    },
+                ],
+            ),
+        };
+
+        Some(SourceSchema {
+            nodes: vec![NodeSchema {
+                label: label.to_string(),
+                properties,
+            }],
+            relations: Vec::new(),
+        })
     }
 
     async fn start(&self) -> Result<()> {

@@ -62,6 +62,7 @@ use std::sync::Arc;
 
 use crate::component_graph::ComponentUpdateSender;
 use crate::identity::IdentityProvider;
+use crate::reactions::SnapshotFetcher;
 use crate::state_store::StateStoreProvider;
 
 /// Context provided to Source plugins during initialization.
@@ -220,6 +221,16 @@ pub struct ReactionRuntimeContext {
     /// Reactions can use this to obtain authentication credentials (passwords, tokens,
     /// certificates) for connecting to external systems.
     pub identity_provider: Option<Arc<dyn IdentityProvider>>,
+
+    /// Optional snapshot fetcher for on-demand query snapshot access.
+    ///
+    /// This is `Some` when the host has a `QueryProvider` available. Reactions can
+    /// use this to fetch the current result set of any subscribed query at any time,
+    /// not just during bootstrap.
+    ///
+    /// The fetcher is scoped to the reaction's configured query IDs — attempting to
+    /// fetch a snapshot for an unsubscribed query will return an error.
+    pub snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
 }
 
 impl ReactionRuntimeContext {
@@ -248,6 +259,7 @@ impl ReactionRuntimeContext {
             state_store,
             update_tx,
             identity_provider,
+            snapshot_fetcher: None,
         }
     }
 
@@ -283,6 +295,10 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                     .identity_provider
                     .as_ref()
                     .map(|_| "<IdentityProvider>"),
+            )
+            .field(
+                "snapshot_fetcher",
+                &self.snapshot_fetcher.as_ref().map(|_| "<SnapshotFetcher>"),
             )
             .finish()
     }

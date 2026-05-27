@@ -142,6 +142,8 @@ impl Source for TestMockSource {
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver: None,
+            position_handle: None,
+            bootstrap_result_receiver: None,
         })
     }
 
@@ -248,6 +250,8 @@ impl Source for TestBootstrapMockSource {
             source_id: self.id.clone(),
             receiver,
             bootstrap_receiver: self.bootstrap_rx.lock().await.take(),
+            position_handle: None,
+            bootstrap_result_receiver: None,
         })
     }
 
@@ -345,6 +349,65 @@ impl Source for LoggingTestSource {
 
     async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn test_source_supports_replay_default_true() {
+        let source = create_test_mock_source("test-replay".to_string());
+        assert!(source.supports_replay());
+    }
+
+    #[test]
+    fn test_source_error_position_unavailable_display() {
+        use crate::sources::SourceError;
+        use bytes::Bytes;
+
+        let err = SourceError::PositionUnavailable {
+            source_id: "postgres-1".to_string(),
+            requested: Bytes::copy_from_slice(&1000u64.to_le_bytes()),
+            earliest_available: Some(Bytes::copy_from_slice(&5000u64.to_le_bytes())),
+        };
+
+        // Verify display formatting
+        let msg = format!("{err}");
+        assert!(msg.contains("postgres-1"));
+        assert!(msg.contains("position unavailable"));
+
+        // Verify anyhow round-trip: SourceError → anyhow::Error → downcast
+        let anyhow_err: anyhow::Error = err.into();
+        let downcasted = anyhow_err.downcast_ref::<SourceError>();
+        assert!(downcasted.is_some());
+        match downcasted.unwrap() {
+            SourceError::PositionUnavailable {
+                source_id,
+                requested,
+                earliest_available,
+            } => {
+                assert_eq!(source_id, "postgres-1");
+                assert_eq!(*requested, Bytes::copy_from_slice(&1000u64.to_le_bytes()));
+                assert!(earliest_available.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_source_error_position_unavailable_no_earliest() {
+        use crate::sources::SourceError;
+        use bytes::Bytes;
+
+        let err = SourceError::PositionUnavailable {
+            source_id: "http-wal".to_string(),
+            requested: Bytes::from_static(b"some-position"),
+            earliest_available: None,
+        };
+
+        let msg = format!("{err}");
+        assert!(msg.contains("None"));
     }
 }
 
@@ -629,7 +692,7 @@ mod manager_tests {
             .1;
 
         assert!(matches!(source1_status, ComponentStatus::Running));
-        assert!(matches!(source2_status, ComponentStatus::Stopped));
+        assert!(matches!(source2_status, ComponentStatus::Added));
     }
 
     /// Test that concurrent add_source calls with the same ID are handled atomically.
@@ -752,8 +815,8 @@ mod manager_tests {
             "Source with auto_start=true should be running"
         );
         assert!(
-            matches!(status2, ComponentStatus::Stopped),
-            "Source with auto_start=false should still be stopped"
+            matches!(status2, ComponentStatus::Added),
+            "Source with auto_start=false should still be in Added state"
         );
     }
 
@@ -818,7 +881,7 @@ mod manager_tests {
             .await
             .unwrap();
         assert!(
-            matches!(status, ComponentStatus::Stopped),
+            matches!(status, ComponentStatus::Added),
             "Source with auto_start=false should not be started by start_all"
         );
 

@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Application Source Plugin for Drasi
 //!
 //! This plugin enables programmatic event injection into Drasi's continuous query
@@ -23,7 +24,7 @@
 //!
 //! The application source uses a handle-based pattern:
 //! - **`ApplicationSource`**: The source component that processes events
-//! - **`ApplicationSourceHandle`**: A clonable handle for sending events from anywhere in your code
+//! - **`ApplicationSourceHandle`**: A cloneable handle for sending events from anywhere in your code
 //!
 //! # API Overview
 //!

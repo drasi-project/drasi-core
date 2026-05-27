@@ -128,7 +128,10 @@ impl PostgresExecutor {
 
         let credentials = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
-            Some(provider.get_credentials().await?)
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &config.hostname)
+                .with_property("port", port.to_string());
+            Some(provider.get_credentials(&context).await?)
         } else {
             None
         };

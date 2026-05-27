@@ -120,19 +120,19 @@ impl ReactionPluginDescriptor for GrpcAdaptiveReactionDescriptor {
         let mut builder = GrpcAdaptiveReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_endpoint(mapper.resolve_string(&dto.endpoint)?);
+            .with_endpoint(mapper.resolve_string(&dto.endpoint).await?);
 
         if let Some(ref v) = dto.timeout_ms {
-            builder = builder.with_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_timeout_ms(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.max_retries {
-            builder = builder.with_max_retries(mapper.resolve_typed(v)?);
+            builder = builder.with_max_retries(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.adaptive_min_batch_size {
-            builder = builder.with_min_batch_size(mapper.resolve_typed(v)?);
+            builder = builder.with_min_batch_size(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.adaptive_max_batch_size {
-            builder = builder.with_max_batch_size(mapper.resolve_typed(v)?);
+            builder = builder.with_max_batch_size(mapper.resolve_typed(v).await?);
         }
 
         for (key, value) in &dto.metadata {

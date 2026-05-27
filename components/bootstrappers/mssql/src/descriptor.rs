@@ -197,16 +197,16 @@ impl BootstrapPluginDescriptor for MsSqlBootstrapDescriptor {
             .collect();
 
         let config = MsSqlSourceConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            database: mapper.resolve_string(&dto.database)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            database: mapper.resolve_string(&dto.database).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
             auth_mode,
             tables: dto.tables,
             poll_interval_ms: 1000,
             encryption,
-            trust_server_certificate: mapper.resolve_typed(&dto.trust_server_certificate)?,
+            trust_server_certificate: mapper.resolve_typed(&dto.trust_server_certificate).await?,
             table_keys,
             start_position: Default::default(),
         };

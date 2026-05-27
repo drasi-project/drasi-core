@@ -282,6 +282,7 @@ impl ReplicationConnection {
             consistent_point: String::new(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
+            restart_lsn: None,
         };
 
         loop {
@@ -352,6 +353,7 @@ impl ReplicationConnection {
             consistent_point: "0/0".to_string(),
             snapshot_name: None,
             output_plugin: "pgoutput".to_string(),
+            restart_lsn: None,
         };
         let mut found_row = false;
 
@@ -370,10 +372,12 @@ impl ReplicationConnection {
                                 slot_info.consistent_point = lsn;
                             }
                         }
-                        if slot_info.consistent_point == "0/0" {
-                            if let Some(Some(restart_lsn)) = row.get(2) {
-                                let lsn = String::from_utf8_lossy(restart_lsn).to_string();
-                                if !lsn.is_empty() {
+                        if let Some(Some(restart_lsn_val)) = row.get(2) {
+                            let lsn = String::from_utf8_lossy(restart_lsn_val).to_string();
+                            if !lsn.is_empty() {
+                                slot_info.restart_lsn = Some(lsn.clone());
+                                // Fall back to restart_lsn for consistent_point if confirmed_flush is unset
+                                if slot_info.consistent_point == "0/0" {
                                     slot_info.consistent_point = lsn;
                                 }
                             }
@@ -570,12 +574,14 @@ impl ReplicationConnection {
     }
 }
 
-fn format_lsn(lsn: u64) -> String {
+/// Formats a WAL LSN `u64` as the PostgreSQL `"high/low"` hex notation (e.g. `"0/1A3F00"`).
+pub(crate) fn format_lsn(lsn: u64) -> String {
     format!("{:X}/{:X}", lsn >> 32, lsn & 0xFFFFFFFF)
 }
 
-#[allow(dead_code)]
-fn parse_lsn(lsn_str: &str) -> Result<u64> {
+/// Parses a PostgreSQL LSN string in `"high/low"` hex notation into a `u64`.
+/// Returns an error if the string is not in `"X/Y"` format.
+pub(crate) fn parse_lsn(lsn_str: &str) -> Result<u64> {
     let parts: Vec<&str> = lsn_str.split('/').collect();
     if parts.len() != 2 {
         return Err(anyhow!("Invalid LSN format: {lsn_str}"));

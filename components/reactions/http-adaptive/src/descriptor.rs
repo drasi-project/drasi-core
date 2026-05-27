@@ -130,30 +130,30 @@ impl ReactionPluginDescriptor for HttpAdaptiveReactionDescriptor {
         let mut builder = HttpAdaptiveReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_base_url(mapper.resolve_string(&dto.base_url)?);
+            .with_base_url(mapper.resolve_string(&dto.base_url).await?);
 
         if let Some(ref token) = dto.token {
-            builder = builder.with_token(mapper.resolve_string(token)?);
+            builder = builder.with_token(mapper.resolve_string(token).await?);
         }
 
         if let Some(ref timeout_ms) = dto.timeout_ms {
-            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms)?);
+            builder = builder.with_timeout_ms(mapper.resolve_typed(timeout_ms).await?);
         }
 
         if let Some(ref v) = dto.adaptive_min_batch_size {
-            builder = builder.with_min_batch_size(mapper.resolve_typed(v)?);
+            builder = builder.with_min_batch_size(mapper.resolve_typed(v).await?);
         }
 
         if let Some(ref v) = dto.adaptive_max_batch_size {
-            builder = builder.with_max_batch_size(mapper.resolve_typed(v)?);
+            builder = builder.with_max_batch_size(mapper.resolve_typed(v).await?);
         }
 
         if let Some(ref v) = dto.adaptive_window_size {
-            builder = builder.with_window_size(mapper.resolve_typed(v)?);
+            builder = builder.with_window_size(mapper.resolve_typed(v).await?);
         }
 
         if let Some(ref v) = dto.adaptive_batch_timeout_ms {
-            builder = builder.with_batch_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_timeout_ms(mapper.resolve_typed(v).await?);
         }
 
         for (query_id, config) in &dto.routes {

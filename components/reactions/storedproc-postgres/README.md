@@ -137,20 +137,16 @@ let reaction = PostgresStoredProcReaction::builder("my-reaction")
 **AWS IAM Authentication (Amazon RDS/Aurora):**
 
 ```rust
-use drasi_lib::identity::AwsIdentityProvider;
+use drasi_identity_aws::AwsIdentityProvider;
 
 // Using IAM user credentials
 let identity_provider = AwsIdentityProvider::new(
     "myuser",
-    "mydb.rds.amazonaws.com",
-    5432
 ).await?;
 
 // Or assuming an IAM role
 let identity_provider = AwsIdentityProvider::with_assumed_role(
     "myuser",
-    "mydb.rds.amazonaws.com",
-    5432,
     "arn:aws:iam::123456789012:role/RDSAccessRole",
     None
 ).await?;

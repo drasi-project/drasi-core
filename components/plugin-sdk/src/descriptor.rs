@@ -118,8 +118,8 @@
 //!     ) -> anyhow::Result<Box<dyn Source>> {
 //!         let dto: PostgresSourceConfigDto = serde_json::from_value(config_json.clone())?;
 //!         let mapper = DtoMapper::new();
-//!         let host = mapper.resolve_string(&dto.host)?;
-//!         let port = mapper.resolve_typed(&dto.port)?;
+//!         let host = mapper.resolve_string(&dto.host).await?;
+//!         let port = mapper.resolve_typed(&dto.port).await?;
 //!         // ... build and return the source
 //!         todo!()
 //!     }
@@ -128,7 +128,9 @@
 
 use async_trait::async_trait;
 use drasi_lib::bootstrap::BootstrapProvider;
+use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
+use drasi_lib::secret_store::SecretStoreProvider;
 use drasi_lib::sources::Source;
 
 /// Descriptor for a **source** plugin.
@@ -344,6 +346,89 @@ pub trait BootstrapPluginDescriptor: Send + Sync {
         config_json: &serde_json::Value,
         source_config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn BootstrapProvider>>;
+}
+
+/// Descriptor for an **identity provider** plugin.
+///
+/// Identity provider plugins supply authentication credentials (passwords, tokens,
+/// certificates) to sources and reactions that need them for connecting to external
+/// systems. Examples include Azure AD managed-identity providers and AWS IAM
+/// authentication providers.
+///
+/// # Implementors
+///
+/// Each identity provider plugin crate (e.g., `drasi-identity-azure`) implements
+/// this trait on a zero-sized descriptor struct and returns it via
+/// [`PluginRegistration`].
+#[async_trait]
+pub trait IdentityProviderPluginDescriptor: Send + Sync {
+    /// The unique kind identifier for this identity provider (e.g., `"azure"`, `"aws"`).
+    fn kind(&self) -> &str;
+
+    /// The semver version of this plugin's configuration DTO.
+    fn config_version(&self) -> &str;
+
+    /// Returns all OpenAPI schemas as a JSON-serialized map (see [`SourcePluginDescriptor::config_schema_json`]).
+    fn config_schema_json(&self) -> String;
+
+    /// Returns the OpenAPI schema name for this plugin's configuration DTO.
+    fn config_schema_name(&self) -> &str;
+
+    /// Create a new identity provider instance from the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_json` — The plugin-specific configuration as a JSON value.
+    ///   This should be deserialized into the plugin's DTO type.
+    async fn create_identity_provider(
+        &self,
+        config_json: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn IdentityProvider>>;
+}
+
+/// Descriptor for a **secret store** plugin.
+///
+/// Secret store plugins resolve named secret references into their actual string
+/// values. They are initialized **before** any other plugins, since sources,
+/// reactions, and bootstrap providers need resolved secrets during their
+/// `create_*` calls.
+///
+/// # Important
+///
+/// A secret store's own configuration must use `ConfigValue::Static` or
+/// `ConfigValue::EnvironmentVariable` — never `ConfigValue::Secret`. The secret
+/// store resolves *other* plugins' secrets; it cannot resolve its own.
+///
+/// # Implementors
+///
+/// Each secret store plugin crate (e.g., `drasi-secret-store-file`) implements
+/// this trait on a zero-sized descriptor struct and returns it via
+/// [`PluginRegistration`].
+#[async_trait]
+pub trait SecretStorePluginDescriptor: Send + Sync {
+    /// The unique kind identifier for this secret store (e.g., `"file"`, `"keyvault"`, `"keyring"`).
+    fn kind(&self) -> &str;
+
+    /// The semver version of this plugin's configuration DTO.
+    fn config_version(&self) -> &str;
+
+    /// Returns all OpenAPI schemas as a JSON-serialized map (see [`SourcePluginDescriptor::config_schema_json`]).
+    fn config_schema_json(&self) -> String;
+
+    /// Returns the OpenAPI schema name for this plugin's configuration DTO.
+    fn config_schema_name(&self) -> &str;
+
+    /// Create a new secret store provider instance from the given configuration.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_json` — The plugin-specific configuration as a JSON value.
+    ///   This should be deserialized into the plugin's DTO type.
+    ///   Must NOT contain `ConfigValue::Secret` references (bootstrap constraint).
+    async fn create_secret_store(
+        &self,
+        config_json: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn SecretStoreProvider>>;
 }
 
 #[cfg(test)]

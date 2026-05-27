@@ -110,32 +110,34 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
         let mut builder = GrpcReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_endpoint(mapper.resolve_string(&dto.endpoint)?);
+            .with_endpoint(mapper.resolve_string(&dto.endpoint).await?);
 
         if let Some(ref v) = dto.timeout_ms {
-            builder = builder.with_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_timeout_ms(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.batch_size {
-            builder = builder.with_batch_size(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_size(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.batch_flush_timeout_ms {
-            builder = builder.with_batch_flush_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_flush_timeout_ms(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.max_retries {
-            builder = builder.with_max_retries(mapper.resolve_typed(v)?);
+            builder = builder.with_max_retries(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.connection_retry_attempts {
-            builder = builder.with_connection_retry_attempts(mapper.resolve_typed(v)?);
+            builder = builder.with_connection_retry_attempts(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.initial_connection_timeout_ms {
-            builder = builder.with_initial_connection_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_initial_connection_timeout_ms(mapper.resolve_typed(v).await?);
         }
 
         for (key, value) in &dto.metadata {
             builder = builder.with_metadata(key, value);
         }
 
-        let reaction = builder.build()?;
+        let mut reaction = builder.build()?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

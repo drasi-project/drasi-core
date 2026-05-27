@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GTFS-RT Live Dashboard</title>
+  <link rel="icon" href="data:," />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>GTFS-Realtime Dashboard</h1>
+      <p>Live transit telemetry from Drasi continuous queries.</p>
+    </div>
+    <div class="status-group">
+      <span id="connection-pill" class="pill pill-warn">Connecting...</span>
+      <span id="generated-at" class="timestamp">Waiting for data...</span>
+    </div>
+  </header>
+
+  <main class="dashboard-grid">
+    <section class="panel map-panel">
+      <div class="panel-header">
+        <h2>Live Vehicle Map</h2>
+        <span id="vehicle-count" class="panel-meta">0 vehicles</span>
+      </div>
+      <div id="vehicle-map" class="map"></div>
+      <div class="legend">
+        <span><i class="dot dot-green"></i> On time</span>
+        <span><i class="dot dot-yellow"></i> Delayed</span>
+        <span><i class="dot dot-red"></i> Very delayed</span>
+      </div>
+    </section>
+
+    <div class="right-column">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Delay Leaderboard</h2>
+          <span class="panel-meta">Top delayed trips</span>
+        </div>
+        <div class="table-wrap">
+          <table id="delay-table">
+            <thead>
+              <tr>
+                <th>Trip</th>
+                <th>Route</th>
+                <th>Vehicle</th>
+                <th>Delay</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Active Alerts</h2>
+          <span id="alert-count" class="panel-meta">0 alerts</span>
+        </div>
+        <div id="alerts-container" class="alerts-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Route Statistics</h2>
+          <span class="panel-meta">Vehicles per route</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="route-chart"></canvas>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  ></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

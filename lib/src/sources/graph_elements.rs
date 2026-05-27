@@ -91,10 +91,12 @@ pub(crate) fn now_ms() -> u64 {
 /// Human-readable string for a [`ComponentStatus`].
 pub(crate) fn status_str(status: &ComponentStatus) -> &'static str {
     match status {
+        ComponentStatus::Added => "Added",
         ComponentStatus::Stopped => "Stopped",
         ComponentStatus::Starting => "Starting",
         ComponentStatus::Running => "Running",
         ComponentStatus::Stopping => "Stopping",
+        ComponentStatus::Removed => "Removed",
         ComponentStatus::Reconfiguring => "Reconfiguring",
         ComponentStatus::Error => "Error",
     }

@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! No-op bootstrap provider for sources without bootstrap support
 
 pub mod descriptor;
@@ -21,7 +22,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
 
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::BootstrapEventSender;
 
 /// Bootstrap provider that returns no data
@@ -77,12 +80,12 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         _context: &BootstrapContext,
         _event_tx: BootstrapEventSender,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "No-op bootstrap for query {}: returning no data",
             request.query_id
         );
-        Ok(0)
+        Ok(BootstrapResult::default())
     }
 }
 

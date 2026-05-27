@@ -535,9 +535,9 @@ mod tests {
             .build();
         core.add_query(config).await.unwrap();
 
-        // Query added without auto-start should be Stopped
+        // Query added without auto-start should be Added
         let status = core.get_query_status("q-status").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]

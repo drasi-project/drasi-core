@@ -56,7 +56,10 @@ impl MsSqlExecutor {
 
         let (username, password) = if let Some(provider) = provider {
             debug!("Using identity provider for authentication");
-            let credentials = provider.get_credentials().await?;
+            let context = drasi_lib::identity::CredentialContext::new()
+                .with_property("hostname", &config.hostname)
+                .with_property("port", port.to_string());
+            let credentials = provider.get_credentials(&context).await?;
             if credentials.is_certificate() {
                 anyhow::bail!(
                     "Certificate-based authentication is not supported for MS SQL Server. \

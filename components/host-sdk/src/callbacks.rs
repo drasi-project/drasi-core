@@ -183,49 +183,58 @@ fn ffi_lifecycle_to_component_status(event_type: FfiLifecycleEventType) -> Compo
 /// Raw pointer dereferences are guarded by `unsafe` blocks inside the body.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
-    let entry = unsafe { &*entry };
-    let plugin_id = unsafe { entry.plugin_id.to_string() };
-    let message = unsafe { entry.message.to_string() };
-    let instance_id = unsafe { entry.instance_id.to_string() };
-    let component_id = unsafe { entry.component_id.to_string() };
-    let level = entry.level;
+    // Wrap the entire body in catch_unwind: this is an extern "C" function called
+    // from plugin code, so any unwinding panic across the FFI boundary causes a
+    // non-unwinding abort. We must absorb panics here.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let entry = unsafe { &*entry };
+        let plugin_id = unsafe { entry.plugin_id.to_string() };
+        let message = unsafe { entry.message.to_string() };
+        let instance_id = unsafe { entry.instance_id.to_string() };
+        let component_id = unsafe { entry.component_id.to_string() };
+        let level = entry.level;
 
-    // Always forward to host's log framework
-    log::log!(
-        ffi_log_level_to_std_level(level),
-        "[plugin:{}] {}",
-        if component_id.is_empty() {
-            &plugin_id
-        } else {
-            &component_id
-        },
-        message
-    );
-
-    // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C"
-    // if the Mutex was poisoned by a prior test/thread panic — a panic here would
-    // be a non-unwinding abort since this is an extern "C" function)
-    if let Ok(mut logs) = captured_logs().lock() {
-        logs.push(CapturedLog {
-            level,
-            plugin_id: plugin_id.clone(),
-            message: message.clone(),
-        });
-    }
-
-    // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
-    if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
-        let context = unsafe { CallbackContext::from_raw_ref(ctx) };
-        let log_message = LogMessage::with_instance(
-            ffi_log_level_to_log_level(level),
-            message,
-            &instance_id,
-            &component_id,
-            ComponentType::Source, // TODO: parse from entry if available
+        // Always forward to host's log framework
+        log::log!(
+            ffi_log_level_to_std_level(level),
+            "[plugin:{}] {}",
+            if component_id.is_empty() {
+                &plugin_id
+            } else {
+                &component_id
+            },
+            message
         );
-        let registry = context.log_registry.clone();
-        registry.try_log(log_message);
-    }
+
+        // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C"
+        // if the Mutex was poisoned by a prior test/thread panic — a panic here would
+        // be a non-unwinding abort since this is an extern "C" function)
+        if let Ok(mut logs) = captured_logs().lock() {
+            logs.push(CapturedLog {
+                level,
+                plugin_id: plugin_id.clone(),
+                message: message.clone(),
+            });
+        }
+
+        // Route into DrasiLib's ComponentLogRegistry if we have both context and instance info
+        if !ctx.is_null() && !instance_id.is_empty() && !component_id.is_empty() {
+            let context = unsafe { CallbackContext::from_raw_ref(ctx) };
+            let log_message = LogMessage::with_instance(
+                ffi_log_level_to_log_level(level),
+                message,
+                &instance_id,
+                &component_id,
+                ComponentType::Source, // TODO: parse from entry if available
+            );
+            let registry = context.log_registry.clone();
+            // try_log may panic from inside tokio's RwLock::try_write under
+            // certain race conditions; catch_unwind above absorbs that.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                registry.try_log(log_message);
+            }));
+        }
+    }));
 }
 
 /// Host lifecycle callback that routes plugin events into DrasiLib's ComponentEventHistory.
@@ -234,51 +243,56 @@ pub extern "C" fn default_log_callback(ctx: *mut c_void, entry: *const FfiLogEnt
 /// or must point to a valid `CallbackContext`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn default_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
-    let event = unsafe { &*event };
-    let component_id = unsafe { event.component_id.to_string() };
-    let component_type_str = unsafe { event.component_type.to_string() };
-    let message = unsafe { event.message.to_string() };
-    let event_type = event.event_type;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let event = unsafe { &*event };
+        let component_id = unsafe { event.component_id.to_string() };
+        let component_type_str = unsafe { event.component_type.to_string() };
+        let message = unsafe { event.message.to_string() };
+        let event_type = event.event_type;
 
-    log::debug!("Lifecycle: {component_id} ({component_type_str}) {event_type:?} {message}");
+        log::debug!("Lifecycle: {component_id} ({component_type_str}) {event_type:?} {message}");
 
-    // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-    if let Ok(mut events) = captured_lifecycles().lock() {
-        events.push(CapturedLifecycle {
-            component_id: component_id.clone(),
-            event_type,
-            message: message.clone(),
-        });
-    }
-
-    // Route into DrasiLib's ComponentEventHistory if context is available
-    if !ctx.is_null() {
-        let context = unsafe { CallbackContext::from_raw_ref(ctx) };
-        let component_type = parse_component_type(&component_type_str);
-        let status = ffi_lifecycle_to_component_status(event_type);
-
-        let component_event = ComponentEvent {
-            component_id,
-            component_type: component_type.clone(),
-            status,
-            timestamp: chrono::Utc::now(),
-            message: if message.is_empty() {
-                None
-            } else {
-                Some(message)
-            },
-        };
-
-        // Use try_write to avoid spawning async tasks that block the scheduler
-        let event_history = match component_type {
-            ComponentType::Reaction => context.reaction_event_history.clone(),
-            _ => context.source_event_history.clone(),
-        };
-        let write_result = event_history.try_write();
-        if let Ok(mut history) = write_result {
-            history.record_event(component_event);
+        // Always capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+        if let Ok(mut events) = captured_lifecycles().lock() {
+            events.push(CapturedLifecycle {
+                component_id: component_id.clone(),
+                event_type,
+                message: message.clone(),
+            });
         }
-    }
+
+        // Route into DrasiLib's ComponentEventHistory if context is available
+        if !ctx.is_null() {
+            let context = unsafe { CallbackContext::from_raw_ref(ctx) };
+            let component_type = parse_component_type(&component_type_str);
+            let status = ffi_lifecycle_to_component_status(event_type);
+
+            let component_event = ComponentEvent {
+                component_id,
+                component_type: component_type.clone(),
+                status,
+                timestamp: chrono::Utc::now(),
+                message: if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                },
+            };
+
+            // Use try_write to avoid spawning async tasks that block the scheduler
+            let event_history = match component_type {
+                ComponentType::Reaction => context.reaction_event_history.clone(),
+                _ => context.source_event_history.clone(),
+            };
+            // try_write on tokio RwLock may panic with `unreachable!` under certain
+            // race conditions; absorb that panic to keep FFI safe.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Ok(mut history) = event_history.try_write() {
+                    history.record_event(component_event);
+                }
+            }));
+        }
+    }));
 }
 
 /// Get the default log callback function pointer.
@@ -305,61 +319,67 @@ pub fn default_lifecycle_callback_fn() -> LifecycleCallbackFn {
 /// must point to a valid `InstanceCallbackContext`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEntry) {
-    let entry = unsafe { &*entry };
-    let plugin_id = unsafe { entry.plugin_id.to_string() };
-    let message = unsafe { entry.message.to_string() };
-    let instance_id = unsafe { entry.instance_id.to_string() };
-    let component_id = unsafe { entry.component_id.to_string() };
-    let level = entry.level;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let entry = unsafe { &*entry };
+        let plugin_id = unsafe { entry.plugin_id.to_string() };
+        let message = unsafe { entry.message.to_string() };
+        let instance_id = unsafe { entry.instance_id.to_string() };
+        let component_id = unsafe { entry.component_id.to_string() };
+        let level = entry.level;
 
-    // Forward to host log framework
-    log::log!(
-        ffi_log_level_to_std_level(level),
-        "[plugin:{}] {}",
-        if component_id.is_empty() {
-            &plugin_id
-        } else {
-            &component_id
-        },
-        message
-    );
-
-    // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-    if let Ok(mut logs) = captured_logs().lock() {
-        logs.push(CapturedLog {
-            level,
-            plugin_id: plugin_id.clone(),
-            message: message.clone(),
-        });
-    }
-
-    // Route into ComponentLogRegistry
-    if !ctx.is_null() {
-        let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-        // Use instance_id/component_id from the log entry (set by TLS in plugin)
-        // Fall back to context's instance_id if entry doesn't have them
-        let log_instance_id = if instance_id.is_empty() {
-            &context.instance_id
-        } else {
-            &instance_id
-        };
-        let log_component_id = if component_id.is_empty() {
-            &plugin_id
-        } else {
-            &component_id
-        };
-        let log_message = LogMessage::with_instance(
-            ffi_log_level_to_log_level(level),
-            message,
-            log_instance_id,
-            log_component_id,
-            ComponentType::Source,
+        // Forward to host log framework
+        log::log!(
+            ffi_log_level_to_std_level(level),
+            "[plugin:{}] {}",
+            if component_id.is_empty() {
+                &plugin_id
+            } else {
+                &component_id
+            },
+            message
         );
-        let registry = context.log_registry.clone();
-        // Use try_log (non-blocking) to avoid spawning async tasks that can
-        // block the current_thread scheduler during drop sequences.
-        registry.try_log(log_message);
-    }
+
+        // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+        if let Ok(mut logs) = captured_logs().lock() {
+            logs.push(CapturedLog {
+                level,
+                plugin_id: plugin_id.clone(),
+                message: message.clone(),
+            });
+        }
+
+        // Route into ComponentLogRegistry
+        if !ctx.is_null() {
+            let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
+            // Use instance_id/component_id from the log entry (set by TLS in plugin)
+            // Fall back to context's instance_id if entry doesn't have them
+            let log_instance_id = if instance_id.is_empty() {
+                &context.instance_id
+            } else {
+                &instance_id
+            };
+            let log_component_id = if component_id.is_empty() {
+                &plugin_id
+            } else {
+                &component_id
+            };
+            let log_message = LogMessage::with_instance(
+                ffi_log_level_to_log_level(level),
+                message,
+                log_instance_id,
+                log_component_id,
+                ComponentType::Source,
+            );
+            let registry = context.log_registry.clone();
+            // Use try_log (non-blocking) to avoid spawning async tasks that can
+            // block the current_thread scheduler during drop sequences.
+            // try_log internally calls tokio's RwLock::try_write which can panic
+            // with `unreachable!` under certain races; absorb that panic.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                registry.try_log(log_message);
+            }));
+        }
+    }));
 }
 
 /// Per-instance lifecycle callback that sends events through the SourceManager's
@@ -369,47 +389,49 @@ pub extern "C" fn instance_log_callback(ctx: *mut c_void, entry: *const FfiLogEn
 /// or must point to a valid `InstanceCallbackContext`.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn instance_lifecycle_callback(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
-    let event = unsafe { &*event };
-    let component_id = unsafe { event.component_id.to_string() };
-    let component_type_str = unsafe { event.component_type.to_string() };
-    let message = unsafe { event.message.to_string() };
-    let event_type = event.event_type;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let event = unsafe { &*event };
+        let component_id = unsafe { event.component_id.to_string() };
+        let component_type_str = unsafe { event.component_type.to_string() };
+        let message = unsafe { event.message.to_string() };
+        let event_type = event.event_type;
 
-    log::debug!(
-        "Lifecycle [instance]: {component_id} ({component_type_str}) {event_type:?} {message}"
-    );
+        log::debug!(
+            "Lifecycle [instance]: {component_id} ({component_type_str}) {event_type:?} {message}"
+        );
 
-    // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
-    if let Ok(mut events) = captured_lifecycles().lock() {
-        events.push(CapturedLifecycle {
-            component_id: component_id.clone(),
-            event_type,
-            message: message.clone(),
-        });
-    }
-
-    // Send through the component graph update channel
-    if !ctx.is_null() {
-        let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
-        let status = ffi_lifecycle_to_component_status(event_type);
-
-        let update = ComponentUpdate::Status {
-            component_id,
-            status,
-            message: if message.is_empty() {
-                None
-            } else {
-                Some(message)
-            },
-        };
-
-        let tx = context.update_tx.clone();
-        // Use try_send to avoid spawning an async task that may block
-        // the host runtime's current_thread scheduler during drop sequences.
-        if let Err(e) = tx.try_send(update) {
-            log::error!("Failed to send lifecycle event: {e}");
+        // Capture for diagnostics (use `ok()` to avoid panicking in extern "C")
+        if let Ok(mut events) = captured_lifecycles().lock() {
+            events.push(CapturedLifecycle {
+                component_id: component_id.clone(),
+                event_type,
+                message: message.clone(),
+            });
         }
-    }
+
+        // Send through the component graph update channel
+        if !ctx.is_null() {
+            let context = unsafe { InstanceCallbackContext::from_raw_ref(ctx) };
+            let status = ffi_lifecycle_to_component_status(event_type);
+
+            let update = ComponentUpdate::Status {
+                component_id,
+                status,
+                message: if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                },
+            };
+
+            let tx = context.update_tx.clone();
+            // Use try_send to avoid spawning an async task that may block
+            // the host runtime's current_thread scheduler during drop sequences.
+            if let Err(e) = tx.try_send(update) {
+                log::error!("Failed to send lifecycle event: {e}");
+            }
+        }
+    }));
 }
 
 /// Get the per-instance log callback function pointer.

@@ -176,6 +176,8 @@ impl LazySortedSetStore for InMemoryResultIndex {
     }
 }
 
+impl ResultIndex for InMemoryResultIndex {}
+
 #[async_trait]
 impl ResultSequenceCounter for InMemoryResultIndex {
     async fn apply_sequence(
@@ -194,5 +196,3 @@ impl ResultSequenceCounter for InMemoryResultIndex {
         Ok(data.clone())
     }
 }
-
-impl ResultIndex for InMemoryResultIndex {}

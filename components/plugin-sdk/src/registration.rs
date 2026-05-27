@@ -59,7 +59,8 @@
 //! checks this at load time and rejects plugins built with incompatible SDK versions.
 
 use crate::descriptor::{
-    BootstrapPluginDescriptor, ReactionPluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
+    SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 /// The version of the Drasi Plugin SDK.
@@ -135,6 +136,12 @@ pub struct PluginRegistration {
 
     /// Bootstrap plugin descriptors provided by this plugin.
     pub bootstrappers: Vec<Box<dyn BootstrapPluginDescriptor>>,
+
+    /// Identity provider plugin descriptors provided by this plugin.
+    pub identity_providers: Vec<Box<dyn IdentityProviderPluginDescriptor>>,
+
+    /// Secret store plugin descriptors provided by this plugin.
+    pub secret_stores: Vec<Box<dyn SecretStorePluginDescriptor>>,
 }
 
 impl PluginRegistration {
@@ -148,6 +155,8 @@ impl PluginRegistration {
             sources: Vec::new(),
             reactions: Vec::new(),
             bootstrappers: Vec::new(),
+            identity_providers: Vec::new(),
+            secret_stores: Vec::new(),
         }
     }
 
@@ -172,14 +181,39 @@ impl PluginRegistration {
         self
     }
 
+    /// Register an identity provider plugin descriptor.
+    #[must_use]
+    pub fn with_identity_provider(
+        mut self,
+        descriptor: Box<dyn IdentityProviderPluginDescriptor>,
+    ) -> Self {
+        self.identity_providers.push(descriptor);
+        self
+    }
+
+    /// Register a secret store plugin descriptor.
+    #[must_use]
+    pub fn with_secret_store(mut self, descriptor: Box<dyn SecretStorePluginDescriptor>) -> Self {
+        self.secret_stores.push(descriptor);
+        self
+    }
+
     /// Returns true if this registration contains no descriptors.
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty() && self.reactions.is_empty() && self.bootstrappers.is_empty()
+        self.sources.is_empty()
+            && self.reactions.is_empty()
+            && self.bootstrappers.is_empty()
+            && self.identity_providers.is_empty()
+            && self.secret_stores.is_empty()
     }
 
     /// Returns the total number of descriptors in this registration.
     pub fn descriptor_count(&self) -> usize {
-        self.sources.len() + self.reactions.len() + self.bootstrappers.len()
+        self.sources.len()
+            + self.reactions.len()
+            + self.bootstrappers.len()
+            + self.identity_providers.len()
+            + self.secret_stores.len()
     }
 }
 
@@ -210,6 +244,22 @@ impl std::fmt::Debug for PluginRegistration {
                     .bootstrappers
                     .iter()
                     .map(|b| b.kind())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "identity_providers",
+                &self
+                    .identity_providers
+                    .iter()
+                    .map(|ip| ip.kind())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "secret_stores",
+                &self
+                    .secret_stores
+                    .iter()
+                    .map(|ss| ss.kind())
                     .collect::<Vec<_>>(),
             )
             .finish()
