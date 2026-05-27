@@ -23,6 +23,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use drasi_lib::DurabilityConfig;
+
 /// HTTP source configuration
 ///
 /// This config only contains HTTP-specific settings.
@@ -71,6 +73,14 @@ pub struct HttpSourceConfig {
     /// Webhook configuration (enables webhook mode when present)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhooks: Option<WebhookConfig>,
+
+    /// Optional WAL durability configuration.
+    ///
+    /// When present and enabled, the source persists incoming events to a
+    /// local Write-Ahead Log before acknowledging the caller, enabling
+    /// crash recovery and replay for persistent queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityConfig>,
 }
 
 /// Returns true if webhook mode is enabled
@@ -621,6 +631,7 @@ adaptive_enabled: true
             adaptive_window_secs: Some(30),
             adaptive_enabled: Some(false),
             webhooks: None,
+            durability: None,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -653,6 +664,7 @@ adaptive_enabled: false
             adaptive_window_secs: None,
             adaptive_enabled: None,
             webhooks: None,
+            durability: None,
         };
 
         assert_eq!(config.timeout_ms, 10000);
