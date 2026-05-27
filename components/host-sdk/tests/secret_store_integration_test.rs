@@ -95,8 +95,11 @@ fn require_plugin(crate_name: &str) -> PathBuf {
 fn create_temp_secrets_file(secrets: &serde_json::Value) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::TempDir::new().expect("Failed to create temp dir");
     let path = dir.path().join("secrets.json");
-    std::fs::write(&path, serde_json::to_string(secrets).expect("Failed to serialize secrets"))
-        .expect("Failed to write secrets file");
+    std::fs::write(
+        &path,
+        serde_json::to_string(secrets).expect("Failed to serialize secrets"),
+    )
+    .expect("Failed to write secrets file");
     (dir, path)
 }
 
