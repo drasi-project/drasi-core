@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod dispatcher;
-pub mod events;
-pub mod priority_queue;
+//! User-facing durability configuration for transient sources.
+//!
+//! This module re-exports [`DurabilityConfig`] and [`CapacityPolicy`] from the
+//! WAL layer. These types are the public interface that source configurations
+//! depend on — placing them here in the sources module makes the dependency
+//! direction clearer (sources → config, not sources → wal internals).
 
-#[cfg(test)]
-mod events_test;
-
-pub use dispatcher::{
-    BroadcastChangeDispatcher, BroadcastChangeReceiver, ChangeDispatcher, ChangeReceiver,
-    ChannelChangeDispatcher, ChannelChangeReceiver, DispatchMode, ReplayThenLiveReceiver,
-};
-pub use events::*;
-pub use priority_queue::{PriorityQueue, PriorityQueueMetrics};
+pub use crate::wal::{CapacityPolicy, DurabilityConfig};
