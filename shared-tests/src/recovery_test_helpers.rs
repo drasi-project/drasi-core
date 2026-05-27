@@ -16,7 +16,9 @@
 
 use anyhow::{anyhow, bail, Result};
 use drasi_lib::channels::{ComponentEvent, ComponentStatus, QueryResult};
-use drasi_lib::{DrasiLib, MemoryStateStoreProvider, Query, QueryConfig, Reaction, StateStoreProvider};
+use drasi_lib::{
+    DrasiLib, MemoryStateStoreProvider, Query, QueryConfig, Reaction, StateStoreProvider,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
