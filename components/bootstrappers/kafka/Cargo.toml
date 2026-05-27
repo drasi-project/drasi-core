@@ -1,0 +1,36 @@
+[package]
+name = "drasi-bootstrap-kafka"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Kafka bootstrap provider plugin for Drasi"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "plugin", "bootstrap", "kafka"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-lib.workspace = true
+drasi-core.workspace = true
+drasi-source-mapping.workspace = true
+drasi-source-kafka.workspace = true
+drasi-plugin-sdk = { workspace = true }
+utoipa = { workspace = true }
+anyhow = "1.0"
+async-trait = "0.1"
+bytes = "1"
+chrono = "0.4"
+rdkafka = { version = "0.36", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+
+[features]
+dynamic-plugin = []

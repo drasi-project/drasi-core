@@ -1,0 +1,306 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Kafka consumer task that reads messages and dispatches them as graph change events.
+
+use crate::config::KafkaSourceConfig;
+use crate::position::encode_position;
+use anyhow::{anyhow, Context, Result};
+use drasi_core::models::{ElementMetadata, ElementReference, SourceChange};
+use drasi_lib::channels::events::{SourceEvent, SourceEventWrapper};
+use drasi_lib::sources::SourceBase;
+use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
+use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::message::Message;
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{watch, RwLock};
+use tracing::{error, info, warn};
+
+/// Consumer task that runs in a spawned Tokio task.
+pub struct KafkaConsumerTask {
+    pub config: KafkaSourceConfig,
+    pub mappings: Vec<SourceMapping>,
+    pub engine: Arc<SourceMappingEngine>,
+    pub base: SourceBase,
+    pub source_id: String,
+    pub shutdown_rx: watch::Receiver<bool>,
+    pub resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
+}
+
+impl KafkaConsumerTask {
+    /// Run the consumer task. Returns when shutdown is signaled or an error occurs.
+    pub async fn run(mut self) -> Result<()> {
+        let consumer = self.create_consumer()?;
+
+        // Don't consume until at least one query has subscribed, otherwise events
+        // can be dropped before any dispatcher exists.
+        self.base.wait_for_subscribers().await;
+
+        // Get topic metadata to discover partition count
+        let metadata = consumer
+            .fetch_metadata(Some(&self.config.topic), std::time::Duration::from_secs(10))
+            .context("Failed to fetch topic metadata")?;
+
+        let topic_metadata = metadata
+            .topics()
+            .iter()
+            .find(|t| t.name() == self.config.topic)
+            .ok_or_else(|| anyhow!("Topic '{}' not found", self.config.topic))?;
+
+        let partition_count = topic_metadata.partitions().len();
+        if partition_count == 0 {
+            return Err(anyhow!("Topic '{}' has no partitions", self.config.topic));
+        }
+
+        info!(
+            "[{}] Topic '{}' has {} partition(s)",
+            self.source_id, self.config.topic, partition_count
+        );
+
+        let min_resume_offsets = self.minimum_resume_offsets(partition_count).await;
+
+        // Assign to all partitions.
+        let mut tpl = TopicPartitionList::new();
+        for partition in 0..partition_count as i32 {
+            let start_offset = if let Some(ref offsets) = min_resume_offsets {
+                Offset::Offset(offsets.get(partition as usize).copied().unwrap_or(0).max(0))
+            } else {
+                match self.config.auto_offset_reset {
+                    crate::config::AutoOffsetReset::Earliest => Offset::Beginning,
+                    crate::config::AutoOffsetReset::Latest => Offset::End,
+                }
+            };
+
+            tpl.add_partition_offset(&self.config.topic, partition, start_offset)
+                .context("Failed to add partition offset")?;
+        }
+
+        consumer
+            .assign(&tpl)
+            .context("Failed to assign partitions")?;
+
+        info!(
+            "[{}] Assigned to {} partitions of '{}'",
+            self.source_id, partition_count, self.config.topic
+        );
+        if let Some(ref offsets) = min_resume_offsets {
+            info!(
+                "[{}] Starting from replay offsets: {:?}",
+                self.source_id, offsets
+            );
+        }
+
+        // Track current offsets per partition (next offset to consume)
+        let mut current_offsets = min_resume_offsets.unwrap_or_else(|| vec![0; partition_count]);
+
+        // Consume messages
+        loop {
+            tokio::select! {
+                _ = self.shutdown_rx.changed() => {
+                    if *self.shutdown_rx.borrow() {
+                        info!("[{}] Shutdown signal received", self.source_id);
+                        break;
+                    }
+                }
+                message_result = consumer.recv() => {
+                    match message_result {
+                        Ok(msg) => {
+                            let partition = msg.partition() as usize;
+                            let offset = msg.offset();
+                            let key = msg.key()
+                                .map(|k| String::from_utf8_lossy(k).to_string())
+                                .unwrap_or_default();
+                            let topic = msg.topic().to_string();
+
+                            let source_change = if let Some(payload_bytes) = msg.payload() {
+                                match serde_json::from_slice::<JsonValue>(payload_bytes) {
+                                    Ok(payload) => self.process_message(&payload, &key, &topic, partition, offset),
+                                    Err(e) => {
+                                        warn!(
+                                            "[{}] Failed to parse message payload as JSON (topic={}, partition={}, offset={}): {}",
+                                            self.source_id, topic, partition, offset, e
+                                        );
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                self.process_tombstone(&key)
+                            };
+
+                            match source_change {
+                                Ok(change) => {
+                                    let mut offsets_for_event = current_offsets.clone();
+                                    if partition < offsets_for_event.len() {
+                                        offsets_for_event[partition] = offset + 1;
+                                    }
+
+                                    let wrapper = SourceEventWrapper {
+                                        source_id: self.source_id.clone(),
+                                        event: SourceEvent::Change(change),
+                                        timestamp: chrono::Utc::now(),
+                                        profiling: None,
+                                        sequence: None,
+                                        source_position: Some(encode_position(&offsets_for_event)),
+                                    };
+
+                                    if let Err(e) = self.base.dispatch_event(wrapper).await {
+                                        error!("[{}] Failed to dispatch event: {}", self.source_id, e);
+                                    } else if partition < current_offsets.len() {
+                                        // Advance only after successful dispatch so failed events
+                                        // are replayable after restart.
+                                        current_offsets[partition] = offset + 1;
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "[{}] Failed to process message (topic={}, partition={}, offset={}): {}",
+                                        self.source_id, topic, partition, offset, e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("[{}] Kafka consumer error: {}", self.source_id, e);
+                            // rdkafka may return transient errors; continue unless shutdown
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn minimum_resume_offsets(&self, partition_count: usize) -> Option<Vec<i64>> {
+        let resume_positions = self.resume_positions.read().await;
+        let mut min_offsets: Option<Vec<i64>> = None;
+
+        for (query_id, offsets) in resume_positions.iter() {
+            if offsets.len() != partition_count {
+                warn!(
+                    "[{}] Ignoring resume offsets for query '{}' due to partition count mismatch (got {}, expected {})",
+                    self.source_id,
+                    query_id,
+                    offsets.len(),
+                    partition_count
+                );
+                continue;
+            }
+
+            if let Some(ref mut min) = min_offsets {
+                for i in 0..partition_count {
+                    min[i] = min[i].min(offsets[i]);
+                }
+            } else {
+                min_offsets = Some(offsets.clone());
+            }
+        }
+
+        min_offsets
+    }
+
+    /// Create the rdkafka StreamConsumer with configuration.
+    fn create_consumer(&self) -> Result<StreamConsumer> {
+        let mut client_config = ClientConfig::new();
+        client_config
+            .set("bootstrap.servers", &self.config.bootstrap_servers)
+            .set("group.id", &self.config.group_id)
+            .set("enable.auto.commit", "false")
+            .set(
+                "auto.offset.reset",
+                match self.config.auto_offset_reset {
+                    crate::config::AutoOffsetReset::Earliest => "earliest",
+                    crate::config::AutoOffsetReset::Latest => "latest",
+                },
+            );
+
+        // Security configuration
+        if let Some(ref protocol) = self.config.security_protocol {
+            client_config.set("security.protocol", protocol);
+        }
+        if let Some(ref mechanism) = self.config.sasl_mechanism {
+            client_config.set("sasl.mechanism", mechanism);
+        }
+        if let Some(ref username) = self.config.sasl_username {
+            client_config.set("sasl.username", username);
+        }
+        if let Some(ref password) = self.config.sasl_password {
+            client_config.set("sasl.password", password);
+        }
+
+        // Additional properties (escape hatch)
+        for (key, value) in &self.config.additional_properties {
+            client_config.set(key, value);
+        }
+
+        let consumer: StreamConsumer = client_config
+            .create()
+            .context("Failed to create Kafka consumer")?;
+
+        Ok(consumer)
+    }
+
+    /// Process a non-tombstone message through the mapping engine.
+    fn process_message(
+        &self,
+        payload: &JsonValue,
+        key: &str,
+        topic: &str,
+        partition: usize,
+        offset: i64,
+    ) -> Result<SourceChange> {
+        // Build template context
+        let context = serde_json::json!({
+            "payload": payload,
+            "key": key,
+            "topic": topic,
+            "partition": partition,
+            "offset": offset,
+            "source_id": self.source_id,
+        });
+
+        // Find matching mapping
+        let mapping = self
+            .engine
+            .find_matching_mapping(&self.mappings, &context, None)
+            .ok_or_else(|| anyhow!("No matching mapping found for message"))?;
+
+        self.engine
+            .process_mapping(mapping, &context, &self.source_id)
+    }
+
+    /// Process a tombstone (null payload) as a Delete event.
+    fn process_tombstone(&self, key: &str) -> Result<SourceChange> {
+        if key.is_empty() {
+            return Err(anyhow!(
+                "Tombstone message has no key; cannot determine element to delete"
+            ));
+        }
+
+        let metadata = ElementMetadata {
+            reference: ElementReference {
+                source_id: Arc::from(self.source_id.as_str()),
+                element_id: Arc::from(key),
+            },
+            labels: Arc::from(vec![Arc::from(self.config.node_label.as_str())]),
+            effective_from: chrono::Utc::now().timestamp_millis() as u64,
+        };
+
+        Ok(SourceChange::Delete { metadata })
+    }
+}

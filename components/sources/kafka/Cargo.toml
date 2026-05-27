@@ -13,14 +13,14 @@
 # limitations under the License.
 
 [package]
-name = "drasi-source-http"
-version = "0.2.2"
+name = "drasi-source-kafka"
+version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "HTTP source plugin for Drasi"
+description = "Kafka source plugin for Drasi"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "http"]
+keywords = ["drasi", "plugin", "kafka"]
 categories = ["network-programming"]
 
 [lib]
@@ -42,35 +42,19 @@ tracing = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
-reqwest = { version = "0.11", features = ["json"] }
-tower-service = "0.3"
-hyper = "1.0"
 chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
-tokio-stream = "0.1"
-prost-types = "0.12"
-ordered-float = "3.0"
-# Webhook feature dependencies
-handlebars = "6"
-quick-xml = { version = "0.37", features = ["serialize"] }
-hmac = "0.12"
-sha1 = "0.10"
-sha2 = "0.10"
-subtle = "2"
-base64 = "0.22"
-hex = "0.4"
-regex = "1.10"
+bytes = "1"
+rdkafka = "0.36"
 
 [dev-dependencies]
 tokio-test = "0.4"
 drasi-reaction-application = { workspace = true }
 env_logger = "0.11"
-
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["kafka"] }
+rdkafka = "0.36"
+serde_json = "1.0"
+drasi-source-mapping.workspace = true
 
 [features]
-# default = []
 dynamic-plugin = []
