@@ -174,18 +174,18 @@ impl ReactionPluginDescriptor for AzureStorageReactionDescriptor {
         let mut builder = AzureStorageReaction::builder(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_account_name(mapper.resolve_string(&dto.account_name)?)
-            .with_access_key(mapper.resolve_string(&dto.access_key)?)
+            .with_account_name(mapper.resolve_string(&dto.account_name).await?)
+            .with_access_key(mapper.resolve_string(&dto.access_key).await?)
             .with_target(map_target(&dto.target));
 
         if let Some(v) = &dto.blob_endpoint {
-            builder = builder.with_blob_endpoint(mapper.resolve_string(v)?);
+            builder = builder.with_blob_endpoint(mapper.resolve_string(v).await?);
         }
         if let Some(v) = &dto.queue_endpoint {
-            builder = builder.with_queue_endpoint(mapper.resolve_string(v)?);
+            builder = builder.with_queue_endpoint(mapper.resolve_string(v).await?);
         }
         if let Some(v) = &dto.table_endpoint {
-            builder = builder.with_table_endpoint(mapper.resolve_string(v)?);
+            builder = builder.with_table_endpoint(mapper.resolve_string(v).await?);
         }
 
         if let Some(default_template) = &dto.default_template {

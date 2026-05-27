@@ -1,5 +1,4 @@
-#![allow(unexpected_cfgs)]
-// Copyright 2025 The Drasi Authors.
+// Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! Host-side SDK for loading and interacting with Drasi cdylib plugins.
 //!
@@ -34,6 +35,7 @@ pub mod plugin_types;
 pub mod proxies;
 #[cfg(feature = "registry")]
 pub mod registry;
+pub mod snapshot_fetcher_bridge;
 pub mod state_store_bridge;
 pub mod watcher;
 
@@ -44,9 +46,16 @@ pub use loader::{
     PluginLoaderConfig, PluginMetadataSummary, DEFAULT_PLUGIN_FILE_PATTERNS,
     PLUGIN_BINARY_EXTENSIONS,
 };
+
+// Re-export the ConfigResolverFn type so consumers can build host-side callbacks.
+pub use drasi_plugin_sdk::ffi::ConfigResolverFn;
 pub use proxies::bootstrap_provider::{BootstrapPluginProxy, BootstrapProviderProxy};
 pub use proxies::reaction::{ReactionPluginProxy, ReactionProxy};
+pub use proxies::secret_store::{
+    HostSecretStoreProxy, SecretStorePluginProxy, SecretStoreValueResolverAdapter,
+};
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
+pub use snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 pub use state_store_bridge::StateStoreVtableBuilder;
 
 pub use plugin_types::{

@@ -19,7 +19,7 @@ use std::ffi::c_void;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_lib::identity::{Credentials, IdentityProvider};
+use drasi_lib::identity::{CredentialContext, Credentials, IdentityProvider};
 
 use super::identity::IdentityProviderVtable;
 
@@ -48,10 +48,13 @@ impl FfiIdentityProviderProxy {
 
 #[async_trait]
 impl IdentityProvider for FfiIdentityProviderProxy {
-    async fn get_credentials(&self) -> Result<Credentials> {
+    async fn get_credentials(&self, context: &CredentialContext) -> Result<Credentials> {
         let vtable = unsafe { &*self.vtable };
-        // The get_credentials_fn is blocking (host spawns its own runtime)
-        let result = (vtable.get_credentials_fn)(vtable.state);
+        // Serialize context as JSON for FFI transport
+        let context_json =
+            serde_json::to_string(&context.properties).unwrap_or_else(|_| "{}".to_string());
+        let result =
+            (vtable.get_credentials_fn)(vtable.state, context_json.as_ptr(), context_json.len());
         unsafe { result.into_result() }
     }
 

@@ -15,6 +15,7 @@
 use std::{
     collections::HashMap,
     fmt::Debug,
+    future::Future,
     hash::{Hash, Hasher},
     sync::Arc,
     time::Duration,
@@ -35,7 +36,7 @@ use crate::{
         QueryPartEvaluator,
     },
     interface::{
-        ElementIndex, FutureQueue, FutureQueueConsumer, MiddlewareError, QueryClock,
+        ElementIndex, FutureQueue, FutureQueueConsumer, IndexError, MiddlewareError, QueryClock,
         SessionControl, SessionGuard,
     },
     middleware::SourceMiddlewarePipelineCollection,
@@ -111,6 +112,33 @@ impl ContinuousQuery {
         let changes = self.execute_source_middleware(change).await?;
         let result = self.process_changes_inner(changes).await?;
 
+        guard.commit().await?;
+        Ok(result)
+    }
+
+    /// Process a source change with a pre-commit hook that runs inside the session.
+    ///
+    /// The hook executes after index updates but before the session commits,
+    /// allowing callers to stage additional writes (e.g. checkpoint data) into
+    /// the same atomic transaction. The change_lock is held for the entire
+    /// duration, preserving serialization.
+    #[tracing::instrument(skip_all, err, level = "debug")]
+    pub async fn process_source_change_with_hook<F, Fut>(
+        &self,
+        change: SourceChange,
+        pre_commit_hook: F,
+    ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<(), IndexError>> + Send,
+    {
+        let _lock = self.change_lock.lock().await;
+        let guard = SessionGuard::begin(self.session_control.clone()).await?;
+
+        let changes = self.execute_source_middleware(change).await?;
+        let result = self.process_changes_inner(changes).await?;
+
+        pre_commit_hook().await?;
         guard.commit().await?;
         Ok(result)
     }

@@ -33,7 +33,101 @@ drasi-lib = "0.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
-Minimal example:
+**Note:** If you don't use middleware, or only use non-jq middleware, you don't need these build tools.
+
+## Identity Providers
+
+DrasiLib includes a trait-based identity provider abstraction for authenticating with databases and external services. The core trait (`IdentityProvider`) and `PasswordIdentityProvider` are built into `drasi-lib`. Cloud-specific providers are available as separate crates.
+
+### Built-in: Password Authentication
+
+```rust
+use drasi_lib::identity::PasswordIdentityProvider;
+
+let identity = PasswordIdentityProvider::new("myuser", "mypassword");
+```
+
+### Azure AD Authentication
+
+Add `drasi-identity-azure` to your dependencies:
+
+```toml
+[dependencies]
+drasi-identity-azure = "0.1"
+```
+
+```rust
+use drasi_identity_azure::AzureIdentityProvider;
+
+// System-assigned managed identity
+let identity = AzureIdentityProvider::new("user@tenant.onmicrosoft.com")?;
+
+// User-assigned managed identity
+let identity = AzureIdentityProvider::with_managed_identity(
+    "user@tenant.onmicrosoft.com",
+    "03bbedd2-cce5-45ab-9414-1c1cb82361f0",
+)?;
+
+// Workload identity (AKS)
+let identity = AzureIdentityProvider::with_workload_identity("user@tenant.onmicrosoft.com")?;
+
+// Developer tools (local development)
+let identity = AzureIdentityProvider::with_default_credentials("user@tenant.onmicrosoft.com")?;
+```
+
+### AWS IAM Authentication
+
+Add `drasi-identity-aws` to your dependencies:
+
+```toml
+[dependencies]
+drasi-identity-aws = "0.1"
+```
+
+```rust
+use drasi_identity_aws::AwsIdentityProvider;
+
+// Region from environment
+let identity = AwsIdentityProvider::new("mydbuser").await?;
+
+// Explicit region
+let identity = AwsIdentityProvider::with_region("mydbuser", "us-west-2").await?;
+
+// Assumed role
+let identity = AwsIdentityProvider::with_assumed_role(
+    "mydbuser",
+    "arn:aws:iam::123456789012:role/my-role", None
+).await?;
+```
+
+### Using Identity Providers with Reactions
+
+All identity providers implement the `IdentityProvider` trait and can be passed to any reaction or source that supports it:
+
+```rust
+let reaction = PostgresStoredProcReaction::builder("my-reaction")
+    .with_hostname("mydb.postgres.database.azure.com")
+    .with_database("mydb")
+    .with_identity_provider(identity)
+    .build()
+    .await?;
+```
+
+---
+
+## Initialization Methods
+
+DrasiLib can be initialized in two ways:
+1. **Builder Pattern** (Recommended) - Fluent API for programmatic configuration
+2. **Config Struct** - Direct configuration for YAML/JSON loading scenarios
+
+---
+
+## Method 1: Builder Pattern (Recommended)
+
+The builder provides a fluent interface for configuring sources, queries, and reactions.
+
+### Basic Example
 
 ```rust
 use drasi_lib::{DrasiLib, Query};
@@ -174,7 +268,9 @@ let config = Query::gql("active-orders")
 | `with_priority_queue_capacity(usize)` | Override instance-level queue capacity | Inherited |
 | `with_dispatch_buffer_capacity(usize)` | Override instance-level buffer size | Inherited |
 | `with_dispatch_mode(DispatchMode)` | `Channel` (backpressure) or `Broadcast` (fanout) | `Channel` |
+| `with_outbox_capacity(usize)` | Number of recent results retained for reaction replay | `1,000` |
 | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
+| `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
 | `build() -> QueryConfig` | Build the configuration | — |
 
@@ -723,6 +819,112 @@ impl Reaction for MyReaction {
 
 **Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-grpc-adaptive`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`.
 
+### Reaction Recovery
+
+Reactions can be stopped and restarted without losing data. The runtime uses a **checkpoint + outbox** mechanism to guarantee at-least-once delivery:
+
+```
+Query emits results ──► Outbox (ring buffer) ──► Forwarder ──► Reaction
+                           │                        │
+                           │  retained N entries     │  tracks last-delivered seq
+                           │                        ▼
+                           │                   Checkpoint Store
+                           │                   (persisted per query)
+                           ▼
+                     On restart: replay from checkpoint
+```
+
+1. Each query retains the last N results in an **outbox** (configurable via `with_outbox_capacity`).
+2. Reactions persist a **checkpoint** (sequence number + config hash) after each delivered result.
+3. On restart, the runtime replays missed results from the outbox starting after the checkpoint.
+4. If the checkpoint falls behind the outbox (gap), the **recovery policy** decides what happens.
+
+#### Recovery Policies
+
+| Policy | Behavior on gap | Use case |
+|--------|----------------|----------|
+| `Strict` (default) | Fail with error — reaction stops | Correctness-critical (financial, audit) |
+| `AutoReset` | Wipe checkpoint, re-bootstrap from full snapshot | Materialized views, caches |
+| `AutoSkipGap` | Skip missing entries, resume from latest | Best-effort delivery (alerts, logs) |
+
+#### Configuring Recovery
+
+Recovery is configured via the `Reaction` trait and `ReactionBaseParams`:
+
+```rust
+use drasi_lib::recovery::ReactionRecoveryPolicy;
+use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+
+// Per-instance configuration (highest priority):
+let params = ReactionBaseParams::new("my-reaction", vec!["q1".into()])
+    .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
+
+let base = ReactionBase::new(params);
+```
+
+Or override the default in your `Reaction` trait implementation:
+
+```rust
+impl Reaction for MyReaction {
+    // ...
+
+    fn is_durable(&self) -> bool {
+        true  // requires a durable StateStoreProvider
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        true  // triggers bootstrap() on first start with no checkpoint
+    }
+
+    fn default_recovery_policy(&self) -> ReactionRecoveryPolicy {
+        ReactionRecoveryPolicy::AutoReset
+    }
+
+    async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
+        // Called on fresh start (if needs_snapshot_on_fresh_start=true)
+        // and on AutoReset recovery after a gap.
+        let snapshot = ctx.fetch_snapshot().await?;
+        while let Some(row) = snapshot.next().await {
+            // Process each row...
+        }
+        Ok(())
+    }
+}
+```
+
+#### Reaction Recovery Trait Methods
+
+| Method | Description | Default |
+|--------|-------------|---------|
+| `is_durable()` | Whether a persistent state store is required | `false` |
+| `needs_snapshot_on_fresh_start()` | Whether to bootstrap on first start (no prior checkpoint) | `false` |
+| `default_recovery_policy()` | Fallback policy when not set via `ReactionBaseParams` | `Strict` |
+| `bootstrap(ctx)` | Hook called for initial load or `AutoReset` recovery | no-op |
+
+#### Compatibility Rules
+
+The runtime validates these constraints at startup:
+
+| Condition | Result |
+|-----------|--------|
+| `is_durable=true` + no durable `StateStoreProvider` | Error: cannot persist checkpoints |
+| `needs_snapshot_on_fresh_start=true` + `AutoSkipGap` | Error: contradictory (skip means no snapshot) |
+| `needs_snapshot_on_fresh_start=false` + `AutoReset` | Error: AutoReset requires bootstrap capability |
+
+#### Query Outbox Configuration
+
+The outbox is a bounded ring buffer on the query side:
+
+```rust
+let query = Query::cypher("q1")
+    .query("MATCH (n:Sensor) RETURN n.id, n.value")
+    .from_source("sensors")
+    .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
+    .build();
+```
+
+If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
+
 ### Result Format
 
 Reactions receive `QueryResult` values containing `ResultDiff` items:
@@ -826,6 +1028,8 @@ let core = builder
 | `joins` | `joins` | `Option<Vec<QueryJoinConfig>>` | `None` |
 | `dispatch_mode` | `dispatch_mode` | `Option<DispatchMode>` | `Channel` |
 | `storage_backend` | `storage_backend` | `Option<StorageBackendRef>` | In-memory |
+| `outbox_capacity` | `outbox_capacity` | `Option<usize>` | `1,000` |
+| `recovery_policy` | `recoveryPolicy` | `Option<RecoveryPolicy>` | `Strict` (via global default) |
 
 ---
 

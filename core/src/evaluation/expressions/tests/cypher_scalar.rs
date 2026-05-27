@@ -449,7 +449,7 @@ async fn evaluate_to_float_numeric() {
 }
 
 #[tokio::test]
-async fn evluate_to_float_null() {
+async fn evaluate_to_float_null() {
     let expr = "toFloat(null)";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 

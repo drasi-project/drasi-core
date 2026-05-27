@@ -1,5 +1,4 @@
-#![allow(dead_code)]
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 use drasi_core::models::ElementPropertyMap;
 use generational_arena;
 use generational_arena::{Arena, Index};
@@ -184,7 +184,7 @@ impl Relation {
 // Define a DomainModelGraph struct.
 // The DomainModelGraph struct contains two Arenas, one for Nodes and one for Relations.
 // The Node Arena is used to store Node structs and the Relation Arena is used to store Relation structs.
-// The DomainModelGraph struct also contains a HashMap that maps NodeIds to NodeIndexs and a HashMap that maps RelationIds to RelationIndexs.
+// The DomainModelGraph struct also contains a HashMap that maps NodeIds to NodeIndexes and a HashMap that maps RelationIds to RelationIndexes.
 pub struct DomainModelGraph {
     nodes: Arena<Node>,
     relations: Arena<Relation>,

@@ -222,19 +222,25 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
         let dto: MsSqlSourceConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let host: String = mapper.resolve_string(&dto.host)?;
-        let port: u16 = mapper.resolve_typed(&dto.port)?;
-        let database: String = mapper.resolve_string(&dto.database)?;
-        let user: String = mapper.resolve_string(&dto.user)?;
-        let password: String = mapper.resolve_string(&dto.password)?;
-        let auth_mode: AuthMode = mapper.resolve_typed::<AuthModeDto>(&dto.auth_mode)?.into();
-        let poll_interval_ms: u64 = mapper.resolve_typed(&dto.poll_interval_ms)?;
-        let encryption: EncryptionMode = mapper
-            .resolve_typed::<EncryptionModeDto>(&dto.encryption)?
+        let host: String = mapper.resolve_string(&dto.host).await?;
+        let port: u16 = mapper.resolve_typed(&dto.port).await?;
+        let database: String = mapper.resolve_string(&dto.database).await?;
+        let user: String = mapper.resolve_string(&dto.user).await?;
+        let password: String = mapper.resolve_string(&dto.password).await?;
+        let auth_mode: AuthMode = mapper
+            .resolve_typed::<AuthModeDto>(&dto.auth_mode)
+            .await?
             .into();
-        let trust_server_certificate: bool = mapper.resolve_typed(&dto.trust_server_certificate)?;
+        let poll_interval_ms: u64 = mapper.resolve_typed(&dto.poll_interval_ms).await?;
+        let encryption: EncryptionMode = mapper
+            .resolve_typed::<EncryptionModeDto>(&dto.encryption)
+            .await?
+            .into();
+        let trust_server_certificate: bool =
+            mapper.resolve_typed(&dto.trust_server_certificate).await?;
         let start_position: StartPosition = mapper
-            .resolve_typed::<StartPositionDto>(&dto.start_position)?
+            .resolve_typed::<StartPositionDto>(&dto.start_position)
+            .await?
             .into();
 
         let mut builder = MsSqlSourceBuilder::new(id)
@@ -254,7 +260,9 @@ impl SourcePluginDescriptor for MsSqlSourceDescriptor {
             builder = builder.with_table_key(tk.table.clone(), tk.key_columns.clone());
         }
 
-        let source = builder.build()?;
+        let mut source = builder.build()?;
+        source.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(source))
     }
 }

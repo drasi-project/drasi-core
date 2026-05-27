@@ -171,13 +171,14 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: BootstrapEventSender,
-    ) -> Result<usize>;
+        settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult>;
 }
 ```
 
-**Behavior**: Logs the bootstrap request for the query and immediately returns `Ok(0)` without sending any events.
+**Behavior**: Logs the bootstrap request for the query and immediately returns `BootstrapResult::default()` (event_count = 0) without sending any events.
 
-**Returns**: `Result<usize>` - Always returns `Ok(0)` indicating zero elements were sent.
+**Returns**: `Result<BootstrapResult>` — always returns a default `BootstrapResult` (`event_count: 0`, `last_sequence: None`, `sequences_aligned: false`) indicating zero elements were sent.
 
 ### NoOpBootstrapProviderBuilder
 
@@ -274,12 +275,13 @@ impl BootstrapProvider for NoOpBootstrapProvider {
         request: BootstrapRequest,
         _context: &BootstrapContext,
         _event_tx: BootstrapEventSender,
-    ) -> Result<usize> {
+        _settings: Option<&SourceSubscriptionSettings>,
+    ) -> Result<BootstrapResult> {
         info!(
             "No-op bootstrap for query {}: returning no data",
             request.query_id
         );
-        Ok(0)
+        Ok(BootstrapResult::default())
     }
 }
 ```

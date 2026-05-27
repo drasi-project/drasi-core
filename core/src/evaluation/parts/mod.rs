@@ -60,7 +60,7 @@ impl QueryPartEvaluator {
     ) -> Result<Vec<QueryPartEvaluationContext>, EvaluationError> {
         // println!("Evaluating : {:#?}", context);
 
-        let is_return_aggreating = matches!(
+        let is_return_aggregating = matches!(
             &part.return_clause,
             ProjectionClause::GroupBy {
                 grouping: _,
@@ -215,9 +215,9 @@ impl QueryPartEvaluator {
                         .await?
                     {
                         if let Some(agg_after) = agg_after {
-                            if is_return_aggreating {
+                            if is_return_aggregating {
                                 return self
-                                    .reconile_crossing_agregate(
+                                    .reconcile_crossing_aggregate(
                                         part,
                                         grouping_keys,
                                         Some(before),
@@ -252,7 +252,7 @@ impl QueryPartEvaluator {
                         grouping: _,
                         aggregates: _,
                     } => {
-                        self.reconile_crossing_agregate(
+                        self.reconcile_crossing_aggregate(
                             part,
                             grouping_keys,
                             Some(before),
@@ -524,9 +524,9 @@ impl QueryPartEvaluator {
                         .await?
                     {
                         if let Some(next_after) = next_after {
-                            if is_return_aggreating {
+                            if is_return_aggregating {
                                 return self
-                                    .reconile_crossing_agregate(
+                                    .reconcile_crossing_aggregate(
                                         part,
                                         next_after_grouping_keys,
                                         before,
@@ -564,7 +564,7 @@ impl QueryPartEvaluator {
                         grouping: _,
                         aggregates: _,
                     } => Ok(self
-                        .reconile_crossing_agregate(
+                        .reconcile_crossing_aggregate(
                             part,
                             next_after_grouping_keys,
                             before,
@@ -649,7 +649,7 @@ impl QueryPartEvaluator {
 
     /// Reconciles values crossing from one group to another
     #[allow(clippy::too_many_arguments, clippy::unwrap_used)]
-    async fn reconile_crossing_agregate(
+    async fn reconcile_crossing_aggregate(
         &self,
         part: &QueryPart,
         grouping_keys: Vec<String>,

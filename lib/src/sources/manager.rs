@@ -27,41 +27,40 @@ use crate::channels::*;
 use crate::component_graph::{ComponentGraph, ComponentKind, ComponentUpdateSender};
 use crate::config::SourceRuntime;
 use crate::context::SourceRuntimeContext;
+use crate::identity::IdentityProvider;
 use crate::managers::{ComponentLogKey, ComponentLogRegistry};
+use crate::schema::SourceSchema;
 use crate::sources::Source;
 use crate::state_store::StateStoreProvider;
 
 // Convert JSON value to ElementValue
-pub fn convert_json_to_element_value(value: &Value) -> Result<ElementValue> {
+pub fn convert_json_to_element_value(value: &Value) -> ElementValue {
     match value {
-        Value::String(s) => Ok(ElementValue::String(Arc::from(s.as_str()))),
+        Value::String(s) => ElementValue::String(Arc::from(s.as_str())),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(ElementValue::Integer(i))
+                ElementValue::Integer(i)
             } else if let Some(f) = n.as_f64() {
-                Ok(ElementValue::Float(OrderedFloat(f)))
+                ElementValue::Float(OrderedFloat(f))
             } else {
-                Ok(ElementValue::String(Arc::from(n.to_string())))
+                ElementValue::String(Arc::from(n.to_string()))
             }
         }
-        Value::Bool(b) => Ok(ElementValue::Bool(*b)),
-        Value::Null => Ok(ElementValue::Null),
+        Value::Bool(b) => ElementValue::Bool(*b),
+        Value::Null => ElementValue::Null,
         // For arrays and objects, convert to string representation
-        Value::Array(_) | Value::Object(_) => {
-            Ok(ElementValue::String(Arc::from(value.to_string())))
-        }
+        Value::Array(_) | Value::Object(_) => ElementValue::String(Arc::from(value.to_string())),
     }
 }
 
 // Convert JSON properties to ElementPropertyMap
 pub fn convert_json_to_element_properties(
     json_props: &serde_json::Map<String, Value>,
-) -> Result<ElementPropertyMap> {
+) -> ElementPropertyMap {
     let mut properties = BTreeMap::new();
 
     for (key, value) in json_props {
-        let element_value = convert_json_to_element_value(value)?;
-
+        let element_value = convert_json_to_element_value(value);
         properties.insert(Arc::from(key.as_str()), element_value);
     }
 
@@ -69,12 +68,13 @@ pub fn convert_json_to_element_properties(
     for (key, value) in properties {
         property_map.insert(&key, value);
     }
-    Ok(property_map)
+    property_map
 }
 
 pub struct SourceManager {
     instance_id: String,
     state_store: Arc<RwLock<Option<Arc<dyn StateStoreProvider>>>>,
+    identity_provider: Arc<RwLock<Option<Arc<dyn IdentityProvider>>>>,
     log_registry: Arc<ComponentLogRegistry>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
@@ -101,6 +101,7 @@ impl SourceManager {
         Self {
             instance_id: instance_id.into(),
             state_store: Arc::new(RwLock::new(None)),
+            identity_provider: Arc::new(RwLock::new(None)),
             log_registry,
             graph,
             update_tx,
@@ -114,9 +115,13 @@ impl SourceManager {
         *self.state_store.write().await = Some(state_store);
     }
 
-    /// Get the runtime instance for a source by ID.
+    /// Inject the identity provider (called after DrasiLib is fully constructed)
     ///
-    /// Returns `None` if no runtime is registered for the given ID.
+    /// This allows sources to obtain authentication credentials when they are added.
+    pub async fn inject_identity_provider(&self, identity_provider: Arc<dyn IdentityProvider>) {
+        *self.identity_provider.write().await = Some(identity_provider);
+    }
+
     pub async fn get_source_instance(&self, id: &str) -> Option<Arc<dyn Source>> {
         let graph = self.graph.read().await;
         graph.get_runtime::<Arc<dyn Source>>(id).cloned()
@@ -139,14 +144,15 @@ impl SourceManager {
         let source: Arc<dyn Source> = Arc::new(source);
         let source_id = source.id().to_string();
 
-        // Construct runtime context for this source (includes update channel for status reporting)
-        let context = SourceRuntimeContext::new(
+        // Construct runtime context for this source
+        let mut context = SourceRuntimeContext::new(
             &self.instance_id,
             &source_id,
             self.state_store.read().await.clone(),
             self.update_tx.clone(),
             None,
         );
+        context.identity_provider = self.identity_provider.read().await.clone();
 
         // Initialize the source with its runtime context
         source.initialize(context).await;
@@ -234,6 +240,22 @@ impl SourceManager {
                 properties: source.properties(),
             };
             Ok(runtime)
+        } else {
+            Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
+        }
+    }
+
+    /// Get the best-effort graph schema for a source, if available.
+    ///
+    /// # Errors
+    /// Returns an error if the source is not found.
+    pub async fn get_source_schema(&self, id: String) -> Result<Option<SourceSchema>> {
+        let graph = self.graph.read().await;
+        let source = graph.get_runtime::<Arc<dyn Source>>(&id).cloned();
+        drop(graph);
+
+        if let Some(source) = source {
+            Ok(source.describe_schema())
         } else {
             Err(crate::managers::ComponentNotFoundError::new("source", &id).into())
         }
@@ -359,6 +381,30 @@ impl SourceManager {
         .await
     }
 
+    /// Notify all running sources that initial subscriptions are complete.
+    ///
+    /// Called by the lifecycle after all auto-start queries have subscribed.
+    /// Sources that hold back feedback during the subscription window (e.g.,
+    /// Postgres flush-fence) release those guards here.
+    pub async fn subscriptions_complete(&self) {
+        let sources: Vec<Arc<dyn Source>> = {
+            let g = self.graph.read().await;
+            g.list_by_kind(&ComponentKind::Source)
+                .iter()
+                .filter_map(|(id, status)| {
+                    if *status == ComponentStatus::Running {
+                        g.get_runtime::<Arc<dyn Source>>(id).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for source in sources {
+            source.on_subscriptions_complete().await;
+        }
+    }
+
     /// Stop all running sources.
     ///
     /// # Errors
@@ -438,10 +484,10 @@ impl SourceManager {
         Vec<ComponentEvent>,
         tokio::sync::broadcast::Receiver<ComponentEvent>,
     )> {
-        let mut graph = self.graph.write().await;
+        let graph = self.graph.read().await;
         if !graph.has_runtime(id) {
             return None;
         }
-        Some(graph.subscribe_events(id))
+        graph.subscribe_events(id)
     }
 }

@@ -23,6 +23,8 @@ use async_trait::async_trait;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::channels::events::SubscriptionResponse;
 use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::identity::IdentityProvider;
+use drasi_lib::schema::SourceSchema;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext};
 use drasi_plugin_sdk::descriptor::SourcePluginDescriptor;
@@ -40,23 +42,30 @@ use crate::state_store_bridge::StateStoreVtableBuilder;
 /// Runs the pinned future on a new OS thread with a current-thread tokio runtime.
 /// This avoids nesting issues with the host's multi-thread runtime.
 extern "C" fn host_executor(future_ptr: *mut c_void) -> *mut c_void {
-    // Wrap the raw pointer to make it Send-safe for std::thread::spawn
-    let send_ptr = drasi_plugin_sdk::ffi::SendMutPtr(future_ptr);
-    let result = std::thread::spawn(move || {
-        let boxed_future = unsafe {
-            Box::from_raw(send_ptr.as_ptr()
-                as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>)
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime for source proxy");
-        // Wrap the result in SendMutPtr to satisfy Send bound
-        drasi_plugin_sdk::ffi::SendMutPtr(rt.block_on(*boxed_future))
-    })
-    .join()
-    .expect("host executor thread panicked");
-    result.as_ptr()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Wrap the raw pointer to make it Send-safe for std::thread::spawn
+        let send_ptr = drasi_plugin_sdk::ffi::SendMutPtr(future_ptr);
+        let result = std::thread::spawn(move || {
+            let boxed_future = unsafe {
+                Box::from_raw(send_ptr.as_ptr()
+                    as *mut std::pin::Pin<Box<dyn std::future::Future<Output = *mut c_void>>>)
+            };
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return drasi_plugin_sdk::ffi::SendMutPtr(std::ptr::null_mut()),
+            };
+            // Wrap the result in SendMutPtr to satisfy Send bound
+            drasi_plugin_sdk::ffi::SendMutPtr(rt.block_on(*boxed_future))
+        })
+        .join()
+        .map(|p| p.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+        result
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Wraps a `SourceVtable` into a DrasiLib `Source` trait implementation.
@@ -70,6 +79,11 @@ pub struct SourceProxy {
     cached_type_name: String,
     /// Keeps the per-instance callback context alive for the lifetime of this proxy.
     _callback_ctx: std::sync::Mutex<Option<Arc<crate::callbacks::InstanceCallbackContext>>>,
+    /// Per-source identity provider set programmatically via
+    /// [`Source::set_identity_provider`]. When present, it takes precedence over
+    /// any instance-wide provider supplied via
+    /// [`SourceRuntimeContext::identity_provider`] during [`Source::initialize`].
+    identity_provider: std::sync::Mutex<Option<Arc<dyn IdentityProvider>>>,
 }
 
 unsafe impl Send for SourceProxy {}
@@ -86,6 +100,7 @@ impl SourceProxy {
             cached_id,
             cached_type_name,
             _callback_ctx: std::sync::Mutex::new(None),
+            identity_provider: std::sync::Mutex::new(None),
         }
     }
 }
@@ -127,6 +142,25 @@ impl Source for SourceProxy {
         (self.vtable.auto_start_fn)(self.vtable.state as *const c_void)
     }
 
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        // Safety: both the raw function-pointer call and `into_string()` (which calls
+        // `String::from_raw_parts`) require unsafe.
+        let json = unsafe {
+            (self.vtable.describe_schema_fn)(self.vtable.state as *const c_void).into_string()
+        };
+
+        match serde_json::from_str(&json) {
+            Ok(schema) => schema,
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse plugin schema for '{}': {e}",
+                    self.cached_id
+                );
+                None
+            }
+        }
+    }
+
     async fn start(&self) -> anyhow::Result<()> {
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let start_fn = self.vtable.start_fn;
@@ -154,6 +188,8 @@ impl Source for SourceProxy {
             FfiComponentStatus::Stopped => ComponentStatus::Stopped,
             FfiComponentStatus::Reconfiguring => ComponentStatus::Reconfiguring,
             FfiComponentStatus::Error => ComponentStatus::Error,
+            FfiComponentStatus::Added => ComponentStatus::Added,
+            FfiComponentStatus::Removed => ComponentStatus::Removed,
         }
     }
 
@@ -170,6 +206,18 @@ impl Source for SourceProxy {
         let relations_ffi = FfiStr::from_str(&relations_json);
         let enable_bootstrap = settings.enable_bootstrap;
 
+        // Pass resume_from position bytes across FFI (null ptr + 0 len if None)
+        let (resume_from_ptr, resume_from_len) = match &settings.resume_from {
+            Some(bytes) => (bytes.as_ptr(), bytes.len() as u32),
+            None => (std::ptr::null(), 0u32),
+        };
+
+        // Pass last_sequence across FFI (bool flag + u64 value)
+        let (has_last_sequence, last_sequence_val) = match settings.last_sequence {
+            Some(seq) => (true, seq),
+            None => (false, 0u64),
+        };
+
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -177,6 +225,11 @@ impl Source for SourceProxy {
             query_id_ffi,
             nodes_ffi,
             relations_ffi,
+            resume_from_ptr,
+            resume_from_len,
+            has_last_sequence,
+            last_sequence_val,
+            settings.request_position_handle,
         );
 
         if resp_ptr.is_null() {
@@ -217,16 +270,160 @@ impl Source for SourceProxy {
             Some(proxy.into_mpsc_receiver())
         };
 
+        // Reconstruct position_handle from Arc::into_raw pointer
+        let position_handle = if ffi_resp.position_handle_ptr.is_null() {
+            None
+        } else {
+            // Safety: the plugin side did Arc::into_raw(arc) which transfers one
+            // ref-count. We reconstruct the Arc without incrementing. The plugin's
+            // SourceBase holds another clone, so the AtomicU64 stays alive until
+            // both sides drop their Arcs.
+            Some(unsafe {
+                std::sync::Arc::from_raw(
+                    ffi_resp.position_handle_ptr as *const std::sync::atomic::AtomicU64,
+                )
+            })
+        };
+
+        // Reconstruct bootstrap_result_receiver via push-based callback
+        let bootstrap_result_receiver = if ffi_resp.bootstrap_result_receiver.is_null() {
+            None
+        } else {
+            let ffi_brr = unsafe { *Box::from_raw(ffi_resp.bootstrap_result_receiver) };
+            let (host_tx, host_rx) = tokio::sync::oneshot::channel::<
+                anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+            >();
+
+            // Wrap sender in Mutex<Option<...>> so duplicate callbacks are
+            // harmless (second call sees None and is a no-op).
+            struct BootstrapResultCtx {
+                tx: std::sync::Mutex<
+                    Option<
+                        tokio::sync::oneshot::Sender<
+                            anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                        >,
+                    >,
+                >,
+            }
+
+            // Callback the plugin will invoke when bootstrap result is ready
+            extern "C" fn host_bootstrap_result_callback(
+                ctx: *mut std::ffi::c_void,
+                result: *mut drasi_plugin_sdk::ffi::FfiBootstrapResult,
+            ) {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if ctx.is_null() {
+                        return;
+                    }
+                    let wrapper = unsafe { Box::from_raw(ctx as *mut BootstrapResultCtx) };
+                    let tx = match wrapper.tx.lock() {
+                        Ok(mut guard) => guard.take(),
+                        Err(_) => None,
+                    };
+                    let Some(tx) = tx else {
+                        return;
+                    };
+                    if result.is_null() {
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "Bootstrap result receiver dropped without result"
+                        )));
+                        return;
+                    }
+                    let ffi_result = unsafe { *Box::from_raw(result) };
+                    if ffi_result.event_count < 0 {
+                        let _ = tx.send(Err(anyhow::anyhow!(
+                            "Bootstrap failed with code {}",
+                            ffi_result.event_count
+                        )));
+                        return;
+                    }
+                    let last_sequence = if ffi_result.last_sequence >= 0 {
+                        Some(ffi_result.last_sequence as u64)
+                    } else {
+                        None
+                    };
+                    let source_position = if !ffi_result.source_position_ptr.is_null()
+                        && ffi_result.source_position_len > 0
+                    {
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(
+                                ffi_result.source_position_ptr,
+                                ffi_result.source_position_len,
+                            )
+                        };
+                        let owned = bytes::Bytes::copy_from_slice(bytes);
+                        if let Some(drop_fn) = ffi_result.source_position_drop_fn {
+                            (drop_fn)(
+                                ffi_result.source_position_ptr as *mut u8,
+                                ffi_result.source_position_len,
+                            );
+                        }
+                        Some(owned)
+                    } else {
+                        None
+                    };
+                    let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
+                        event_count: ffi_result.event_count as usize,
+                        last_sequence,
+                        sequences_aligned: ffi_result.sequences_aligned,
+                        source_position,
+                    }));
+                }));
+            }
+
+            let ctx_wrapper = Box::new(BootstrapResultCtx {
+                tx: std::sync::Mutex::new(Some(host_tx)),
+            });
+            let ctx = Box::into_raw(ctx_wrapper) as *mut std::ffi::c_void;
+            (ffi_brr.start_fn)(ffi_brr.state, host_bootstrap_result_callback, ctx);
+            // Safe to call drop_fn: the plugin state is Arc-based, so the
+            // spawned task holds its own clone. Dropping the FFI handle's Arc
+            // reference won't free the state while the task is alive.
+            (ffi_brr.drop_fn)(ffi_brr.state);
+
+            Some(host_rx)
+        };
+
         Ok(SubscriptionResponse {
             query_id,
             source_id,
             receiver,
             bootstrap_receiver,
+            position_handle,
+            bootstrap_result_receiver,
         })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn supports_replay(&self) -> bool {
+        (self.vtable.supports_replay_fn)(self.vtable.state)
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
+        let remove_fn = self.vtable.remove_position_handle_fn;
+        let qid = query_id.to_string();
+        let result = std::thread::spawn(move || {
+            let ffi_qid = drasi_plugin_sdk::ffi::FfiStr::from_str(&qid);
+            (remove_fn)(state.as_ptr(), ffi_qid)
+        })
+        .join()
+        .map(|r| unsafe { r.into_result() });
+
+        match result {
+            Ok(Ok(())) => {
+                log::debug!("SourceProxy::remove_position_handle('{query_id}') completed via FFI");
+            }
+            Ok(Err(e)) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') FFI error: {e}");
+            }
+            Err(_) => {
+                log::warn!("SourceProxy::remove_position_handle('{query_id}') thread panicked");
+            }
+        }
     }
 
     async fn deprovision(&self) -> anyhow::Result<()> {
@@ -264,20 +461,27 @@ impl Source for SourceProxy {
             update_tx: context.update_tx.clone(),
         });
 
-        // Use as_ptr (no refcount increment) — the Arc in _callback_ctx keeps
-        // the context alive for the proxy's lifetime. This avoids the memory
-        // leak that Arc::into_raw would cause (no matching from_raw).
-        let ctx_ptr = Arc::as_ptr(&per_instance_ctx) as *mut c_void;
+        // Bug C fix: hand the plugin a strong reference (Arc::into_raw bumps
+        // the refcount) so log/lifecycle callbacks emitted late by the plugin
+        // (e.g. from inside stop_fn or from internal tasks shutting down) do
+        // not deref freed memory. The matching `mem::forget` happens in Drop
+        // and intentionally leaks one strong ref per instance — acceptable
+        // because the cdylib itself is intentionally process-leaked (see
+        // host-sdk/src/loader.rs).
+        let ctx_for_plugin = per_instance_ctx.clone();
+        let ctx_ptr = Arc::into_raw(ctx_for_plugin) as *mut c_void;
 
         // Store the Arc so it stays alive as long as this proxy
         if let Ok(mut guard) = self._callback_ctx.lock() {
             *guard = Some(per_instance_ctx);
         }
 
-        let identity_vtable = context
-            .identity_provider
-            .as_ref()
-            .map(|ip| crate::identity_bridge::IdentityProviderVtableBuilder::build(ip.clone()));
+        let identity_vtable = crate::proxies::identity_resolution::resolve_identity_provider(
+            &self.identity_provider,
+            context.identity_provider.clone(),
+            &format!("Source '{}'", self.cached_id),
+        )
+        .map(crate::identity_bridge::IdentityProviderVtableBuilder::build);
 
         let ip_ptr = identity_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
@@ -292,6 +496,7 @@ impl Source for SourceProxy {
             log_ctx: ctx_ptr,
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
+            snapshot_fetcher: std::ptr::null(),
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);
@@ -306,6 +511,28 @@ impl Source for SourceProxy {
         let vtable_ptr = Box::into_raw(Box::new(vtable));
         (self.vtable.set_bootstrap_provider_fn)(self.vtable.state, vtable_ptr);
     }
+
+    /// Stash a per-instance identity provider that will take precedence over
+    /// the runtime-context provider during [`Source::initialize`].
+    ///
+    /// # Timing constraint (FFI sources only)
+    ///
+    /// For `SourceProxy`, the provider must be set **before** the source is
+    /// added to `DrasiLib` (i.e. before the lifecycle manager calls
+    /// `initialize`). There is no FFI hook for late identity-provider
+    /// injection — the plugin only receives the provider through
+    /// `FfiRuntimeContext` during `initialize_fn`. Calls made after
+    /// `initialize` have no effect on the running plugin.
+    async fn set_identity_provider(&self, provider: Arc<dyn IdentityProvider>) {
+        // See doc comment above for the timing constraint.
+        match self.identity_provider.lock() {
+            Ok(mut guard) => *guard = Some(provider),
+            Err(_) => log::warn!(
+                "Source '{}': identity_provider mutex is poisoned; provider not set",
+                self.cached_id
+            ),
+        }
+    }
 }
 
 impl Drop for SourceProxy {
@@ -315,6 +542,17 @@ impl Drop for SourceProxy {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
         let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+
+        // Bug C fix: leak the per-instance callback context Arc unconditionally.
+        // The strong reference handed to the plugin via `Arc::into_raw` in
+        // initialize() is never reclaimed — late log/lifecycle callbacks
+        // emitted by the plugin (during stop_fn or from internal tasks) must
+        // still find a valid pointer. Matches the pattern in ReactionProxy.
+        if let Ok(mut guard) = self._callback_ctx.lock() {
+            if let Some(ctx) = guard.take() {
+                std::mem::forget(ctx);
+            }
+        }
     }
 }
 

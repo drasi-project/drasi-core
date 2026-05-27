@@ -408,7 +408,7 @@ impl Reaction for AzureStorageReaction {
 
                 for result in &query_result.results {
                     let op_and_data: Result<Option<(OperationType, &str, Value)>> = match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             Ok(Some((OperationType::Add, "ADD", data.clone())))
                         }
                         ResultDiff::Update { .. } => match serde_json::to_value(result) {
@@ -417,7 +417,7 @@ impl Reaction for AzureStorageReaction {
                                 "failed to serialize UPDATE ResultDiff into JSON payload: {err}"
                             )),
                         },
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             Ok(Some((OperationType::Delete, "DELETE", data.clone())))
                         }
                         ResultDiff::Aggregation { .. } => match serde_json::to_value(result) {

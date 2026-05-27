@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use super::schema::QueryConfig;
 use crate::channels::ComponentStatus;
+use crate::identity::IdentityProvider;
 use crate::indexes::IndexBackendPlugin;
 use crate::indexes::IndexFactory;
 use crate::state_store::{MemoryStateStoreProvider, StateStoreProvider};
@@ -239,6 +240,10 @@ pub struct RuntimeConfig {
     pub index_factory: Arc<IndexFactory>,
     /// State store provider for plugin state persistence
     pub state_store_provider: Arc<dyn StateStoreProvider>,
+    /// Optional identity provider for credential injection into sources/reactions
+    pub identity_provider: Option<Arc<dyn IdentityProvider>>,
+    /// Optional secret store provider for resolving `ConfigValue::Secret` references
+    pub secret_store_provider: Option<Arc<dyn crate::secret_store::SecretStoreProvider>>,
     /// Query configurations (sources/reactions are now instance-only)
     pub queries: Vec<QueryConfig>,
     /// Original global priority queue capacity (before applying to queries)
@@ -247,6 +252,10 @@ pub struct RuntimeConfig {
     pub global_dispatch_buffer_capacity: Option<usize>,
     /// Original storage backend configurations
     pub storage_backends: Vec<crate::indexes::StorageBackendConfig>,
+    /// Global default recovery policy for all queries.
+    /// Per-query `QueryConfig::recovery_policy` overrides this.
+    /// If neither is set, defaults to `Strict`.
+    pub default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
 impl std::fmt::Debug for RuntimeConfig {
@@ -255,6 +264,20 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("id", &self.id)
             .field("index_factory", &self.index_factory)
             .field("state_store_provider", &"<dyn StateStoreProvider>")
+            .field(
+                "identity_provider",
+                &self
+                    .identity_provider
+                    .as_ref()
+                    .map(|_| "<dyn IdentityProvider>"),
+            )
+            .field(
+                "secret_store_provider",
+                &self
+                    .secret_store_provider
+                    .as_ref()
+                    .map(|_| "<dyn SecretStoreProvider>"),
+            )
             .field("queries", &self.queries)
             .field(
                 "global_priority_queue_capacity",
@@ -265,12 +288,13 @@ impl std::fmt::Debug for RuntimeConfig {
                 &self.global_dispatch_buffer_capacity,
             )
             .field("storage_backends", &self.storage_backends)
+            .field("default_recovery_policy", &self.default_recovery_policy)
             .finish()
     }
 }
 
 impl RuntimeConfig {
-    /// Create a new RuntimeConfig with optional index backend and state store providers.
+    /// Create a new RuntimeConfig with optional index backend, state store, and identity providers.
     ///
     /// When an index provider is supplied, RocksDB and Redis/Garnet storage backends
     /// will delegate to the provider for index creation. Without a provider, only
@@ -279,15 +303,23 @@ impl RuntimeConfig {
     /// When a state store provider is supplied, it will be used for plugin state
     /// persistence. Without a provider, the default in-memory state store is used.
     ///
+    /// When an identity provider is supplied, it will be injected into source and
+    /// reaction runtime contexts for credential acquisition.
+    ///
     /// # Arguments
     ///
     /// * `config` - The DrasiLib configuration
     /// * `index_provider` - Optional index backend plugin for persistent storage
     /// * `state_store_provider` - Optional state store provider for plugin state
+    /// * `identity_provider` - Optional identity provider for credential injection
+    /// * `secret_store_provider` - Optional secret store provider for resolving secrets
     pub fn new(
         config: super::schema::DrasiLibConfig,
         index_provider: Option<Arc<dyn IndexBackendPlugin>>,
         state_store_provider: Option<Arc<dyn StateStoreProvider>>,
+        identity_provider: Option<Arc<dyn IdentityProvider>>,
+        secret_store_provider: Option<Arc<dyn crate::secret_store::SecretStoreProvider>>,
+        default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     ) -> Self {
         // Preserve original global defaults for config snapshot round-tripping
         let global_priority_queue_capacity = config.priority_queue_capacity;
@@ -326,17 +358,19 @@ impl RuntimeConfig {
             id: config.id,
             index_factory,
             state_store_provider,
+            identity_provider,
+            secret_store_provider,
             queries,
             global_priority_queue_capacity,
             global_dispatch_buffer_capacity,
             storage_backends,
+            default_recovery_policy,
         }
     }
 }
 
 impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
     fn from(config: super::schema::DrasiLibConfig) -> Self {
-        // Default to no index provider and no state store provider
-        Self::new(config, None, None)
+        Self::new(config, None, None, None, None, None)
     }
 }

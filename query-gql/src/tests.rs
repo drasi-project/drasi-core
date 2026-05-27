@@ -3657,7 +3657,7 @@ fn filter_filter_let_filter() {
 }
 
 #[test]
-fn muliple_match_comma_match_where() {
+fn multiple_match_comma_match_where() {
     let query = "MATCH (:Person {name: 'Martin Sheen'})-[:ACTED_IN]->(movie:Movie),
     (director:Person)-[:DIRECTED]->(movie)
     WHERE director.age > 60
@@ -5024,4 +5024,62 @@ fn test_yield_with_case_expression() {
         gql_ast, expected_ast,
         "GQL AST should match expected structure for YIELD with CASE expression"
     );
+}
+
+#[test]
+fn starts_with_expression() {
+    let query = gql::query(
+        "MATCH (a) WHERE a.name STARTS WITH 'Dr' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::starts_with(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text("Dr".into()))
+        )]
+    );
+}
+
+#[test]
+fn ends_with_expression() {
+    let query = gql::query(
+        "MATCH (a) WHERE a.name ENDS WITH 'si' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::ends_with(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text("si".into()))
+        )]
+    );
+}
+
+#[test]
+fn contains_expression() {
+    let query = gql::query(
+        "MATCH (a) WHERE a.name CONTAINS 'ras' RETURN a",
+        &TEST_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(
+        query.parts[0].where_clauses,
+        vec![BinaryExpression::contains(
+            UnaryExpression::expression_property(UnaryExpression::ident("a"), "name".into()),
+            UnaryExpression::literal(Literal::Text("ras".into()))
+        )]
+    );
+}
+
+#[test]
+fn contains_relationship_label_no_conflict() {
+    let query = gql::query("MATCH (a)-[:CONTAINS]->(b) RETURN a, b", &TEST_CONFIG).unwrap();
+
+    assert_eq!(query.parts[0].match_clauses.len(), 1);
 }

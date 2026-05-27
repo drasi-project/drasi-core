@@ -410,6 +410,9 @@ pub enum BinaryExpression {
     Exponent(Box<Expression>, Box<Expression>),
     HasLabel(Box<Expression>, Box<Expression>),
     Index(Box<Expression>, Box<Expression>),
+    StartsWith(Box<Expression>, Box<Expression>),
+    EndsWith(Box<Expression>, Box<Expression>),
+    Contains(Box<Expression>, Box<Expression>),
 }
 
 impl BinaryExpression {
@@ -480,6 +483,18 @@ impl BinaryExpression {
     pub fn index(a: Expression, b: Expression) -> Expression {
         Expression::BinaryExpression(Self::Index(Box::new(a), Box::new(b)))
     }
+
+    pub fn starts_with(a: Expression, b: Expression) -> Expression {
+        Expression::BinaryExpression(Self::StartsWith(Box::new(a), Box::new(b)))
+    }
+
+    pub fn ends_with(a: Expression, b: Expression) -> Expression {
+        Expression::BinaryExpression(Self::EndsWith(Box::new(a), Box::new(b)))
+    }
+
+    pub fn contains(a: Expression, b: Expression) -> Expression {
+        Expression::BinaryExpression(Self::Contains(Box::new(a), Box::new(b)))
+    }
 }
 
 impl ParentExpression for BinaryExpression {
@@ -502,6 +517,9 @@ impl ParentExpression for BinaryExpression {
             BinaryExpression::Exponent(a, b) => vec![a, b],
             BinaryExpression::HasLabel(a, b) => vec![a, b],
             BinaryExpression::Index(a, b) => vec![a, b],
+            BinaryExpression::StartsWith(a, b) => vec![a, b],
+            BinaryExpression::EndsWith(a, b) => vec![a, b],
+            BinaryExpression::Contains(a, b) => vec![a, b],
         }
     }
 }

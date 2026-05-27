@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unexpected_cfgs)]
+
 //! Shared types for MS SQL source and bootstrap plugins
 //!
 //! This crate contains configuration, connection, error, and type conversion
@@ -22,6 +23,7 @@ pub mod config;
 pub mod connection;
 pub mod error;
 pub mod keys;
+pub mod lsn;
 pub mod types;
 
 // Re-export main types
@@ -32,4 +34,5 @@ pub use config::{
 pub use connection::MsSqlConnection;
 pub use error::{ConnectionError, LsnError, MsSqlError, MsSqlErrorKind, PrimaryKeyError};
 pub use keys::PrimaryKeyCache;
+pub use lsn::Lsn;
 pub use types::{extract_column_value, value_to_string};

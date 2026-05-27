@@ -50,10 +50,9 @@ azure_storage_queues = "0.21"
 azure_data_tables = "0.21"
 
 [dev-dependencies]
-drasi-source-application = { path = "../../sources/application" }
-env_logger = "0.10.0"
-serial_test = "3.0"
-testcontainers = "0.23"
+drasi-source-application.workspace = true
+env_logger = "0.11"
+testcontainers = "0.27"
 tokio-test = "0.4"
 
 [features]

@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! HTTP Source Plugin for Drasi
 //!
@@ -251,6 +252,7 @@ use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::Source;
 use tracing::Instrument;
@@ -318,6 +320,70 @@ struct WebhookState {
     route_matcher: RouteMatcher,
     /// Template engine for payload transformation
     template_engine: TemplateEngine,
+}
+
+fn extract_property_schemas(properties: Option<&serde_json::Value>) -> Vec<PropertySchema> {
+    match properties {
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .map(|key| PropertySchema::new(key.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn derive_schema_from_webhooks(webhooks: &WebhookConfig) -> Option<SourceSchema> {
+    let mut node_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
+    let mut relation_map: HashMap<String, Vec<PropertySchema>> = HashMap::new();
+
+    for route in &webhooks.routes {
+        for mapping in &route.mappings {
+            let Some(label) = mapping.template.labels.first().cloned() else {
+                continue;
+            };
+
+            let properties = extract_property_schemas(mapping.template.properties.as_ref());
+
+            match mapping.element_type {
+                crate::config::ElementType::Node => {
+                    let entry = node_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
+                crate::config::ElementType::Relation => {
+                    let entry = relation_map.entry(label).or_default();
+                    for prop in properties {
+                        if !entry.iter().any(|p| p.name == prop.name) {
+                            entry.push(prop);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let nodes: Vec<_> = node_map
+        .into_iter()
+        .map(|(label, properties)| NodeSchema { label, properties })
+        .collect();
+    let relations: Vec<_> = relation_map
+        .into_iter()
+        .map(|(label, properties)| RelationSchema {
+            label,
+            from: None,
+            to: None,
+            properties,
+        })
+        .collect();
+
+    if nodes.is_empty() && relations.is_empty() {
+        None
+    } else {
+        Some(SourceSchema { nodes, relations })
+    }
 }
 
 impl HttpSource {
@@ -899,14 +965,21 @@ impl Source for HttpSource {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        use crate::descriptor::HttpSourceConfigDto;
+
+        self.base
+            .properties_or_serialize(&HttpSourceConfigDto::from(&self.config))
     }
 
     fn auto_start(&self) -> bool {
         self.base.get_auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.config
+            .webhooks
+            .as_ref()
+            .and_then(derive_schema_from_webhooks)
     }
 
     async fn start(&self) -> Result<()> {
@@ -1689,6 +1762,108 @@ mod tests {
 
             assert!(!props.contains_key("endpoint"));
         }
+
+        #[test]
+        fn test_describe_schema_uses_webhook_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Node,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["Order".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "total": "{{payload.total}}",
+                                    "status": "{{payload.status}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema");
+
+            assert_eq!(schema.nodes.len(), 1);
+            let node = &schema.nodes[0];
+            assert_eq!(node.label, "Order");
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "total"));
+            assert!(node
+                .properties
+                .iter()
+                .any(|property| property.name == "status"));
+        }
+
+        #[test]
+        fn test_describe_schema_includes_relation_mappings() {
+            let source = HttpSourceBuilder::new("test")
+                .with_host("localhost")
+                .with_webhooks(WebhookConfig {
+                    error_behavior: ErrorBehavior::AcceptAndLog,
+                    cors: None,
+                    routes: vec![crate::config::WebhookRoute {
+                        path: "/events".to_string(),
+                        methods: vec![crate::config::HttpMethod::Post],
+                        auth: None,
+                        error_behavior: None,
+                        mappings: vec![crate::config::WebhookMapping {
+                            when: None,
+                            operation: Some(crate::config::OperationType::Insert),
+                            operation_from: None,
+                            operation_map: None,
+                            element_type: crate::config::ElementType::Relation,
+                            effective_from: None,
+                            template: crate::config::ElementTemplate {
+                                id: "{{payload.id}}".to_string(),
+                                labels: vec!["PLACED_BY".to_string()],
+                                properties: Some(serde_json::json!({
+                                    "placed_at": "{{payload.timestamp}}"
+                                })),
+                                from: None,
+                                to: None,
+                            },
+                        }],
+                    }],
+                })
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("webhook-configured HTTP source should expose schema for relations");
+
+            assert_eq!(schema.relations.len(), 1);
+            let relation = &schema.relations[0];
+            assert_eq!(relation.label, "PLACED_BY");
+            assert!(relation
+                .properties
+                .iter()
+                .any(|property| property.name == "placed_at"));
+            // Static derivation cannot infer endpoints
+            assert_eq!(relation.from, None);
+            assert_eq!(relation.to, None);
+        }
     }
 
     mod lifecycle {
@@ -1917,6 +2092,75 @@ mod tests {
                 default_config.min_batch_size
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use drasi_lib::sources::Source;
+
+    #[test]
+    fn test_builder_fallback_produces_camel_case() {
+        let source = HttpSourceBuilder::new("http-fallback")
+            .with_host("0.0.0.0")
+            .with_port(9090)
+            .with_endpoint("/ingest")
+            .with_timeout_ms(5000)
+            .with_adaptive_max_batch_size(500)
+            .with_adaptive_min_batch_size(10)
+            .with_adaptive_max_wait_ms(2000)
+            .with_adaptive_min_wait_ms(100)
+            .build()
+            .unwrap();
+
+        let props = source.properties();
+
+        // Must use camelCase keys (DTO serialization)
+        assert!(
+            props.contains_key("timeoutMs"),
+            "expected camelCase 'timeoutMs', got keys: {:?}",
+            props.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            props.contains_key("adaptiveMaxBatchSize"),
+            "expected camelCase 'adaptiveMaxBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinBatchSize"),
+            "expected camelCase 'adaptiveMinBatchSize'"
+        );
+        assert!(
+            props.contains_key("adaptiveMaxWaitMs"),
+            "expected camelCase 'adaptiveMaxWaitMs'"
+        );
+        assert!(
+            props.contains_key("adaptiveMinWaitMs"),
+            "expected camelCase 'adaptiveMinWaitMs'"
+        );
+
+        // Must NOT have snake_case keys
+        assert!(
+            !props.contains_key("timeout_ms"),
+            "should not have snake_case 'timeout_ms'"
+        );
+        assert!(
+            !props.contains_key("adaptive_max_batch_size"),
+            "should not have snake_case 'adaptive_max_batch_size'"
+        );
+
+        // Values should be correct
+        assert_eq!(props.get("host").and_then(|v| v.as_str()), Some("0.0.0.0"));
+        assert_eq!(props.get("port").and_then(|v| v.as_u64()), Some(9090));
+        assert_eq!(
+            props.get("endpoint").and_then(|v| v.as_str()),
+            Some("/ingest")
+        );
+        assert_eq!(props.get("timeoutMs").and_then(|v| v.as_u64()), Some(5000));
+        assert_eq!(
+            props.get("adaptiveMaxBatchSize").and_then(|v| v.as_u64()),
+            Some(500)
+        );
     }
 }
 

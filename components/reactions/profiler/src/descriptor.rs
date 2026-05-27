@@ -83,10 +83,10 @@ impl ReactionPluginDescriptor for ProfilerReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref v) = dto.window_size {
-            builder = builder.with_window_size(mapper.resolve_typed(v)?);
+            builder = builder.with_window_size(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.report_interval_secs {
-            builder = builder.with_report_interval_secs(mapper.resolve_typed(v)?);
+            builder = builder.with_report_interval_secs(mapper.resolve_typed(v).await?);
         }
 
         let reaction = builder.build()?;
