@@ -12,16 +12,19 @@
 
 ## Configuration
 
-Bootstrap config supports:
+| Field | Required | Description |
+|---|---|---|
+| `bootstrapServers` | no | Kafka brokers (`host:port[,host:port]`). Falls back to source config. |
+| `topic` | no | Topic to consume. Falls back to source config. |
+| `nodeLabel` | no | Default node label for default mapping and tombstones. Falls back to source config. |
+| `mappings` | no | Custom mapping list. Falls back to source config. |
+| `securityProtocol` | no | Kafka `security.protocol` (e.g. `SASL_SSL`) |
+| `saslMechanism` | no | Kafka `sasl.mechanism` |
+| `saslUsername` | no | Kafka `sasl.username` |
+| `saslPassword` | no | Kafka `sasl.password` |
+| `additionalProperties` | no | Extra rdkafka properties |
 
-- `bootstrapServers`
-- `topic`
-- `nodeLabel`
-- optional `mappings`
-- optional security/SASL settings (`securityProtocol`, `saslMechanism`, `saslUsername`, `saslPassword`)
-- optional `additionalProperties`
-
-When bootstrap config omits values, descriptor creation can fallback to source config fields.
+When bootstrap config omits values, descriptor creation can fall back to source config fields.
 
 ## Usage
 

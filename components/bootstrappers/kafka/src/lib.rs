@@ -17,9 +17,10 @@
 //! Kafka Bootstrap Provider for Drasi
 //!
 //! This provider bootstraps initial data from a Kafka topic by consuming all
-//! existing messages from the beginning to the current high watermark.
-//! Messages are processed through the mapping engine: non-tombstone messages
-//! are emitted as Insert events and tombstones (null payload) as Delete events.
+//! existing messages from the low watermark to the current high watermark.
+//! Messages are processed through the mapping engine, which produces Insert,
+//! Update, or Delete events depending on the mapping configuration. Tombstones
+//! (null payload) are emitted as Delete events.
 //! The final position (high watermark vector) is returned for seamless handoff
 //! to streaming.
 
@@ -44,8 +45,9 @@ use tracing::{debug, info, warn};
 
 /// Kafka bootstrap provider that reads all existing messages from the topic.
 ///
-/// Creates a temporary consumer that reads from offset 0 to the high watermark
-/// for all partitions. Every message is emitted as an Insert event.
+/// Creates a temporary consumer that reads from the low watermark to the high
+/// watermark for all partitions. Messages are processed through the mapping
+/// engine, producing Insert, Update, or Delete events per the mapping config.
 /// The final source_position is the high watermark vector, enabling seamless
 /// handoff to the streaming consumer.
 pub struct KafkaBootstrapProvider {
