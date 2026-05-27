@@ -15,6 +15,7 @@
 //! Integration test for RabbitMQ reaction using testcontainers.
 
 use anyhow::{anyhow, Result};
+use drasi_lib::state_store::{StateStoreProvider, StateStoreResult};
 use drasi_lib::{DrasiLib, Query};
 use drasi_reaction_rabbitmq::{
     ExchangeType, PublishSpec, QueryPublishConfig, RabbitMQReaction, RabbitMQReactionConfig,
@@ -31,11 +32,69 @@ use lapin::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
+
+/// In-memory state store that reports itself as durable for testing purposes.
+struct DurableMemoryStateStore {
+    inner: drasi_lib::MemoryStateStoreProvider,
+}
+
+impl DurableMemoryStateStore {
+    fn new() -> Self {
+        Self {
+            inner: drasi_lib::MemoryStateStoreProvider::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StateStoreProvider for DurableMemoryStateStore {
+    async fn get(&self, store_id: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        self.inner.get(store_id, key).await
+    }
+    async fn set(&self, store_id: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+        self.inner.set(store_id, key, value).await
+    }
+    async fn delete(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        self.inner.delete(store_id, key).await
+    }
+    async fn contains_key(&self, store_id: &str, key: &str) -> StateStoreResult<bool> {
+        self.inner.contains_key(store_id, key).await
+    }
+    async fn get_many(
+        &self,
+        store_id: &str,
+        keys: &[&str],
+    ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
+        self.inner.get_many(store_id, keys).await
+    }
+    async fn set_many(&self, store_id: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        self.inner.set_many(store_id, entries).await
+    }
+    async fn delete_many(&self, store_id: &str, keys: &[&str]) -> StateStoreResult<usize> {
+        self.inner.delete_many(store_id, keys).await
+    }
+    async fn clear_store(&self, store_id: &str) -> StateStoreResult<usize> {
+        self.inner.clear_store(store_id).await
+    }
+    async fn list_keys(&self, store_id: &str) -> StateStoreResult<Vec<String>> {
+        self.inner.list_keys(store_id).await
+    }
+    async fn store_exists(&self, store_id: &str) -> StateStoreResult<bool> {
+        self.inner.store_exists(store_id).await
+    }
+    async fn key_count(&self, store_id: &str) -> StateStoreResult<usize> {
+        self.inner.key_count(store_id).await
+    }
+    fn is_durable(&self) -> bool {
+        true
+    }
+}
 
 async fn setup_rabbitmq() -> Result<(ContainerAsync<GenericImage>, String)> {
     let image = GenericImage::new("rabbitmq", "3.13-management")
@@ -169,6 +228,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
 
     let core = DrasiLib::builder()
         .with_id("rabbitmq-test-core")
+        .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
@@ -322,6 +382,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
 
     let core = DrasiLib::builder()
         .with_id("rabbitmq-agg-test-core")
+        .with_state_store_provider(Arc::new(DurableMemoryStateStore::new()))
         .with_source(source)
         .with_query(query)
         .with_reaction(reaction)
