@@ -16,6 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use drasi_lib::DurabilityConfig;
+
 /// Default timeout in milliseconds
 fn default_timeout_ms() -> u64 {
     5000
@@ -39,6 +41,14 @@ pub struct GrpcSourceConfig {
     /// Request timeout in milliseconds
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+
+    /// Optional WAL durability configuration.
+    ///
+    /// When present and enabled, the source persists incoming events to a
+    /// local Write-Ahead Log before acknowledging the caller, enabling
+    /// crash recovery and replay for persistent queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityConfig>,
 }
 
 fn default_host() -> String {
@@ -56,6 +66,7 @@ impl Default for GrpcSourceConfig {
             port: default_port(),
             endpoint: None,
             timeout_ms: default_timeout_ms(),
+            durability: None,
         }
     }
 }
