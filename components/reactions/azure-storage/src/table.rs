@@ -53,7 +53,9 @@ impl TableService {
         mut properties: Map<String, Value>,
     ) -> anyhow::Result<()> {
         if properties.contains_key("PartitionKey") {
-            debug!("upsert_entity: template included 'PartitionKey'; overwriting with computed value");
+            debug!(
+                "upsert_entity: template included 'PartitionKey'; overwriting with computed value"
+            );
         }
         properties.insert(
             "PartitionKey".to_string(),

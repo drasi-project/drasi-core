@@ -33,7 +33,10 @@ mod tests {
 
     #[test]
     fn uri_already_ends_with_account_name() {
-        let result = normalize_custom_uri("devstoreaccount1", "http://127.0.0.1:10000/devstoreaccount1");
+        let result = normalize_custom_uri(
+            "devstoreaccount1",
+            "http://127.0.0.1:10000/devstoreaccount1",
+        );
         assert_eq!(result, "http://127.0.0.1:10000/devstoreaccount1");
     }
 
@@ -51,7 +54,10 @@ mod tests {
 
     #[test]
     fn uri_with_trailing_slash_and_account_name() {
-        let result = normalize_custom_uri("devstoreaccount1", "http://127.0.0.1:10000/devstoreaccount1/");
+        let result = normalize_custom_uri(
+            "devstoreaccount1",
+            "http://127.0.0.1:10000/devstoreaccount1/",
+        );
         assert_eq!(result, "http://127.0.0.1:10000/devstoreaccount1");
     }
 }

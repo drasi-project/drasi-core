@@ -217,8 +217,8 @@ impl AzureStorageReactionConfig {
             ("table_endpoint", &self.table_endpoint),
         ] {
             if let Some(url) = ep {
-                let parsed = url::Url::parse(url)
-                    .with_context(|| format!("{name} is not a valid URL"))?;
+                let parsed =
+                    url::Url::parse(url).with_context(|| format!("{name} is not a valid URL"))?;
                 if !matches!(parsed.scheme(), "http" | "https") {
                     anyhow::bail!("{name} must use http or https scheme");
                 }

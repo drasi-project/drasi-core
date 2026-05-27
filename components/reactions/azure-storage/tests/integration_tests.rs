@@ -173,7 +173,10 @@ async fn start_drasi_with_reaction(
         )
     })
     .await;
-    assert!(ready, "reaction '{reaction_id}' did not reach Running status within timeout");
+    assert!(
+        ready,
+        "reaction '{reaction_id}' did not reach Running status within timeout"
+    );
     Ok((drasi, handle))
 }
 
@@ -386,7 +389,10 @@ async fn test_queue_reaction_aggregation() {
         )
     })
     .await;
-    assert!(ready, "reaction 'agg-queue-reaction' did not reach Running status within timeout");
+    assert!(
+        ready,
+        "reaction 'agg-queue-reaction' did not reach Running status within timeout"
+    );
 
     // First insert produces an aggregation result (sum goes from nothing to 10)
     handle

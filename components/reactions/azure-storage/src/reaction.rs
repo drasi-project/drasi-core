@@ -257,7 +257,9 @@ impl AzureStorageReaction {
                 let row_key = handlebars.render_template(row_key_template, &context)?;
                 for (name, key) in [("partitionKey", &partition_key), ("rowKey", &row_key)] {
                     if key.is_empty()
-                        || key.chars().any(|c| matches!(c, '/' | '\\' | '#' | '?') || c < ' ')
+                        || key
+                            .chars()
+                            .any(|c| matches!(c, '/' | '\\' | '#' | '?') || c < ' ')
                     {
                         anyhow::bail!("{name} contains invalid characters: {key:?}");
                     }
