@@ -31,6 +31,7 @@ pub struct DurableMemoryStateStoreProvider {
 }
 
 impl DurableMemoryStateStoreProvider {
+    /// Creates a new `DurableMemoryStateStoreProvider` backed by an in-memory store.
     pub fn new() -> Self {
         Self {
             inner: MemoryStateStoreProvider::new(),

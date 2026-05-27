@@ -242,28 +242,33 @@ impl PropertyMapBuilder {
         }
     }
 
+    /// Sets a string property.
     pub fn with_string(mut self, key: &str, value: &str) -> Self {
         self.properties
             .insert(key, ElementValue::String(Arc::from(value)));
         self
     }
 
+    /// Sets an integer property.
     pub fn with_integer(mut self, key: &str, value: i64) -> Self {
         self.properties.insert(key, ElementValue::Integer(value));
         self
     }
 
+    /// Sets a float property.
     pub fn with_float(mut self, key: &str, value: f64) -> Self {
         self.properties
             .insert(key, ElementValue::Float(OrderedFloat(value)));
         self
     }
 
+    /// Sets a boolean property.
     pub fn with_bool(mut self, key: &str, value: bool) -> Self {
         self.properties.insert(key, ElementValue::Bool(value));
         self
     }
 
+    /// Builds the property map.
     pub fn build(self) -> ElementPropertyMap {
         self.properties
     }
