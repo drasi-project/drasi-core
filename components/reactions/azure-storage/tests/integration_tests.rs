@@ -19,7 +19,7 @@ use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::{BlobServiceClient, ClientBuilder};
 use azure_storage_queues::prelude::QueueServiceClient;
 use azure_storage_queues::QueueServiceClientBuilder;
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Reaction};
 use drasi_reaction_azure_storage::{
     AzureStorageReaction, QueryConfig, StorageTarget, TemplateSpec,
 };
@@ -142,6 +142,7 @@ async fn start_drasi_with_reaction(
     reaction: AzureStorageReaction,
     query_id: &str,
 ) -> anyhow::Result<(DrasiLib, drasi_source_application::ApplicationSourceHandle)> {
+    let reaction_id = reaction.id().to_string();
     let (source, handle) = ApplicationSource::new(
         "app-source",
         ApplicationSourceConfig {
@@ -162,8 +163,17 @@ async fn start_drasi_with_reaction(
         .await?;
 
     drasi.start().await?;
-    // Brief pause to allow async subscription wiring to complete
-    sleep(Duration::from_millis(500)).await;
+    // Poll until the reaction reaches Running status
+    let drasi_ref = &drasi;
+    let rid = reaction_id.clone();
+    let ready = poll_until(|| async {
+        matches!(
+            drasi_ref.get_reaction_status(&rid).await,
+            Ok(ComponentStatus::Running)
+        )
+    })
+    .await;
+    assert!(ready, "reaction '{reaction_id}' did not reach Running status within timeout");
     Ok((drasi, handle))
 }
 
@@ -368,7 +378,15 @@ async fn test_queue_reaction_aggregation() {
         .expect("drasi should build");
 
     drasi.start().await.expect("drasi should start");
-    sleep(Duration::from_millis(500)).await;
+    let drasi_ref = &drasi;
+    let ready = poll_until(|| async {
+        matches!(
+            drasi_ref.get_reaction_status("agg-queue-reaction").await,
+            Ok(ComponentStatus::Running)
+        )
+    })
+    .await;
+    assert!(ready, "reaction 'agg-queue-reaction' did not reach Running status within timeout");
 
     // First insert produces an aggregation result (sum goes from nothing to 10)
     handle
