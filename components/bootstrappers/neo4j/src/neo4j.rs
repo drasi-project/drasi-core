@@ -20,7 +20,9 @@ use chrono::Utc;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult};
+use drasi_lib::bootstrap::{
+    BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
+};
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use log::info;
 use neo4rs::{query, BoltMap, BoltType, ConfigBuilder, Graph};
