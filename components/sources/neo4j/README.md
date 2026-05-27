@@ -25,10 +25,10 @@ See: https://neo4j.com/licensing/
 
 ## Configuration
 
-- `uri` (required): Bolt URI (for example `bolt://localhost:7687`)
+- `uri` (required): Bolt URI (for example `bolt://localhost:7687` or `bolt+s://host:7687` for TLS)
 - `user` (required): Neo4j username
-- `password`: Neo4j password
-- `database`: Database name (`neo4j` by default)
+- `password` (required): Neo4j password
+- `database` (required): Database name (`neo4j` by default)
 - `labels`: Node labels to monitor (empty means all)
 - `rel_types`: Relationship types to monitor (empty means all)
 - `poll_interval_ms`: CDC polling interval (default 500 ms)

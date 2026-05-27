@@ -25,9 +25,9 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
+use drasi_neo4j_common::mapping::bolt_map_to_element_properties;
 use log::info;
-use neo4rs::{query, BoltMap, BoltType, ConfigBuilder, Graph};
-use ordered_float::OrderedFloat;
+use neo4rs::{query, BoltType, ConfigBuilder, Graph};
 use std::sync::Arc;
 
 use crate::config::Neo4jBootstrapConfig;
@@ -228,7 +228,7 @@ async fn stream_nodes_query(
                 let props = row.get::<BoltType>("props")?;
 
                 let properties = match props {
-                    BoltType::Map(map) => bolt_map_to_properties(&map)?,
+                    BoltType::Map(map) => bolt_map_to_element_properties(&map)?,
                     _ => ElementPropertyMap::new(),
                 };
 
@@ -333,7 +333,7 @@ async fn stream_relationship_query(
                 let props = row.get::<BoltType>("props")?;
 
                 let properties = match props {
-                    BoltType::Map(map) => bolt_map_to_properties(&map)?,
+                    BoltType::Map(map) => bolt_map_to_element_properties(&map)?,
                     _ => ElementPropertyMap::new(),
                 };
 
@@ -372,53 +372,14 @@ fn quote_ident(input: &str) -> String {
     format!("`{}`", input.replace('`', "``"))
 }
 
-fn normalize_uri(uri: &str) -> String {
-    uri.trim()
-        .trim_start_matches("bolt+ssc://")
-        .trim_start_matches("bolt+s://")
-        .trim_start_matches("neo4j+ssc://")
-        .trim_start_matches("neo4j+s://")
-        .trim_start_matches("bolt://")
-        .trim_start_matches("neo4j://")
-        .to_string()
-}
-
 async fn connect_graph(config: &Neo4jBootstrapConfig) -> Result<Graph> {
     let neo4j_config = ConfigBuilder::default()
-        .uri(normalize_uri(&config.uri))
+        .uri(config.uri.trim())
         .user(config.user.as_str())
         .password(config.password.as_str())
         .db(config.database.as_str())
         .build()?;
     Ok(Graph::connect(neo4j_config).await?)
-}
-
-fn bolt_map_to_properties(map: &BoltMap) -> Result<ElementPropertyMap> {
-    let mut properties = ElementPropertyMap::new();
-    for (key, value) in &map.value {
-        properties.insert(&key.value, bolt_type_to_value(value)?);
-    }
-    Ok(properties)
-}
-
-fn bolt_type_to_value(value: &BoltType) -> Result<drasi_core::models::ElementValue> {
-    Ok(match value {
-        BoltType::Null(_) => drasi_core::models::ElementValue::Null,
-        BoltType::Boolean(v) => drasi_core::models::ElementValue::Bool(v.value),
-        BoltType::Integer(v) => drasi_core::models::ElementValue::Integer(v.value),
-        BoltType::Float(v) => drasi_core::models::ElementValue::Float(OrderedFloat(v.value)),
-        BoltType::String(v) => {
-            drasi_core::models::ElementValue::String(Arc::from(v.value.as_str()))
-        }
-        BoltType::List(v) => drasi_core::models::ElementValue::List(
-            v.value
-                .iter()
-                .map(bolt_type_to_value)
-                .collect::<Result<Vec<_>>>()?,
-        ),
-        BoltType::Map(v) => drasi_core::models::ElementValue::Object(bolt_map_to_properties(v)?),
-        other => drasi_core::models::ElementValue::String(Arc::from(other.to_string())),
-    })
 }
 
 fn now_ms() -> u64 {

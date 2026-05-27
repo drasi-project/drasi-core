@@ -13,37 +13,21 @@
 # limitations under the License.
 
 [package]
-name = "drasi-bootstrap-neo4j"
+name = "drasi-neo4j-common"
 version = "0.1.0"
 edition = "2021"
 authors = ["Drasi Project"]
-description = "Neo4j bootstrap provider plugin for Drasi"
+description = "Shared types for Neo4j source and bootstrap plugins"
 license = "Apache-2.0"
 repository = "https://github.com/drasi-project/drasi-core"
-keywords = ["drasi", "plugin", "bootstrap", "neo4j"]
-categories = ["development-tools"]
-
-[lib]
-crate-type = ["lib", "cdylib"]
+keywords = ["drasi", "neo4j", "common"]
+categories = ["database"]
 
 [lints]
 workspace = true
 
 [dependencies]
-drasi-lib.workspace = true
 drasi-core.workspace = true
-drasi-neo4j-common = { workspace = true }
-drasi-plugin-sdk = { workspace = true }
-utoipa = { workspace = true }
 anyhow = "1.0"
-async-trait = "0.1"
-bytes = "1"
-chrono = "0.4"
-log = "0.4"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.0", features = ["full"] }
 neo4rs = "0.8"
-
-[features]
-dynamic-plugin = []
+ordered-float = "3.0"

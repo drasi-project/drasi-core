@@ -23,7 +23,7 @@ pub mod config;
 pub mod descriptor;
 pub mod mapping;
 
-pub use config::{CdcMode, Neo4jSourceConfig, StartCursor};
+pub use config::{Neo4jSourceConfig, StartCursor};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -324,20 +324,9 @@ fn extract_event_time_ms(metadata: Option<&BoltType>) -> Option<u64> {
     }
 }
 
-fn normalize_uri(uri: &str) -> String {
-    uri.trim()
-        .trim_start_matches("bolt+ssc://")
-        .trim_start_matches("bolt+s://")
-        .trim_start_matches("neo4j+ssc://")
-        .trim_start_matches("neo4j+s://")
-        .trim_start_matches("bolt://")
-        .trim_start_matches("neo4j://")
-        .to_string()
-}
-
 async fn connect_graph(config: &Neo4jSourceConfig) -> Result<Graph> {
     let neo4j_config = ConfigBuilder::default()
-        .uri(normalize_uri(&config.uri))
+        .uri(config.uri.trim())
         .user(config.user.as_str())
         .password(config.password.as_str())
         .db(config.database.as_str())
@@ -355,7 +344,6 @@ pub struct Neo4jSourceBuilder {
     labels: Vec<String>,
     rel_types: Vec<String>,
     poll_interval_ms: u64,
-    cdc_mode: CdcMode,
     start_cursor: StartCursor,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
@@ -375,7 +363,6 @@ impl Neo4jSourceBuilder {
             labels: Vec::new(),
             rel_types: Vec::new(),
             poll_interval_ms: 500,
-            cdc_mode: CdcMode::Full,
             start_cursor: StartCursor::Now,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
@@ -417,11 +404,6 @@ impl Neo4jSourceBuilder {
 
     pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
         self.poll_interval_ms = u64::try_from(poll_interval.as_millis()).unwrap_or(u64::MAX);
-        self
-    }
-
-    pub fn with_cdc_mode(mut self, cdc_mode: CdcMode) -> Self {
-        self.cdc_mode = cdc_mode;
         self
     }
 
@@ -476,7 +458,6 @@ impl Neo4jSourceBuilder {
         self.labels = config.labels;
         self.rel_types = config.rel_types;
         self.poll_interval_ms = config.poll_interval_ms;
-        self.cdc_mode = config.cdc_mode;
         self.start_cursor = config.start_cursor;
         self
     }
@@ -490,7 +471,6 @@ impl Neo4jSourceBuilder {
             labels: self.labels,
             rel_types: self.rel_types,
             poll_interval_ms: self.poll_interval_ms,
-            cdc_mode: self.cdc_mode,
             start_cursor: self.start_cursor,
         };
         config.validate()?;

@@ -14,7 +14,7 @@
 
 //! Neo4j source plugin descriptor and configuration DTOs.
 
-use crate::{CdcMode, Neo4jSourceConfig, StartCursor};
+use crate::{Neo4jSourceConfig, StartCursor};
 use drasi_plugin_sdk::prelude::*;
 use utoipa::OpenApi;
 
@@ -49,32 +49,8 @@ pub struct Neo4jSourceConfigDto {
     pub poll_interval_ms: u64,
 
     #[serde(default)]
-    #[schema(value_type = source::neo4j::CdcMode)]
-    pub cdc_mode: CdcModeDto,
-
-    #[serde(default)]
     #[schema(value_type = source::neo4j::StartCursor)]
     pub start_cursor: StartCursorDto,
-}
-
-/// Neo4j CDC enrichment mode.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[schema(as = source::neo4j::CdcMode)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum CdcModeDto {
-    Diff,
-    #[default]
-    Full,
-}
-
-impl From<CdcModeDto> for CdcMode {
-    fn from(dto: CdcModeDto) -> Self {
-        match dto {
-            CdcModeDto::Diff => CdcMode::Diff,
-            CdcModeDto::Full => CdcMode::Full,
-        }
-    }
 }
 
 /// Startup behavior for CDC cursor initialization.
@@ -120,7 +96,7 @@ fn default_poll_interval_ms() -> u64 {
 }
 
 #[derive(OpenApi)]
-#[openapi(components(schemas(Neo4jSourceConfigDto, CdcModeDto, StartCursorDto,)))]
+#[openapi(components(schemas(Neo4jSourceConfigDto, StartCursorDto,)))]
 struct Neo4jSourceSchemas;
 
 /// Descriptor for the Neo4j source plugin.
@@ -168,7 +144,6 @@ impl SourcePluginDescriptor for Neo4jSourceDescriptor {
             labels: dto.labels,
             rel_types: dto.rel_types,
             poll_interval_ms: dto.poll_interval_ms,
-            cdc_mode: dto.cdc_mode.into(),
             start_cursor: dto.start_cursor.into(),
         };
 

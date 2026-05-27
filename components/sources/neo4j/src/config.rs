@@ -12,19 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Neo4j CDC enrichment mode expected on the remote database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CdcMode {
-    Diff,
-    Full,
-}
-
-impl Default for CdcMode {
-    fn default() -> Self {
-        Self::Full
-    }
-}
-
 /// Startup behavior for CDC cursor initialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartCursor {
@@ -48,14 +35,21 @@ impl Default for StartCursor {
 /// Configuration for the Neo4j CDC source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Neo4jSourceConfig {
+    /// Bolt URI for the Neo4j instance (e.g. `bolt://host:7687` or `bolt+s://host:7687`).
     pub uri: String,
+    /// Username for Neo4j authentication.
     pub user: String,
+    /// Password for Neo4j authentication.
     pub password: String,
+    /// Neo4j database name to connect to.
     pub database: String,
+    /// Node labels to subscribe to for CDC events. Empty means all labels.
     pub labels: Vec<String>,
+    /// Relationship types to subscribe to for CDC events. Empty means all types.
     pub rel_types: Vec<String>,
+    /// Polling interval in milliseconds for CDC queries.
     pub poll_interval_ms: u64,
-    pub cdc_mode: CdcMode,
+    /// Where to start reading CDC events from on first connection.
     pub start_cursor: StartCursor,
 }
 
@@ -101,9 +95,8 @@ impl Neo4jSourceConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_default_config() {
-        let config = Neo4jSourceConfig {
+    fn valid_config() -> Neo4jSourceConfig {
+        Neo4jSourceConfig {
             uri: "bolt://localhost:7687".to_string(),
             user: "neo4j".to_string(),
             password: "secret".to_string(),
@@ -111,13 +104,59 @@ mod tests {
             labels: Vec::new(),
             rel_types: Vec::new(),
             poll_interval_ms: 500,
-            cdc_mode: CdcMode::default(),
             start_cursor: StartCursor::default(),
-        };
+        }
+    }
 
-        assert_eq!(config.database, "neo4j");
-        assert_eq!(config.poll_interval_ms, 500);
-        assert_eq!(config.cdc_mode, CdcMode::Full);
-        assert_eq!(config.start_cursor, StartCursor::Now);
+    #[test]
+    fn test_valid_config_passes_validation() {
+        assert!(valid_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_uri() {
+        let mut config = valid_config();
+        config.uri = "  ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("uri cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_user() {
+        let mut config = valid_config();
+        config.user = "".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("user cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_database() {
+        let mut config = valid_config();
+        config.database = " ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("database cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_zero_poll_interval() {
+        let mut config = valid_config();
+        config.poll_interval_ms = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("poll_interval_ms cannot be 0"));
+    }
+
+    #[test]
+    fn test_validate_negative_timestamp() {
+        let mut config = valid_config();
+        config.start_cursor = StartCursor::Timestamp(-1);
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("timestamp cannot be negative"));
+    }
+
+    #[test]
+    fn test_validate_valid_timestamp() {
+        let mut config = valid_config();
+        config.start_cursor = StartCursor::Timestamp(1700000000000);
+        assert!(config.validate().is_ok());
     }
 }

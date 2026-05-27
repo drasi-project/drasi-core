@@ -12,6 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Re-exports shared Neo4j Bolt to Drasi mapping utilities.
+//! Shared utilities for Neo4j source and bootstrap plugins.
 
-pub use drasi_neo4j_common::mapping::{bolt_map_to_element_properties, bolt_type_to_element_value};
+pub mod mapping;

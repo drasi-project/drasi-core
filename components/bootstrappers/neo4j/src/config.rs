@@ -49,3 +49,48 @@ impl Neo4jBootstrapConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> Neo4jBootstrapConfig {
+        Neo4jBootstrapConfig {
+            uri: "bolt://localhost:7687".to_string(),
+            user: "neo4j".to_string(),
+            password: "secret".to_string(),
+            database: "neo4j".to_string(),
+            labels: vec!["Person".to_string()],
+            rel_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_valid_config_passes_validation() {
+        assert!(valid_config().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_uri() {
+        let mut config = valid_config();
+        config.uri = "  ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("uri cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_user() {
+        let mut config = valid_config();
+        config.user = "".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("user cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_empty_database() {
+        let mut config = valid_config();
+        config.database = " ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("database cannot be empty"));
+    }
+}

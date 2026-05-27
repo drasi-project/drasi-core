@@ -403,4 +403,53 @@ mod tests {
         let change = parse_source_change("src", &event, 100).unwrap().unwrap();
         assert!(matches!(change, SourceChange::Insert { .. }));
     }
+
+    #[test]
+    fn test_build_selectors_empty() {
+        let selectors = build_selectors(&[], &[]);
+        assert!(selectors.is_empty());
+    }
+
+    #[test]
+    fn test_build_selectors_labels_only() {
+        let selectors = build_selectors(&["Person".to_string(), "Movie".to_string()], &[]);
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(
+            selectors[0].get("select"),
+            Some(&BoltType::String("n".into()))
+        );
+        assert_eq!(
+            selectors[1].get("select"),
+            Some(&BoltType::String("n".into()))
+        );
+    }
+
+    #[test]
+    fn test_build_selectors_rel_types_only() {
+        let selectors = build_selectors(&[], &["ACTED_IN".to_string()]);
+        assert_eq!(selectors.len(), 1);
+        assert_eq!(
+            selectors[0].get("select"),
+            Some(&BoltType::String("r".into()))
+        );
+        assert_eq!(
+            selectors[0].get("type"),
+            Some(&BoltType::String("ACTED_IN".into()))
+        );
+    }
+
+    #[test]
+    fn test_build_selectors_mixed() {
+        let selectors =
+            build_selectors(&["Person".to_string()], &["KNOWS".to_string()]);
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(
+            selectors[0].get("select"),
+            Some(&BoltType::String("n".into()))
+        );
+        assert_eq!(
+            selectors[1].get("select"),
+            Some(&BoltType::String("r".into()))
+        );
+    }
 }
