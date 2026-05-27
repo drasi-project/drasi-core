@@ -877,9 +877,14 @@ impl HttpSource {
                             }
                             Err(e) => {
                                 error!("[{source_id}] WAL append failed: {e}");
-                                error_count += 1;
-                                last_error = Some(format!("WAL error: {e}"));
-                                continue;
+                                // WAL durability failure — reject to maintain at-least-once guarantee
+                                return handle_error(
+                                    error_behavior,
+                                    source_id,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    &format!("WAL durability failure: {e}"),
+                                    None,
+                                );
                             }
                         }
                     } else {
