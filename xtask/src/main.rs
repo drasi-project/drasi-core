@@ -81,7 +81,13 @@ struct PluginArtifactMetadata {
 ///       "drasi-bootstrap-mssql" → ("bootstrap", "mssql")
 fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     let stripped = crate_name.strip_prefix("drasi-")?;
-    for prefix in &["source-", "reaction-", "bootstrap-", "identity-", "secret-store-"] {
+    for prefix in &[
+        "source-",
+        "reaction-",
+        "bootstrap-",
+        "identity-",
+        "secret-store-",
+    ] {
         if let Some(kind) = stripped.strip_prefix(prefix) {
             let plugin_type = prefix.trim_end_matches('-');
             return Some((plugin_type.to_string(), kind.to_string()));
@@ -898,9 +904,7 @@ fn cosign_sign(reference: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let mut cmd = Command::new("cosign");
-    cmd.arg("sign")
-        .arg("--yes")
-        .arg(reference);
+    cmd.arg("sign").arg("--yes").arg(reference);
 
     // If COSIGN_KEY is set, use key-based signing
     if let Ok(key) = std::env::var("COSIGN_KEY") {
