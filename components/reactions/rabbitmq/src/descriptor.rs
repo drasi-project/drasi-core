@@ -191,7 +191,8 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
         }
 
         if let Some(ref message_persistent) = dto.message_persistent {
-            builder = builder.with_message_persistent(mapper.resolve_typed(message_persistent).await?);
+            builder =
+                builder.with_message_persistent(mapper.resolve_typed(message_persistent).await?);
         }
 
         if let Some(ref tls_enabled) = dto.tls_enabled {
