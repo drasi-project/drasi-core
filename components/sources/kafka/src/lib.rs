@@ -41,7 +41,7 @@ pub mod descriptor;
 mod position;
 
 pub use config::{AutoOffsetReset, KafkaSourceConfig};
-pub use position::{encode_position, KafkaPositionComparator};
+pub use position::{decode_position, encode_position, KafkaPositionComparator};
 
 use async_trait::async_trait;
 use config::KafkaSourceBuilder;
@@ -268,7 +268,7 @@ impl Source for KafkaSource {
     ) -> anyhow::Result<SubscriptionResponse> {
         if let Some(ref resume_bytes) = settings.resume_from {
             match position::decode_position(resume_bytes) {
-                Some(offsets) => {
+                Some((_from_partition, offsets)) => {
                     self.subscriber_resume_positions
                         .write()
                         .await

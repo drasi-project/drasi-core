@@ -18,8 +18,10 @@
 //!
 //! This provider bootstraps initial data from a Kafka topic by consuming all
 //! existing messages from the beginning to the current high watermark.
-//! Each message is emitted as an Insert event, and the final position
-//! (high watermark vector) is returned for seamless handoff to streaming.
+//! Messages are processed through the mapping engine: non-tombstone messages
+//! are emitted as Insert events and tombstones (null payload) as Delete events.
+//! The final position (high watermark vector) is returned for seamless handoff
+//! to streaming.
 
 pub mod descriptor;
 
@@ -244,7 +246,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 "Topic '{}' is empty, nothing to bootstrap",
                 self.config.topic
             );
-            let position = encode_position(&high_watermarks);
+            let position = encode_position(0, &high_watermarks);
             return Ok(BootstrapResult {
                 event_count: 0,
                 last_sequence: None,
@@ -281,7 +283,11 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 break;
             }
 
-            match consumer.poll(poll_timeout) {
+            // Use block_in_place so the blocking poll doesn't starve the Tokio runtime.
+            let poll_result =
+                tokio::task::block_in_place(|| consumer.poll(poll_timeout));
+
+            match poll_result {
                 Some(Ok(msg)) => {
                     let partition = msg.partition() as usize;
                     let offset = msg.offset();
@@ -358,7 +364,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             }
         }
 
-        let position = encode_position(&high_watermarks);
+        let position = encode_position(0, &high_watermarks);
 
         info!(
             "Kafka bootstrap completed for query '{}': {} events from {} partitions",

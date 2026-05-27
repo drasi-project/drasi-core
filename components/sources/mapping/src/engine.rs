@@ -26,7 +26,9 @@ use handlebars::{
     Context, Handlebars, Helper, HelperResult, Output, RenderContext, RenderErrorReason,
 };
 use ordered_float::OrderedFloat;
+use regex::Regex;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Source mapping engine that transforms payloads into graph change events.
@@ -40,6 +42,7 @@ use std::sync::Arc;
 /// - Kafka source: `{ "payload": ..., "key": ..., "topic": ..., "partition": ..., "offset": ... }`
 pub struct SourceMappingEngine {
     handlebars: Handlebars<'static>,
+    regex_cache: std::sync::Mutex<HashMap<String, Regex>>,
 }
 
 impl SourceMappingEngine {
@@ -50,7 +53,10 @@ impl SourceMappingEngine {
 
         register_helpers(&mut handlebars);
 
-        Self { handlebars }
+        Self {
+            handlebars,
+            regex_cache: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Render a template string with the given context
@@ -139,6 +145,9 @@ impl SourceMappingEngine {
                 || field_path.starts_with("key")
                 || field_path.starts_with("topic")
                 || field_path.starts_with("headers.")
+                || field_path.starts_with("partition")
+                || field_path.starts_with("offset")
+                || field_path.starts_with("source_id")
             {
                 field_path.clone()
             } else {
@@ -169,6 +178,16 @@ impl SourceMappingEngine {
         }
 
         if let Some(ref regex_str) = condition.regex {
+            if let Ok(mut cache) = self.regex_cache.lock() {
+                let re = cache
+                    .entry(regex_str.clone())
+                    .or_insert_with(|| {
+                        regex::Regex::new(regex_str)
+                            .unwrap_or_else(|_| regex::Regex::new("(?:)").expect("infallible"))
+                    });
+                return re.is_match(&value_str);
+            }
+            // Mutex poisoned — fall back to one-shot compile
             if let Ok(re) = regex::Regex::new(regex_str) {
                 return re.is_match(&value_str);
             }
@@ -668,7 +687,10 @@ fn parse_with_format(value: &str, format: &TimestampFormat) -> Result<u64> {
                 .trim()
                 .parse()
                 .map_err(|e| anyhow!("Invalid Unix seconds: {e}"))?;
-            Ok((secs * 1000) as u64)
+            if secs < 0 {
+                return Err(anyhow!("Negative Unix timestamp not supported: {secs}"));
+            }
+            Ok((secs as u64) * 1000)
         }
         TimestampFormat::UnixMillis => {
             let millis: u64 = value

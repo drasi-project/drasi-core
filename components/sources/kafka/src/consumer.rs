@@ -47,8 +47,17 @@ impl KafkaConsumerTask {
         let consumer = self.create_consumer()?;
 
         // Don't consume until at least one query has subscribed, otherwise events
-        // can be dropped before any dispatcher exists.
-        self.base.wait_for_subscribers().await;
+        // can be dropped before any dispatcher exists. Also watch for shutdown so
+        // stopping before any subscription doesn't hang forever.
+        tokio::select! {
+            _ = self.base.wait_for_subscribers() => {}
+            _ = self.shutdown_rx.changed() => {
+                if *self.shutdown_rx.borrow() {
+                    info!("[{}] Shutdown before any subscribers", self.source_id);
+                    return Ok(());
+                }
+            }
+        }
 
         // Get topic metadata to discover partition count
         let metadata = consumer
@@ -104,8 +113,24 @@ impl KafkaConsumerTask {
             );
         }
 
-        // Track current offsets per partition (next offset to consume)
-        let mut current_offsets = min_resume_offsets.unwrap_or_else(|| vec![0; partition_count]);
+        // Track current offsets per partition (next offset to consume).
+        // For Latest mode without resume, use high watermarks so checkpoints
+        // don't incorrectly encode offset 0.
+        let mut current_offsets = if let Some(offsets) = min_resume_offsets {
+            offsets
+        } else if matches!(self.config.auto_offset_reset, crate::config::AutoOffsetReset::Latest)
+        {
+            let mut watermarks = Vec::with_capacity(partition_count);
+            for p in 0..partition_count as i32 {
+                let (_, high) = consumer
+                    .fetch_watermarks(&self.config.topic, p, std::time::Duration::from_secs(5))
+                    .unwrap_or((0, 0));
+                watermarks.push(high);
+            }
+            watermarks
+        } else {
+            vec![0; partition_count]
+        };
 
         // Consume messages
         loop {
@@ -154,7 +179,7 @@ impl KafkaConsumerTask {
                                         timestamp: chrono::Utc::now(),
                                         profiling: None,
                                         sequence: None,
-                                        source_position: Some(encode_position(&offsets_for_event)),
+                                        source_position: Some(encode_position(partition, &offsets_for_event)),
                                     };
 
                                     if let Err(e) = self.base.dispatch_event(wrapper).await {
@@ -229,7 +254,12 @@ impl KafkaConsumerTask {
                 },
             );
 
-        // Security configuration
+        // Additional properties applied FIRST so explicit settings below always win.
+        for (key, value) in &self.config.additional_properties {
+            client_config.set(key, value);
+        }
+
+        // Security configuration (applied after additional_properties to prevent override)
         if let Some(ref protocol) = self.config.security_protocol {
             client_config.set("security.protocol", protocol);
         }
@@ -241,11 +271,6 @@ impl KafkaConsumerTask {
         }
         if let Some(ref password) = self.config.sasl_password {
             client_config.set("sasl.password", password);
-        }
-
-        // Additional properties (escape hatch)
-        for (key, value) in &self.config.additional_properties {
-            client_config.set(key, value);
         }
 
         let consumer: StreamConsumer = client_config
