@@ -578,7 +578,7 @@ mod tests {
                 assert_eq!(&*meta.reference.element_id, "item-1");
                 assert_eq!(&*meta.labels[0], "TestNode");
             }
-            other => panic!("Expected Insert, got {:?}", other),
+            other => panic!("Expected Insert, got {other:?}"),
         }
     }
 
@@ -593,7 +593,7 @@ mod tests {
                 assert_eq!(&*metadata.reference.source_id, "src-1");
                 assert_eq!(&*metadata.labels[0], "TestNode");
             }
-            other => panic!("Expected Delete, got {:?}", other),
+            other => panic!("Expected Delete, got {other:?}"),
         }
     }
 

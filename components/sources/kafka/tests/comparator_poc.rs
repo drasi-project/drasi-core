@@ -174,7 +174,7 @@ fn poc_multi_subscriber_delivery_count() {
     let resume_a = encode_position(0, &[10, 5]);
     let resume_b = encode_position(0, &[8, 7]);
 
-    let events = vec![
+    let events = [
         encode_position(0, &[9, 5]),  // P0:8
         encode_position(1, &[9, 6]),  // P1:5
         encode_position(0, &[10, 6]), // P0:9
