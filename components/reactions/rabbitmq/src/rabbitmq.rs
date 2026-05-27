@@ -555,7 +555,7 @@ impl Reaction for RabbitMQReaction {
 
                 for result in &query_result.results {
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             if let Some(spec) = query_config.added.as_ref() {
                                 if let Err(e) = Self::publish_result(
                                     &channel,
@@ -578,7 +578,7 @@ impl Reaction for RabbitMQReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             if let Some(spec) = query_config.deleted.as_ref() {
                                 if let Err(e) = Self::publish_result(
                                     &channel,
@@ -629,7 +629,7 @@ impl Reaction for RabbitMQReaction {
                                 }
                             }
                         }
-                        ResultDiff::Aggregation { before, after } => {
+                        ResultDiff::Aggregation { before, after, .. } => {
                             if let Some(spec) = query_config.updated.as_ref() {
                                 if let Err(e) = Self::publish_result(
                                     &channel,

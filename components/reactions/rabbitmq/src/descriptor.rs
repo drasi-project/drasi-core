@@ -166,17 +166,17 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
         let defaults = crate::RabbitMQReactionConfig::default();
 
         let connection_string = match dto.connection_string.as_ref() {
-            Some(value) => mapper.resolve_string(value)?,
+            Some(value) => mapper.resolve_string(value).await?,
             None => defaults.connection_string,
         };
 
         let exchange_name = match dto.exchange_name.as_ref() {
-            Some(value) => mapper.resolve_string(value)?,
+            Some(value) => mapper.resolve_string(value).await?,
             None => defaults.exchange_name,
         };
 
         let exchange_type = match dto.exchange_type.as_ref() {
-            Some(value) => parse_exchange_type(&mapper.resolve_string(value)?)?,
+            Some(value) => parse_exchange_type(&mapper.resolve_string(value).await?)?,
             None => defaults.exchange_type,
         };
 
@@ -187,21 +187,21 @@ impl ReactionPluginDescriptor for RabbitMQReactionDescriptor {
             .with_exchange(exchange_name, exchange_type);
 
         if let Some(ref exchange_durable) = dto.exchange_durable {
-            builder = builder.with_exchange_durable(mapper.resolve_typed(exchange_durable)?);
+            builder = builder.with_exchange_durable(mapper.resolve_typed(exchange_durable).await?);
         }
 
         if let Some(ref message_persistent) = dto.message_persistent {
-            builder = builder.with_message_persistent(mapper.resolve_typed(message_persistent)?);
+            builder = builder.with_message_persistent(mapper.resolve_typed(message_persistent).await?);
         }
 
         if let Some(ref tls_enabled) = dto.tls_enabled {
-            if mapper.resolve_typed(tls_enabled)? {
+            if mapper.resolve_typed(tls_enabled).await? {
                 let tls_cert_path = match dto.tls_cert_path.as_ref() {
-                    Some(value) => Some(mapper.resolve_string(value)?),
+                    Some(value) => Some(mapper.resolve_string(value).await?),
                     None => None,
                 };
                 let tls_pfx_path = match dto.tls_pfx_path.as_ref() {
-                    Some(value) => Some(mapper.resolve_string(value)?),
+                    Some(value) => Some(mapper.resolve_string(value).await?),
                     None => None,
                 };
                 builder = builder.with_tls(tls_cert_path, tls_pfx_path);
