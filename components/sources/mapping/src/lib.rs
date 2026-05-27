@@ -29,10 +29,15 @@
 //! to the Drasi query engine.
 
 mod config;
+mod dto;
 mod engine;
 
 pub use config::{
     EffectiveFromConfig, ElementTemplate, ElementType, MappingCondition, OperationType,
     SourceMapping, TimestampFormat,
+};
+pub use dto::{
+    EffectiveFromConfigDto, ElementTemplateDto, ElementTypeDto, MappingConditionDto,
+    OperationTypeDto, SourceMappingDto, TimestampFormatDto,
 };
 pub use engine::{json_to_element_value, SourceMappingEngine};

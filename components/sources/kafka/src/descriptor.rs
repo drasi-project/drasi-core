@@ -16,7 +16,7 @@
 
 use crate::{AutoOffsetReset, KafkaSource};
 use drasi_plugin_sdk::prelude::*;
-use drasi_source_mapping::SourceMapping;
+use drasi_source_mapping::SourceMappingDto;
 use std::collections::HashMap;
 use std::str::FromStr;
 use utoipa::OpenApi;
@@ -73,8 +73,8 @@ pub struct KafkaSourceConfigDto {
     pub node_label: ConfigValue<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
-    pub mappings: Option<serde_json::Value>,
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub mappings: Option<Vec<SourceMappingDto>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
@@ -187,8 +187,8 @@ impl SourcePluginDescriptor for KafkaSourceDescriptor {
             .node_label(node_label)
             .auto_offset_reset(auto_offset_reset);
 
-        if let Some(mappings_json) = dto.mappings {
-            let mappings: Vec<SourceMapping> = serde_json::from_value(mappings_json)?;
+        if let Some(mapping_dtos) = dto.mappings {
+            let mappings = mapping_dtos.into_iter().map(Into::into).collect();
             builder = builder.mappings(mappings);
         }
 

@@ -17,7 +17,7 @@
 use crate::KafkaBootstrapProvider;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_plugin_sdk::prelude::*;
-use drasi_source_mapping::SourceMapping;
+use drasi_source_mapping::SourceMappingDto;
 use std::collections::HashMap;
 use utoipa::OpenApi;
 
@@ -39,8 +39,8 @@ pub struct KafkaBootstrapConfigDto {
     pub node_label: Option<ConfigValue<String>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<Object>)]
-    pub mappings: Option<serde_json::Value>,
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub mappings: Option<Vec<SourceMappingDto>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<ConfigValueString>)]
@@ -68,7 +68,7 @@ struct KafkaSourceFallbackConfig {
     bootstrap_servers: Option<ConfigValue<String>>,
     topic: Option<ConfigValue<String>>,
     node_label: Option<ConfigValue<String>>,
-    mappings: Option<serde_json::Value>,
+    mappings: Option<Vec<SourceMappingDto>>,
     security_protocol: Option<ConfigValue<String>>,
     sasl_mechanism: Option<ConfigValue<String>>,
     sasl_username: Option<ConfigValue<String>>,
@@ -140,9 +140,9 @@ impl BootstrapPluginDescriptor for KafkaBootstrapDescriptor {
             .topic(mapper.resolve_string(topic_cfg).await?)
             .node_label(mapper.resolve_string(node_label_cfg).await?);
 
-        let mappings_json = dto.mappings.or(source_fallback.mappings);
-        if let Some(value) = mappings_json {
-            let mappings: Vec<SourceMapping> = serde_json::from_value(value)?;
+        let mapping_dtos = dto.mappings.or(source_fallback.mappings);
+        if let Some(dtos) = mapping_dtos {
+            let mappings = dtos.into_iter().map(Into::into).collect();
             builder = builder.mappings(mappings);
         }
 
