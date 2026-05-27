@@ -91,11 +91,12 @@ impl KafkaBootstrapProvider {
     }
 
     /// Create a base consumer for bootstrap reading.
-    fn create_consumer(&self) -> Result<BaseConsumer> {
+    fn create_consumer(&self, source_id: &str) -> Result<BaseConsumer> {
+        let group_id = format!("__drasi_bootstrap_{}_{}", source_id, uuid::Uuid::new_v4());
         let mut client_config = ClientConfig::new();
         client_config
             .set("bootstrap.servers", &self.config.bootstrap_servers)
-            .set("group.id", "__drasi_bootstrap_internal")
+            .set("group.id", &group_id)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest");
 
@@ -185,7 +186,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             request.query_id, self.config.topic
         );
 
-        let consumer = self.create_consumer()?;
+        let consumer = self.create_consumer(&context.source_id)?;
 
         // Get topic metadata to discover partition count
         let metadata = consumer
