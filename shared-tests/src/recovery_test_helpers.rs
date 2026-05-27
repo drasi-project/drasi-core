@@ -224,7 +224,6 @@ pub async fn wait_for_component_status(
 }
 
 /// Assert that no error event arrives for a component during a quiet period.
-#[allow(dead_code)]
 pub async fn assert_no_error_event(
     event_rx: &mut broadcast::Receiver<ComponentEvent>,
     component_id: &str,
@@ -353,8 +352,9 @@ where
     .await?;
 
     insert_person(&handle, "live", "Live", 99).await?;
-    // Wait for the live event to be processed, then verify the reaction is still Running.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Verify no error event arrives after processing the live event,
+    // then confirm the reaction is still in the Running state.
+    assert_no_error_event(&mut event_rx, reaction_id, Duration::from_millis(500)).await?;
     assert_reaction_running(&core, reaction_id).await?;
 
     core.stop().await?;
@@ -398,7 +398,10 @@ where
         .await?;
     }
 
-    let restart_result = core.start_reaction(reaction_id).await;
+    // start_reaction may return Err synchronously (current behavior) or Ok(())
+    // with an async transition to Error. Either way, we verify the reaction
+    // reaches Error status.
+    let _restart_result = core.start_reaction(reaction_id).await;
 
     wait_for_component_status(
         &mut event_rx,
@@ -407,11 +410,6 @@ where
         Duration::from_secs(5),
     )
     .await?;
-
-    assert!(
-        restart_result.is_err(),
-        "Strict recovery should fail when the outbox has a gap"
-    );
 
     core.stop().await?;
     Ok(())
