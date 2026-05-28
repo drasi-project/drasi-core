@@ -573,10 +573,29 @@ function renderMap(widget, runtime, container) {
   }, true);
 }
 
+// Per-widget sort state for table column sorting
+const tableSortState = new Map();
+
 function renderTable(widget, runtime, container) {
-  const rows = asRows(runtime);
+  let rows = asRows(runtime);
   const cfgCols = widget.config?.columns ?? [];
   const columns = cfgCols.length > 0 ? cfgCols : Object.keys(rows[0] ?? {});
+
+  // Apply sort if active for this widget
+  const sortState = tableSortState.get(widget.id);
+  if (sortState) {
+    rows = [...rows].sort((a, b) => {
+      const va = a?.[sortState.field], vb = b?.[sortState.field];
+      const na = Number(va), nb = Number(vb);
+      let cmp;
+      if (Number.isFinite(na) && Number.isFinite(nb)) {
+        cmp = na - nb;
+      } else {
+        cmp = String(va ?? "").localeCompare(String(vb ?? ""));
+      }
+      return sortState.order === "desc" ? -cmp : cmp;
+    });
+  }
 
   const isNumeric = (v) => typeof v === "number" || (typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v));
 
@@ -605,7 +624,20 @@ function renderTable(widget, runtime, container) {
   const headRow = document.createElement("tr");
   columns.forEach((c) => {
     const th = document.createElement("th");
-    th.textContent = String(c);
+    th.style.cursor = "pointer";
+    th.style.userSelect = "none";
+    const label = String(c);
+    const arrow = sortState?.field === c ? (sortState.order === "asc" ? " ▲" : " ▼") : "";
+    th.textContent = label + arrow;
+    th.addEventListener("click", () => {
+      const current = tableSortState.get(widget.id);
+      if (current?.field === c) {
+        tableSortState.set(widget.id, { field: c, order: current.order === "asc" ? "desc" : "asc" });
+      } else {
+        tableSortState.set(widget.id, { field: c, order: "asc" });
+      }
+      renderTable(widget, runtime, container);
+    });
     headRow.appendChild(th);
   });
   thead.appendChild(headRow);
