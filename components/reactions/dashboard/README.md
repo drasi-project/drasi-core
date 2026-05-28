@@ -122,8 +122,22 @@ Available context:
 | `latest` | Last updated row |
 | `aggregation` | Query-level aggregation value (if any) |
 
-Built-in helpers: `sum`, `avg`, `min`, `max`, `count`, `format` (currency/percent/compact),
-`eq`, `gt`, `lt`, `gte`, `lte`.
+Built-in helpers:
+
+| Helper | Usage | Description |
+|---|---|---|
+| `sum` | `{{sum "field"}}` | Sum of a numeric field across all rows |
+| `avg` | `{{avg "field"}}` | Average (2 decimal places) |
+| `min` | `{{min "field"}}` | Minimum value |
+| `max` | `{{max "field"}}` | Maximum value |
+| `count` | `{{count}}` | Number of rows |
+| `format` | `{{format value "style"}}` | Format number: `currency` ($1,234.56), `percent` (12.34%), `compact` (1.2K/M/B) |
+| `eq` | `{{eq a b}}` | Strict equality |
+| `gt` / `lt` | `{{gt a b}}` | Greater / less than |
+| `gte` / `lte` | `{{gte a b}}` | Greater/less or equal |
+| `link` | `{{link url "text"}}` | Hyperlink opening in a new tab (`target="_blank"`) |
+| `sortBy` | `{{#sortBy rows "field" "desc"}}...{{/sortBy}}` | Block helper to sort rows by field (ascending by default) |
+| `html` | `{{html myVar}}` | Render raw HTML (bypasses Handlebars escaping; still sanitized by DOMPurify) |
 
 ```handlebars
 ## {{count}} sensors online
@@ -133,6 +147,24 @@ Built-in helpers: `sum`, `avg`, `min`, `max`, `count`, `format` (currency/percen
 {{/each}}
 
 Average reading: {{format (avg "value") "compact"}}
+```
+
+#### Sorting and Links Example
+
+```handlebars
+## Top Sensors (highest first)
+
+{{#sortBy rows "value" "desc"}}
+- {{link this.url this.name}} — {{this.value}} {{this.unit}}
+{{/sortBy}}
+```
+
+#### Raw HTML Example
+
+```handlebars
+{{#each rows}}
+{{html this.richDescription}}
+{{/each}}
 ```
 
 ## HTTP API

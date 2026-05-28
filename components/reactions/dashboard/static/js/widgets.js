@@ -122,6 +122,45 @@ if (window.Handlebars) {
   Hbs.registerHelper("lt", function (a, b) { return Number(a) < Number(b); });
   Hbs.registerHelper("gte", function (a, b) { return Number(a) >= Number(b); });
   Hbs.registerHelper("lte", function (a, b) { return Number(a) <= Number(b); });
+
+  // Hyperlink helper — generates an <a> tag that opens in a new tab.
+  // Usage: {{link url "Link Text"}} or {{link url}} (defaults text to the URL)
+  Hbs.registerHelper("link", function (url, text) {
+    const href = String(url ?? "");
+    const label = typeof text === "string" ? text : href;
+    return new Hbs.SafeString(
+      `<a href="${href.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${Hbs.Utils.escapeExpression(label)}</a>`
+    );
+  });
+
+  // Sort helper — block helper that sorts rows by a field.
+  // Usage: {{#sortBy rows "field"}}...{{/sortBy}} or {{#sortBy rows "field" "desc"}}...{{/sortBy}}
+  Hbs.registerHelper("sortBy", function (rows, field, order, options) {
+    if (typeof order === "object") { options = order; order = "asc"; }
+    const arr = Array.isArray(rows) ? [...rows] : [];
+    arr.sort((a, b) => {
+      const va = a?.[field], vb = b?.[field];
+      const na = Number(va), nb = Number(vb);
+      let cmp;
+      if (Number.isFinite(na) && Number.isFinite(nb)) {
+        cmp = na - nb;
+      } else {
+        cmp = String(va ?? "").localeCompare(String(vb ?? ""));
+      }
+      return order === "desc" ? -cmp : cmp;
+    });
+    let result = "";
+    for (let i = 0; i < arr.length; i++) {
+      result += options.fn(arr[i], { data: { ...options.data, index: i, first: i === 0, last: i === arr.length - 1 } });
+    }
+    return result;
+  });
+
+  // HTML helper — marks content as safe HTML (bypasses Handlebars escaping).
+  // Usage: {{html myHtmlContent}} — output is still sanitized by DOMPurify in the render pipeline.
+  Hbs.registerHelper("html", function (content) {
+    return new Hbs.SafeString(String(content ?? ""));
+  });
 }
 
 export const WIDGET_TYPES = [

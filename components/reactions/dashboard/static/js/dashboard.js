@@ -318,6 +318,13 @@ export class DashboardDesigner {
               <tr><td><code>{{gt a b}}</code> / <code>{{lt a b}}</code></td><td>Greater / Less than</td></tr>
               <tr><td><code>{{gte a b}}</code> / <code>{{lte a b}}</code></td><td>Greater/Less or equal</td></tr>
             </table>
+            <h4>Links, Sorting &amp; HTML</h4>
+            <table class="help-table">
+              <tr><td><code>{{link url "text"}}</code></td><td>Hyperlink opening in new tab</td></tr>
+              <tr><td><code>{{#sortBy rows "field"}}...{{/sortBy}}</code></td><td>Sort rows ascending</td></tr>
+              <tr><td><code>{{#sortBy rows "field" "desc"}}...{{/sortBy}}</code></td><td>Sort rows descending</td></tr>
+              <tr><td><code>{{html myVar}}</code></td><td>Render raw HTML (sanitized by DOMPurify)</td></tr>
+            </table>
             <h4>Markdown</h4>
             <p>Supports full Markdown: <code>**bold**</code>, <code>*italic*</code>, headings, lists, tables, code blocks, and horizontal rules.</p>
           </div>`;
