@@ -1,5 +1,8 @@
 // Tests for custom Handlebars helpers registered in widgets.js.
 // Run: node tests/handlebars_helpers.test.js
+//
+// This file loads the actual widgets.js source into a VM sandbox so that
+// helper implementations are tested directly from production code.
 
 const { readFileSync } = require("fs");
 const path = require("path");
@@ -11,96 +14,38 @@ const handlebarsSource = readFileSync(
   "utf-8"
 );
 
-const sandbox = { module: { exports: {} }, exports: {}, global: {}, self: {} };
-vm.runInNewContext(handlebarsSource, sandbox, { filename: "handlebars.min.js" });
-const Handlebars = sandbox.module.exports;
+const hbsSandbox = { module: { exports: {} }, exports: {}, global: {}, self: {} };
+vm.runInNewContext(handlebarsSource, hbsSandbox, { filename: "handlebars.min.js" });
+const Handlebars = hbsSandbox.module.exports;
 
-// ─── Register helpers (extracted logic from widgets.js) ─────────────
-const Hbs = Handlebars;
+// Load widgets.js into a sandbox with browser-like stubs.
+// The file uses `window`, `document`, ES module `export`, and `Map`.
+const widgetsSource = readFileSync(
+  path.join(__dirname, "../static/js/widgets.js"),
+  "utf-8"
+);
 
-Hbs.registerHelper("sum", function (field, options) {
-  const rows = options?.data?.root?.rows ?? [];
-  return rows.reduce((acc, r) => acc + (Number(r?.[field]) || 0), 0);
-});
+const widgetsSandbox = {
+  window: { Handlebars, echarts: null },
+  document: { createElement: () => ({}), documentElement: { getAttribute: () => "dark" } },
+  Map,
+  Number,
+  Math,
+  Array,
+  String,
+  Object,
+  RegExp,
+  JSON,
+  console,
+  // export keyword stub — widgets.js uses `export const ...` and `export function ...`
+};
 
-Hbs.registerHelper("avg", function (field, options) {
-  const rows = options?.data?.root?.rows ?? [];
-  if (rows.length === 0) return 0;
-  const sum = rows.reduce((acc, r) => acc + (Number(r?.[field]) || 0), 0);
-  return (sum / rows.length).toFixed(2);
-});
+// Strip ES module export syntax so it can run as a script in vm
+const strippedSource = widgetsSource
+  .replace(/^export\s+/gm, "")
+  .replace(/^import\s+.*$/gm, "");
 
-Hbs.registerHelper("min", function (field, options) {
-  const rows = options?.data?.root?.rows ?? [];
-  if (rows.length === 0) return 0;
-  const val = Math.min(...rows.map((r) => Number(r?.[field]) || 0));
-  return Number.isInteger(val) ? val : Number(val.toFixed(2));
-});
-
-Hbs.registerHelper("max", function (field, options) {
-  const rows = options?.data?.root?.rows ?? [];
-  if (rows.length === 0) return 0;
-  const val = Math.max(...rows.map((r) => Number(r?.[field]) || 0));
-  return Number.isInteger(val) ? val : Number(val.toFixed(2));
-});
-
-Hbs.registerHelper("count", function (options) {
-  return (options?.data?.root?.rows ?? []).length;
-});
-
-Hbs.registerHelper("format", function (value, style) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return value;
-  switch (style) {
-    case "currency": return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    case "percent": return n.toFixed(2) + "%";
-    case "compact":
-      if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(1) + "B";
-      if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + "M";
-      if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + "K";
-      return n.toLocaleString();
-    default: return n.toLocaleString();
-  }
-});
-
-Hbs.registerHelper("eq", function (a, b) { return a === b; });
-Hbs.registerHelper("gt", function (a, b) { return Number(a) > Number(b); });
-Hbs.registerHelper("lt", function (a, b) { return Number(a) < Number(b); });
-Hbs.registerHelper("gte", function (a, b) { return Number(a) >= Number(b); });
-Hbs.registerHelper("lte", function (a, b) { return Number(a) <= Number(b); });
-
-Hbs.registerHelper("link", function (url, text) {
-  const href = String(url ?? "");
-  const label = typeof text === "string" ? text : href;
-  return new Hbs.SafeString(
-    `<a href="${href.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${Hbs.Utils.escapeExpression(label)}</a>`
-  );
-});
-
-Hbs.registerHelper("sortBy", function (rows, field, order, options) {
-  if (typeof order === "object") { options = order; order = "asc"; }
-  const arr = Array.isArray(rows) ? [...rows] : [];
-  arr.sort((a, b) => {
-    const va = a?.[field], vb = b?.[field];
-    const na = Number(va), nb = Number(vb);
-    let cmp;
-    if (Number.isFinite(na) && Number.isFinite(nb)) {
-      cmp = na - nb;
-    } else {
-      cmp = String(va ?? "").localeCompare(String(vb ?? ""));
-    }
-    return order === "desc" ? -cmp : cmp;
-  });
-  let result = "";
-  for (let i = 0; i < arr.length; i++) {
-    result += options.fn(arr[i], { data: { ...options.data, index: i, first: i === 0, last: i === arr.length - 1 } });
-  }
-  return result;
-});
-
-Hbs.registerHelper("html", function (content) {
-  return new Hbs.SafeString(String(content ?? ""));
-});
+vm.runInNewContext(strippedSource, widgetsSandbox, { filename: "widgets.js" });
 
 // ─── Test runner ────────────────────────────────────────────────────
 let passed = 0;
@@ -133,7 +78,7 @@ function assertEqual(actual, expected, message) {
 console.log("\n=== link helper ===");
 
 {
-  const tpl = Hbs.compile('{{link url "Click here"}}');
+  const tpl = Handlebars.compile('{{link url "Click here"}}');
   const result = tpl({ url: "https://example.com" });
   assertEqual(
     result,
@@ -143,7 +88,7 @@ console.log("\n=== link helper ===");
 }
 
 {
-  const tpl = Hbs.compile("{{link url}}");
+  const tpl = Handlebars.compile("{{link url}}");
   const result = tpl({ url: "https://example.com" });
   assertEqual(
     result,
@@ -153,7 +98,7 @@ console.log("\n=== link helper ===");
 }
 
 {
-  const tpl = Hbs.compile('{{link url "<script>alert(1)</script>"}}');
+  const tpl = Handlebars.compile('{{link url "<script>alert(1)</script>"}}');
   const result = tpl({ url: "https://example.com" });
   assert(
     result.includes("&lt;script&gt;") && !result.includes("<script>"),
@@ -162,18 +107,45 @@ console.log("\n=== link helper ===");
 }
 
 {
-  const tpl = Hbs.compile('{{link url "test"}}');
+  const tpl = Handlebars.compile('{{link url "test"}}');
   const result = tpl({ url: 'https://example.com/path?a=1&b="quoted"' });
   assert(
-    result.includes("&quot;quoted&quot;") && !result.includes('""'),
-    "link escapes quotes in href"
+    result.includes("&amp;") && result.includes("&quot;"),
+    "link escapes special characters in href"
+  );
+}
+
+{
+  const tpl = Handlebars.compile('{{link url "evil"}}');
+  const result = tpl({ url: "javascript:alert(1)" });
+  assert(
+    !result.includes("href") && result.includes("evil"),
+    "link rejects javascript: URLs and renders plain text"
+  );
+}
+
+{
+  const tpl = Handlebars.compile('{{link url "relative"}}');
+  const result = tpl({ url: "/dashboard/page" });
+  assert(
+    result.includes('href="/dashboard/page"'),
+    "link allows relative URLs"
+  );
+}
+
+{
+  const tpl = Handlebars.compile('{{link url "mail"}}');
+  const result = tpl({ url: "mailto:user@example.com" });
+  assert(
+    result.includes("href=") && result.includes("mailto:"),
+    "link allows mailto: URLs"
   );
 }
 
 console.log("\n=== sortBy helper ===");
 
 {
-  const tpl = Hbs.compile("{{#sortBy rows \"value\"}}{{this.name}}:{{this.value}} {{/sortBy}}");
+  const tpl = Handlebars.compile("{{#sortBy rows \"value\"}}{{this.name}}:{{this.value}} {{/sortBy}}");
   const result = tpl({
     rows: [
       { name: "C", value: 30 },
@@ -185,7 +157,7 @@ console.log("\n=== sortBy helper ===");
 }
 
 {
-  const tpl = Hbs.compile('{{#sortBy rows "value" "desc"}}{{this.name}}:{{this.value}} {{/sortBy}}');
+  const tpl = Handlebars.compile('{{#sortBy rows "value" "desc"}}{{this.name}}:{{this.value}} {{/sortBy}}');
   const result = tpl({
     rows: [
       { name: "A", value: 10 },
@@ -197,7 +169,7 @@ console.log("\n=== sortBy helper ===");
 }
 
 {
-  const tpl = Hbs.compile("{{#sortBy rows \"name\"}}{{this.name}} {{/sortBy}}");
+  const tpl = Handlebars.compile("{{#sortBy rows \"name\"}}{{this.name}} {{/sortBy}}");
   const result = tpl({
     rows: [
       { name: "Charlie" },
@@ -209,7 +181,7 @@ console.log("\n=== sortBy helper ===");
 }
 
 {
-  const tpl = Hbs.compile("{{#sortBy rows \"value\"}}{{@index}} {{/sortBy}}");
+  const tpl = Handlebars.compile("{{#sortBy rows \"value\"}}{{@index}} {{/sortBy}}");
   const result = tpl({
     rows: [
       { value: 3 },
@@ -221,7 +193,7 @@ console.log("\n=== sortBy helper ===");
 }
 
 {
-  const tpl = Hbs.compile("{{#sortBy rows \"value\"}}{{/sortBy}}");
+  const tpl = Handlebars.compile("{{#sortBy rows \"value\"}}{{/sortBy}}");
   const result = tpl({ rows: [] });
   assertEqual(result, "", "sortBy handles empty rows");
 }
@@ -229,13 +201,13 @@ console.log("\n=== sortBy helper ===");
 console.log("\n=== html helper ===");
 
 {
-  const tpl = Hbs.compile("{{html content}}");
+  const tpl = Handlebars.compile("{{html content}}");
   const result = tpl({ content: "<strong>Bold</strong>" });
   assertEqual(result, "<strong>Bold</strong>", "html helper outputs raw HTML");
 }
 
 {
-  const tpl = Hbs.compile("{{content}}");
+  const tpl = Handlebars.compile("{{content}}");
   const result = tpl({ content: "<strong>Bold</strong>" });
   assertEqual(
     result,
@@ -245,13 +217,13 @@ console.log("\n=== html helper ===");
 }
 
 {
-  const tpl = Hbs.compile("{{html content}}");
+  const tpl = Handlebars.compile("{{html content}}");
   const result = tpl({ content: null });
   assertEqual(result, "", "html helper handles null gracefully");
 }
 
 {
-  const tpl = Hbs.compile("{{html content}}");
+  const tpl = Handlebars.compile("{{html content}}");
   const result = tpl({});
   assertEqual(result, "", "html helper handles undefined gracefully");
 }

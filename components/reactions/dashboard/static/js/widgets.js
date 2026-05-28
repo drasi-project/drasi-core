@@ -128,8 +128,13 @@ if (window.Handlebars) {
   Hbs.registerHelper("link", function (url, text) {
     const href = String(url ?? "");
     const label = typeof text === "string" ? text : href;
+    // Only allow safe URL schemes
+    const allowedScheme = /^(https?:|mailto:|\/|#)/i;
+    if (href && !allowedScheme.test(href)) {
+      return new Hbs.SafeString(Hbs.Utils.escapeExpression(label));
+    }
     return new Hbs.SafeString(
-      `<a href="${href.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${Hbs.Utils.escapeExpression(label)}</a>`
+      `<a href="${Hbs.Utils.escapeExpression(href)}" target="_blank" rel="noopener noreferrer">${Hbs.Utils.escapeExpression(label)}</a>`
     );
   });
 
