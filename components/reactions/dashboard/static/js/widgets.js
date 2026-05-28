@@ -690,7 +690,7 @@ function renderText(widget, runtime, container) {
     const compiled = Handlebars.compile(template);
     const markdown = compiled(context);
     const rawHtml = window.marked ? window.marked.parse(markdown) : markdown;
-    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(rawHtml) : rawHtml;
+    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(rawHtml, { ADD_ATTR: ["target", "rel"] }) : rawHtml;
     container.innerHTML = `<div class="widget-markdown">${safeHtml}</div>`;
   } catch (e) {
     container.innerHTML = `<div class="widget-markdown widget-error"><pre>Template error: ${escapeHtml(e.message)}</pre></div>`;
