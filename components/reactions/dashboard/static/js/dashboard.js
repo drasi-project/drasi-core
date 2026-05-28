@@ -323,6 +323,7 @@ export class DashboardDesigner {
               <tr><td><code>{{link url "text"}}</code></td><td>Hyperlink opening in new tab</td></tr>
               <tr><td><code>{{#sortBy rows "field"}}...{{/sortBy}}</code></td><td>Sort rows ascending</td></tr>
               <tr><td><code>{{#sortBy rows "field" "desc"}}...{{/sortBy}}</code></td><td>Sort rows descending</td></tr>
+              <tr><td><code>{{#groupBy rows "field"}}{{@key}}...{{/groupBy}}</code></td><td>Group rows by field value</td></tr>
               <tr><td><code>{{html myVar}}</code></td><td>Render raw HTML (sanitized by DOMPurify)</td></tr>
             </table>
             <h4>Markdown</h4>

@@ -228,6 +228,77 @@ console.log("\n=== html helper ===");
   assertEqual(result, "", "html helper handles undefined gracefully");
 }
 
+console.log("\n=== groupBy helper ===");
+
+{
+  const tpl = Handlebars.compile('{{#groupBy rows "category"}}[{{@key}}:{{#each this}}{{this.name}}{{/each}}]{{/groupBy}}');
+  const result = tpl({
+    rows: [
+      { name: "A", category: "fruit" },
+      { name: "B", category: "veggie" },
+      { name: "C", category: "fruit" },
+    ],
+  });
+  assertEqual(result, "[fruit:AC][veggie:B]", "groupBy groups rows by string field");
+}
+
+{
+  const tpl = Handlebars.compile('{{#groupBy rows "category"}}{{@key}} {{/groupBy}}');
+  const result = tpl({
+    rows: [
+      { name: "C", category: "zebra" },
+      { name: "A", category: "apple" },
+      { name: "B", category: "mango" },
+    ],
+  });
+  assertEqual(result, "apple mango zebra ", "groupBy sorts groups alphabetically by @key");
+}
+
+{
+  const tpl = Handlebars.compile('{{#groupBy rows "category"}}{{#each this}}{{this.name}}{{/each}}{{/groupBy}}');
+  const result = tpl({
+    rows: [
+      { name: "first", category: "x" },
+      { name: "second", category: "x" },
+      { name: "third", category: "x" },
+    ],
+  });
+  assertEqual(result, "firstsecondthird", "groupBy preserves row order within each group");
+}
+
+{
+  const tpl = Handlebars.compile('{{#groupBy rows "category"}}x{{/groupBy}}');
+  const result = tpl({ rows: [] });
+  assertEqual(result, "", "groupBy handles empty rows");
+}
+
+{
+  const tpl = Handlebars.compile('{{#groupBy rows "category"}}[{{@key}}:{{this.length}}]{{/groupBy}}');
+  const result = tpl({
+    rows: [
+      { name: "A", category: null },
+      { name: "B" },
+      { name: "C", category: "valid" },
+    ],
+  });
+  assertEqual(result, "[:2][valid:1]", "groupBy groups null/missing field values under empty string key");
+}
+
+{
+  // Verify @key is correct inside nested blocks
+  const tpl = Handlebars.compile('{{#groupBy rows "type"}}{{@key}}={{this.length}}|{{/groupBy}}');
+  const result = tpl({
+    rows: [
+      { type: "bug" },
+      { type: "feature" },
+      { type: "bug" },
+      { type: "feature" },
+      { type: "feature" },
+    ],
+  });
+  assertEqual(result, "bug=2|feature=3|", "groupBy @key contains the group value with correct counts");
+}
+
 // ─── Summary ────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

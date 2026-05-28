@@ -161,6 +161,24 @@ if (window.Handlebars) {
     return result;
   });
 
+  // Group helper — block helper that groups rows by a field value.
+  // Usage: {{#groupBy rows "field"}}{{@key}}: {{#each this}}...{{/each}}{{/groupBy}}
+  Hbs.registerHelper("groupBy", function (rows, field, options) {
+    const arr = Array.isArray(rows) ? rows : [];
+    const groups = {};
+    for (const row of arr) {
+      const key = String(row?.[field] ?? "");
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(row);
+    }
+    const sortedKeys = Object.keys(groups).sort((a, b) => a.localeCompare(b));
+    let result = "";
+    for (const key of sortedKeys) {
+      result += options.fn(groups[key], { data: { ...options.data, key } });
+    }
+    return result;
+  });
+
   // HTML helper — marks content as safe HTML (bypasses Handlebars escaping).
   // Usage: {{html myHtmlContent}} — output is still sanitized by DOMPurify in the render pipeline.
   Hbs.registerHelper("html", function (content) {

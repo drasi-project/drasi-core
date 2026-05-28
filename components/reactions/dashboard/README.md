@@ -137,6 +137,7 @@ Built-in helpers:
 | `gte` / `lte` | `{{gte a b}}` | Greater/less or equal |
 | `link` | `{{link url "text"}}` | Hyperlink opening in a new tab (`target="_blank"`) |
 | `sortBy` | `{{#sortBy rows "field" "desc"}}...{{/sortBy}}` | Block helper to sort rows by field (ascending by default) |
+| `groupBy` | `{{#groupBy rows "field"}}{{@key}}...{{/groupBy}}` | Block helper to group rows by field value (groups sorted alphabetically) |
 | `html` | `{{html myVar}}` | Render raw HTML (bypasses Handlebars escaping; still sanitized by DOMPurify) |
 
 ```handlebars
@@ -165,6 +166,18 @@ Average reading: {{format (avg "value") "compact"}}
 {{#each rows}}
 {{html this.richDescription}}
 {{/each}}
+```
+
+#### Grouping Example
+
+```handlebars
+{{#groupBy rows "category"}}
+### {{@key}}
+{{#each this}}
+- **{{this.name}}**: {{this.value}}
+{{/each}}
+
+{{/groupBy}}
 ```
 
 ## HTTP API
