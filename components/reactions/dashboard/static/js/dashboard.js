@@ -324,6 +324,8 @@ export class DashboardDesigner {
               <tr><td><code>{{#sortBy rows "field"}}...{{/sortBy}}</code></td><td>Sort rows ascending</td></tr>
               <tr><td><code>{{#sortBy rows "field" "desc"}}...{{/sortBy}}</code></td><td>Sort rows descending</td></tr>
               <tr><td><code>{{#groupBy rows "field"}}{{@key}}...{{/groupBy}}</code></td><td>Group rows by field value</td></tr>
+              <tr><td><code>{{replace value "search" "rep"}}</code></td><td>Replace all occurrences of a substring</td></tr>
+              <tr><td><code>{{trimPrefix value "prefix"}}</code></td><td>Remove a prefix from the start of a string</td></tr>
               <tr><td><code>{{html myVar}}</code></td><td>Render raw HTML (sanitized by DOMPurify)</td></tr>
             </table>
             <h4>Markdown</h4>

@@ -299,6 +299,58 @@ console.log("\n=== groupBy helper ===");
   assertEqual(result, "bug=2|feature=3|", "groupBy @key contains the group value with correct counts");
 }
 
+console.log("\n=== replace helper ===");
+
+{
+  const tpl = Handlebars.compile('{{replace val "foo" "bar"}}');
+  const result = tpl({ val: "foo and foo again" });
+  assertEqual(result, "bar and bar again", "replace replaces all occurrences");
+}
+
+{
+  const tpl = Handlebars.compile('{{replace val "xyz" "bar"}}');
+  const result = tpl({ val: "hello world" });
+  assertEqual(result, "hello world", "replace returns original if search not found");
+}
+
+{
+  const tpl = Handlebars.compile('{{replace val "https://api.github.com/repos/" ""}}');
+  const result = tpl({ val: "https://api.github.com/repos/drasi-project/drasi-core" });
+  assertEqual(result, "drasi-project/drasi-core", "replace handles empty replacement (deletion)");
+}
+
+{
+  const tpl = Handlebars.compile('{{replace val "x" "y"}}');
+  const result = tpl({ val: 12345 });
+  assertEqual(result, "12345", "replace handles non-string input gracefully");
+}
+
+console.log("\n=== trimPrefix helper ===");
+
+{
+  const tpl = Handlebars.compile('{{trimPrefix val "https://api.github.com/repos/"}}');
+  const result = tpl({ val: "https://api.github.com/repos/drasi-project/drasi-core" });
+  assertEqual(result, "drasi-project/drasi-core", "trimPrefix removes prefix when present");
+}
+
+{
+  const tpl = Handlebars.compile('{{trimPrefix val "xyz"}}');
+  const result = tpl({ val: "hello world" });
+  assertEqual(result, "hello world", "trimPrefix returns unchanged string when prefix not present");
+}
+
+{
+  const tpl = Handlebars.compile('{{trimPrefix val "prefix"}}');
+  const result = tpl({ val: null });
+  assertEqual(result, "", "trimPrefix handles null input");
+}
+
+{
+  const tpl = Handlebars.compile('{{trimPrefix val "prefix"}}');
+  const result = tpl({});
+  assertEqual(result, "", "trimPrefix handles undefined input");
+}
+
 // ─── Summary ────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

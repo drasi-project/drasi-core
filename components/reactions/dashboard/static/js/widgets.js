@@ -184,6 +184,25 @@ if (window.Handlebars) {
   Hbs.registerHelper("html", function (content) {
     return new Hbs.SafeString(String(content ?? ""));
   });
+
+  // Replace helper — replaces all occurrences of a substring.
+  // Usage: {{replace value "search" "replacement"}}
+  Hbs.registerHelper("replace", function (value, search, replacement) {
+    if (typeof value !== "string") return value;
+    if (typeof search !== "string") return value;
+    if (typeof replacement !== "string") replacement = "";
+    return value.split(search).join(replacement);
+  });
+
+  // TrimPrefix helper — removes a prefix from the start of a string.
+  // Usage: {{trimPrefix value "prefix"}}
+  Hbs.registerHelper("trimPrefix", function (value, prefix) {
+    const str = String(value ?? "");
+    if (typeof prefix === "string" && str.startsWith(prefix)) {
+      return str.slice(prefix.length);
+    }
+    return str;
+  });
 }
 
 export const WIDGET_TYPES = [
