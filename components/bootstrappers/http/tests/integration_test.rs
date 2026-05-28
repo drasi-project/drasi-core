@@ -17,6 +17,8 @@
 //! These tests spin up real HTTP servers using axum and verify
 //! the full bootstrap flow: HTTP request → parse → map → emit events.
 
+#![allow(clippy::unwrap_used, clippy::uninlined_format_args)]
+
 use axum::{
     extract::Query,
     http::{header, HeaderMap, StatusCode},
@@ -1757,5 +1759,327 @@ async fn test_type_preservation_in_properties() {
             _ => panic!("Expected Node"),
         },
         _ => panic!("Expected Insert"),
+    }
+}
+
+// ── Test: Truncated response body detection (Issue #493) ────────────────────
+//
+// This test simulates the real-world truncation scenario that causes issue #493:
+// A server (or intermediary proxy/load balancer) returns a truncated JSON body.
+// The HTTP response is "complete" at the transport level (proper chunked
+// encoding termination), but the body content is cut off mid-JSON.
+//
+// This happens in production when:
+// - A load balancer sends GOAWAY during HTTP/2 multiplexing (partially buffered)
+// - A reverse proxy times out and sends whatever it buffered
+// - A CDN serves a cached partial response
+// - Network issues cause chunked encoding to terminate early
+
+/// Start a raw TCP server that sends HTTP/1.1 chunked responses with truncated
+/// JSON bodies. The response is properly terminated at the HTTP level (final
+/// 0-length chunk) but the JSON content is incomplete.
+async fn start_truncating_http11_server(
+    truncate_fraction: f64,
+    request_count: Arc<AtomicU64>,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            let request_count = request_count.clone();
+            let truncate_frac = truncate_fraction;
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+
+                // Read HTTP request (one per connection due to Connection: close)
+                let n = match socket.read(&mut buf).await {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+
+                let request_str = String::from_utf8_lossy(&buf[..n]);
+                if !request_str.contains("HTTP/1.1") {
+                    return;
+                }
+
+                request_count.fetch_add(1, Ordering::Relaxed);
+
+                // Generate a large JSON response
+                let full_body = serde_json::to_string(&json!([
+                    {"id": "1", "name": "Item One", "data": "x".repeat(5000)},
+                    {"id": "2", "name": "Item Two", "data": "x".repeat(5000)},
+                    {"id": "3", "name": "Item Three", "data": "x".repeat(5000)},
+                    {"id": "4", "name": "Item Four", "data": "x".repeat(5000)},
+                    {"id": "5", "name": "Item Five", "data": "x".repeat(5000)},
+                    {"id": "6", "name": "Item Six", "data": "x".repeat(5000)},
+                    {"id": "7", "name": "Item Seven", "data": "x".repeat(5000)},
+                    {"id": "8", "name": "Item Eight", "data": "x".repeat(5000)},
+                    {"id": "9", "name": "Item Nine", "data": "x".repeat(5000)},
+                    {"id": "10", "name": "Item Ten", "data": "x".repeat(5000)}
+                ]))
+                .unwrap();
+
+                // Truncate the body
+                let truncated_len = (full_body.len() as f64 * truncate_frac) as usize;
+                let truncated_body = &full_body[..truncated_len];
+
+                // Send HTTP/1.1 response with Transfer-Encoding: chunked
+                // and properly terminated — but with truncated content
+                let chunk_hex = format!("{:x}", truncated_len);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/json\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {chunk_hex}\r\n\
+                     {truncated_body}\r\n\
+                     0\r\n\
+                     \r\n"
+                );
+
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    format!("http://127.0.0.1:{}", addr.port()) // DevSkim: ignore DS137138
+}
+
+/// Proves that a truncated HTTP/1.1 response causes silent bootstrap failure.
+/// The response is "complete" at the transport level but contains invalid JSON.
+/// With the current code, this causes a non-retriable parse error.
+#[tokio::test]
+#[ignore]
+async fn test_truncated_response_causes_bootstrap_failure() {
+    let request_count = Arc::new(AtomicU64::new(0));
+    // Send only 60% of the body — enough to be a valid HTTP response but invalid JSON
+    let base_url = start_truncating_http11_server(0.6, request_count.clone()).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/items"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["Item".to_string()],
+                        properties: Some(json!({
+                            "name": "{{item.name}}"
+                        })),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 3,
+        retry_delay_ms: 100,
+        max_pages: None,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("truncation-test");
+    let request = test_request(vec!["Item".to_string()], vec![]);
+    let (tx, _rx) = mpsc::channel(100);
+
+    let result = provider.bootstrap(request, &context, tx, None).await;
+
+    // The bootstrap should fail because ALL responses are truncated (even after retries)
+    assert!(
+        result.is_err(),
+        "Expected bootstrap to fail when server always returns truncated responses"
+    );
+
+    let err = result.unwrap_err();
+    let err_str = format!("{err:#}");
+    eprintln!("Bootstrap error (expected): {err_str}");
+
+    // With the fix: all retries are attempted (1 initial + max_retries = 4 total)
+    let requests_made = request_count.load(Ordering::Relaxed);
+    eprintln!("Requests made to server: {requests_made}");
+    assert_eq!(
+        requests_made, 4,
+        "Expected 4 requests (1 initial + 3 retries), got {requests_made}"
+    );
+    eprintln!("✓ Parse failures ARE retried ({requests_made} attempts made)");
+
+    // Verify error message mentions truncation
+    assert!(
+        err_str.contains("possible truncation"),
+        "Error should mention 'possible truncation': {err_str}"
+    );
+    eprintln!("✓ Error message correctly identifies possible truncation");
+}
+
+/// Start a server that truncates responses intermittently.
+/// First request returns truncated, second returns full response.
+/// This simulates real-world intermittent truncation from flaky proxies.
+async fn start_intermittent_truncating_server(request_count: Arc<AtomicU64>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap(); // DevSkim: ignore DS137138
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            let request_count = request_count.clone();
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+
+                let n = match socket.read(&mut buf).await {
+                    Ok(0) => return,
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+
+                let request_str = String::from_utf8_lossy(&buf[..n]);
+                if !request_str.contains("HTTP/1.1") {
+                    return;
+                }
+
+                let count = request_count.fetch_add(1, Ordering::Relaxed);
+
+                // Full valid response
+                let full_body = serde_json::to_string(&json!([
+                    {"id": "1", "name": "Item One", "data": "payload-1"},
+                    {"id": "2", "name": "Item Two", "data": "payload-2"},
+                    {"id": "3", "name": "Item Three", "data": "payload-3"}
+                ]))
+                .unwrap();
+
+                // Truncate on even-numbered requests (0th, 2nd, etc.)
+                let body = if count % 2 == 0 {
+                    full_body[..full_body.len() / 2].to_string()
+                } else {
+                    full_body.clone()
+                };
+
+                let chunk_hex = format!("{:x}", body.len());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/json\r\n\
+                     Transfer-Encoding: chunked\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {chunk_hex}\r\n\
+                     {body}\r\n\
+                     0\r\n\
+                     \r\n"
+                );
+
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    format!("http://127.0.0.1:{}", addr.port()) // DevSkim: ignore DS137138
+}
+
+/// Tests that after the fix, intermittent truncation is recovered via retry.
+/// The server returns truncated on first attempt, valid on second.
+/// With proper retry-on-parse-failure, bootstrap should succeed.
+#[tokio::test]
+#[ignore]
+async fn test_truncation_recovered_by_retry() {
+    let request_count = Arc::new(AtomicU64::new(0));
+    let base_url = start_intermittent_truncating_server(request_count.clone()).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/items"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["Item".to_string()],
+                        properties: Some(json!({
+                            "name": "{{item.name}}"
+                        })),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 3,
+        retry_delay_ms: 100,
+        max_pages: None,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("retry-test");
+    let request = test_request(vec!["Item".to_string()], vec![]);
+    let (tx, rx) = mpsc::channel(100);
+
+    let result = provider.bootstrap(request, &context, tx, None).await;
+
+    let requests_made = request_count.load(Ordering::Relaxed);
+    eprintln!("Requests made to server: {requests_made}");
+
+    // After the fix: bootstrap should succeed because it retries on
+    // parse failure and the second attempt returns valid data.
+    // Before the fix: this test fails because parse errors are not retried.
+    match result {
+        Ok(r) => {
+            eprintln!(
+                "✓ Bootstrap succeeded after retry! Events: {}",
+                r.event_count
+            );
+            assert_eq!(r.event_count, 3);
+            let events = collect_events(rx).await;
+            assert_eq!(events.len(), 3);
+            eprintln!("✓ All 3 items correctly bootstrapped after retry");
+            assert!(
+                requests_made >= 2,
+                "Expected at least 2 requests (1 failed + 1 retry), got {requests_made}"
+            );
+            eprintln!("✓ Confirmed: {requests_made} requests made (retry worked)");
+        }
+        Err(e) => {
+            eprintln!("✗ Bootstrap FAILED (fix not applied): {e:#}");
+            eprintln!("  Requests made: {requests_made}");
+            eprintln!("  This test will pass once parse failures trigger retries.");
+            panic!(
+                "Bootstrap failed — parse errors are not retried. \
+                 Apply the fix to make body parsing failures retriable. Error: {e}"
+            );
+        }
     }
 }

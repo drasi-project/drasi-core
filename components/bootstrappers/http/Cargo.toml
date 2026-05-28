@@ -50,9 +50,20 @@ url = "2"
 
 [dev-dependencies]
 axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1.0", features = ["full"] }
 env_logger = "0.11"
 base64 = "0.22"
+futures = "0.3"
+rcgen = "0.13"
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http2"] }
+hyper = { version = "1", features = ["server"] }
+h2 = "0.4"
+bytes = "1"
+http = "1"
 
 [features]
 dynamic-plugin = []
