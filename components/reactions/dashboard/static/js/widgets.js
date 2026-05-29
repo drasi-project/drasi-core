@@ -723,6 +723,10 @@ function renderText(widget, runtime, container) {
     aggregation: runtime?.aggregation ?? null,
   };
 
+  // Preserve scroll position across re-renders
+  const existing = container.querySelector(".widget-markdown");
+  const scrollTop = existing ? existing.scrollTop : 0;
+
   try {
     const compiled = Handlebars.compile(template);
     const markdown = compiled(context);
@@ -732,6 +736,9 @@ function renderText(widget, runtime, container) {
   } catch (e) {
     container.innerHTML = `<div class="widget-markdown widget-error"><pre>Template error: ${escapeHtml(e.message)}</pre></div>`;
   }
+
+  const updated = container.querySelector(".widget-markdown");
+  if (updated) updated.scrollTop = scrollTop;
 }
 
 // ─── Public render dispatcher ───────────────────────────────
