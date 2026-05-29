@@ -37,6 +37,7 @@ pub mod proxies;
 pub mod registry;
 pub mod snapshot_fetcher_bridge;
 pub mod state_store_bridge;
+pub mod wal_provider_bridge;
 pub mod watcher;
 
 pub use callbacks::{CallbackContext, CapturedLifecycle, CapturedLog, InstanceCallbackContext};
@@ -57,6 +58,7 @@ pub use proxies::secret_store::{
 pub use proxies::source::{SourcePluginProxy, SourceProxy};
 pub use snapshot_fetcher_bridge::SnapshotFetcherVtableBuilder;
 pub use state_store_bridge::StateStoreVtableBuilder;
+pub use wal_provider_bridge::WalProviderVtableBuilder;
 
 pub use plugin_types::{
     PluginCategory, PluginEvent, PluginFileEvent, PluginKindEntry, PluginStatus,

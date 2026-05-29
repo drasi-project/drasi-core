@@ -20,6 +20,7 @@
 
 use drasi_lib::{DrasiLib, LogLevel};
 use drasi_source_postgres::PostgresReplicationSource;
+use serial_test::serial;
 use std::time::Duration;
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
@@ -28,9 +29,12 @@ use tokio::time::timeout;
 /// Test that logs from a successfully connected PostgreSQL source are captured.
 /// This test requires Docker to be running.
 #[tokio::test]
+#[serial]
 async fn test_postgres_source_logs_captured_on_success() {
-    // Start a PostgreSQL container with logical replication enabled
+    // Start a PostgreSQL container with logical replication and scram-sha-256 auth
     let container = Postgres::default()
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "scram-sha-256")
+        .with_env_var("POSTGRES_INITDB_ARGS", "--auth-host=scram-sha-256")
         .with_cmd([
             "postgres",
             "-c",
@@ -39,6 +43,8 @@ async fn test_postgres_source_logs_captured_on_success() {
             "max_replication_slots=10",
             "-c",
             "max_wal_senders=10",
+            "-c",
+            "password_encryption=scram-sha-256",
         ])
         .start()
         .await
@@ -149,6 +155,7 @@ async fn test_postgres_source_logs_captured_on_success() {
 /// Test that error logs are captured when PostgreSQL source fails to connect.
 /// Uses the DrasiLib public API to retrieve logs.
 #[tokio::test]
+#[serial]
 async fn test_postgres_source_logs_captured_on_connection_failure() {
     // Create a source pointing to a non-existent database
     let source = PostgresReplicationSource::builder("failing-pg-source")
@@ -168,10 +175,16 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
         .await
         .expect("Failed to build DrasiLib");
 
-    drasi.start().await.expect("Failed to start DrasiLib");
+    // start() will return an error because the source cannot connect.
+    // We still expect logs to have been captured during the failed attempt.
+    let start_result = drasi.start().await;
+    assert!(
+        start_result.is_err(),
+        "Expected start to fail with connection error"
+    );
 
-    // Give the source time to attempt connection and fail
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Give time for logs to propagate
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Use the DrasiLib public API to get logs
     let (history, _receiver) = drasi
@@ -215,6 +228,7 @@ async fn test_postgres_source_logs_captured_on_connection_failure() {
 
 /// Test that log streaming works for PostgreSQL source via DrasiLib API.
 #[tokio::test]
+#[serial]
 async fn test_postgres_source_log_streaming() {
     // Create a source pointing to a non-existent port (will fail quickly)
     let source = PostgresReplicationSource::builder("streaming-pg-source")
@@ -242,7 +256,9 @@ async fn test_postgres_source_log_streaming() {
     // Initial history should be empty before start
     println!("Initial history before start: {initial_history:?}");
 
-    drasi.start().await.expect("Failed to start DrasiLib");
+    // start() will fail because the source cannot connect, but logs should
+    // still be streamed during the attempt.
+    let _start_result = drasi.start().await;
 
     // Wait for logs to stream in
     let mut received_logs = Vec::new();
