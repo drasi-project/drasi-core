@@ -27,14 +27,14 @@ pub struct StorageBackendConfig {
 
 /// Storage backend specification defining the type and parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "backend_type")]
+#[serde(tag = "kind", rename_all_fields = "camelCase")]
 pub enum StorageBackendSpec {
     /// In-memory storage backend (volatile, fast, no persistence)
     ///
     /// # Example
     /// ```yaml
-    /// backend_type: memory
-    /// enable_archive: true
+    /// kind: memory
+    /// enableArchive: true
     /// ```
     #[serde(rename = "memory")]
     Memory {
@@ -47,10 +47,10 @@ pub enum StorageBackendSpec {
     ///
     /// # Example
     /// ```yaml
-    /// backend_type: rocksdb
+    /// kind: rocksdb
     /// path: /data/drasi
-    /// enable_archive: true
-    /// direct_io: false
+    /// enableArchive: true
+    /// directIo: false
     /// ```
     #[serde(rename = "rocksdb")]
     RocksDb {
@@ -68,9 +68,9 @@ pub enum StorageBackendSpec {
     ///
     /// # Example
     /// ```yaml
-    /// backend_type: redis
-    /// connection_string: "redis://localhost:6379"
-    /// cache_size: 10000
+    /// kind: redis
+    /// connectionString: "redis://localhost:6379"
+    /// cacheSize: 10000
     /// ```
     #[serde(rename = "redis")]
     Redis {
@@ -144,8 +144,8 @@ mod tests {
     #[test]
     fn test_memory_serde() {
         let yaml = r#"
-backend_type: memory
-enable_archive: true
+kind: memory
+enableArchive: true
 "#;
         let spec: StorageBackendSpec = serde_yaml::from_str(yaml).unwrap();
         match spec {
@@ -169,10 +169,10 @@ enable_archive: true
     #[test]
     fn test_rocksdb_serde() {
         let yaml = r#"
-backend_type: rocksdb
+kind: rocksdb
 path: /data/drasi
-enable_archive: true
-direct_io: false
+enableArchive: true
+directIo: false
 "#;
         let spec: StorageBackendSpec = serde_yaml::from_str(yaml).unwrap();
         match spec {
@@ -192,9 +192,9 @@ direct_io: false
     #[test]
     fn test_redis_serde() {
         let yaml = r#"
-backend_type: redis
-connection_string: "redis://localhost:6379"
-cache_size: 10000
+kind: redis
+connectionString: "redis://localhost:6379"
+cacheSize: 10000
 "#;
         let spec: StorageBackendSpec = serde_yaml::from_str(yaml).unwrap();
         match spec {
@@ -213,9 +213,9 @@ cache_size: 10000
     fn test_storage_backend_config_serde() {
         let yaml = r#"
 id: rocks_persistent
-backend_type: rocksdb
+kind: rocksdb
 path: /data/drasi
-enable_archive: true
+enableArchive: true
 "#;
         let config: StorageBackendConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.id, "rocks_persistent");
@@ -247,8 +247,8 @@ enable_archive: true
     #[test]
     fn test_storage_backend_ref_inline() {
         let yaml = r#"
-backend_type: memory
-enable_archive: false
+kind: memory
+enableArchive: false
 "#;
         let ref_val: StorageBackendRef = serde_yaml::from_str(yaml).unwrap();
         match ref_val {

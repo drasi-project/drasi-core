@@ -33,10 +33,10 @@
 //! ```yaml
 //! storage_backends:
 //!   - id: rocks_persistent
-//!     backend_type: rocksdb
+//!     kind: rocksdb
 //!     path: /data/drasi
-//!     enable_archive: true
-//!     direct_io: false
+//!     enableArchive: true
+//!     directIo: false
 //!
 //! queries:
 //!   - id: my_query
@@ -53,9 +53,9 @@
 //!     query: "MATCH (n) RETURN n"
 //!     sources: [my_source]
 //!     storage_backend:
-//!       backend_type: rocksdb
+//!       kind: rocksdb
 //!       path: /data/drasi
-//!       enable_archive: true
+//!       enableArchive: true
 //! ```
 //!
 //! ## Performance Characteristics
