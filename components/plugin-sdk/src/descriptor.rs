@@ -127,13 +127,13 @@
 //! ```
 
 use async_trait::async_trait;
-use std::sync::Arc;
 use drasi_core::interface::IndexBackendPlugin;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::secret_store::SecretStoreProvider;
 use drasi_lib::sources::Source;
+use std::sync::Arc;
 
 /// Descriptor for a **source** plugin.
 ///

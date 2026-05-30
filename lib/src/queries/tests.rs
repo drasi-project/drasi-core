@@ -126,7 +126,10 @@ mod manager_tests {
         ));
 
         // Create a test IndexFactory with empty backends (no plugin, memory only)
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], std::collections::HashMap::new()));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
+            vec![],
+            std::collections::HashMap::new(),
+        ));
 
         // Create a test middleware registry
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
@@ -1023,7 +1026,10 @@ mod output_state_integration_tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], std::collections::HashMap::new()));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
+            vec![],
+            std::collections::HashMap::new(),
+        ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(QueryManager::new(

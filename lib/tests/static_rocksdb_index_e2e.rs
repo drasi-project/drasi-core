@@ -160,10 +160,7 @@ async fn static_rocksdb_descriptor_drives_query() -> Result<()> {
         2,
         "query backed by RocksDB should return both rows, got: {results:?}"
     );
-    let names: Vec<&str> = results
-        .iter()
-        .filter_map(|r| r["name"].as_str())
-        .collect();
+    let names: Vec<&str> = results.iter().filter_map(|r| r["name"].as_str()).collect();
     assert!(names.contains(&"Alice"), "missing Alice in {results:?}");
     assert!(names.contains(&"Bob"), "missing Bob in {results:?}");
 

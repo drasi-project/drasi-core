@@ -88,10 +88,7 @@ impl fmt::Debug for IndexFactory {
         f.debug_struct("IndexFactory")
             .field("memory_backends", &self.memory_backends)
             .field("plugin_backends", &self.plugin_backends)
-            .field(
-                "providers",
-                &self.providers.keys().collect::<Vec<_>>(),
-            )
+            .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -295,10 +292,7 @@ mod tests {
         }
     }
 
-    fn providers_with(
-        name: &str,
-        volatile: bool,
-    ) -> HashMap<String, Arc<dyn IndexBackendPlugin>> {
+    fn providers_with(name: &str, volatile: bool) -> HashMap<String, Arc<dyn IndexBackendPlugin>> {
         let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
         m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
         m
@@ -327,7 +321,10 @@ mod tests {
         assert!(factory.memory_backends.contains_key("memory_test"));
         assert_eq!(factory.plugin_backends.len(), 1);
         assert_eq!(
-            factory.plugin_backends.get("rocks_test").map(|s| s.as_str()),
+            factory
+                .plugin_backends
+                .get("rocks_test")
+                .map(|s| s.as_str()),
             Some("rocksdb")
         );
     }

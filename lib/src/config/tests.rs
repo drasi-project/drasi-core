@@ -676,8 +676,14 @@ mod runtime_tests {
             queries: vec![],
         };
 
-        let runtime_config =
-            RuntimeConfig::new(config, std::collections::HashMap::new(), None, None, None, None);
+        let runtime_config = RuntimeConfig::new(
+            config,
+            std::collections::HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(runtime_config.id, "test-server");
     }
 

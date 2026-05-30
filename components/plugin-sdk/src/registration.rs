@@ -204,10 +204,7 @@ impl PluginRegistration {
 
     /// Register an index backend plugin descriptor.
     #[must_use]
-    pub fn with_index_backend(
-        mut self,
-        descriptor: Box<dyn IndexBackendPluginDescriptor>,
-    ) -> Self {
+    pub fn with_index_backend(mut self, descriptor: Box<dyn IndexBackendPluginDescriptor>) -> Self {
         self.index_backends.push(descriptor);
         self
     }

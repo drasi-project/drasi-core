@@ -254,7 +254,10 @@ mod tests {
             update_tx.clone(),
         ));
 
-        let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], std::collections::HashMap::new()));
+        let index_factory = Arc::new(crate::indexes::IndexFactory::new(
+            vec![],
+            std::collections::HashMap::new(),
+        ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
 
         let query_manager = Arc::new(crate::queries::QueryManager::new(
@@ -1512,7 +1515,8 @@ mod tests {
             vec![],
             std::collections::HashMap::from([(
                 "persistent".to_string(),
-                Arc::new(MockPersistentPlugin::new()) as Arc<dyn crate::indexes::IndexBackendPlugin>,
+                Arc::new(MockPersistentPlugin::new())
+                    as Arc<dyn crate::indexes::IndexBackendPlugin>,
             )]),
         ));
         let middleware_registry = Arc::new(MiddlewareTypeRegistry::new());
@@ -3174,7 +3178,10 @@ mod orchestration_tests {
             update_tx.clone(),
         ));
 
-        let providers: std::collections::HashMap<String, Arc<dyn crate::indexes::IndexBackendPlugin>> = plugin
+        let providers: std::collections::HashMap<
+            String,
+            Arc<dyn crate::indexes::IndexBackendPlugin>,
+        > = plugin
             .map(|p| std::collections::HashMap::from([("persistent".to_string(), p)]))
             .unwrap_or_default();
         let index_factory = Arc::new(crate::indexes::IndexFactory::new(vec![], providers));

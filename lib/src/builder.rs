@@ -523,7 +523,9 @@ impl DrasiLibBuilder {
                             )));
                         }
                     }
-                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. })) => {
+                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
+                        kind, ..
+                    })) => {
                         return Err(DrasiError::validation(format!(
                             "Query '{}' uses an inline '{}' storage backend, which is not \
                              supported in embedded mode. Declare a named storage backend and \
