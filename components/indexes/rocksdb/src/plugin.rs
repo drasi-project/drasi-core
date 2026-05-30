@@ -26,7 +26,7 @@
 //!
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
 //! let drasi = DrasiLib::builder()
-//!     .with_index_provider(Arc::new(provider))
+//!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
 //! ```
 

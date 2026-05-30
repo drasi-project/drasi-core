@@ -45,6 +45,15 @@ async-recursion = "1.0.4"
 ordered-float = "3.7.0"
 tracing = "0.1.37"
 prost = "0.12.3"
+drasi-plugin-sdk = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
+anyhow = { version = "1.0", optional = true }
+
+[features]
+# Enables the plugin descriptor + configuration DTO (env-var/secret resolution,
+# OpenAPI schema) so this backend can be driven by the Drasi plugin pipeline.
+# Off by default to keep core-only embedders lean.
+plugin-descriptor = ["dep:drasi-plugin-sdk", "dep:utoipa", "dep:anyhow"]
 
 [dev-dependencies]
 shared-tests = { path = "../../../shared-tests" }

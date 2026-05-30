@@ -957,7 +957,7 @@ fn pg_matches_change(
 #[ignore]
 async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1034,11 +1034,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q1_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let query2 = Query::cypher(q2_id)
@@ -1051,11 +1047,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q2_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
@@ -1075,7 +1067,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_query(query2)
             .with_reaction(reaction1)
             .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );
@@ -1193,7 +1185,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 #[ignore]
 async fn test_postgres_stop_restart_recovers() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1265,11 +1257,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
         .from_source("kr-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction, handle) = ApplicationReaction::builder("kr-reaction")
@@ -1284,7 +1272,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );

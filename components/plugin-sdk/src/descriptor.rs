@@ -127,6 +127,8 @@
 //! ```
 
 use async_trait::async_trait;
+use std::sync::Arc;
+use drasi_core::interface::IndexBackendPlugin;
 use drasi_lib::bootstrap::BootstrapProvider;
 use drasi_lib::identity::IdentityProvider;
 use drasi_lib::reactions::Reaction;
@@ -429,6 +431,65 @@ pub trait SecretStorePluginDescriptor: Send + Sync {
         &self,
         config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn SecretStoreProvider>>;
+}
+
+/// Descriptor for an **index backend** plugin.
+///
+/// Index backend plugins provide the storage used by continuous queries: the
+/// element index, archive index, result index, future queue, and (for
+/// persistent backends) a checkpoint store. Examples include the in-memory
+/// backend (built into `drasi-core`), RocksDB (`drasi-index-rocksdb`), and
+/// Garnet/Redis (`drasi-index-garnet`).
+///
+/// Unlike the runtime [`IndexBackendPlugin`] trait (which lives in
+/// `drasi-core` and is constructed directly by embedding applications), this
+/// descriptor enables index backends to participate in the same
+/// configuration-DTO + schema + `ConfigValue` resolution pipeline as every
+/// other plugin type, so that values such as a RocksDB `path` or a Redis
+/// `connectionString` can be sourced from environment variables or secrets.
+///
+/// # Implementors
+///
+/// Each index backend plugin crate implements this trait on a zero-sized
+/// descriptor struct and returns it via [`PluginRegistration`].
+#[async_trait]
+pub trait IndexBackendPluginDescriptor: Send + Sync {
+    /// The unique kind identifier for this index backend (e.g., `"rocksdb"`, `"redis"`).
+    fn kind(&self) -> &str;
+
+    /// The semver version of this plugin's configuration DTO.
+    fn config_version(&self) -> &str;
+
+    /// Returns all OpenAPI schemas as a JSON-serialized map (see [`SourcePluginDescriptor::config_schema_json`]).
+    fn config_schema_json(&self) -> String;
+
+    /// Returns the OpenAPI schema name for this plugin's configuration DTO.
+    fn config_schema_name(&self) -> &str;
+
+    /// Human-readable display name for this index backend (optional).
+    fn display_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Human-readable description for this index backend (optional).
+    fn display_description(&self) -> Option<&str> {
+        None
+    }
+
+    /// Create a new index backend provider instance from the given configuration.
+    ///
+    /// Implementations deserialize `config_json` into their DTO, resolve any
+    /// [`ConfigValue`](crate::config_value::ConfigValue) fields (via
+    /// [`DtoMapper`](crate::mapper::DtoMapper)), validate the resolved values,
+    /// and construct the backend.
+    ///
+    /// # Arguments
+    ///
+    /// - `config_json` — The plugin-specific configuration as a JSON value.
+    async fn create_index_backend(
+        &self,
+        config_json: &serde_json::Value,
+    ) -> anyhow::Result<Arc<dyn IndexBackendPlugin>>;
 }
 
 #[cfg(test)]

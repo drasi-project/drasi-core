@@ -59,8 +59,8 @@
 //! checks this at load time and rejects plugins built with incompatible SDK versions.
 
 use crate::descriptor::{
-    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SecretStorePluginDescriptor, SourcePluginDescriptor,
+    BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, IndexBackendPluginDescriptor,
+    ReactionPluginDescriptor, SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 /// The version of the Drasi Plugin SDK.
@@ -142,6 +142,9 @@ pub struct PluginRegistration {
 
     /// Secret store plugin descriptors provided by this plugin.
     pub secret_stores: Vec<Box<dyn SecretStorePluginDescriptor>>,
+
+    /// Index backend plugin descriptors provided by this plugin.
+    pub index_backends: Vec<Box<dyn IndexBackendPluginDescriptor>>,
 }
 
 impl PluginRegistration {
@@ -157,6 +160,7 @@ impl PluginRegistration {
             bootstrappers: Vec::new(),
             identity_providers: Vec::new(),
             secret_stores: Vec::new(),
+            index_backends: Vec::new(),
         }
     }
 
@@ -198,6 +202,16 @@ impl PluginRegistration {
         self
     }
 
+    /// Register an index backend plugin descriptor.
+    #[must_use]
+    pub fn with_index_backend(
+        mut self,
+        descriptor: Box<dyn IndexBackendPluginDescriptor>,
+    ) -> Self {
+        self.index_backends.push(descriptor);
+        self
+    }
+
     /// Returns true if this registration contains no descriptors.
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
@@ -205,6 +219,7 @@ impl PluginRegistration {
             && self.bootstrappers.is_empty()
             && self.identity_providers.is_empty()
             && self.secret_stores.is_empty()
+            && self.index_backends.is_empty()
     }
 
     /// Returns the total number of descriptors in this registration.
@@ -214,6 +229,7 @@ impl PluginRegistration {
             + self.bootstrappers.len()
             + self.identity_providers.len()
             + self.secret_stores.len()
+            + self.index_backends.len()
     }
 }
 
@@ -260,6 +276,14 @@ impl std::fmt::Debug for PluginRegistration {
                     .secret_stores
                     .iter()
                     .map(|ss| ss.kind())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "index_backends",
+                &self
+                    .index_backends
+                    .iter()
+                    .map(|ib| ib.kind())
                     .collect::<Vec<_>>(),
             )
             .finish()

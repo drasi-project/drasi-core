@@ -480,7 +480,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
 
 // --- Checkpoint Recovery Integration Tests ---
 
-use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+use drasi_lib::indexes::config::StorageBackendRef;
 use drasi_reaction_application::subscription::SubscriptionOptions;
 
 /// Helper to start a MySQL container with replication and GTID enabled.
@@ -651,11 +651,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
             .from_source("mysql-cp-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("cp-reaction")
@@ -669,7 +665,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();
@@ -798,11 +794,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
             .from_source("mysql-bs-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("bs-reaction")
@@ -816,7 +808,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();
@@ -930,11 +922,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
             .from_source("mysql-fr-src")
             .auto_start(true)
             .enable_bootstrap(true)
-            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-                path: tmp_dir.path().to_string_lossy().to_string(),
-                enable_archive: false,
-                direct_io: false,
-            }))
+            .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build();
 
         let (reaction, handle) = ApplicationReaction::builder("fr-reaction")
@@ -948,7 +936,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
             .unwrap();

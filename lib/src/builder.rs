@@ -60,6 +60,7 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::channels::DispatchMode;
@@ -139,7 +140,7 @@ pub struct DrasiLibBuilder {
         String,
         std::collections::HashMap<String, serde_json::Value>,
     )>,
-    index_provider: Option<Arc<dyn IndexBackendPlugin>>,
+    index_providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
     wal_provider: Option<Arc<dyn WalProvider>>,
@@ -165,7 +166,7 @@ impl DrasiLibBuilder {
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
             bootstrap_metadata: Vec::new(),
-            index_provider: None,
+            index_providers: HashMap::new(),
             state_store_provider: None,
             identity_provider: None,
             wal_provider: None,
@@ -198,15 +199,17 @@ impl DrasiLibBuilder {
         self
     }
 
-    /// Set the index backend provider for persistent storage.
+    /// Register a named index backend provider for persistent storage.
     ///
-    /// When using RocksDB or Redis/Garnet storage backends, you must provide
-    /// an index provider that implements `IndexBackendPlugin`. The provider
-    /// is responsible for creating the actual index instances.
+    /// Persistent storage backends (e.g. RocksDB or Redis/Garnet) are supplied as
+    /// pre-built providers implementing [`IndexBackendPlugin`] and registered under a
+    /// name. A query selects a provider by referencing that same name via its
+    /// `storage_backend` (a [`crate::indexes::StorageBackendRef::Named`]).
     ///
-    /// If no index provider is set, only in-memory storage backends can be used.
-    /// Attempting to use RocksDB or Redis backends without a provider will result
-    /// in an error.
+    /// The `name` must match the name used by queries (and, if you also declare the
+    /// backend in `storage_backends`, the backend id). Multiple providers may be
+    /// registered under different names. If no provider is registered, only in-memory
+    /// storage backends can be used.
     ///
     /// # Example
     /// ```ignore
@@ -215,12 +218,16 @@ impl DrasiLibBuilder {
     ///
     /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
     /// let core = DrasiLib::builder()
-    ///     .with_index_provider(Arc::new(provider))
+    ///     .with_index_provider("rocks", Arc::new(provider))
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn with_index_provider(mut self, provider: Arc<dyn IndexBackendPlugin>) -> Self {
-        self.index_provider = Some(provider);
+    pub fn with_index_provider(
+        mut self,
+        name: impl Into<String>,
+        provider: Arc<dyn IndexBackendPlugin>,
+    ) -> Self {
+        self.index_providers.insert(name.into(), provider);
         self
     }
 
@@ -456,10 +463,84 @@ impl DrasiLibBuilder {
             .validate()
             .map_err(|e| DrasiError::validation(e.to_string()))?;
 
+        // Strict referential validation for query storage backends. Config-level
+        // validation (DrasiLibConfig::validate) is intentionally lenient about named
+        // references because injected providers are only known here. We perform the
+        // authoritative check now, where both declared backends and injected provider
+        // names are available, so any misconfiguration fails at build time rather than
+        // being deferred to (possibly manual) query start.
+        {
+            use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
+
+            // Declared backends, classified as in-memory or plugin (by kind).
+            let mut declared_memory: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            let mut declared_plugin: std::collections::HashMap<&str, &str> =
+                std::collections::HashMap::new();
+            for b in &config.storage_backends {
+                match &b.spec {
+                    StorageBackendSpec::Memory { .. } => {
+                        declared_memory.insert(b.id.as_str());
+                    }
+                    StorageBackendSpec::Plugin { kind, .. } => {
+                        declared_plugin.insert(b.id.as_str(), kind.as_str());
+                    }
+                }
+            }
+
+            // An injected provider must not shadow a declared in-memory backend of the
+            // same name (it would silently change a volatile backend into a persistent
+            // one). Sharing a name with a declared plugin backend is expected.
+            for name in self.index_providers.keys() {
+                if declared_memory.contains(name.as_str()) {
+                    return Err(DrasiError::validation(format!(
+                        "Injected index provider '{name}' collides with a storage backend \
+                         declared as 'memory'. Rename the provider or the storage backend."
+                    )));
+                }
+            }
+
+            for query in &config.queries {
+                match &query.storage_backend {
+                    Some(StorageBackendRef::Named(name)) => {
+                        if self.index_providers.contains_key(name)
+                            || declared_memory.contains(name.as_str())
+                        {
+                            // Resolvable: injected provider or in-memory backend.
+                        } else if let Some(kind) = declared_plugin.get(name.as_str()) {
+                            return Err(DrasiError::validation(format!(
+                                "Query '{}' references storage backend '{}' (kind '{}') which is \
+                                 declared but has no injected provider. Inject one via \
+                                 with_index_provider(\"{}\", ...).",
+                                query.id, name, kind, name
+                            )));
+                        } else {
+                            return Err(DrasiError::validation(format!(
+                                "Query '{}' references unknown storage backend '{}'. Declare it in \
+                                 storage_backends or inject a provider via \
+                                 with_index_provider(\"{}\", ...).",
+                                query.id, name, name
+                            )));
+                        }
+                    }
+                    Some(StorageBackendRef::Inline(StorageBackendSpec::Plugin { kind, .. })) => {
+                        return Err(DrasiError::validation(format!(
+                            "Query '{}' uses an inline '{}' storage backend, which is not \
+                             supported in embedded mode. Declare a named storage backend and \
+                             inject a provider via with_index_provider(name, ...).",
+                            query.id, kind
+                        )));
+                    }
+                    // Inline Memory or no backend: nothing to validate here.
+                    Some(StorageBackendRef::Inline(StorageBackendSpec::Memory { .. })) | None => {}
+                }
+            }
+        }
+
         // Create runtime config and server with optional index and state store providers
         let runtime_config = Arc::new(crate::config::RuntimeConfig::new(
             config,
-            self.index_provider,
+            self.index_providers,
             self.state_store_provider,
             self.identity_provider,
             self.secret_store_provider,
@@ -1093,7 +1174,7 @@ mod tests {
         assert!(builder.query_configs.is_empty());
         assert!(builder.source_instances.is_empty());
         assert!(builder.reaction_instances.is_empty());
-        assert!(builder.index_provider.is_none());
+        assert!(builder.index_providers.is_empty());
         assert!(builder.state_store_provider.is_none());
     }
 
@@ -1146,9 +1227,89 @@ mod tests {
         assert!(core.is_ok(), "Builder with storage backend should succeed");
     }
 
-    // ==========================================================================
-    // Query Builder Unit Tests
-    // ==========================================================================
+    #[tokio::test]
+    async fn test_builder_query_named_unknown_backend_errors() {
+        use crate::indexes::config::StorageBackendRef;
+
+        let query = Query::cypher("q")
+            .query("MATCH (n) RETURN n")
+            .with_storage_backend(StorageBackendRef::Named("nope".to_string()))
+            .build();
+        let err = DrasiLibBuilder::new()
+            .with_query(query)
+            .build()
+            .await
+            .map(|_| ())
+            .expect_err("unknown named backend should fail");
+        assert!(err.to_string().contains("unknown storage backend"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_query_named_memory_backend_ok() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
+
+        let backend = StorageBackendConfig {
+            id: "mem".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let query = Query::cypher("q")
+            .query("MATCH (n) RETURN n")
+            .with_storage_backend(StorageBackendRef::Named("mem".to_string()))
+            .build();
+        let core = DrasiLibBuilder::new()
+            .add_storage_backend(backend)
+            .with_query(query)
+            .build()
+            .await;
+        assert!(core.is_ok(), "named memory backend should resolve");
+    }
+
+    #[tokio::test]
+    async fn test_builder_query_declared_plugin_without_provider_errors() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendRef, StorageBackendSpec};
+
+        let backend = StorageBackendConfig {
+            id: "rocks".to_string(),
+            spec: StorageBackendSpec::Plugin {
+                kind: "rocksdb".to_string(),
+                config: serde_json::json!({ "path": "/data/drasi" }),
+            },
+        };
+        let query = Query::cypher("q")
+            .query("MATCH (n) RETURN n")
+            .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
+            .build();
+        let err = DrasiLibBuilder::new()
+            .add_storage_backend(backend)
+            .with_query(query)
+            .build()
+            .await
+            .map(|_| ())
+            .expect_err("declared plugin without provider should fail");
+        assert!(err.to_string().contains("no injected provider"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_inline_plugin_backend_errors() {
+        use crate::indexes::config::{StorageBackendRef, StorageBackendSpec};
+
+        let query = Query::cypher("q")
+            .query("MATCH (n) RETURN n")
+            .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::Plugin {
+                kind: "rocksdb".to_string(),
+                config: serde_json::json!({ "path": "/data/drasi" }),
+            }))
+            .build();
+        let err = DrasiLibBuilder::new()
+            .with_query(query)
+            .build()
+            .await
+            .map(|_| ())
+            .expect_err("inline plugin backend should fail in embedded mode");
+        assert!(err.to_string().contains("not supported in embedded mode"));
+    }
 
     #[test]
     fn test_query_cypher_sets_id_and_language() {
