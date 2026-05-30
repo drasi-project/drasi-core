@@ -165,7 +165,7 @@ impl ShellReactionConfig {
         }
 
         // check that number of commands matches the number of subscribed queries (size check).
-        if (self.commands.len() != subscribed_queries.len()) {
+        if self.commands.len() != subscribed_queries.len() {
             error!("[{reaction_id}] Invalid configuration: number of commands must match the number of subscribed queries. commands: {}, subscribed_queries: {}", self.commands.len(), subscribed_queries.len());
             Err(anyhow::anyhow!(
                 "number of commands must match the number of subscribed queries"

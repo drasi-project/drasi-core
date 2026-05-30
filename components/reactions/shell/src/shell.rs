@@ -164,7 +164,7 @@ impl Reaction for ShellReaction {
         self.base
             .set_status(
                 ComponentStatus::Starting,
-                Some("Starting Shell Reaction".to_string()),
+                Some(format!("[{}] Starting Shell Reaction", self.base.id)),
             )
             .await;
 
@@ -188,7 +188,7 @@ impl Reaction for ShellReaction {
         self.base
             .set_status(
                 ComponentStatus::Running,
-                Some("Shell Reaction is running".to_string()),
+                Some(format!("[{}] Shell Reaction is running", self.base.id)),
             )
             .await;
 
@@ -196,14 +196,19 @@ impl Reaction for ShellReaction {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await?;
+        self.base
+            .set_status(
+                ComponentStatus::Stopping,
+                Some(format!("[{}] Stopping Shell Reaction", self.base.id)),
+            )
+            .await;
 
-        tokio::time::sleep(tokio::time::Duration::from_micros(500)).await;
+        self.base.stop_common().await?; // blocks waiting for the processing task to finish
 
         self.base
             .set_status(
                 ComponentStatus::Stopped,
-                Some("Shell Reaction has stopped".to_string()),
+                Some(format!("[{}] Shell Reaction has stopped", self.base.id)),
             )
             .await;
 

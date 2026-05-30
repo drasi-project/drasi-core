@@ -32,7 +32,7 @@ Content-Type: application/json
     "labels": ["sensors"],
     "properties": {
       "id": "sensor_01",
-      "temperature": 2.5,
+      "temperature": 54.5,
       "location": "room-a"
     }
   }

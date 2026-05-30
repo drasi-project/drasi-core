@@ -30,6 +30,7 @@ use drasi_lib::reactions::common::OperationType;
 use handlebars::Handlebars;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
+use std::io::{Error, ErrorKind};
 use std::process;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -40,6 +41,34 @@ use tokio_util::sync::CancellationToken;
 use std::process::Stdio;
 
 use log::{debug, error, info, warn};
+
+macro_rules! process_kill_macro {
+    ($pid:expr, $state:expr, $child:expr) => {
+        unsafe {
+            libc::kill(-$pid, libc::SIGTERM);
+        }
+
+        match timeout(std::time::Duration::from_millis(750), $child.wait()).await {
+            Ok(Ok(status)) => {
+                debug!("[{}] Process group terminated gracefully with SIGTERM. pid: {}, exit_status: {:?}", $state.reaction_id, $pid, status.code());
+                return Ok(());
+            }
+            _ => {
+                // if the process didn't exit, send SIGKILL to the whole process group
+                unsafe {
+                    libc::kill(-$pid, libc::SIGKILL);
+                }
+
+                let _ = $child.wait().await;
+                debug!(
+                    "[{}] Process group killed with SIGKILL after failed SIGTERM. pid: {}", $state.reaction_id, $pid
+                );
+
+                return Ok(());
+            }
+        }
+    };
+}
 
 #[derive(Debug)]
 pub struct ShellExecutor {
@@ -101,6 +130,7 @@ impl ShellExecutor {
         Ok(tokio::spawn(async move {
             let sem = Arc::new(Semaphore::new(max_concurrent as usize));
             let cancel = CancellationToken::new();
+            let mut join_set = tokio::task::JoinSet::new();
 
             loop {
                 tokio::select! {
@@ -112,8 +142,13 @@ impl ShellExecutor {
                         break;
                     }
 
+                    Some(result) = join_set.join_next(), if !join_set.is_empty() => {
+                        if let Err(e) = result {
+                            error!("[{reaction_id}] Task panicked: {e:?}");
+                        }
+                    }
 
-                    result = priority_queue.dequeue() => {
+                    result = priority_queue.dequeue(), if join_set.len() < max_concurrent as usize => {
                         let query_result = result.as_ref();
 
                         if(query_result.results.is_empty()){
@@ -122,7 +157,7 @@ impl ShellExecutor {
                             continue;
 
                         } else {
-                            tokio::spawn(
+                            join_set.spawn(
                                     Self::process_results(cancel.clone(), query_result.clone(), config_arc.clone(), sem.clone(), handlebars_arc.clone(), state.clone())
                             );
                         }
@@ -362,11 +397,28 @@ impl ShellExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(context.kill_on_drop);
 
-        // create a new process group for the child process, this allows to kill the entire group when needed.
+        // process security hardening and memory capping.
         unsafe {
             cmd.pre_exec(|| {
-                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
-                    .map_err(std::io::Error::from)?;
+                // process group ID is set to its pid, to kill the entire process group.
+                // child becomes leader of a new process group where PGID == its own PID
+                nix::unistd::setpgid(
+                    nix::unistd::Pid::from_raw(0), // target process.
+                    nix::unistd::Pid::from_raw(0), // target process pid.
+                )
+                .map_err(std::io::Error::from)?;
+
+                // prevent privilage escalation.
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+
+                // set memory cap.
+                let mem_rlim = libc::rlimit {
+                    rlim_cur: 256 * 1024 * 1024, // 256 MB
+                    rlim_max: 256 * 1024 * 1024, // 256 MB
+                };
+
+                libc::setrlimit(libc::RLIMIT_AS, &mem_rlim);
+
                 Ok(())
             });
         }
@@ -406,7 +458,7 @@ impl ShellExecutor {
         };
 
         // get the child pid, returns none if the process has already exited
-        let pid = match child.id() {
+        let pid_u32 = match child.id() {
             Some(pid) => pid,
             None => {
                 // This can happen if the process exits very quickly after spawning, before we can get its PID. (the process doesn't need stdin data)
@@ -480,7 +532,15 @@ impl ShellExecutor {
                     .add_invocation(recent_invocation);
                 return Ok(());
             }
-        } as i32;
+        };
+
+        let pid = i32::try_from(pid_u32).map_err(|_| {
+            anyhow::anyhow!(
+                "[{}] Child PID {} exceeds i32 range; refusing to signal process group safely",
+                state.reaction_id,
+                pid_u32
+            )
+        })?;
 
         // take the child stdin to write input stdin data.
         let child_write = child.stdin.take();
@@ -571,13 +631,13 @@ impl ShellExecutor {
             None => {
                 // cancellation case, kill the process group and return.
                 debug!("[{}] Command execution cancelled. Killing process group. pid: {}, command: {:?}", state.reaction_id, pid, command);
-                Self::terminate_process_group(&mut child, pid, &state.reaction_id, &state).await;
+                Self::terminate_process_group(&mut child, pid, &state.reaction_id, &state).await?;
             }
             Some(Err(e)) => {
                 // timeout case, kill the process group and return.
                 warn!("[{}] Command execution timed out after {} seconds. Killing process group. pid: {}, command: {:?}", state.reaction_id, context.timeout_s, pid, command);
                 state.metrics.record_timeout();
-                Self::terminate_process_group(&mut child, pid, &state.reaction_id, &state).await;
+                Self::terminate_process_group(&mut child, pid, &state.reaction_id, &state).await?;
             }
             Some(Ok((write_result, wait_result, stdout_data, stderr_data))) => {
                 if let Err(e) = write_result {
@@ -634,28 +694,40 @@ impl ShellExecutor {
         pid: i32,
         reaction_id: &str,
         state: &Arc<ShellReactionState>,
-    ) {
-        unsafe {
-            libc::kill(-pid, libc::SIGTERM);
+    ) -> anyhow::Result<()> {
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                warn!("[{reaction_id}] Failed to read /proc/{pid}/stat. error: {e:?}. Attempting to kill process group without pgid verification.");
+                // if we fail to read the stat file, we proceed with killing the process group without pgid verification, as it's safer to attempt killing than to leave a runaway process.
+                process_kill_macro!(pid, state, child);
+            }
+        };
+
+        // pgid and pid verification to ensure we are killing the correct process group, and not an unrelated one in the case of PID reuse.
+        // the correct process group should have the same pgid as the pid of the main process, because we setpgid to set the pgid to the pid of the main process in pre_exec.
+        let after_comm = stat.rfind(')').ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "malformed /proc/{pid}/stat: no closing paren",
+            )
+        })?;
+
+        let fields: Vec<&str> = stat[after_comm + 1..].split_whitespace().collect();
+        let current_pgid = fields
+            .get(2)
+            .and_then(|v| v.parse::<i32>().ok())
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "bad /proc/{pid}/stat"))?;
+
+        if current_pgid != pid {
+            return Err(
+                Error::other("pgid mismatch, refusing to kill unrelated process group").into(),
+            );
         }
 
-        match timeout(std::time::Duration::from_millis(750), child.wait()).await {
-            Ok(Ok(status)) => {
-                debug!("[{}] Process group terminated gracefully with SIGTERM. pid: {}, exit_status: {:?}", state.reaction_id, pid, status.code());
-            }
-            _ => {
-                // if the process didn't exit, send SIGKILL to the whole process group
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                }
-
-                let _ = child.wait().await;
-                debug!(
-                    "[{}] Process group killed with SIGKILL after failed SIGTERM. pid: {}",
-                    state.reaction_id, pid
-                );
-            }
-        }
+        // process group kill
+        process_kill_macro!(pid, state, child);
     }
 
     pub async fn read_limited<R>(mut reader: R, mut limit: usize) -> anyhow::Result<(Vec<u8>, bool)>

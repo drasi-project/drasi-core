@@ -816,8 +816,7 @@ impl Reaction for MyReaction {
 }
 ```
 
-**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-grpc-adaptive`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`,
-`drasi-reaction-shell`.
+**Available reaction plugins:** `drasi-reaction-http`, `drasi-reaction-grpc`, `drasi-reaction-grpc-adaptive`, `drasi-reaction-sse`, `drasi-reaction-log`, `drasi-reaction-platform`, `drasi-reaction-profiler`, `drasi-reaction-storedproc-postgres`, `drasi-reaction-storedproc-mysql`, `drasi-reaction-storedproc-mssql`, `drasi-reaction-application`, `drasi-reaction-shell`.
 
 ### Result Format
 
