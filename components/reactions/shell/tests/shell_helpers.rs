@@ -15,12 +15,10 @@
 use drasi_lib::{DrasiLib, Query, Source};
 
 use anyhow::Result;
-use drasi_reaction_shell::{ShellCommand, ShellReactionBuilder, ShellReactionConfig};
-use drasi_source_http::{HttpSource, HttpSourceConfig};
+use drasi_reaction_shell::{ShellReactionBuilder, ShellReactionConfig};
+use drasi_source_http::HttpSource;
 use log::info;
-use serial_test::serial;
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::{thread::sleep, time::Duration};
 use tokio::time::Instant;

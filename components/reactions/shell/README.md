@@ -315,6 +315,20 @@ Configuration is validated at construction time (both `new()` and `build()`):
 - Environment variable keys in `extension.env` must match `^[A-Za-z_][A-Za-z0-9_]*$`.
 - All args must be non-empty strings.
 
+## Process Security Hardening
+
+The shell reaction executes external programs, so it should be treated as privileged code execution. Use these controls in production:
+
+### Built-in hardening in the executor
+
+Before each child process starts, the executor applies Linux `pre_exec` safeguards:
+
+1. **Dedicated process group**: `setpgid(0, 0)` makes the child the leader of a new process group (`PGID == PID`), so timeout/cancellation can terminate the entire group (not just the immediate child).
+2. **No privilege escalation**: `prctl(PR_SET_NO_NEW_PRIVS, 1, ...)` prevents the child and descendants from gaining additional privileges.
+3. **Memory cap**: `setrlimit(RLIMIT_AS, 256 MiB)` caps virtual address space for the child process.
+
+These controls are Linux-only and are applied per invocation.
+
 ## Example Script
 
 A minimal script that reads from stdin and forwards the JSON payload:

@@ -77,8 +77,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use drasi_lib::{DrasiLib, Query};
-use drasi_reaction_shell::{ ShellReactionBuilder };
-use drasi_reaction_shell::config::{ TemplateSpec, QueryConfig, ShellExtension, ShellCommand };
+use drasi_reaction_shell::config::{QueryConfig, ShellCommand, ShellExtension, TemplateSpec};
+use drasi_reaction_shell::ShellReactionBuilder;
 use drasi_source_http::HttpSource;
 
 use std::collections::HashMap;
@@ -102,17 +102,34 @@ async fn main() -> Result<()> {
         .build()?;
 
     // =========================================================================
-    // Step 2: Define Query
+    // Step 2: Define Queries
     // =========================================================================
-    // Continuously monitors all `sensors` nodes and returns their properties.
+    // Query 1 continuously monitors all `sensors` nodes and returns properties.
+    // Query 2 emits only hot sensors (temperature >= 25.0).
 
     let sensor_query = Query::cypher("sensor-monitor")
-        .query(r#"
+        .query(
+            r#"
             MATCH (s:sensors)
             RETURN s.id AS id,
                    s.temperature AS temperature,
                    s.location AS location
-        "#)
+        "#,
+        )
+        .from_source("sensors")
+        .auto_start(true)
+        .build();
+
+    let hot_sensor_query = Query::cypher("hot-sensor-alerts")
+        .query(
+            r#"
+            MATCH (s:sensors)
+            WHERE s.temperature >= 25.0
+            RETURN s.id AS id,
+                   s.temperature AS temperature,
+                   s.location AS location
+        "#,
+        )
         .from_source("sensors")
         .auto_start(true)
         .build();
@@ -130,17 +147,20 @@ async fn main() -> Result<()> {
 
     let default_template = QueryConfig {
         added: Some(TemplateSpec {
-            template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}".to_string(),
-            extension: ShellExtension{
+            template: "[ADD] sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}"
+                .to_string(),
+            extension: ShellExtension {
                 env: {
                     let mut e = HashMap::new();
                     e.insert("SENSOR_ID".to_string(), "from {{after.id}}".to_string());
                     e
                 },
-            }
+            },
         }),
         updated: Some(TemplateSpec {
-            template: "[UPDATE] sensor={{after.id}} temp={{before.temperature}} -> {{after.temperature}}".to_string(),
+            template:
+                "[UPDATE] sensor={{after.id}} temp={{before.temperature}} -> {{after.temperature}}"
+                    .to_string(),
             extension: ShellExtension::default(),
         }),
         deleted: Some(TemplateSpec {
@@ -149,15 +169,44 @@ async fn main() -> Result<()> {
         }),
     };
 
+    let hot_sensor_template = QueryConfig {
+        added: Some(TemplateSpec {
+            template: "[ALERT] hot sensor={{after.id}} temp={{after.temperature}} loc={{after.location}}"
+                .to_string(),
+            extension: ShellExtension::default(),
+        }),
+        updated: Some(TemplateSpec {
+            template: "[ALERT UPDATE] sensor={{after.id}} temp={{before.temperature}} -> {{after.temperature}}"
+                .to_string(),
+            extension: ShellExtension::default(),
+        }),
+        deleted: Some(TemplateSpec {
+            template: "[ALERT CLEAR] sensor={{before.id}}".to_string(),
+            extension: ShellExtension::default(),
+        }),
+    };
+
     let shell_reaction = ShellReactionBuilder::new("shell-logger")
         .with_query("sensor-monitor")
-        .with_command("sensor-monitor", ShellCommand {
-            executable: "/usr/bin/python3".to_string(),
-            args: vec!["main.py".to_string()],
-        })
+        .with_query("hot-sensor-alerts")
+        .with_command(
+            "sensor-monitor",
+            ShellCommand {
+                executable: "/usr/bin/python3".to_string(),
+                args: vec!["main.py".to_string()],
+            },
+        )
+        .with_command(
+            "hot-sensor-alerts",
+            ShellCommand {
+                executable: "/usr/bin/python3".to_string(),
+                args: vec!["main.py".to_string()],
+            },
+        )
+        .with_route("hot-sensor-alerts", hot_sensor_template)
         .with_default_template(default_template)
-        .with_max_concurrent(3)
-        .with_timeout_s(10)
+        .with_max_concurrent(10)
+        .with_timeout_s(100)
         .build()?;
 
     // =========================================================================
@@ -169,9 +218,10 @@ async fn main() -> Result<()> {
             .with_id("shell-example")
             .with_source(http_source)
             .with_query(sensor_query)
+            .with_query(hot_sensor_query)
             .with_reaction(shell_reaction)
             .build()
-            .await?
+            .await?,
     );
 
     core.start().await?;
@@ -183,7 +233,9 @@ async fn main() -> Result<()> {
     println!("│   POST /sources/sensors/events             │");
     println!("├────────────────────────────────────────────┤");
     println!("│ Shell command: /usr/bin/python3 main.py    │");
-    println!("│ Watching query: sensor-monitor             │");
+    println!("│ Watching queries:                          │");
+    println!("│   - sensor-monitor                         │");
+    println!("│   - hot-sensor-alerts                      │");
     println!("├────────────────────────────────────────────┤");
     println!("│ Press Ctrl+C to stop                       │");
     println!("└────────────────────────────────────────────┘\n");

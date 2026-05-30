@@ -28,21 +28,13 @@
 mod shell_helpers;
 
 use anyhow::Result;
-use drasi_lib::channels::ResultDiff;
-use drasi_lib::identity::{self, IdentityProvider};
-use drasi_lib::{identity::PasswordIdentityProvider, DrasiLib, Query, Source};
 use shell_helpers::*;
 
-use drasi_reaction_shell::{ShellCommand, ShellReactionBuilder, ShellReactionConfig};
-use drasi_source_http::{HttpSource, HttpSourceConfig};
-use log::info;
+use drasi_reaction_shell::{ShellCommand, ShellReactionConfig};
 use serial_test::serial;
 use std::collections::HashMap;
-use std::num;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
 use std::{thread::sleep, time::Duration};
-use tokio::time::Instant;
 
 macro_rules! wait_for_startup {
     ($core:expr, $reaction_id:expr, $source_id:expr) => {
@@ -116,6 +108,13 @@ async fn test_shell_reaction_processing() -> Result<()> {
     // get the invocation details
     tokio::time::sleep(Duration::from_secs(2)).await;
     let invocation = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    assert_eq!(
+        invocation.len(),
+        1,
+        "there should be one invocation of the script, got {}",
+        invocation.len()
+    );
 
     let exit_status = invocation[0]["exit_status"].as_i64().unwrap_or(-1);
     assert_eq!(exit_status, 0, "operations.sh should exit with 0");
@@ -501,7 +500,6 @@ async fn test_shell_reaction_concurrent_execution_limit() -> Result<()> {
 #[ignore]
 // validate that the shell reaction accepts the failure of the script and adds it to the invocation details without crashing.
 async fn test_shell_reaction_script_failure() -> Result<()> {
-
     init_logging();
 
     let shell_reaction_slot_name = slot_name();
@@ -509,7 +507,7 @@ async fn test_shell_reaction_script_failure() -> Result<()> {
     // get the script path
     let script_path = operations_script_path("test2");
     // make the script executable
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
 
     let reaction_config = ShellReactionConfig {
         commands: HashMap::from([(
@@ -519,9 +517,7 @@ async fn test_shell_reaction_script_failure() -> Result<()> {
                 args: vec![],
             },
         )]),
-        env: HashMap::from([
-            ("FAIL_EXIT".to_string(), "true".to_string()),
-        ]),
+        env: HashMap::from([("FAIL_EXIT".to_string(), "true".to_string())]),
         timeout_s: 20,
         ..Default::default()
     };
@@ -548,7 +544,6 @@ async fn test_shell_reaction_script_failure() -> Result<()> {
         "stdout should contain the failure message from the script, got: {stdout}"
     );
 
-
     let properties = get_reaction_properties(&core, &shell_reaction_slot_name).await?;
     let non_zero_exits = properties
         .get("non_zero_exits")
@@ -559,6 +554,6 @@ async fn test_shell_reaction_script_failure() -> Result<()> {
         non_zero_exits, 1,
         "there should be 1 non-zero exit for the script execution, got {non_zero_exits}"
     );
-    
+
     Ok(())
 }

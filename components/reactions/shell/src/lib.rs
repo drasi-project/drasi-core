@@ -103,8 +103,8 @@ impl ShellReactionBuilder {
     }
 
     /// Add a shell command configuration
-    pub fn with_command(mut self, command_name: impl Into<String>, command: ShellCommand) -> Self {
-        self.commands.insert(command_name.into(), command);
+    pub fn with_command(mut self, query_id: impl Into<String>, command: ShellCommand) -> Self {
+        self.commands.insert(query_id.into(), command);
         self
     }
 
