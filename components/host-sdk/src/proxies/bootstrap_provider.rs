@@ -171,8 +171,15 @@ impl Drop for BootstrapProviderProxy {
 /// Uses a std::sync::mpsc channel + forwarding thread to avoid blocking the plugin's
 /// tokio runtime (the same pattern proven in the PoC's cross-plugin bootstrap).
 fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSender {
-    // Create a std::sync channel for the plugin to send on (sync-safe)
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
+    // Create a *bounded* std::sync channel so the plugin's `send_fn` blocks
+    // when the forwarding thread is itself blocked on the bounded tokio
+    // channel downstream. With an unbounded channel, the plugin could keep
+    // pushing events past whatever rate the query consumes, which on large
+    // bootstraps quietly burns memory.
+    // The capacity matches the downstream tokio channel capacity (1000) so
+    // the buffer is at most ~2x downstream capacity in flight.
+    // See https://github.com/drasi-project/drasi-core/issues/454
+    let (std_tx, std_rx) = std::sync::mpsc::sync_channel::<BootstrapEvent>(1000);
 
     // Spawn a thread that forwards from std channel → tokio channel
     std::thread::spawn(move || {
@@ -191,7 +198,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
 
     extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let tx = unsafe { &*(state as *const std::sync::mpsc::Sender<BootstrapEvent>) };
+            let tx = unsafe { &*(state as *const std::sync::mpsc::SyncSender<BootstrapEvent>) };
             if event.is_null() {
                 return -1;
             }
@@ -211,7 +218,7 @@ fn build_ffi_bootstrap_sender(event_tx: BootstrapEventSender) -> FfiBootstrapSen
     extern "C" fn drop_fn(state: *mut c_void) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             drop(Box::from_raw(
-                state as *mut std::sync::mpsc::Sender<BootstrapEvent>,
+                state as *mut std::sync::mpsc::SyncSender<BootstrapEvent>,
             ))
         }));
     }

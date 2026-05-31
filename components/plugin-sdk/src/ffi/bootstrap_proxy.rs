@@ -59,7 +59,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
 
         // FFI sender callback — wraps tokio sender, called from the bootstrap thread
         struct SenderState {
-            tx: std::sync::mpsc::Sender<drasi_lib::channels::events::BootstrapEvent>,
+            tx: std::sync::mpsc::SyncSender<drasi_lib::channels::events::BootstrapEvent>,
         }
 
         extern "C" fn send_fn(state: *mut c_void, event: *mut FfiBootstrapEvent) -> i32 {
@@ -82,9 +82,14 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             unsafe { drop(Box::from_raw(state as *mut SenderState)) };
         }
 
-        // Use std::sync::mpsc so the vtable thread can send without async
+        // Use a *bounded* std::sync::mpsc so the vtable thread (the plugin
+        // bootstrap sender) blocks when downstream backpressure takes hold,
+        // rather than buffering events without limit. The capacity matches
+        // the host's forwarding channel (1000) so the buffer in flight is
+        // bounded.
+        // See https://github.com/drasi-project/drasi-core/issues/454
         let (std_tx, std_rx) =
-            std::sync::mpsc::channel::<drasi_lib::channels::events::BootstrapEvent>();
+            std::sync::mpsc::sync_channel::<drasi_lib::channels::events::BootstrapEvent>(1000);
 
         let sender_state = Box::new(SenderState { tx: std_tx });
         let ffi_sender = Box::new(FfiBootstrapSender {
