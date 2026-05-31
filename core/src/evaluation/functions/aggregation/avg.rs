@@ -278,6 +278,15 @@ impl AggregatingFunction for Avg {
                 0,
                 0,
             ))),
+            // `apply` and `revert` already accept `Null` (see above) — for
+            // example, when a property is missing on a bootstrap-originated
+            // element. `snapshot` was the odd one out and crashed with
+            // `InvalidArgument(0)` instead of returning the running average.
+            // That manifests as a hard crash on RocksDB-persisted restart.
+            // See https://github.com/drasi-project/drasi-core/issues/498
+            VariableValue::Null => Ok(VariableValue::Float(
+                Float::from_f64(avg).unwrap_or_default(),
+            )),
             _ => Err(FunctionError {
                 function_name: "Avg".to_string(),
                 error: FunctionEvaluationError::InvalidArgument(0),
@@ -289,5 +298,140 @@ impl AggregatingFunction for Avg {
 impl Debug for Avg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Avg")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        evaluation::{
+            context::QueryVariables, variable_value::VariableValue, ExpressionEvaluationContext,
+            InstantQueryClock,
+        },
+        in_memory_index::in_memory_result_index::InMemoryResultIndex,
+    };
+    use drasi_query_ast::ast;
+
+    fn make_context() -> (QueryVariables, Arc<InstantQueryClock>) {
+        (
+            QueryVariables::new(),
+            Arc::new(InstantQueryClock::new(0, 0)),
+        )
+    }
+
+    fn expression() -> ast::FunctionExpression {
+        ast::FunctionExpression {
+            name: "avg".into(),
+            args: vec![],
+            position_in_query: 10,
+        }
+    }
+
+    /// Regression test for <https://github.com/drasi-project/drasi-core/issues/498>.
+    ///
+    /// `Avg::apply` and `Avg::revert` already accept `VariableValue::Null` and
+    /// just return the running average. `Avg::snapshot` was the odd one out
+    /// and crashed with `InvalidArgument(0)`. On a RocksDB-persisted restart
+    /// the bootstrap re-evaluates each element through `snapshot`; if any
+    /// element's aggregation expression evaluates to `Null` (typical when
+    /// the underlying property is missing/optional), the whole bootstrap
+    /// blew up. After the fix, `snapshot` returns the running average just
+    /// like `apply`/`revert` do.
+    #[tokio::test]
+    async fn snapshot_with_null_returns_running_average() {
+        let avg = Avg {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let (variables, clock) = make_context();
+        let context = ExpressionEvaluationContext::new(&variables, clock);
+        let expr = expression();
+
+        let mut accumulator = avg.initialize_accumulator(&context, &expr, &vec![], index);
+
+        // Build up an average from two real samples: (10 + 20) / 2 == 15.0
+        avg.apply(
+            &context,
+            vec![VariableValue::Integer(10.into())],
+            &mut accumulator,
+        )
+        .await
+        .unwrap();
+        avg.apply(
+            &context,
+            vec![VariableValue::Integer(20.into())],
+            &mut accumulator,
+        )
+        .await
+        .unwrap();
+
+        // Snapshot with a Null arg used to bail with InvalidArgument(0).
+        // It must now succeed and return the running average unchanged.
+        let snap = avg
+            .snapshot(&context, vec![VariableValue::Null], &accumulator)
+            .await
+            .expect("Avg::snapshot must accept Null (issue #498)");
+
+        match snap {
+            VariableValue::Float(n) => {
+                assert!(
+                    (n.as_f64().unwrap() - 15.0).abs() < f64::EPSILON,
+                    "expected running average 15.0, got {n:?}"
+                );
+            }
+            other => panic!("expected Float, got {other:?}"),
+        }
+    }
+
+    /// `apply` keeps the average unchanged when fed `Null`. `snapshot` must
+    /// agree — fixed-point invariant: `apply(Null); snapshot(Null) == snapshot(prev)`.
+    #[tokio::test]
+    async fn apply_then_snapshot_with_null_is_consistent() {
+        let avg = Avg {};
+        let index = Arc::new(InMemoryResultIndex::new());
+        let (variables, clock) = make_context();
+        let context = ExpressionEvaluationContext::new(&variables, clock);
+        let expr = expression();
+
+        let mut accumulator = avg.initialize_accumulator(&context, &expr, &vec![], index);
+
+        avg.apply(
+            &context,
+            vec![VariableValue::Float(8.0.into())],
+            &mut accumulator,
+        )
+        .await
+        .unwrap();
+        avg.apply(
+            &context,
+            vec![VariableValue::Float(4.0.into())],
+            &mut accumulator,
+        )
+        .await
+        .unwrap();
+
+        // Apply a Null sample (no-op) then snapshot; must match a snapshot
+        // taken before the Null apply.
+        let baseline = avg
+            .snapshot(
+                &context,
+                vec![VariableValue::Float(0.0.into())],
+                &accumulator,
+            )
+            .await
+            .unwrap();
+        avg.apply(&context, vec![VariableValue::Null], &mut accumulator)
+            .await
+            .unwrap();
+        let after_null = avg
+            .snapshot(&context, vec![VariableValue::Null], &accumulator)
+            .await
+            .unwrap();
+
+        match (baseline, after_null) {
+            (VariableValue::Float(a), VariableValue::Float(b)) => {
+                assert_eq!(a.as_f64(), b.as_f64());
+            }
+            (a, b) => panic!("expected two Float values, got ({a:?}, {b:?})"),
+        }
     }
 }
