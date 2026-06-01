@@ -113,6 +113,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_json_roundtrip_both_variants() {
+        // JSON is the wire format used by StorageBackendConfig in the factory,
+        // so assert to_value -> from_value preserves both variants. This pins
+        // the (enum-level tag + per-variant untagged) serde behavior so a future
+        // serde change can't silently break the JSON round-trip.
+        let memory = StorageBackendSpec::Memory {
+            enable_archive: true,
+        };
+        let memory_value = serde_json::to_value(&memory).unwrap();
+        assert_eq!(memory_value["kind"], "memory");
+        match serde_json::from_value::<StorageBackendSpec>(memory_value).unwrap() {
+            StorageBackendSpec::Memory { enable_archive } => assert!(enable_archive),
+            _ => panic!("Expected Memory variant after JSON round-trip"),
+        }
+
+        let plugin = StorageBackendSpec::Plugin {
+            kind: "rocksdb".to_string(),
+            config: serde_json::json!({
+                "path": "/data/drasi",
+                "enableArchive": true,
+            }),
+        };
+        let plugin_value = serde_json::to_value(&plugin).unwrap();
+        assert_eq!(plugin_value["kind"], "rocksdb");
+        assert_eq!(plugin_value["path"], "/data/drasi");
+        match serde_json::from_value::<StorageBackendSpec>(plugin_value).unwrap() {
+            StorageBackendSpec::Plugin { kind, config } => {
+                assert_eq!(kind, "rocksdb");
+                assert_eq!(config["path"], "/data/drasi");
+                assert_eq!(config["enableArchive"], true);
+            }
+            _ => panic!("Expected Plugin variant after JSON round-trip"),
+        }
+    }
+
+    #[test]
     fn test_memory_serde() {
         let yaml = r#"
 kind: memory

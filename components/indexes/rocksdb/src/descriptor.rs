@@ -116,6 +116,19 @@ impl IndexBackendPluginDescriptor for RocksDbIndexDescriptor {
             anyhow::bail!("RocksDB index 'path' must not be empty");
         }
 
+        // Relative paths are intentionally supported (resolved against the
+        // process working directory), but parent-directory (`..`) components are
+        // rejected so a configured path cannot escape upward out of its intended
+        // storage root.
+        if std::path::Path::new(&path)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "RocksDB index 'path' must not contain parent directory ('..') components, got: {path}"
+            );
+        }
+
         Ok(Arc::new(RocksDbIndexProvider::new(
             path,
             enable_archive,
@@ -161,6 +174,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_create_with_env_var_path() {
         std::env::set_var("TEST_ROCKSDB_PATH", "/tmp/drasi-rocks-env");
         let json = serde_json::json!({
@@ -182,5 +196,28 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("path"));
+    }
+
+    #[tokio::test]
+    async fn test_create_accepts_relative_path() {
+        let json = serde_json::json!({ "path": "data/drasi-rocks-rel" });
+        let provider = RocksDbIndexDescriptor
+            .create_index_backend(&json)
+            .await
+            .expect("relative paths must be accepted");
+        assert!(!provider.is_volatile());
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_parent_dir_traversal() {
+        let json = serde_json::json!({ "path": "../../secrets" });
+        let err = match RocksDbIndexDescriptor.create_index_backend(&json).await {
+            Ok(_) => panic!("should reject parent-directory traversal"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("parent directory"),
+            "unexpected error: {err}"
+        );
     }
 }

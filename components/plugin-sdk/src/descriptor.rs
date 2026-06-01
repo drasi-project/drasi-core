@@ -460,7 +460,9 @@ pub trait IndexBackendPluginDescriptor: Send + Sync {
     /// The semver version of this plugin's configuration DTO.
     fn config_version(&self) -> &str;
 
-    /// Returns all OpenAPI schemas as a JSON-serialized map (see [`SourcePluginDescriptor::config_schema_json`]).
+    /// Returns all OpenAPI schemas as a JSON-serialized `serde_json::Map<String, Schema>`,
+    /// keyed by schema name (e.g. `"index.redis.GarnetIndexConfig"`). This is the same
+    /// format required by [`SourcePluginDescriptor::config_schema_json`].
     fn config_schema_json(&self) -> String;
 
     /// Returns the OpenAPI schema name for this plugin's configuration DTO.
@@ -486,6 +488,14 @@ pub trait IndexBackendPluginDescriptor: Send + Sync {
     /// # Arguments
     ///
     /// - `config_json` — The plugin-specific configuration as a JSON value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `config_json` cannot be deserialized into the
+    /// expected DTO, if any [`ConfigValue`](crate::config_value::ConfigValue)
+    /// field fails to resolve (e.g. missing environment variable or secret),
+    /// if resolved values fail validation (e.g. empty connection string), or
+    /// if the backend cannot be constructed (e.g. unavailable server).
     async fn create_index_backend(
         &self,
         config_json: &serde_json::Value,

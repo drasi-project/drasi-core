@@ -59,3 +59,4 @@ plugin-descriptor = ["dep:drasi-plugin-sdk", "dep:utoipa", "dep:anyhow"]
 shared-tests = { path = "../../../shared-tests" }
 uuid = { version = "0.8.2", features = ["serde", "v4"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
+serial_test = "3"

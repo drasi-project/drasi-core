@@ -1313,6 +1313,65 @@ mod tests {
         assert!(err.to_string().contains("not supported in embedded mode"));
     }
 
+    #[tokio::test]
+    async fn test_builder_provider_shadows_memory_backend_errors() {
+        use crate::indexes::config::{StorageBackendConfig, StorageBackendSpec};
+        use async_trait::async_trait;
+        use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
+        use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
+        use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+        use drasi_core::interface::{CreatedIndexes, IndexSet, NoOpSessionControl};
+
+        // A persistent (non-volatile) provider injected under a name that is also
+        // declared as an in-memory backend must be rejected — silently turning a
+        // volatile backend into a persistent one is a misconfiguration.
+        struct MockPersistentPlugin;
+
+        #[async_trait]
+        impl IndexBackendPlugin for MockPersistentPlugin {
+            async fn create_indexes(
+                &self,
+                _query_id: &str,
+            ) -> std::result::Result<CreatedIndexes, drasi_core::interface::IndexError> {
+                let element_index = Arc::new(InMemoryElementIndex::new());
+                Ok(CreatedIndexes {
+                    set: IndexSet {
+                        element_index: element_index.clone(),
+                        archive_index: element_index,
+                        result_index: Arc::new(InMemoryResultIndex::new()),
+                        future_queue: Arc::new(InMemoryFutureQueue::new()),
+                        session_control: Arc::new(NoOpSessionControl),
+                    },
+                    checkpoint_store: None,
+                    outbox_writer: None,
+                    live_results_writer: None,
+                })
+            }
+
+            fn is_volatile(&self) -> bool {
+                false
+            }
+        }
+
+        let backend = StorageBackendConfig {
+            id: "mem".to_string(),
+            spec: StorageBackendSpec::Memory {
+                enable_archive: false,
+            },
+        };
+        let err = DrasiLibBuilder::new()
+            .add_storage_backend(backend)
+            .with_index_provider("mem", Arc::new(MockPersistentPlugin))
+            .build()
+            .await
+            .map(|_| ())
+            .expect_err("provider shadowing a declared memory backend should fail");
+        assert!(
+            err.to_string().contains("collides"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_query_cypher_sets_id_and_language() {
         let q = Query::cypher("cypher-q");

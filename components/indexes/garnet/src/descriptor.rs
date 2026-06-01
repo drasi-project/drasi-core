@@ -116,6 +116,17 @@ impl IndexBackendPluginDescriptor for GarnetIndexDescriptor {
             anyhow::bail!("Garnet index 'connectionString' must not be empty");
         }
 
+        // Require a Redis URL scheme so malformed values (e.g. bare host:port or
+        // a file path) fail fast at construction rather than producing a
+        // confusing error deep inside the Redis client.
+        if !connection_string.starts_with("redis://")
+            && !connection_string.starts_with("rediss://")
+        {
+            anyhow::bail!(
+                "Garnet index 'connectionString' must start with 'redis://' or 'rediss://', got: {connection_string}"
+            );
+        }
+
         Ok(Arc::new(GarnetIndexProvider::new(
             connection_string,
             cache_size,
@@ -161,6 +172,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_create_with_env_var_connection() {
         std::env::set_var("TEST_GARNET_CONN", "redis://example:6379");
         let json = serde_json::json!({
@@ -182,5 +194,28 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("connectionString"));
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_non_redis_scheme() {
+        let json = serde_json::json!({ "connectionString": "example.com:6379" });
+        let err = match GarnetIndexDescriptor.create_index_backend(&json).await {
+            Ok(_) => panic!("should reject connection string without redis scheme"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("redis://"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_accepts_rediss_scheme() {
+        let json = serde_json::json!({ "connectionString": "rediss://secure:6380" });
+        let provider = GarnetIndexDescriptor
+            .create_index_backend(&json)
+            .await
+            .expect("rediss:// scheme must be accepted");
+        assert!(!provider.is_volatile());
     }
 }
