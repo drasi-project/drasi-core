@@ -218,7 +218,7 @@ mod tests {
             self.secrets
                 .get(name)
                 .cloned()
-                .ok_or_else(|| anyhow!("Secret '{}' not found", name))
+                .ok_or_else(|| anyhow!("Secret '{name}' not found"))
         }
     }
 
