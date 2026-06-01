@@ -150,7 +150,7 @@ async fn test_simple_json_endpoint() {
             }
             _ => panic!("Expected Node"),
         },
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Update"),
     }
 }
 
@@ -1234,7 +1234,7 @@ async fn test_relations_mapping() {
             }
             _ => panic!("Expected Relation"),
         },
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Update"),
     }
 }
 
@@ -1599,7 +1599,7 @@ async fn test_xml_response_parsing() {
             }
             _ => panic!("Expected Node"),
         },
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Update"),
     }
 }
 
@@ -1687,7 +1687,7 @@ async fn test_yaml_response_parsing() {
             }
             _ => panic!("Expected Node"),
         },
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Update"),
     }
 }
 
@@ -1777,7 +1777,222 @@ async fn test_type_preservation_in_properties() {
             }
             _ => panic!("Expected Node"),
         },
-        _ => panic!("Expected Insert"),
+        _ => panic!("Expected Update"),
+    }
+}
+
+// ── Test: Explicit operation types (Issue #508) ─────────────────────────────
+
+#[tokio::test]
+async fn test_explicit_insert_operation() {
+    let app = Router::new().route(
+        "/users",
+        get(|| async {
+            Json(json!([
+                {"id": "1", "name": "Alice"},
+                {"id": "2", "name": "Bob"}
+            ]))
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/users"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    operation: OperationType::Insert,
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["User".to_string()],
+                        properties: Some(json!({
+                            "name": "{{item.name}}"
+                        })),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+        max_pages: None,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("test-source");
+    let request = test_request(vec!["User".to_string()], vec![]);
+
+    let (tx, rx) = mpsc::channel(100);
+    provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
+
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 2);
+
+    // All events should be Insert
+    for event in &events {
+        match &event.change {
+            SourceChange::Insert { element } => match element {
+                Element::Node { metadata, .. } => {
+                    assert_eq!(&*metadata.labels[0], "User");
+                }
+                _ => panic!("Expected Node"),
+            },
+            _ => panic!("Expected Insert"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_delete_operation_nodes() {
+    let app = Router::new().route(
+        "/deleted-users",
+        get(|| async {
+            Json(json!([
+                {"id": "1", "name": "Alice"},
+                {"id": "2", "name": "Bob"},
+                {"id": "3", "name": "Charlie"}
+            ]))
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/deleted-users"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    operation: OperationType::Delete,
+                    element_type: ElementType::Node,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["User".to_string()],
+                        properties: Some(json!({
+                            "name": "{{item.name}}"
+                        })),
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+        max_pages: None,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("test-source");
+    let request = test_request(vec!["User".to_string()], vec![]);
+
+    let (tx, rx) = mpsc::channel(100);
+    provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
+
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 3);
+
+    // All events should be Delete with only metadata (id + labels)
+    for (i, event) in events.iter().enumerate() {
+        match &event.change {
+            SourceChange::Delete { metadata } => {
+                let expected_id = format!("{}", i + 1);
+                assert_eq!(&*metadata.reference.element_id, expected_id.as_str());
+                assert_eq!(&*metadata.labels[0], "User");
+            }
+            other => panic!("Expected Delete, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_delete_operation_relations() {
+    let app = Router::new().route(
+        "/deleted-edges",
+        get(|| async {
+            Json(json!([
+                {"id": "r1", "from": "u1", "to": "u2"},
+                {"id": "r2", "from": "u2", "to": "u3"}
+            ]))
+        }),
+    );
+
+    let base_url = start_server(app).await;
+
+    let config = HttpBootstrapConfig {
+        endpoints: vec![EndpointConfig {
+            url: format!("{base_url}/deleted-edges"),
+            method: HttpMethod::Get,
+            headers: HashMap::new(),
+            body: None,
+            auth: None,
+            pagination: None,
+            response: ResponseConfig {
+                items_path: "$".to_string(),
+                content_type: None,
+                mappings: vec![ElementMappingConfig {
+                    operation: OperationType::Delete,
+                    element_type: ElementType::Relation,
+                    template: ElementTemplate {
+                        id: "{{item.id}}".to_string(),
+                        labels: vec!["FOLLOWS".to_string()],
+                        properties: None,
+                        from: None,
+                        to: None,
+                    },
+                }],
+            },
+        }],
+        timeout_seconds: 10,
+        max_retries: 0,
+        retry_delay_ms: 100,
+        max_pages: None,
+    };
+
+    let provider = HttpBootstrapProvider::new(config).unwrap();
+    let context = test_context("test-source");
+    let request = test_request(vec![], vec!["FOLLOWS".to_string()]);
+
+    let (tx, rx) = mpsc::channel(100);
+    provider
+        .bootstrap(request, &context, tx, None)
+        .await
+        .unwrap();
+
+    let events = collect_events(rx).await;
+    assert_eq!(events.len(), 2);
+
+    // Delete relations: no from/to needed, just id + labels
+    match &events[0].change {
+        SourceChange::Delete { metadata } => {
+            assert_eq!(&*metadata.reference.element_id, "r1");
+            assert_eq!(&*metadata.labels[0], "FOLLOWS");
+        }
+        other => panic!("Expected Delete, got {other:?}"),
     }
 }
 

@@ -481,6 +481,12 @@ mod tests {
         assert_eq!(config.endpoints.len(), 1);
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.endpoints[0].url, "https://api.example.com/users");
+
+        // Backward compat: missing "operation" field should default to Update
+        assert_eq!(
+            config.endpoints[0].response.mappings[0].operation,
+            OperationType::Update
+        );
     }
 
     #[test]

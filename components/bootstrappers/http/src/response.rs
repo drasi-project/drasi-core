@@ -91,6 +91,7 @@ fn map_single_item(
     engine: &TemplateEngine,
 ) -> Result<Element> {
     let template = &mapping.template;
+    let is_delete = mapping.operation == OperationType::Delete;
 
     // Render ID
     let id = engine
@@ -110,6 +111,22 @@ fn map_single_item(
         if !label.is_empty() {
             labels.push(Arc::from(label.as_str()));
         }
+    }
+
+    // For Delete operations, only metadata (id + labels) is needed — skip
+    // property and relation endpoint rendering.
+    if is_delete {
+        let metadata = ElementMetadata {
+            reference: ElementReference::new(source_id, &id),
+            labels: labels.into(),
+            effective_from: 0,
+        };
+        // Use Node for delete — the element type doesn't matter since only
+        // metadata is extracted for SourceChange::Delete.
+        return Ok(Element::Node {
+            metadata,
+            properties: ElementPropertyMap::new(),
+        });
     }
 
     // Render properties
