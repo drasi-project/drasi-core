@@ -119,8 +119,7 @@ impl IndexBackendPluginDescriptor for GarnetIndexDescriptor {
         // Require a Redis URL scheme so malformed values (e.g. bare host:port or
         // a file path) fail fast at construction rather than producing a
         // confusing error deep inside the Redis client.
-        if !connection_string.starts_with("redis://")
-            && !connection_string.starts_with("rediss://")
+        if !connection_string.starts_with("redis://") && !connection_string.starts_with("rediss://")
         {
             anyhow::bail!(
                 "Garnet index 'connectionString' must start with 'redis://' or 'rediss://', got: {connection_string}"
