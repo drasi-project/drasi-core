@@ -117,10 +117,7 @@ impl OciRegistryClient {
                     // This is normal end-of-pagination behavior.
                     let err_str = format!("{e:#}");
                     if err_str.contains("invalid type: null") {
-                        debug!(
-                            "Registry returned null tags for {}; end of pagination",
-                            oci_ref
-                        );
+                        debug!("Registry returned null tags for {oci_ref}; end of pagination");
                         break;
                     }
                     return Err(e).context("failed to list tags");
@@ -135,8 +132,7 @@ impl OciRegistryClient {
             let new_last = page.last().cloned();
             if new_last == last {
                 warn!(
-                    "Registry pagination cursor did not advance for {}; stopping to avoid infinite loop",
-                    oci_ref
+                    "Registry pagination cursor did not advance for {oci_ref}; stopping to avoid infinite loop"
                 );
                 break;
             }
@@ -145,8 +141,7 @@ impl OciRegistryClient {
 
             if all_tags.len() >= MAX_TAGS {
                 warn!(
-                    "Tag listing for {} reached safety cap of {} tags; results may be incomplete",
-                    oci_ref, MAX_TAGS
+                    "Tag listing for {oci_ref} reached safety cap of {MAX_TAGS} tags; results may be incomplete"
                 );
                 break;
             }
@@ -333,7 +328,7 @@ impl OciRegistryClient {
         let mut candidates: Vec<(String, String)> = Vec::new();
         for tag in &dir_tags {
             if let Some((ptype, kind)) = tag.split_once('.') {
-                let plugin_ref = format!("{}/{}", ptype, kind);
+                let plugin_ref = format!("{ptype}/{kind}");
 
                 let matches = if query.is_empty() || query == "*" {
                     true
@@ -354,7 +349,7 @@ impl OciRegistryClient {
         // For each matched plugin, fetch versions
         let mut results = Vec::new();
         for (ptype, kind) in &candidates {
-            let plugin_ref = format!("{}/{}", ptype, kind);
+            let plugin_ref = format!("{ptype}/{kind}");
             match self.list_tags(&plugin_ref).await {
                 Ok(tags) => {
                     // Group tags by version, collecting platform suffixes
