@@ -319,7 +319,7 @@ impl ElementMappingConfig {
                 "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.labels must have at least one label"
             ));
         }
-        if self.element_type == ElementType::Relation {
+        if self.element_type == ElementType::Relation && self.operation != OperationType::Delete {
             if self.template.from.is_none() {
                 return Err(anyhow::anyhow!(
                     "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.from is required for relation mappings"
@@ -388,8 +388,23 @@ pub struct ElementMappingConfig {
     /// Type of element to create.
     pub element_type: ElementType,
 
+    /// Operation type for the source change (default: update for idempotent bootstrap).
+    #[serde(default)]
+    pub operation: OperationType,
+
     /// Template for element creation.
     pub template: ElementTemplate,
+}
+
+/// Operation type for source changes.
+/// Matches the HTTP webhook source naming convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationType {
+    Insert,
+    #[default]
+    Update,
+    Delete,
 }
 
 /// Element type.
@@ -555,6 +570,7 @@ mod tests {
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
                         element_type: ElementType::Node,
+                        operation: Default::default(),
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),
                             labels: vec!["User".to_string()],

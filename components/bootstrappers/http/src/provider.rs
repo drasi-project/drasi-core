@@ -32,7 +32,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::BootstrapEvent;
 
 use crate::auth::{self, ResolvedAuth};
-use crate::config::{EndpointConfig, HttpBootstrapConfig, HttpMethod};
+use crate::config::{EndpointConfig, HttpBootstrapConfig, HttpMethod, OperationType};
 use crate::content_parser::{self, ContentType};
 use crate::pagination::{self, NextPage, Paginator};
 use crate::response;
@@ -214,13 +214,24 @@ impl HttpBootstrapProvider {
 
             for result in element_results {
                 match result {
-                    Ok(element) => {
+                    Ok(mapped) => {
                         // Filter by requested labels
-                        if !should_include_element(&element, request) {
+                        if !should_include_element(&mapped.element, request) {
                             continue;
                         }
 
-                        let source_change = SourceChange::Insert { element };
+                        let source_change = match mapped.operation {
+                            OperationType::Insert => {
+                                SourceChange::Insert { element: mapped.element }
+                            }
+                            OperationType::Update => {
+                                SourceChange::Update { element: mapped.element }
+                            }
+                            OperationType::Delete => {
+                                let metadata = mapped.element.get_metadata().clone();
+                                SourceChange::Delete { metadata }
+                            }
+                        };
                         let sequence = context.next_sequence();
 
                         let bootstrap_event = BootstrapEvent {

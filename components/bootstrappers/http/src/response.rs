@@ -26,7 +26,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::{ElementMappingConfig, ElementType};
+use crate::config::{ElementMappingConfig, ElementType, OperationType};
 use crate::pagination;
 use crate::template_engine::{TemplateContext, TemplateEngine};
 
@@ -47,13 +47,19 @@ pub fn extract_items(body: &JsonValue, items_path: &str) -> Result<Vec<JsonValue
     }
 }
 
+/// A mapped element result bundling the element with the operation to perform.
+pub struct MappedElement {
+    pub element: Element,
+    pub operation: OperationType,
+}
+
 /// Map a list of items to Drasi graph elements using the configured mappings.
 pub fn map_items_to_elements(
     items: &[JsonValue],
     mappings: &[ElementMappingConfig],
     source_id: &str,
     engine: &TemplateEngine,
-) -> Vec<Result<Element>> {
+) -> Vec<Result<MappedElement>> {
     let mut elements = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
@@ -64,7 +70,12 @@ pub fn map_items_to_elements(
         };
 
         for mapping in mappings {
-            let result = map_single_item(&context, mapping, source_id, engine);
+            let result = map_single_item(&context, mapping, source_id, engine).map(|element| {
+                MappedElement {
+                    element,
+                    operation: mapping.operation.clone(),
+                }
+            });
             elements.push(result);
         }
     }
@@ -233,6 +244,7 @@ mod tests {
 
         let mappings = vec![ElementMappingConfig {
             element_type: ElementType::Node,
+            operation: Default::default(),
             template: crate::config::ElementTemplate {
                 id: "{{item.id}}".to_string(),
                 labels: vec!["User".to_string()],
@@ -246,8 +258,8 @@ mod tests {
         let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
         assert_eq!(results.len(), 2);
 
-        let elem = results[0].as_ref().unwrap();
-        match elem {
+        let mapped = results[0].as_ref().unwrap();
+        match &mapped.element {
             Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(metadata.labels.len(), 1);
@@ -263,6 +275,7 @@ mod tests {
 
         let mappings = vec![ElementMappingConfig {
             element_type: ElementType::Relation,
+            operation: Default::default(),
             template: crate::config::ElementTemplate {
                 id: "{{item.id}}".to_string(),
                 labels: vec!["{{item.type}}".to_string()],
@@ -276,8 +289,8 @@ mod tests {
         let results = map_items_to_elements(&items, &mappings, "test-source", &engine);
         assert_eq!(results.len(), 1);
 
-        let elem = results[0].as_ref().unwrap();
-        match elem {
+        let mapped = results[0].as_ref().unwrap();
+        match &mapped.element {
             Element::Relation {
                 metadata,
                 in_node,

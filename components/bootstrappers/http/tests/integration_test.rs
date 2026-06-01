@@ -105,6 +105,7 @@ async fn test_simple_json_endpoint() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -142,7 +143,7 @@ async fn test_simple_json_endpoint() {
 
     // Verify first event
     match &events[0].change {
-        SourceChange::Insert { element } => match element {
+        SourceChange::Update { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.reference.element_id, "1");
                 assert_eq!(&*metadata.labels[0], "User");
@@ -207,6 +208,7 @@ async fn test_offset_limit_pagination() {
                 items_path: "$.data".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -303,6 +305,7 @@ async fn test_cursor_pagination_stripe_style() {
                 items_path: "$.data".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -406,6 +409,7 @@ async fn test_link_header_pagination_github_style() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -543,6 +547,7 @@ async fn test_next_url_pagination_salesforce_style() {
                 items_path: "$.records".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.Id}}".to_string(),
@@ -613,6 +618,7 @@ async fn test_bearer_auth() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -687,6 +693,7 @@ async fn test_api_key_header_auth() {
                 items_path: "$.products".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -769,6 +776,7 @@ async fn test_basic_auth() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.sid}}".to_string(),
@@ -868,6 +876,7 @@ async fn test_oauth2_client_credentials() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -946,6 +955,7 @@ async fn test_multi_endpoint_bootstrap() {
                     items_path: "$".to_string(),
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
+                        operation: Default::default(),
                         element_type: ElementType::Node,
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),
@@ -968,6 +978,7 @@ async fn test_multi_endpoint_bootstrap() {
                     items_path: "$".to_string(),
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
+                        operation: Default::default(),
                         element_type: ElementType::Node,
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),
@@ -1041,6 +1052,7 @@ async fn test_retry_on_failure() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1107,6 +1119,7 @@ async fn test_retries_exhausted_returns_error() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1175,6 +1188,7 @@ async fn test_relations_mapping() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Relation,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1206,7 +1220,7 @@ async fn test_relations_mapping() {
 
     let events = collect_events(rx).await;
     match &events[0].change {
-        SourceChange::Insert { element } => match element {
+        SourceChange::Update { element } => match element {
             Element::Relation {
                 metadata,
                 in_node,
@@ -1279,6 +1293,7 @@ async fn test_page_number_pagination() {
                 items_path: "$.items".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1340,6 +1355,7 @@ async fn test_label_filtering() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1542,6 +1558,7 @@ async fn test_xml_response_parsing() {
                 items_path: "$".to_string(),
                 content_type: Some(ContentTypeOverride::Xml),
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1576,7 +1593,7 @@ async fn test_xml_response_parsing() {
     assert_eq!(events.len(), 1);
 
     match &events[0].change {
-        SourceChange::Insert { element } => match element {
+        SourceChange::Update { element } => match element {
             Element::Node { metadata, .. } => {
                 assert_eq!(&*metadata.labels[0], "XmlNode");
             }
@@ -1623,6 +1640,7 @@ async fn test_yaml_response_parsing() {
                 items_path: "$".to_string(),
                 content_type: Some(ContentTypeOverride::Yaml),
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1655,7 +1673,7 @@ async fn test_yaml_response_parsing() {
     assert_eq!(events.len(), 3);
 
     match &events[0].change {
-        SourceChange::Insert { element } => match element {
+        SourceChange::Update { element } => match element {
             Element::Node {
                 metadata,
                 properties,
@@ -1700,6 +1718,7 @@ async fn test_type_preservation_in_properties() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -1735,7 +1754,7 @@ async fn test_type_preservation_in_properties() {
 
     let events = collect_events(rx).await;
     match &events[0].change {
-        SourceChange::Insert { element } => match element {
+        SourceChange::Update { element } => match element {
             Element::Node { properties, .. } => {
                 use drasi_core::models::ElementValue;
                 use ordered_float::OrderedFloat;
@@ -1879,6 +1898,7 @@ async fn test_truncated_response_causes_bootstrap_failure() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -2024,6 +2044,7 @@ async fn test_truncation_recovered_by_retry() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
