@@ -221,12 +221,12 @@ impl HttpBootstrapProvider {
                         }
 
                         let source_change = match mapped.operation {
-                            OperationType::Insert => {
-                                SourceChange::Insert { element: mapped.element }
-                            }
-                            OperationType::Update => {
-                                SourceChange::Update { element: mapped.element }
-                            }
+                            OperationType::Insert => SourceChange::Insert {
+                                element: mapped.element,
+                            },
+                            OperationType::Update => SourceChange::Update {
+                                element: mapped.element,
+                            },
                             OperationType::Delete => {
                                 let metadata = mapped.element.get_metadata().clone();
                                 SourceChange::Delete { metadata }

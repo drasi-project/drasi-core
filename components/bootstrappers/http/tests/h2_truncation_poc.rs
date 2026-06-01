@@ -120,8 +120,7 @@ async fn start_h2_truncating_server(
                             .header("content-type", "application/json");
 
                         if include_cl {
-                            response =
-                                response.header("content-length", full_len.to_string());
+                            response = response.header("content-length", full_len.to_string());
                         }
 
                         let response = response.body(()).unwrap();
@@ -221,7 +220,9 @@ async fn test_h2_premature_end_stream_no_content_length() {
                     "success" => successes += 1,
                     "truncated" => {
                         silent_truncations += 1;
-                        eprintln!("  [Round {round}] ✗ SILENT TRUNCATION: body_len={len}, {detail}");
+                        eprintln!(
+                            "  [Round {round}] ✗ SILENT TRUNCATION: body_len={len}, {detail}"
+                        );
                     }
                     _ => {
                         proper_errors += 1;
