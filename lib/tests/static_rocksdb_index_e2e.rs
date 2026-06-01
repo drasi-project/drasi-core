@@ -241,3 +241,73 @@ async fn static_rocksdb_index_persists_across_restart() -> Result<()> {
     core.stop().await?;
     Ok(())
 }
+
+/// Proves the `with_default_index_provider` path that `drasi-server` uses for its
+/// instance-wide `persist_index` flag: a query with **no** `storage_backend` is
+/// transparently backed by the default RocksDB provider (rather than falling back
+/// to in-memory), and that data is durable across a query stop/start cycle.
+#[tokio::test]
+async fn static_rocksdb_default_provider_backs_unspecified_query() -> Result<()> {
+    let data_dir = TempDir::new()?;
+    let backend_config = json!({
+        "kind": "rocksdb",
+        "path": data_dir.path().to_string_lossy(),
+        "enableArchive": false,
+    });
+
+    let provider = build_provider_from_config(&backend_config).await;
+    let (source, handle) = MockSource::new("people-src")?;
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("static-rocksdb")
+            // As drasi-server does when persist_index is enabled: register the
+            // provider as the default for any query without an explicit backend.
+            .with_default_index_provider("rocksdb", provider)
+            .with_source(source)
+            // Note: NO with_storage_backend — relies entirely on the default.
+            .with_query(
+                Query::cypher("people")
+                    .query("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+                    .from_source("people-src")
+                    .auto_start(true)
+                    .enable_bootstrap(false)
+                    .build(),
+            )
+            .build()
+            .await?,
+    );
+
+    core.start().await?;
+
+    insert_person(&handle, "p1", "Alice", 30).await?;
+    insert_person(&handle, "p2", "Bob", 25).await?;
+    let results = wait_for_results(&core, "people", 2).await;
+    assert_eq!(
+        results.len(),
+        2,
+        "query with no explicit backend should be served by the default RocksDB provider"
+    );
+
+    // Restart the query: with bootstrap disabled, recovered rows can only come
+    // from the persisted RocksDB index — proving the default provider really is
+    // persistent (not in-memory).
+    core.stop_query("people").await?;
+    wait_for_query_status(&core, "people", ComponentStatus::Stopped).await;
+    core.start_query("people").await?;
+
+    let recovered = wait_for_results(&core, "people", 2).await;
+    let names: Vec<&str> = recovered
+        .iter()
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        2,
+        "default-backed results should survive restart without re-ingestion, got: {recovered:?}"
+    );
+    assert!(names.contains(&"Alice"), "missing Alice in {recovered:?}");
+    assert!(names.contains(&"Bob"), "missing Bob in {recovered:?}");
+
+    core.stop().await?;
+    Ok(())
+}

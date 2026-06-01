@@ -320,6 +320,7 @@ impl RuntimeConfig {
         identity_provider: Option<Arc<dyn IdentityProvider>>,
         secret_store_provider: Option<Arc<dyn crate::secret_store::SecretStoreProvider>>,
         default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+        default_index_backend: Option<crate::indexes::StorageBackendRef>,
     ) -> Self {
         // Preserve original global defaults for config snapshot round-tripping
         let global_priority_queue_capacity = config.priority_queue_capacity;
@@ -333,7 +334,11 @@ impl RuntimeConfig {
         let storage_backends = config.storage_backends.clone();
 
         // Create IndexFactory from storage backend configurations with named providers
-        let index_factory = Arc::new(IndexFactory::new(config.storage_backends, index_providers));
+        let index_factory = Arc::new(IndexFactory::new_with_default(
+            config.storage_backends,
+            index_providers,
+            default_index_backend,
+        ));
 
         // Use provided state store or default to in-memory
         let state_store_provider: Arc<dyn StateStoreProvider> =
@@ -374,6 +379,7 @@ impl From<super::schema::DrasiLibConfig> for RuntimeConfig {
         Self::new(
             config,
             std::collections::HashMap::new(),
+            None,
             None,
             None,
             None,

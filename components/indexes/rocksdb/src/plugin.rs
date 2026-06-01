@@ -63,6 +63,22 @@ pub fn open_unified_db(
     query_id: &str,
     options: &RocksIndexOptions,
 ) -> Result<Arc<OptimisticTransactionDB>, IndexError> {
+    // `query_id` is used directly as a directory name under `path`. Reject values
+    // that could escape the base directory or otherwise misbehave as a path
+    // segment (separators, parent/current-dir references, NUL, or empty).
+    if query_id.is_empty()
+        || query_id == "."
+        || query_id == ".."
+        || query_id.contains('/')
+        || query_id.contains('\\')
+        || query_id.contains('\0')
+    {
+        return Err(IndexError::other(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid query_id '{query_id}' for RocksDB path segment"),
+        )));
+    }
+
     let mut db_opts = Options::default();
     db_opts.create_if_missing(true);
     db_opts.create_missing_column_families(true);
@@ -276,5 +292,23 @@ mod tests {
         let path = temp_dir.path().to_string_lossy().to_string();
         let result = open_unified_db(&path, "test_query", &options);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_open_unified_db_rejects_unsafe_query_id() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let options = RocksIndexOptions {
+            archive_enabled: true,
+            direct_io: false,
+        };
+        let path = temp_dir.path().to_string_lossy().to_string();
+
+        for bad in ["", ".", "..", "a/b", "../escape", "a\\b", "with\0nul"] {
+            let result = open_unified_db(&path, bad, &options);
+            assert!(
+                result.is_err(),
+                "query_id '{bad}' should be rejected as a path segment"
+            );
+        }
     }
 }

@@ -81,6 +81,11 @@ pub struct IndexFactory {
     plugin_backends: HashMap<String, String>,
     /// Injected named providers: name -> provider
     providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
+    /// Default backend applied to queries whose `storage_backend` is `None`.
+    /// When set (typically to a [`StorageBackendRef::Named`] pointing at an
+    /// injected provider), a query that does not specify a backend uses this
+    /// instead of falling back to native in-memory indexes.
+    default_backend: Option<StorageBackendRef>,
 }
 
 impl fmt::Debug for IndexFactory {
@@ -89,6 +94,7 @@ impl fmt::Debug for IndexFactory {
             .field("memory_backends", &self.memory_backends)
             .field("plugin_backends", &self.plugin_backends)
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .field("default_backend", &self.default_backend)
             .finish()
     }
 }
@@ -129,6 +135,21 @@ impl IndexFactory {
         backends: Vec<StorageBackendConfig>,
         providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
     ) -> Self {
+        Self::new_with_default(backends, providers, None)
+    }
+
+    /// Create a new IndexFactory with an optional default backend.
+    ///
+    /// The `default_backend` is applied to queries whose `storage_backend` is
+    /// `None`. This is how `DrasiLibBuilder::with_default_index_provider` makes
+    /// a single injected provider cover every query that does not name a backend
+    /// explicitly. When `default_backend` is `None`, unspecified queries fall
+    /// back to native in-memory indexes (the standard behavior).
+    pub fn new_with_default(
+        backends: Vec<StorageBackendConfig>,
+        providers: HashMap<String, Arc<dyn IndexBackendPlugin>>,
+        default_backend: Option<StorageBackendRef>,
+    ) -> Self {
         let mut memory_backends = HashMap::new();
         let mut plugin_backends = HashMap::new();
         for b in backends {
@@ -145,7 +166,13 @@ impl IndexFactory {
             memory_backends,
             plugin_backends,
             providers,
+            default_backend,
         }
+    }
+
+    /// The default backend applied to queries with no `storage_backend`, if any.
+    pub fn default_backend(&self) -> Option<&StorageBackendRef> {
+        self.default_backend.as_ref()
     }
 
     /// Build a CreatedIndexes for a query using the specified storage backend
@@ -296,6 +323,24 @@ mod tests {
         let mut m: HashMap<String, Arc<dyn IndexBackendPlugin>> = HashMap::new();
         m.insert(name.to_string(), Arc::new(MockPlugin { volatile }));
         m
+    }
+
+    #[test]
+    fn test_index_factory_default_backend_accessor() {
+        // Without a default, the accessor returns None.
+        let factory = IndexFactory::new(vec![], HashMap::new());
+        assert!(factory.default_backend().is_none());
+
+        // With a default, the accessor returns the configured ref.
+        let factory = IndexFactory::new_with_default(
+            vec![],
+            providers_with("rocks", false),
+            Some(StorageBackendRef::Named("rocks".to_string())),
+        );
+        match factory.default_backend() {
+            Some(StorageBackendRef::Named(name)) => assert_eq!(name, "rocks"),
+            other => panic!("expected default Named(\"rocks\"), got {other:?}"),
+        }
     }
 
     #[test]

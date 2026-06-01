@@ -146,6 +146,7 @@ pub struct DrasiLibBuilder {
     wal_provider: Option<Arc<dyn WalProvider>>,
     secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
     default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+    default_index_backend: Option<crate::indexes::StorageBackendRef>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -172,6 +173,7 @@ impl DrasiLibBuilder {
             wal_provider: None,
             secret_store_provider: None,
             default_recovery_policy: None,
+            default_index_backend: None,
         }
     }
 
@@ -228,6 +230,40 @@ impl DrasiLibBuilder {
         provider: Arc<dyn IndexBackendPlugin>,
     ) -> Self {
         self.index_providers.insert(name.into(), provider);
+        self
+    }
+
+    /// Register an index provider and make it the default backend for queries
+    /// that do not specify a `storage_backend`.
+    ///
+    /// This is equivalent to [`with_index_provider`](Self::with_index_provider)
+    /// followed by marking that named backend as the default: every query whose
+    /// `storage_backend` is `None` will use this provider instead of native
+    /// in-memory indexes. Queries may still opt out per-query by setting an
+    /// explicit `storage_backend` (e.g. an inline `Memory` backend).
+    ///
+    /// Calling this more than once replaces the default with the most recent name.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_index_rocksdb::RocksDbIndexProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
+    /// let core = DrasiLib::builder()
+    ///     .with_default_index_provider("rocks", Arc::new(provider))
+    ///     .build()
+    ///     .await?;
+    /// // All queries without an explicit storage_backend now persist to RocksDB.
+    /// ```
+    pub fn with_default_index_provider(
+        mut self,
+        name: impl Into<String>,
+        provider: Arc<dyn IndexBackendPlugin>,
+    ) -> Self {
+        let name = name.into();
+        self.index_providers.insert(name.clone(), provider);
+        self.default_index_backend = Some(crate::indexes::StorageBackendRef::Named(name));
         self
     }
 
@@ -537,6 +573,21 @@ impl DrasiLibBuilder {
                     Some(StorageBackendRef::Inline(StorageBackendSpec::Memory { .. })) | None => {}
                 }
             }
+
+            // Validate the default backend reference (used by queries with no
+            // explicit storage_backend) against injected providers and declared
+            // in-memory backends, so a misconfigured default fails at build time.
+            if let Some(StorageBackendRef::Named(name)) = &self.default_index_backend {
+                if !self.index_providers.contains_key(name)
+                    && !declared_memory.contains(name.as_str())
+                {
+                    return Err(DrasiError::validation(format!(
+                        "Default index backend '{name}' is not registered. Provide it via \
+                         with_default_index_provider(\"{name}\", ...) or declare it in \
+                         storage_backends."
+                    )));
+                }
+            }
         }
 
         // Create runtime config and server with optional index and state store providers
@@ -547,6 +598,7 @@ impl DrasiLibBuilder {
             self.identity_provider,
             self.secret_store_provider,
             self.default_recovery_policy,
+            self.default_index_backend,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
@@ -1332,7 +1384,8 @@ mod tests {
             async fn create_indexes(
                 &self,
                 _query_id: &str,
-            ) -> std::result::Result<CreatedIndexes, drasi_core::interface::IndexError> {
+            ) -> std::result::Result<CreatedIndexes, drasi_core::interface::IndexError>
+            {
                 let element_index = Arc::new(InMemoryElementIndex::new());
                 Ok(CreatedIndexes {
                     set: IndexSet {
@@ -1370,6 +1423,58 @@ mod tests {
             err.to_string().contains("collides"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_with_default_index_provider_sets_default_backend() {
+        use async_trait::async_trait;
+        use drasi_core::in_memory_index::in_memory_element_index::InMemoryElementIndex;
+        use drasi_core::in_memory_index::in_memory_future_queue::InMemoryFutureQueue;
+        use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
+        use drasi_core::interface::{CreatedIndexes, IndexSet, NoOpSessionControl};
+
+        struct MockPersistentPlugin;
+
+        #[async_trait]
+        impl IndexBackendPlugin for MockPersistentPlugin {
+            async fn create_indexes(
+                &self,
+                _query_id: &str,
+            ) -> std::result::Result<CreatedIndexes, drasi_core::interface::IndexError>
+            {
+                let element_index = Arc::new(InMemoryElementIndex::new());
+                Ok(CreatedIndexes {
+                    set: IndexSet {
+                        element_index: element_index.clone(),
+                        archive_index: element_index,
+                        result_index: Arc::new(InMemoryResultIndex::new()),
+                        future_queue: Arc::new(InMemoryFutureQueue::new()),
+                        session_control: Arc::new(NoOpSessionControl),
+                    },
+                    checkpoint_store: None,
+                    outbox_writer: None,
+                    live_results_writer: None,
+                })
+            }
+
+            fn is_volatile(&self) -> bool {
+                false
+            }
+        }
+
+        // A query with no explicit storage_backend should resolve to the default
+        // provider injected via with_default_index_provider.
+        let core = DrasiLibBuilder::new()
+            .with_default_index_provider("rocks", Arc::new(MockPersistentPlugin))
+            .with_query(Query::cypher("q1").query("MATCH (n) RETURN n").build())
+            .build()
+            .await
+            .expect("build with default index provider should succeed");
+
+        match core.config.index_factory.default_backend() {
+            Some(crate::indexes::StorageBackendRef::Named(name)) => assert_eq!(name, "rocks"),
+            other => panic!("expected default Named(\"rocks\"), got {other:?}"),
+        }
     }
 
     #[test]

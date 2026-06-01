@@ -683,6 +683,7 @@ mod runtime_tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(runtime_config.id, "test-server");
     }
