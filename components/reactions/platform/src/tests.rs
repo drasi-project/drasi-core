@@ -80,7 +80,8 @@ mod transformer_integration_tests {
 
         // Wrap in CloudEvent
         let cloud_event_config = CloudEventConfig::new();
-        let cloud_event = CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
+        let cloud_event =
+            CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
 
         // Verify CloudEvent structure
         assert_eq!(cloud_event.topic, "test-query-results");
@@ -151,7 +152,8 @@ mod transformer_integration_tests {
 
         let result_event = transformer::transform_query_result(query_result.clone(), 1, 1).unwrap();
         let cloud_event_config = CloudEventConfig::new();
-        let cloud_event = CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
+        let cloud_event =
+            CloudEvent::new(result_event, &query_result.query_id, &cloud_event_config);
 
         // Serialize and verify metadata is present
         let json_str = serde_json::to_string(&cloud_event).unwrap();
@@ -181,10 +183,8 @@ mod cloudevent_format_tests {
         };
 
         let result_event = ResultEvent::Change(change_event);
-        let cloud_event_config = CloudEventConfig::with_values(
-            "test-pubsub".to_string(),
-            "test-source".to_string(),
-        );
+        let cloud_event_config =
+            CloudEventConfig::with_values("test-pubsub".to_string(), "test-source".to_string());
         let cloud_event = CloudEvent::new(result_event, "format-test", &cloud_event_config);
 
         // Serialize to JSON
@@ -202,7 +202,10 @@ mod cloudevent_format_tests {
             json_value["pubsubname"].is_string(),
             "pubsubname should be a string"
         );
-        assert!(json_value["source"].is_string(), "source should be a string");
+        assert!(
+            json_value["source"].is_string(),
+            "source should be a string"
+        );
         assert!(
             json_value["specversion"].is_string(),
             "specversion should be a string"
@@ -214,7 +217,10 @@ mod cloudevent_format_tests {
         // Verify camelCase format for data fields
         let data = &json_value["data"];
         assert!(data["queryId"].is_string(), "queryId should use camelCase");
-        assert!(data["sourceTimeMs"].is_u64(), "sourceTimeMs should use camelCase");
+        assert!(
+            data["sourceTimeMs"].is_u64(),
+            "sourceTimeMs should use camelCase"
+        );
         assert!(
             data["addedResults"].is_array(),
             "addedResults should use camelCase"
@@ -336,10 +342,7 @@ mod batch_processing_tests {
 
         let (event_tx, _) = tokio::sync::mpsc::channel(100);
         let result = PlatformReaction::new(invalid_config, event_tx);
-        assert!(
-            result.is_err(),
-            "batch_max_size of 0 should be rejected"
-        );
+        assert!(result.is_err(), "batch_max_size of 0 should be rejected");
     }
 }
 
@@ -559,5 +562,25 @@ mod profiling_metadata_tests {
             }
             _ => panic!("Expected Change event"),
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_trait_tests {
+    use super::*;
+    use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+
+    #[test]
+    fn test_recovery_trait_defaults() {
+        let config = create_test_config();
+        let (event_tx, _) = tokio::sync::mpsc::channel(100);
+        let reaction = PlatformReaction::new(config, event_tx).unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::Strict
+        );
     }
 }

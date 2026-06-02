@@ -1,4 +1,4 @@
-// Copyright 2024 The Drasi Authors.
+// Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,21 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-use drasi_core::query::QueryBuilder;
+use anyhow::Result;
+use drasi_reaction_sse::SseReaction;
+use shared_tests::recovery_test_helpers::exercise_autoskipgap_recovery;
 
-pub mod index;
-pub mod mock_source;
-pub mod recovery_test_helpers;
-pub mod redis_helpers;
-pub mod sequence_counter;
-pub mod temporal_retrieval;
-pub mod use_cases;
-
-#[cfg(test)]
-mod in_memory;
-
-#[async_trait]
-pub trait QueryTestConfig {
-    async fn config_query(&self, builder: QueryBuilder) -> QueryBuilder;
+#[tokio::test]
+async fn test_sse_reaction_autoskipgap_recovery() -> Result<()> {
+    let reaction = SseReaction::builder("sse-autoskip")
+        .with_port(0)
+        .with_query("q1")
+        .build()?;
+    exercise_autoskipgap_recovery("sse-autoskipgap", "sse-autoskip", reaction).await
 }

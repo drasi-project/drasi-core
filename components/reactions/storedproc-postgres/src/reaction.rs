@@ -383,6 +383,18 @@ impl Reaction for PostgresStoredProcReaction {
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
     }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::Strict
+    }
 }
 
 /// Builder for PostgresStoredProcReaction
@@ -558,5 +570,28 @@ impl PostgresStoredProcReactionBuilder {
             self.auto_start,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+
+    #[tokio::test]
+    async fn test_recovery_trait_defaults() {
+        let reaction = PostgresStoredProcReaction::builder("test-postgres")
+            .with_connection("localhost", 5432, "testdb", "testuser", "testpass")
+            .with_stored_procedure("test_proc")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::Strict
+        );
     }
 }

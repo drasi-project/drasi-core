@@ -87,6 +87,38 @@ Write a comprehensive plan in markdown format with the following sections:
 - Connection recovery strategy (reconnection with backoff on connection loss)
 - Status transition: `Running` must only be set after the connection is established, not before
 
+## 4.5. Recovery & Delivery Guarantees
+
+The framework supports **reaction recovery** with persistent outbox and live-results tracking. The planner must evaluate:
+
+1. **Idempotency** — Can the target system handle duplicate deliveries? After a crash, the framework may replay results from the outbox. If the target is not idempotent (e.g., incrementing a counter), the reaction should implement deduplication logic.
+
+2. **Recovery policy recommendation** — There are two separate recovery policy types:
+   - **Query/source recovery** (`RecoveryPolicy`): Controls what happens when a source cannot honor a resume position.
+     - `Strict` — Fail startup, require manual intervention (default)
+     - `AutoReset` — Wipe index and re-bootstrap
+     - Configured via query builder: `.with_recovery_policy(RecoveryPolicy::AutoReset)`
+   - **Reaction recovery** (`ReactionRecoveryPolicy`): Controls what happens when the outbox has a gap or cannot satisfy the checkpoint position.
+     - `Strict` — Fail startup, require manual intervention (default)
+     - `AutoReset` — Wipe checkpoint and re-bootstrap from full snapshot
+     - `AutoSkipGap` — Skip the gap and resume from latest available outbox entry (accepts potential data loss)
+     - Configured via the `Reaction` trait: `default_recovery_policy()` method, or per-instance via `ReactionBaseParams::recovery_policy`
+   - Document which policies are appropriate for the target system.
+
+3. **Outbox capacity** — The `outbox_capacity` query builder option controls how many results are buffered for crash recovery. Recommend a size based on expected throughput and acceptable replay window.
+
+4. **Sequence gap handling** — The framework's forwarder detects sequence gaps between last-acked and incoming results. The reaction doesn't need to implement this — the framework handles it — but the planner should note whether gap detection warnings would be actionable for operators.
+
+5. **Reaction trait recovery hooks** — The `Reaction` trait provides recovery-related methods that must be evaluated:
+   - `is_durable()` → Return `true` if the reaction needs persistent checkpoints (default: `false`)
+   - `needs_snapshot_on_fresh_start()` → Return `true` if the reaction needs full current state on first start with no prior checkpoint (default: `false`)
+   - `default_recovery_policy()` → Return the appropriate `ReactionRecoveryPolicy` variant
+   - `bootstrap(ctx: BootstrapContext)` → Implement if the reaction needs snapshot/outbox replay during recovery. The `BootstrapContext` provides `fetch_snapshot()` and `fetch_outbox()` APIs, plus checkpoint read/write helpers.
+
+6. **Live results snapshot** — The query layer maintains a snapshot of the current result set via `LiveResultsWriter`. Reactions that need full-state recovery (e.g., materialized views, dashboards) should use `BootstrapContext::fetch_snapshot()` during `bootstrap()` rather than interacting with `LiveResultsWriter` directly.
+
+**Reference implementation:** See `components/reactions/sse/` for a reaction that uses the outbox and live-results snapshot for crash recovery.
+
 ## 5. Testing Strategy
 
 ### Unit Tests
@@ -181,11 +213,14 @@ Write a comprehensive plan in markdown format with the following sections:
 
 Your plan must:
 - ✅ Include POC verification with evidence
-- ✅ Specify exact Docker images (verified to exist)
+- ✅ Specify exact Docker images (verified to exist) for system-target reactions
+- ✅ Specify client harness design for protocol-target reactions
 - ✅ Define concrete test assertions
 - ✅ Reference actual library APIs (not assumptions)
 - ✅ Include all required helper scripts
 - ✅ Be actionable without additional research
+- ✅ Evaluate recovery & delivery guarantees (idempotency, recovery policy, outbox capacity)
+- ✅ Document whether the target system supports deduplication
 
 ## Red Flags to Avoid
 
@@ -195,6 +230,8 @@ Do NOT create plans that:
 - ❌ Omit integration test specification
 - ❌ Reference non-existent Docker images
 - ❌ Include placeholders like "TODO" or "TBD" in critical sections
+- ❌ Ignore idempotency requirements for the target system
+- ❌ Omit recovery policy recommendation
 
 ## Delivery
 
