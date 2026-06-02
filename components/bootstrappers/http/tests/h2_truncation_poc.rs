@@ -21,7 +21,7 @@
 //! END_STREAM after delivering only a fraction of the response body. This
 //! reproduces the exact silent truncation scenario that causes issue #493:
 //! the client gets `Ok(partial_body)` with no transport error, and the
-//! response is unparseable JSON.
+//! response is unparsable JSON.
 //!
 //! The tests prove:
 //! 1. Without Content-Length, h2 silently truncates (bug reproduced).
