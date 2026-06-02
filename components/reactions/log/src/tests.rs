@@ -17,6 +17,7 @@ mod tests {
     use crate::config::{QueryConfig, TemplateSpec};
     use crate::{LogReaction, LogReactionConfig};
     use drasi_lib::channels::ComponentStatus;
+    use drasi_lib::recovery::ReactionRecoveryPolicy;
     use drasi_lib::Reaction;
     use std::collections::HashMap;
 
@@ -404,5 +405,18 @@ mod tests {
 
         let result = LogReaction::new("test-empty-template", vec!["query1".to_string()], config);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_recovery_trait_defaults() {
+        let config = LogReactionConfig::default();
+        let reaction = LogReaction::new("test-log", vec![], config).unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::AutoSkipGap
+        );
     }
 }

@@ -77,6 +77,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // =========================================================================
     let config = ApplicationSourceConfig {
         properties: HashMap::new(),
+        durability: None,
     };
     let (app_source, app_handle) = ApplicationSource::new("test-app-source", config)?;
 
@@ -327,6 +328,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
     // Create source and handle
     let config = ApplicationSourceConfig {
         properties: HashMap::new(),
+        durability: None,
     };
     let (app_source, app_handle) = ApplicationSource::new("multi-rel-source", config)?;
 
