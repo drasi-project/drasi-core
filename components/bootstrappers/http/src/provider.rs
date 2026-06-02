@@ -223,12 +223,8 @@ impl HttpBootstrapProvider {
                         let source_change = match mapped {
                             response::MappedChange::Upsert { element, operation } => {
                                 match operation {
-                                    OperationType::Insert => {
-                                        SourceChange::Insert { element }
-                                    }
-                                    OperationType::Update => {
-                                        SourceChange::Update { element }
-                                    }
+                                    OperationType::Insert => SourceChange::Insert { element },
+                                    OperationType::Update => SourceChange::Update { element },
                                     OperationType::Delete => unreachable!(),
                                 }
                             }
@@ -436,10 +432,7 @@ fn resolve_content_type(
 }
 
 /// Check if an element should be included based on the bootstrap request's label filters.
-fn should_include_change(
-    change: &response::MappedChange,
-    request: &BootstrapRequest,
-) -> bool {
+fn should_include_change(change: &response::MappedChange, request: &BootstrapRequest) -> bool {
     let metadata = match change {
         response::MappedChange::Upsert { element, .. } => element.get_metadata(),
         response::MappedChange::Delete { metadata } => metadata,
