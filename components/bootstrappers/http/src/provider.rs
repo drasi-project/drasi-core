@@ -345,12 +345,6 @@ impl HttpBootstrapProvider {
                         max_retries + 1,
                         response_text.len(),
                     );
-                    if log::log_enabled!(log::Level::Debug) {
-                        debug!(
-                            "Truncated body first 200 chars: {:?}",
-                            safe_truncate(&response_text, 200)
-                        );
-                    }
                     last_error = Some(e.context(format!(
                         "Failed to parse response from '{}' as {ct:?} \
                          (body length: {}, possible truncation)",
