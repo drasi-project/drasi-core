@@ -58,8 +58,7 @@ futures-util = "0.3"
 env_logger = "0.11"
 ordered-float = "3.0"
 chrono = "0.4"
-
-
+shared-tests = { path = "../../../shared-tests" }
 
 [features]
 # default = []

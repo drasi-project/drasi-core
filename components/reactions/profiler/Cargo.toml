@@ -45,6 +45,9 @@ ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
 
+[dev-dependencies]
+shared-tests = { path = "../../../shared-tests" }
+tokio = { version = "1.0", features = ["full"] }
 
 [features]
 # default = []

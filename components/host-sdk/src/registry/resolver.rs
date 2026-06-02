@@ -62,10 +62,7 @@ impl<'a> PluginResolver<'a> {
             let platform_tag = format!("{tag}-{suffix}");
             let full_ref = format!("{}/{}:{}", parsed.registry, parsed.repository, platform_tag);
 
-            debug!(
-                "Resolving exact version: {} (platform tag: {})",
-                tag, platform_tag
-            );
+            debug!("Resolving exact version: {tag} (platform tag: {platform_tag})");
 
             match self.client.fetch_manifest_annotations(&full_ref).await {
                 Ok(annotations) => {
@@ -119,7 +116,7 @@ impl<'a> PluginResolver<'a> {
     async fn resolve_latest_compatible(&self, parsed: &PluginReference) -> Result<ResolvedPlugin> {
         let base_ref = format!("{}/{}", parsed.registry, parsed.repository);
 
-        info!("Resolving latest compatible version for {}...", base_ref);
+        info!("Resolving latest compatible version for {base_ref}...");
 
         let arch_suffix = target_triple_to_arch_suffix(&self.host_info.target_triple)
             .context("unsupported platform — cannot determine architecture suffix")?;
@@ -137,7 +134,7 @@ impl<'a> PluginResolver<'a> {
             .context("failed to list tags")?;
 
         if tags.is_empty() {
-            bail!("no tags found for {}", base_ref);
+            bail!("no tags found for {base_ref}");
         }
 
         // Try each suffix in order
@@ -151,7 +148,7 @@ impl<'a> PluginResolver<'a> {
                         if v.pre.is_empty() {
                             Some((v, version_str.to_string()))
                         } else {
-                            debug!("  Skipping pre-release tag: {}", version_str);
+                            debug!("  Skipping pre-release tag: {version_str}");
                             None
                         }
                     })
@@ -181,7 +178,7 @@ impl<'a> PluginResolver<'a> {
                 match self.client.fetch_manifest_annotations(&full_ref).await {
                     Ok(ann) => {
                         if self.is_compatible(&ann) {
-                            info!("Found compatible version: {} ({})", version_str, full_ref);
+                            info!("Found compatible version: {version_str} ({full_ref})");
 
                             let digest = self
                                 .client
@@ -231,7 +228,7 @@ impl<'a> PluginResolver<'a> {
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to check {}: {}", full_ref, e);
+                        warn!("Failed to check {full_ref}: {e}");
                     }
                 }
             }
@@ -295,12 +292,11 @@ impl<'a> PluginResolver<'a> {
             if let Some(plugin_ver) = ann.get(*key) {
                 if !major_minor_match(host_ver, plugin_ver) {
                     mismatches.push(format!(
-                        "  {} version: host={}, plugin={} (major.minor mismatch)",
-                        name, host_ver, plugin_ver
+                        "  {name} version: host={host_ver}, plugin={plugin_ver} (major.minor mismatch)"
                     ));
                 }
             } else {
-                mismatches.push(format!("  {} version: missing annotation ({})", name, key));
+                mismatches.push(format!("  {name} version: missing annotation ({key})"));
             }
         }
 
@@ -339,7 +335,7 @@ impl<'a> PluginResolver<'a> {
         };
 
         let prefix = if is_windows { "" } else { "lib" };
-        format!("{}{}.{}", prefix, crate_name, ext)
+        format!("{prefix}{crate_name}.{ext}")
     }
 }
 
