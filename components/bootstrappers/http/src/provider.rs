@@ -216,19 +216,23 @@ impl HttpBootstrapProvider {
                 match result {
                     Ok(mapped) => {
                         // Filter by requested labels
-                        if !should_include_element(&mapped.element, request) {
+                        if !should_include_change(&mapped, request) {
                             continue;
                         }
 
-                        let source_change = match mapped.operation {
-                            OperationType::Insert => SourceChange::Insert {
-                                element: mapped.element,
-                            },
-                            OperationType::Update => SourceChange::Update {
-                                element: mapped.element,
-                            },
-                            OperationType::Delete => {
-                                let metadata = mapped.element.get_metadata().clone();
+                        let source_change = match mapped {
+                            response::MappedChange::Upsert { element, operation } => {
+                                match operation {
+                                    OperationType::Insert => {
+                                        SourceChange::Insert { element }
+                                    }
+                                    OperationType::Update => {
+                                        SourceChange::Update { element }
+                                    }
+                                    OperationType::Delete => unreachable!(),
+                                }
+                            }
+                            response::MappedChange::Delete { metadata } => {
                                 SourceChange::Delete { metadata }
                             }
                         };
@@ -325,12 +329,7 @@ impl HttpBootstrapProvider {
                 };
 
             // Determine content type
-            let ct = content_type_override.clone().unwrap_or_else(|| {
-                let header_value = response_headers
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok());
-                ContentType::from_header(header_value)
-            });
+            let ct = resolve_content_type(content_type_override, &response_headers);
 
             // Validate: parse response body
             match content_parser::parse_body(&response_text, &ct) {
@@ -423,30 +422,55 @@ impl HttpBootstrapProvider {
     }
 }
 
+/// Resolve the content type from the override or response headers.
+fn resolve_content_type(
+    override_ct: &Option<ContentType>,
+    headers: &reqwest::header::HeaderMap,
+) -> ContentType {
+    override_ct.clone().unwrap_or_else(|| {
+        let header_value = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        ContentType::from_header(header_value)
+    })
+}
+
 /// Check if an element should be included based on the bootstrap request's label filters.
-fn should_include_element(
-    element: &drasi_core::models::Element,
+fn should_include_change(
+    change: &response::MappedChange,
     request: &BootstrapRequest,
 ) -> bool {
-    match element {
-        drasi_core::models::Element::Node { metadata, .. } => {
-            if request.node_labels.is_empty() {
-                return true;
-            }
-            metadata
-                .labels
-                .iter()
-                .any(|l| request.node_labels.iter().any(|nl| nl.as_str() == &**l))
+    let metadata = match change {
+        response::MappedChange::Upsert { element, .. } => element.get_metadata(),
+        response::MappedChange::Delete { metadata } => metadata,
+    };
+
+    // Determine if this is a relation by checking element type for Upsert,
+    // or fall back to checking relation_labels for Delete
+    let is_relation = matches!(
+        change,
+        response::MappedChange::Upsert {
+            element: drasi_core::models::Element::Relation { .. },
+            ..
         }
-        drasi_core::models::Element::Relation { metadata, .. } => {
-            if request.relation_labels.is_empty() {
-                return true;
-            }
-            metadata
-                .labels
-                .iter()
-                .any(|l| request.relation_labels.iter().any(|rl| rl.as_str() == &**l))
+    );
+
+    if is_relation {
+        if request.relation_labels.is_empty() {
+            return true;
         }
+        metadata
+            .labels
+            .iter()
+            .any(|l| request.relation_labels.iter().any(|rl| rl.as_str() == &**l))
+    } else {
+        if request.node_labels.is_empty() {
+            return true;
+        }
+        metadata
+            .labels
+            .iter()
+            .any(|l| request.node_labels.iter().any(|nl| nl.as_str() == &**l))
     }
 }
 
