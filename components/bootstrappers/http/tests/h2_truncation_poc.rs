@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Only compile this file when the feature is enabled to avoid CI compile cost.
+#![cfg(feature = "h2-truncation-poc")]
+
 //! PoC: Reproduce HTTP/2 silent body truncation (Issue #493).
 //!
 //! These tests use a custom h2 server (via the `h2` crate) that sends
@@ -26,7 +29,7 @@
 //! 3. HTTP/1.1 (`.http1_only()`) cannot connect to h2-only servers,
 //!    preventing the h2-specific truncation entirely.
 //!
-//! Run with: cargo test -p drasi-bootstrap-http --test h2_truncation_poc -- --ignored --nocapture
+//! Run with: cargo test -p drasi-bootstrap-http --features h2-truncation-poc --test h2_truncation_poc -- --ignored --nocapture
 
 #![allow(clippy::unwrap_used, clippy::uninlined_format_args)]
 

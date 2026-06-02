@@ -2091,11 +2091,10 @@ async fn start_truncating_http11_server(
     format!("http://127.0.0.1:{}", addr.port()) // DevSkim: ignore DS137138
 }
 
-/// Proves that a truncated HTTP/1.1 response causes silent bootstrap failure.
+/// Proves that a truncated HTTP/1.1 response triggers retries.
 /// The response is "complete" at the transport level but contains invalid JSON.
-/// With the current code, this causes a non-retriable parse error.
+/// Previously this caused a non-retriable parse error; now it is retried.
 #[tokio::test]
-#[ignore]
 async fn test_truncated_response_causes_bootstrap_failure() {
     let request_count = Arc::new(AtomicU64::new(0));
     // Send only 60% of the body — enough to be a valid HTTP response but invalid JSON
@@ -2242,7 +2241,6 @@ async fn start_intermittent_truncating_server(request_count: Arc<AtomicU64>) -> 
 /// The server returns truncated on first attempt, valid on second.
 /// With proper retry-on-parse-failure, bootstrap should succeed.
 #[tokio::test]
-#[ignore]
 async fn test_truncation_recovered_by_retry() {
     let request_count = Arc::new(AtomicU64::new(0));
     let base_url = start_intermittent_truncating_server(request_count.clone()).await;

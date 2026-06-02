@@ -60,3 +60,4 @@ http = "1"
 
 [features]
 dynamic-plugin = []
+h2-truncation-poc = []
