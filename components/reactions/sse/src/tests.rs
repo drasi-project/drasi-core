@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::config::SseExtension;
-use drasi_lib::Reaction;
+use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
 
 #[test]
 fn test_sse_builder_defaults() {
@@ -401,5 +401,20 @@ fn test_builder_fallback_produces_camel_case() {
     assert_eq!(
         props.get("heartbeatIntervalMs").and_then(|v| v.as_u64()),
         Some(15000)
+    );
+}
+
+#[test]
+fn test_recovery_trait_defaults() {
+    let reaction = SseReaction::builder("test-sse")
+        .with_port(0)
+        .build()
+        .unwrap();
+
+    assert!(!reaction.is_durable());
+    assert!(!reaction.needs_snapshot_on_fresh_start());
+    assert_eq!(
+        reaction.default_recovery_policy(),
+        ReactionRecoveryPolicy::AutoSkipGap
     );
 }
