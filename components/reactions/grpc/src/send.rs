@@ -141,6 +141,8 @@ pub(crate) async fn send_batch_with_retry(
                     error_type,
                     "GoAway" | "Connection" | "BrokenPipe" | "ChannelClosed" | "Unavailable"
                 );
+                let is_overload_error =
+                    matches!(error_type, "ResourceExhausted" | "DeadlineExceeded");
 
                 warn!(
                     "Error categorized as '{}' - is_connection_error: {}, retry: {}/{}",
@@ -150,42 +152,42 @@ pub(crate) async fn send_batch_with_retry(
                     max_retries + 1
                 );
 
-                if is_connection_error {
-                    warn!("Connection error detected - type: {error_type}, endpoint: {endpoint}");
-
+                if is_overload_error {
+                    // Server-overload / deadline errors: apply targeted backoff
+                    // and retry on the same connection (no reconnect needed).
                     match error_type {
-                        "GoAway" => {
-                            if error_str.contains("StreamId(0)") {
-                                error!("Server immediately rejected connection with GoAway(StreamId(0))");
-                                warn!("Waiting 2 seconds before retry due to immediate GoAway");
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                            }
-                            info!("Creating fresh connection after GoAway...");
-                            match create_client(endpoint, timeout_ms).await {
-                                Ok(new_client) => {
-                                    info!("Successfully created new client after GoAway - will retry request");
-                                    return Ok((true, Some(new_client)));
-                                }
-                                Err(create_err) => {
-                                    warn!("Failed to create new client after GoAway: {create_err}. Will retry on next batch.");
-                                    return Ok((true, None));
-                                }
-                            }
-                        }
                         "ResourceExhausted" => {
                             warn!("Server overloaded (ResourceExhausted) - backing off");
                             tokio::time::sleep(Duration::from_secs(5)).await;
-                            if retries >= max_retries {
-                                return Ok((true, None));
-                            }
                         }
                         "DeadlineExceeded" => {
                             warn!("Request deadline exceeded - consider increasing timeout");
-                            if retries >= max_retries {
+                        }
+                        _ => {}
+                    }
+                    if retries >= max_retries {
+                        return Ok((true, None));
+                    }
+                } else if is_connection_error {
+                    warn!("Connection error detected - type: {error_type}, endpoint: {endpoint}");
+
+                    if error_type == "GoAway" {
+                        if error_str.contains("StreamId(0)") {
+                            error!("Server immediately rejected connection with GoAway(StreamId(0))");
+                            warn!("Waiting 2 seconds before retry due to immediate GoAway");
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                        info!("Creating fresh connection after GoAway...");
+                        match create_client(endpoint, timeout_ms).await {
+                            Ok(new_client) => {
+                                info!("Successfully created new client after GoAway - will retry request");
+                                return Ok((true, Some(new_client)));
+                            }
+                            Err(create_err) => {
+                                warn!("Failed to create new client after GoAway: {create_err}. Will retry on next batch.");
                                 return Ok((true, None));
                             }
                         }
-                        _ => {}
                     }
 
                     if retries == 0 {

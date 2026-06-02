@@ -98,6 +98,51 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                 break;
             }
+            _ = flush_timer.tick() => {
+                // Flush the in-flight batch when the flush timeout elapses so
+                // low-throughput queries aren't held indefinitely waiting to
+                // reach `batch_size`.
+                if !batch.is_empty() && !last_query_id.is_empty() {
+                    ensure_client(
+                        &mut client,
+                        &mut connection_state,
+                        &endpoint,
+                        initial_connection_timeout_ms,
+                        connection_retry_attempts,
+                        &mut consecutive_failures,
+                        &mut _total_connection_attempts,
+                        &mut last_connection_attempt,
+                        base_backoff,
+                        max_backoff,
+                    )
+                    .await;
+
+                    if client.is_some() {
+                        let sent = send_with_swap(
+                            &mut client,
+                            &batch,
+                            &last_query_id,
+                            &metadata,
+                            max_retries,
+                            &endpoint,
+                            timeout_ms,
+                            &reaction_name,
+                            &mut connection_state,
+                            &mut consecutive_failures,
+                            &mut last_connection_attempt,
+                            &mut last_successful_send,
+                            &mut _successful_sends,
+                            &mut _failed_sends,
+                            &mut _goaway_count,
+                        )
+                        .await;
+                        if sent {
+                            batch.clear();
+                        }
+                    }
+                }
+                continue;
+            }
             result = priority_queue.dequeue() => result,
         };
 
