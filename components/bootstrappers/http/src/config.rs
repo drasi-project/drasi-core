@@ -666,4 +666,37 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("at least one label"));
     }
+
+    #[test]
+    fn test_validate_relation_delete_skips_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Delete;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = None;
+        // Delete relations don't need from/to
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_relation_update_requires_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Update;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = None;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("from is required"));
+    }
+
+    #[test]
+    fn test_validate_relation_insert_requires_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Insert;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = Some("{{item.to}}".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("from is required"));
+    }
 }
