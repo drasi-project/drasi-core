@@ -26,7 +26,16 @@ const widgetsSource = readFileSync(
 );
 
 const widgetsSandbox = {
-  window: { Handlebars, echarts: null },
+  window: {
+    Handlebars,
+    echarts: null,
+    DOMPurify: {
+      sanitize: (html, opts) => {
+        // Simple mock: strip <script> tags, preserve other attributes
+        return html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+      },
+    },
+  },
   document: { createElement: () => ({}), documentElement: { getAttribute: () => "dark" } },
   Map,
   Number,
@@ -349,6 +358,79 @@ console.log("\n=== trimPrefix helper ===");
   const tpl = Handlebars.compile('{{trimPrefix val "prefix"}}');
   const result = tpl({});
   assertEqual(result, "", "trimPrefix handles undefined input");
+}
+
+// ─── sortBy: non-array input ─────────────────────────────────────────
+
+{
+  const tpl = Handlebars.compile('{{#sortBy rows "name"}}{{this.name}} {{/sortBy}}');
+  const result = tpl({ rows: null });
+  assertEqual(result, "", "sortBy handles null rows");
+}
+
+{
+  const tpl = Handlebars.compile('{{#sortBy rows "name"}}{{this.name}} {{/sortBy}}');
+  const result = tpl({ rows: undefined });
+  assertEqual(result, "", "sortBy handles undefined rows");
+}
+
+{
+  const tpl = Handlebars.compile('{{#sortBy rows "name"}}{{this.name}} {{/sortBy}}');
+  const result = tpl({ rows: { not: "an array" } });
+  assertEqual(result, "", "sortBy handles object (non-array) rows");
+}
+
+// ─── sortBy: SafeString (no double-escaping) ─────────────────────────
+
+{
+  const tpl = Handlebars.compile('{{#sortBy rows "url"}}{{link this.url "Go"}} {{/sortBy}}');
+  const result = tpl({ rows: [{ url: "https://example.com" }] });
+  assert(result.includes("<a "), "sortBy does not double-escape inner HTML from link helper");
+  assert(!result.includes("&lt;a"), "sortBy must not HTML-escape link helper output");
+}
+
+// ─── html helper: sanitization ───────────────────────────────────────
+
+{
+  // With DOMPurify available — should sanitize
+  const tpl = Handlebars.compile("{{{html content}}}");
+  const result = tpl({ content: '<b>safe</b><script>alert("xss")</script>' });
+  assert(result.includes("<b>safe</b>"), "html helper preserves safe tags");
+  assert(!result.includes("<script>"), "html helper strips script tags via DOMPurify");
+}
+
+{
+  // Test link output survives DOMPurify ADD_ATTR (target, rel preserved)
+  const tpl = Handlebars.compile("{{{html content}}}");
+  const result = tpl({ content: '<a href="https://x.com" target="_blank" rel="noopener noreferrer">X</a>' });
+  assert(result.includes('target="_blank"'), "html helper preserves target attribute via ADD_ATTR");
+  assert(result.includes('rel="noopener noreferrer"'), "html helper preserves rel attribute via ADD_ATTR");
+}
+
+// ─── compareByField utility ──────────────────────────────────────────
+
+{
+  const a = { val: 10 }, b = { val: 3 };
+  const cmp = widgetsSandbox.compareByField(a, b, "val", "asc");
+  assert(cmp > 0, "compareByField: 10 > 3 ascending");
+}
+
+{
+  const a = { val: 10 }, b = { val: 3 };
+  const cmp = widgetsSandbox.compareByField(a, b, "val", "desc");
+  assert(cmp < 0, "compareByField: 10 > 3 descending reverses");
+}
+
+{
+  const a = { name: "banana" }, b = { name: "apple" };
+  const cmp = widgetsSandbox.compareByField(a, b, "name", "asc");
+  assert(cmp > 0, "compareByField: string comparison ascending");
+}
+
+{
+  const a = { val: null }, b = { val: "hello" };
+  const cmp = widgetsSandbox.compareByField(a, b, "val", "asc");
+  assert(typeof cmp === "number", "compareByField: handles null values without throwing");
 }
 
 // ─── Summary ────────────────────────────────────────────────────────
