@@ -323,8 +323,8 @@ impl ReactionPluginDescriptor for HttpReactionDescriptor {
             let resolved: u64 = mapper.resolve_typed(cap).await?;
             builder = builder.with_priority_queue_capacity(resolved as usize);
         }
-        if let Some(ref ot) = dto.output_templates {
-            builder = builder.with_output_templates(map_output_templates(ot));
+        if let Some(ref templates) = dto.output_templates {
+            builder = builder.with_output_templates(map_output_templates(templates));
         }
         if let Some(ref adaptive) = dto.adaptive {
             let cfg = AdaptiveBatchConfig {

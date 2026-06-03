@@ -116,10 +116,10 @@ fn builder_with_output_templates_round_trip() {
         .build()
         .unwrap();
     let p = r.properties();
-    let ot = p
+    let templates = p
         .get("outputTemplates")
         .expect("outputTemplates should appear");
-    let routes = ot
+    let routes = templates
         .get("routes")
         .and_then(|v| v.as_object())
         .expect("routes object");
@@ -209,9 +209,9 @@ fn config_deserialize_with_output_templates_and_adaptive() {
     assert_eq!(a.adaptive_max_batch_size, 500);
     assert_eq!(c.batch_endpoint.as_deref(), Some("/batch"));
     assert!(c.output_templates.is_some());
-    let ot = c.output_templates.unwrap();
-    assert!(ot.default_template.is_some());
-    assert!(ot.routes.contains_key("q1"));
+    let templates = c.output_templates.unwrap();
+    assert!(templates.default_template.is_some());
+    assert!(templates.routes.contains_key("q1"));
 }
 
 #[test]

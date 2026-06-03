@@ -127,11 +127,11 @@ impl HttpReactionBuilder {
     /// Replace the default fallback template applied to every query that
     /// has no explicit route.
     pub fn with_default_template(mut self, template: HttpQueryConfig) -> Self {
-        let ot = self
+        let templates = self
             .config
             .output_templates
             .get_or_insert_with(Default::default);
-        ot.default_template = Some(template);
+        templates.default_template = Some(template);
         self
     }
 
@@ -141,11 +141,11 @@ impl HttpReactionBuilder {
         query_id: impl Into<String>,
         template: HttpQueryConfig,
     ) -> Self {
-        let ot = self
+        let templates = self
             .config
             .output_templates
             .get_or_insert_with(Default::default);
-        ot.routes.insert(query_id.into(), template);
+        templates.routes.insert(query_id.into(), template);
         self
     }
 
