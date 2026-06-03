@@ -141,35 +141,6 @@ batching:
 }
 
 #[test]
-fn test_config_yaml_adaptive_snake_case_alias() {
-    // Legacy snake_case keys must still deserialize for backward compatibility.
-    let yaml = r#"
-endpoint: "grpc://example:50052"
-batching:
-  mode: adaptive
-  adaptive_min_batch_size: 25
-  adaptive_max_batch_size: 750
-  adaptive_window_size: 12
-  adaptive_batch_timeout_ms: 1500
-"#;
-    let cfg: GrpcReactionConfig = serde_yaml::from_str(yaml).unwrap();
-    match cfg.batching {
-        BatchingConfig::Adaptive {
-            adaptive_min_batch_size,
-            adaptive_max_batch_size,
-            adaptive_window_size,
-            adaptive_batch_timeout_ms,
-        } => {
-            assert_eq!(adaptive_min_batch_size, 25);
-            assert_eq!(adaptive_max_batch_size, 750);
-            assert_eq!(adaptive_window_size, 12);
-            assert_eq!(adaptive_batch_timeout_ms, 1500);
-        }
-        _ => panic!("expected adaptive batching"),
-    }
-}
-
-#[test]
 fn test_config_adaptive_serializes_camel_case() {
     // The runtime config must serialize adaptive keys in camelCase, consistent
     // with the descriptor DTO and the rest of the gRPC reaction config.

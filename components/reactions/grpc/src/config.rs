@@ -65,9 +65,7 @@ pub(crate) fn default_adaptive_batch_timeout_ms() -> u64 {
 /// Batching strategy used by the gRPC reaction.
 ///
 /// All keys serialize and deserialize in `camelCase` to stay consistent with the
-/// rest of the gRPC reaction configuration and its generated descriptor. The
-/// adaptive variant additionally accepts the legacy `snake_case` keys as aliases
-/// for backward compatibility.
+/// rest of the gRPC reaction configuration and its generated descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum BatchingConfig {
@@ -88,26 +86,22 @@ pub enum BatchingConfig {
     Adaptive {
         #[serde(
             default = "default_adaptive_min_batch_size",
-            rename = "adaptiveMinBatchSize",
-            alias = "adaptive_min_batch_size"
+            rename = "adaptiveMinBatchSize"
         )]
         adaptive_min_batch_size: usize,
         #[serde(
             default = "default_adaptive_max_batch_size",
-            rename = "adaptiveMaxBatchSize",
-            alias = "adaptive_max_batch_size"
+            rename = "adaptiveMaxBatchSize"
         )]
         adaptive_max_batch_size: usize,
         #[serde(
             default = "default_adaptive_window_size",
-            rename = "adaptiveWindowSize",
-            alias = "adaptive_window_size"
+            rename = "adaptiveWindowSize"
         )]
         adaptive_window_size: usize,
         #[serde(
             default = "default_adaptive_batch_timeout_ms",
-            rename = "adaptiveBatchTimeoutMs",
-            alias = "adaptive_batch_timeout_ms"
+            rename = "adaptiveBatchTimeoutMs"
         )]
         adaptive_batch_timeout_ms: u64,
     },
