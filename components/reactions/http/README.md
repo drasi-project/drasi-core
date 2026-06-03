@@ -90,7 +90,7 @@ All top-level fields are camelCase.
 | `token` | `string` | _none_ | Bearer token sent as `Authorization: Bearer <token>`. |
 | `timeoutMs` | `u64` | `5000` | Per-request HTTP timeout. |
 | `outputTemplates` | object | _none_ | Shared per-operation templates and per-query routes (see [Templating](#templating)). |
-| `batchEndpoint` | `string` | _none_ | When set **and** `adaptive` is enabled, every coalesced batch is POSTed to `{baseUrl}{batchEndpoint}` as a single payload. Ignored in standard mode (a warning is logged at startup). |
+| `batchEndpoint` | `string` | _none_ | When set, `adaptive` **must** also be enabled; every coalesced batch is POSTed to `{baseUrl}{batchEndpoint}` as a single payload. If `batchEndpoint` is set without `adaptive`, the reaction fails to start. |
 | `adaptive` | object | _none_ | When present, enables adaptive batching (see [Adaptive batching](#adaptive-batching)). |
 
 ### `outputTemplates` (and per-query `routes`)
@@ -165,11 +165,9 @@ outputTemplates:
         method: DELETE
 ```
 
-Route keys are matched against the full query id first; for dotted ids
-(e.g. `source.query`) the last segment (`query`) is also tried before falling
-back to `defaultTemplate`. If neither a route nor a default template matches the
-operation, the reaction falls back to a built-in default: POST the raw diff to
-`{baseUrl}/changes/{queryId}`.
+Route keys are matched against the full query id only. If neither a route nor a
+default template matches the operation, the reaction falls back to a built-in
+default: POST the raw diff to `{baseUrl}/changes/{queryId}`.
 
 ---
 

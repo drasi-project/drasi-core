@@ -14,7 +14,7 @@
 
 //! Per-result HTTP delivery used by both standard and adaptive runtime loops.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use handlebars::Handlebars;
 use log::{debug, warn};
 use reqwest::{
@@ -125,7 +125,7 @@ pub(crate) async fn process_result(
         if rendered_spec_url.starts_with("http://") || rendered_spec_url.starts_with("https://") {
             // SSRF guard: a rendered absolute URL may incorporate graph-data
             // fields. Only allow it when its host matches the configured
-            // base_url host; otherwise fall back to the safe default POST.
+            // base_url host; otherwise reject the event.
             let base_host = reqwest::Url::parse(base_url)
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned));
@@ -133,12 +133,10 @@ pub(crate) async fn process_result(
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_owned));
             if base_host.is_none() || base_host != resolved_host {
-                warn!(
+                bail!(
                     "[{reaction_name}] Rendered URL '{rendered_spec_url}' host does not match \
-                     base_url '{base_url}' host — falling back to /changes/{query_name}"
+                     base_url '{base_url}' host for query '{query_name}' — rejecting request"
                 );
-                return fallback_post(client, base_url, token, data, query_name, reaction_name)
-                    .await;
             }
             rendered_spec_url
         } else {

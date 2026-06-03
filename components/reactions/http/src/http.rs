@@ -18,9 +18,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use log::{error, info, warn};
+use log::{error, info};
 use reqwest::Client;
 
 use drasi_lib::channels::ComponentStatus;
@@ -157,12 +157,17 @@ impl Reaction for HttpReaction {
         );
 
         if self.config.batch_endpoint.is_some() && self.config.adaptive.is_none() {
-            warn!(
+            let msg = format!(
                 "[{}] `batchEndpoint` is configured but `adaptive` is not enabled — \
-                 batchEndpoint is ignored in standard (per-result) mode. Set `adaptive` \
-                 to enable coalesced batch delivery.",
+                 batchEndpoint requires adaptive (coalesced batch) mode. Set `adaptive` \
+                 to enable batch delivery.",
                 self.base.id
             );
+            error!("{msg}");
+            self.base
+                .set_status(ComponentStatus::Stopped, Some(msg.clone()))
+                .await;
+            return Err(anyhow!(msg));
         }
 
         self.base

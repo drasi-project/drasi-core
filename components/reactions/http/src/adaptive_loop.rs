@@ -193,7 +193,7 @@ async fn deliver_batch(
             };
 
             let spec_owned: HttpCallSpec;
-            let spec: &HttpCallSpec = match config.get_template_spec_with_suffix(&query_id, op) {
+            let spec: &HttpCallSpec = match config.get_template_spec(&query_id, op) {
                 Some(s) => s,
                 None => {
                     spec_owned = synthesized_default_spec(&query_id);

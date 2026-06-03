@@ -289,50 +289,6 @@ where
         None
     }
 
-    /// Like [`get_template_spec`](Self::get_template_spec), but adds a
-    /// suffix-matching fallback for namespaced query ids.
-    ///
-    /// Lookup order:
-    /// 1. exact match on the full `query_id` route,
-    /// 2. if `query_id` is dotted (e.g. `source.query`), the last segment
-    ///    (`query`) as a route,
-    /// 3. the default template.
-    ///
-    /// This mirrors the behavior of the SSE reaction so per-query templates
-    /// keyed by the unqualified query name still match source-prefixed ids.
-    /// Note: if multiple queries share the same final segment, configure
-    /// using full ids to avoid ambiguity.
-    fn get_template_spec_with_suffix(
-        &self,
-        query_id: &str,
-        operation: OperationType,
-    ) -> Option<&TemplateSpec<T>> {
-        // 1. Exact match on the full query id.
-        if let Some(query_config) = self.routes().get(query_id) {
-            if let Some(spec) = Self::get_spec_from_config(query_config, operation) {
-                return Some(spec);
-            }
-        }
-
-        // 2. Suffix match on the last dotted segment.
-        if let Some(last_segment) = query_id.rsplit('.').next() {
-            if last_segment != query_id {
-                if let Some(query_config) = self.routes().get(last_segment) {
-                    if let Some(spec) = Self::get_spec_from_config(query_config, operation) {
-                        return Some(spec);
-                    }
-                }
-            }
-        }
-
-        // 3. Fall back to default template.
-        if let Some(default_config) = self.default_template() {
-            return Self::get_spec_from_config(default_config, operation);
-        }
-
-        None
-    }
-
     /// Helper to get spec from a QueryConfig based on operation type
     fn get_spec_from_config(
         config: &QueryConfig<T>,
