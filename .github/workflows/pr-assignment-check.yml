@@ -161,5 +161,18 @@ jobs:
                 ? `PR #${prNumber} already labeled needs-assignment, skipping duplicate comment`
                 : `PR #${prNumber} - author not assigned to linked issues, added label and comment`);
             } else {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: 'needs-assignment'
+                });
+                console.log(`Removed "needs-assignment" label from PR #${prNumber}`);
+              } catch (e) {
+                // Label might not exist, that's fine
+                if (e.status !== 404) throw e;
+              }
+
               console.log(`PR #${prNumber} passed assignment check`);
             }
