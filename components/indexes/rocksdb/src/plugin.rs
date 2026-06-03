@@ -39,6 +39,8 @@ use std::sync::Arc;
 use crate::checkpoint::{self, RocksDbCheckpointStore};
 use crate::element_index::{self, RocksDbElementIndex, RocksIndexOptions};
 use crate::future_queue::{self, RocksDbFutureQueue};
+use crate::live_results::{self, RocksDbLiveResultsWriter};
+use crate::outbox::{self, RocksDbOutboxWriter};
 use crate::result_index::{self, RocksDbResultIndex};
 use crate::{RocksDbSessionControl, RocksDbSessionState};
 
@@ -78,6 +80,8 @@ pub fn open_unified_db(
     cfs.extend(result_index::result_cf_descriptors());
     cfs.extend(future_queue::future_queue_cf_descriptors());
     cfs.push(checkpoint::stream_state_cf_descriptor());
+    cfs.push(outbox::outbox_cf_descriptor());
+    cfs.push(live_results::live_results_cf_descriptor());
 
     let db = OptimisticTransactionDB::open_cf_descriptors(&db_opts, db_path, cfs)
         .map_err(IndexError::other)?;
@@ -173,7 +177,9 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
         ));
         let result_index = Arc::new(RocksDbResultIndex::new(db.clone(), session_state.clone()));
         let future_queue = Arc::new(RocksDbFutureQueue::new(db.clone(), session_state.clone()));
-        let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db, session_state));
+        let checkpoint_store = Arc::new(RocksDbCheckpointStore::new(db.clone(), session_state));
+        let outbox_writer = Arc::new(RocksDbOutboxWriter::new(db.clone()));
+        let live_results_writer = Arc::new(RocksDbLiveResultsWriter::new(db));
 
         Ok(CreatedIndexes {
             set: IndexSet {
@@ -184,6 +190,8 @@ impl IndexBackendPlugin for RocksDbIndexProvider {
                 session_control,
             },
             checkpoint_store: Some(checkpoint_store),
+            outbox_writer: Some(outbox_writer),
+            live_results_writer: Some(live_results_writer),
         })
     }
 

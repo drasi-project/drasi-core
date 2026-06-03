@@ -62,7 +62,9 @@ use std::sync::Arc;
 
 use crate::component_graph::ComponentUpdateSender;
 use crate::identity::IdentityProvider;
+use crate::reactions::SnapshotFetcher;
 use crate::state_store::StateStoreProvider;
+use crate::wal::WalProvider;
 
 /// Context provided to Source plugins during initialization.
 ///
@@ -106,6 +108,13 @@ pub struct SourceRuntimeContext {
     /// Sources can use this to obtain authentication credentials (passwords, tokens,
     /// certificates) for connecting to external systems.
     pub identity_provider: Option<Arc<dyn IdentityProvider>>,
+
+    /// Optional Write-Ahead Log provider for durable event persistence.
+    ///
+    /// This is `Some` if a WAL provider was configured on DrasiLib. Transient sources
+    /// (HTTP, gRPC, Application) use this to persist incoming events before ACKing
+    /// the caller, enabling crash recovery and replay for persistent queries.
+    pub wal_provider: Option<Arc<dyn WalProvider>>,
 }
 
 impl SourceRuntimeContext {
@@ -134,6 +143,7 @@ impl SourceRuntimeContext {
             state_store,
             update_tx,
             identity_provider,
+            wal_provider: None,
         }
     }
 
@@ -172,6 +182,10 @@ impl std::fmt::Debug for SourceRuntimeContext {
                     .identity_provider
                     .as_ref()
                     .map(|_| "<IdentityProvider>"),
+            )
+            .field(
+                "wal_provider",
+                &self.wal_provider.as_ref().map(|_| "<WalProvider>"),
             )
             .finish()
     }
@@ -220,6 +234,16 @@ pub struct ReactionRuntimeContext {
     /// Reactions can use this to obtain authentication credentials (passwords, tokens,
     /// certificates) for connecting to external systems.
     pub identity_provider: Option<Arc<dyn IdentityProvider>>,
+
+    /// Optional snapshot fetcher for on-demand query snapshot access.
+    ///
+    /// This is `Some` when the host has a `QueryProvider` available. Reactions can
+    /// use this to fetch the current result set of any subscribed query at any time,
+    /// not just during bootstrap.
+    ///
+    /// The fetcher is scoped to the reaction's configured query IDs — attempting to
+    /// fetch a snapshot for an unsubscribed query will return an error.
+    pub snapshot_fetcher: Option<Arc<dyn SnapshotFetcher>>,
 }
 
 impl ReactionRuntimeContext {
@@ -248,6 +272,7 @@ impl ReactionRuntimeContext {
             state_store,
             update_tx,
             identity_provider,
+            snapshot_fetcher: None,
         }
     }
 
@@ -283,6 +308,10 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                     .identity_provider
                     .as_ref()
                     .map(|_| "<IdentityProvider>"),
+            )
+            .field(
+                "snapshot_fetcher",
+                &self.snapshot_fetcher.as_ref().map(|_| "<SnapshotFetcher>"),
             )
             .finish()
     }

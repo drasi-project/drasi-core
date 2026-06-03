@@ -171,11 +171,11 @@ impl BootstrapPluginDescriptor for PostgresBootstrapDescriptor {
             .collect();
 
         let config = PostgresBootstrapConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            database: mapper.resolve_string(&dto.database)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            database: mapper.resolve_string(&dto.database).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
             tables: dto.tables,
             slot_name: dto.slot_name,
             publication_name: dto.publication_name,

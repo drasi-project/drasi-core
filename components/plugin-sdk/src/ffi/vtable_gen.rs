@@ -47,7 +47,7 @@ use super::types::*;
 use super::vtables::*;
 use crate::descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SourcePluginDescriptor,
+    SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
@@ -132,6 +132,310 @@ fn dispatch_mode_to_ffi(m: DispatchMode) -> FfiDispatchMode {
     match m {
         DispatchMode::Broadcast => FfiDispatchMode::Broadcast,
         DispatchMode::Channel => FfiDispatchMode::Channel,
+    }
+}
+
+// ============================================================================
+// FFI iterator → async Stream wrappers
+// ============================================================================
+
+/// Send-safe wrapper around FFI snapshot iterator state.
+/// Calls `drop_fn` when dropped — the host allocates the iterator state and
+/// this is the only way to reclaim it.
+struct FfiSnapshotIterHandle {
+    iter_ctx: *mut c_void,
+    next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    drop_fn: extern "C" fn(*mut c_void),
+}
+
+// SAFETY: The iter_ctx pointer is exclusively owned by this handle after
+// the host returns it. The next_fn/drop_fn callbacks are thread-safe.
+unsafe impl Send for FfiSnapshotIterHandle {}
+
+impl Drop for FfiSnapshotIterHandle {
+    fn drop(&mut self) {
+        (self.drop_fn)(self.iter_ctx);
+    }
+}
+
+/// Create an async `Stream<Item = serde_json::Value>` from an FFI snapshot iterator.
+///
+/// Each `.next()` dispatches the FFI `next_fn` via `spawn_blocking`, deserializes
+/// one JSON row, and yields it. When the iterator is exhausted (empty string),
+/// the stream ends and `drop_fn` is called.
+pub(crate) fn make_snapshot_stream(
+    iter: FfiSnapshotIterator,
+) -> impl tokio_stream::Stream<Item = serde_json::Value> + Send {
+    let handle = FfiSnapshotIterHandle {
+        iter_ctx: iter.iter_ctx,
+        next_fn: iter.next_fn,
+        drop_fn: iter.drop_fn,
+    };
+
+    async_stream::stream! {
+        let _guard = handle; // ensure drop_fn is called when stream is dropped
+        loop {
+            let next_fn = _guard.next_fn;
+            let ctx = SendMutPtr(_guard.iter_ctx);
+
+            let row = tokio::task::spawn_blocking(move || {
+                let owned_str = next_fn(ctx.as_ptr());
+                let json_str = unsafe { owned_str.into_string() };
+                if json_str.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(&json_str) {
+                        Ok(val) => Some(val),
+                        Err(e) => {
+                            log::error!("[FFI snapshot stream] failed to deserialize row: {e}");
+                            None
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or(None);
+
+            match row {
+                Some(val) => yield val,
+                None => break,
+            }
+        }
+    }
+}
+
+/// Send-safe wrapper around FFI outbox iterator state.
+struct FfiOutboxIterHandle {
+    iter_ctx: *mut c_void,
+    next_fn: extern "C" fn(*mut c_void) -> FfiOwnedStr,
+    drop_fn: extern "C" fn(*mut c_void),
+}
+
+unsafe impl Send for FfiOutboxIterHandle {}
+
+impl Drop for FfiOutboxIterHandle {
+    fn drop(&mut self) {
+        (self.drop_fn)(self.iter_ctx);
+    }
+}
+
+/// Create an async `Stream<Item = Arc<QueryResult>>` from an FFI outbox iterator.
+fn make_outbox_stream(
+    iter: FfiOutboxIterator,
+) -> impl tokio_stream::Stream<Item = Arc<drasi_lib::channels::QueryResult>> + Send {
+    let handle = FfiOutboxIterHandle {
+        iter_ctx: iter.iter_ctx,
+        next_fn: iter.next_fn,
+        drop_fn: iter.drop_fn,
+    };
+
+    async_stream::stream! {
+        let _guard = handle;
+        loop {
+            let next_fn = _guard.next_fn;
+            let ctx = SendMutPtr(_guard.iter_ctx);
+
+            let entry = tokio::task::spawn_blocking(move || {
+                let owned_str = next_fn(ctx.as_ptr());
+                let json_str = unsafe { owned_str.into_string() };
+                if json_str.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_str::<drasi_lib::channels::QueryResult>(&json_str) {
+                        Ok(qr) => Some(Arc::new(qr)),
+                        Err(e) => {
+                            log::error!("[FFI outbox stream] failed to deserialize entry: {e}");
+                            None
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or(None);
+
+            match entry {
+                Some(val) => yield val,
+                None => break,
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FFI bootstrap backend
+// ============================================================================
+
+/// Plugin-side bootstrap backend that calls through FFI callback function pointers.
+///
+/// When the host invokes `bootstrap_fn`, the plugin constructs this backend
+/// wrapping the `FfiBootstrapContext`'s callback pointers. Each async method
+/// uses `spawn_blocking` to call the synchronous FFI callback without blocking
+/// the async runtime.
+struct FfiBootstrapBackend {
+    fetch_snapshot_fn: FfiBootstrapFetchSnapshotFn,
+    fetch_outbox_fn: FfiBootstrapFetchOutboxFn,
+    read_checkpoint_fn: FfiBootstrapReadCheckpointFn,
+    write_checkpoint_fn: FfiBootstrapWriteCheckpointFn,
+    /// Opaque host context passed to all callbacks (raw pointer for Copy semantics).
+    callback_ctx: *mut c_void,
+}
+
+unsafe impl Send for FfiBootstrapBackend {}
+unsafe impl Sync for FfiBootstrapBackend {}
+
+/// SAFETY: FfiOwnedStr contains *mut c_char which is not Send.
+/// We own the data exclusively after the callback returns, so sending
+/// the struct across thread boundaries is safe.
+pub(crate) struct SendFfiSnapshotIteratorResponse(pub(crate) FfiSnapshotIteratorResponse);
+unsafe impl Send for SendFfiSnapshotIteratorResponse {}
+struct SendFfiOutboxIteratorResponse(FfiOutboxIteratorResponse);
+unsafe impl Send for SendFfiOutboxIteratorResponse {}
+struct SendFfiCheckpointResult(FfiCheckpointResult);
+unsafe impl Send for SendFfiCheckpointResult {}
+struct SendFfiResult(FfiResult);
+unsafe impl Send for SendFfiResult {}
+
+#[async_trait::async_trait]
+impl drasi_lib::reactions::BootstrapBackend for FfiBootstrapBackend {
+    async fn fetch_snapshot(
+        &self,
+    ) -> Result<
+        drasi_lib::queries::output_state::SnapshotStream,
+        drasi_lib::queries::output_state::FetchError,
+    > {
+        let cb = self.fetch_snapshot_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp =
+            tokio::task::spawn_blocking(move || SendFfiSnapshotIteratorResponse(cb(ctx.as_ptr())))
+                .await
+                .map_err(
+                    |_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                        status: drasi_lib::ComponentStatus::Error,
+                    },
+                )?
+                .0;
+
+        // Consume error string unconditionally to prevent leaks.
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            log::error!("[FFI fetch_snapshot] host returned error: {err_str}");
+            return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            });
+        }
+
+        let as_of_sequence = resp.as_of_sequence;
+        let config_hash = resp.config_hash;
+
+        // Wrap the FFI iterator in an async stream.
+        let stream = make_snapshot_stream(resp.iterator);
+
+        Ok(
+            drasi_lib::queries::output_state::SnapshotStream::from_stream(
+                stream,
+                as_of_sequence,
+                config_hash,
+            ),
+        )
+    }
+
+    async fn fetch_outbox(
+        &self,
+        after_sequence: u64,
+    ) -> Result<
+        drasi_lib::queries::output_state::OutboxStream,
+        drasi_lib::queries::output_state::FetchError,
+    > {
+        let cb = self.fetch_outbox_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp = tokio::task::spawn_blocking(move || {
+            SendFfiOutboxIteratorResponse(cb(ctx.as_ptr(), after_sequence))
+        })
+        .await
+        .map_err(
+            |_| drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            },
+        )?
+        .0;
+
+        // Consume error string unconditionally to prevent leaks.
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            if err_str.starts_with("OutboxGap:") {
+                let earliest_available = err_str
+                    .strip_prefix("OutboxGap:")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                return Err(drasi_lib::queries::output_state::FetchError::OutboxGap(
+                    drasi_lib::queries::output_state::OutboxGap {
+                        requested: after_sequence,
+                        earliest_available,
+                        latest_sequence: resp.latest_sequence,
+                        config_hash: resp.config_hash,
+                    },
+                ));
+            }
+            log::error!("[FFI fetch_outbox] host returned error: {err_str}");
+            return Err(drasi_lib::queries::output_state::FetchError::NotRunning {
+                status: drasi_lib::ComponentStatus::Error,
+            });
+        }
+
+        let latest_sequence = resp.latest_sequence;
+        let config_hash = resp.config_hash;
+
+        // Wrap the FFI iterator in an async stream.
+        let stream = make_outbox_stream(resp.iterator);
+
+        Ok(drasi_lib::queries::output_state::OutboxStream::from_stream(
+            stream,
+            latest_sequence,
+            config_hash,
+        ))
+    }
+
+    async fn read_checkpoint(
+        &self,
+    ) -> anyhow::Result<Option<drasi_lib::reactions::ReactionCheckpoint>> {
+        let cb = self.read_checkpoint_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let resp = tokio::task::spawn_blocking(move || SendFfiCheckpointResult(cb(ctx.as_ptr())))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
+            .0;
+
+        let err_str = unsafe { resp.error.into_string() };
+        if !err_str.is_empty() {
+            return Err(anyhow::anyhow!("{err_str}"));
+        }
+
+        if !resp.found {
+            return Ok(None);
+        }
+
+        Ok(Some(drasi_lib::reactions::ReactionCheckpoint {
+            sequence: resp.checkpoint.sequence,
+            config_hash: resp.checkpoint.config_hash,
+        }))
+    }
+
+    async fn write_checkpoint(
+        &self,
+        checkpoint: &drasi_lib::reactions::ReactionCheckpoint,
+    ) -> anyhow::Result<()> {
+        let cb = self.write_checkpoint_fn;
+        let ctx = SendMutPtr(self.callback_ctx);
+        let ffi_cp = FfiCheckpoint {
+            sequence: checkpoint.sequence,
+            config_hash: checkpoint.config_hash,
+        };
+        let result = tokio::task::spawn_blocking(move || SendFfiResult(cb(ctx.as_ptr(), ffi_cp)))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?
+            .0;
+
+        unsafe { result.into_result().map_err(|e| anyhow::anyhow!("{e}")) }
     }
 }
 
@@ -233,6 +537,21 @@ pub fn build_source_vtable<T: Source + 'static>(
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let props = w.inner.properties();
         let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
+    extern "C" fn describe_schema_fn<T: Source + 'static>(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!("Source::describe_schema panicked for '{}'", w.cached_id);
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
         FfiOwnedStr::from_string(json)
     }
 
@@ -381,6 +700,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         resume_from_len: u32,
         has_last_sequence: bool,
         last_sequence: u64,
+        request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const SourceWrapper<T>) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -412,7 +732,7 @@ pub fn build_source_vtable<T: Source + 'static>(
             nodes,
             relations,
             resume_from,
-            request_position_handle: false,
+            request_position_handle,
             last_sequence: if has_last_sequence {
                 Some(last_sequence)
             } else {
@@ -505,6 +825,28 @@ pub fn build_source_vtable<T: Source + 'static>(
         });
     }
 
+    extern "C" fn supports_replay_fn<T: Source + 'static>(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const SourceWrapper<T>) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn<T: Source + 'static>(
+        state: *mut c_void,
+        query_id: FfiStr,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const SourceWrapper<T>) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const SourceWrapper<T>);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -531,6 +873,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         auto_start_fn: auto_start_fn::<T>,
         dispatch_mode_fn: dispatch_mode_fn::<T>,
         properties_fn: properties_fn::<T>,
+        describe_schema_fn: describe_schema_fn::<T>,
         start_fn: start_fn::<T>,
         stop_fn: stop_fn::<T>,
         status_fn: status_fn::<T>,
@@ -538,6 +881,8 @@ pub fn build_source_vtable<T: Source + 'static>(
         initialize_fn: initialize_fn::<T>,
         subscribe_fn: subscribe_fn::<T>,
         set_bootstrap_provider_fn: set_bootstrap_provider_fn::<T>,
+        supports_replay_fn: supports_replay_fn::<T>,
+        remove_position_handle_fn: remove_position_handle_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -592,6 +937,24 @@ pub fn build_source_vtable_from_boxed(
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let props = w.inner.properties();
         let json = serde_json::to_string(&props).unwrap_or_else(|_| "{}".to_string());
+        FfiOwnedStr::from_string(json)
+    }
+
+    extern "C" fn describe_schema_fn(state: *const c_void) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            w.inner.describe_schema()
+        })) {
+            Ok(schema) => schema,
+            Err(_) => {
+                log::error!(
+                    "Dynamic source describe_schema panicked for '{}'",
+                    w.cached_id
+                );
+                None
+            }
+        };
+        let json = serde_json::to_string(&schema).unwrap_or_else(|_| "null".to_string());
         FfiOwnedStr::from_string(json)
     }
 
@@ -734,6 +1097,7 @@ pub fn build_source_vtable_from_boxed(
         resume_from_len: u32,
         has_last_sequence: bool,
         last_sequence: u64,
+        request_position_handle: bool,
     ) -> *mut FfiSubscriptionResponse {
         let w = unsafe { &*(state as *const DynSourceWrapper) };
         let source_id_str = unsafe { source_id.to_string() };
@@ -765,7 +1129,7 @@ pub fn build_source_vtable_from_boxed(
             nodes,
             relations,
             resume_from,
-            request_position_handle: false,
+            request_position_handle,
             last_sequence: if has_last_sequence {
                 Some(last_sequence)
             } else {
@@ -854,6 +1218,25 @@ pub fn build_source_vtable_from_boxed(
         });
     }
 
+    extern "C" fn supports_replay_fn(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const DynSourceWrapper) };
+        w.inner.supports_replay()
+    }
+
+    extern "C" fn remove_position_handle_fn(state: *mut c_void, query_id: FfiStr) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const DynSourceWrapper) };
+            let qid = unsafe { query_id.as_str() }.to_string();
+            let handle = (w.runtime_handle)().handle().clone();
+            let inner_ptr = SendPtr(state as *const DynSourceWrapper);
+            dispatch_to_runtime(&handle, async move {
+                let inner = unsafe { inner_ptr.as_ref() };
+                inner.inner.remove_position_handle(&qid).await;
+            });
+            FfiResult::ok()
+        })
+    }
+
     let cached_id = source.id().to_string();
     let cached_type_name = source.type_name().to_string();
 
@@ -880,6 +1263,7 @@ pub fn build_source_vtable_from_boxed(
         auto_start_fn,
         dispatch_mode_fn,
         properties_fn,
+        describe_schema_fn,
         start_fn,
         stop_fn,
         status_fn,
@@ -887,6 +1271,8 @@ pub fn build_source_vtable_from_boxed(
         initialize_fn,
         subscribe_fn,
         set_bootstrap_provider_fn,
+        supports_replay_fn,
+        remove_position_handle_fn,
         drop_fn,
     }
 }
@@ -1168,6 +1554,65 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         });
     }
 
+    extern "C" fn is_durable_fn<T: Reaction + 'static>(state: *const c_void) -> bool {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.is_durable()
+    }
+
+    extern "C" fn needs_snapshot_on_fresh_start_fn<T: Reaction + 'static>(
+        state: *const c_void,
+    ) -> bool {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.needs_snapshot_on_fresh_start()
+    }
+
+    extern "C" fn default_recovery_policy_fn<T: Reaction + 'static>(state: *const c_void) -> u8 {
+        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+        w.inner.default_recovery_policy() as u8
+    }
+
+    extern "C" fn bootstrap_fn<T: Reaction + 'static>(
+        state: *mut c_void,
+        ctx: *const FfiBootstrapContext,
+    ) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = unsafe { &*(state as *const ReactionWrapper<T>) };
+            let ffi_ctx = unsafe { &*ctx };
+
+            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let is_reset = ffi_ctx.is_reset;
+
+            let backend = FfiBootstrapBackend {
+                fetch_snapshot_fn: ffi_ctx.fetch_snapshot_fn,
+                fetch_outbox_fn: ffi_ctx.fetch_outbox_fn,
+                read_checkpoint_fn: ffi_ctx.read_checkpoint_fn,
+                write_checkpoint_fn: ffi_ctx.write_checkpoint_fn,
+                callback_ctx: ffi_ctx.callback_ctx,
+            };
+
+            let bootstrap_ctx = drasi_lib::reactions::BootstrapContext::from_backend(
+                query_id,
+                is_reset,
+                Box::new(backend),
+            );
+
+            let log_ctx = build_reaction_log_ctx(w);
+            let handle = (w.runtime_handle)().handle().clone();
+            let ptr = SendPtr(state as *const ReactionWrapper<T>);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let inner = unsafe { ptr.as_ref() };
+                let r = inner.inner.bootstrap(bootstrap_ctx).await;
+                clear_instance_log_ctx();
+                r
+            });
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = reaction.id().to_string();
     let cached_type_name = reaction.type_name().to_string();
 
@@ -1199,6 +1644,10 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         deprovision_fn: deprovision_fn::<T>,
         initialize_fn: initialize_fn::<T>,
         start_result_push_fn: start_result_push_fn::<T>,
+        is_durable_fn: is_durable_fn::<T>,
+        needs_snapshot_on_fresh_start_fn: needs_snapshot_on_fresh_start_fn::<T>,
+        default_recovery_policy_fn: default_recovery_policy_fn::<T>,
+        bootstrap_fn: bootstrap_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }
@@ -1503,6 +1952,59 @@ pub fn build_reaction_vtable_from_boxed(
         });
     }
 
+    extern "C" fn is_durable_fn(state: *const c_void) -> bool {
+        let w = wrapper_ref(state);
+        w.inner.is_durable()
+    }
+
+    extern "C" fn needs_snapshot_on_fresh_start_fn(state: *const c_void) -> bool {
+        let w = wrapper_ref(state);
+        w.inner.needs_snapshot_on_fresh_start()
+    }
+
+    extern "C" fn default_recovery_policy_fn(state: *const c_void) -> u8 {
+        let w = wrapper_ref(state);
+        w.inner.default_recovery_policy() as u8
+    }
+
+    extern "C" fn bootstrap_fn(state: *mut c_void, ctx: *const FfiBootstrapContext) -> FfiResult {
+        catch_panic_ffi(|| {
+            let w = wrapper_ref(state);
+            let ffi_ctx = unsafe { &*ctx };
+
+            let query_id = unsafe { ffi_ctx.query_id.to_string() };
+            let is_reset = ffi_ctx.is_reset;
+
+            let backend = FfiBootstrapBackend {
+                fetch_snapshot_fn: ffi_ctx.fetch_snapshot_fn,
+                fetch_outbox_fn: ffi_ctx.fetch_outbox_fn,
+                read_checkpoint_fn: ffi_ctx.read_checkpoint_fn,
+                write_checkpoint_fn: ffi_ctx.write_checkpoint_fn,
+                callback_ctx: ffi_ctx.callback_ctx,
+            };
+
+            let bootstrap_ctx = drasi_lib::reactions::BootstrapContext::from_backend(
+                query_id,
+                is_reset,
+                Box::new(backend),
+            );
+
+            let log_ctx = build_dyn_reaction_log_ctx(w);
+            let handle = (w.runtime_handle)().handle().clone();
+            let arc = wrapper_arc(state);
+            let result = dispatch_to_runtime(&handle, async move {
+                set_instance_log_ctx(log_ctx);
+                let r = arc.inner.bootstrap(bootstrap_ctx).await;
+                clear_instance_log_ctx();
+                r
+            });
+            match result {
+                Ok(()) => FfiResult::ok(),
+                Err(e) => FfiResult::err(e.to_string()),
+            }
+        })
+    }
+
     let cached_id = reaction.id().to_string();
     let cached_type_name = reaction.type_name().to_string();
 
@@ -1539,6 +2041,10 @@ pub fn build_reaction_vtable_from_boxed(
         deprovision_fn,
         initialize_fn,
         start_result_push_fn,
+        is_durable_fn,
+        needs_snapshot_on_fresh_start_fn,
+        default_recovery_policy_fn,
+        bootstrap_fn,
         drop_fn,
     }
 }
@@ -1568,7 +2074,7 @@ pub fn build_bootstrap_provider_vtable(
         server_id: FfiStr,
         source_id: FfiStr,
         sender: *mut FfiBootstrapSender,
-    ) -> i64 {
+    ) -> *mut FfiBootstrapResult {
         use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
 
         let query_id_str = unsafe { query_id.to_string() };
@@ -1598,6 +2104,10 @@ pub fn build_bootstrap_provider_vtable(
         let (std_tx, std_rx) = std::sync::mpsc::channel::<BootstrapEvent>();
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
 
+        // Channel to carry the BootstrapResult back from the provider thread
+        let (result_tx, result_rx) =
+            std::sync::mpsc::channel::<Result<drasi_lib::bootstrap::BootstrapResult, String>>();
+
         // Run the actual bootstrap provider in a background thread with its own tokio runtime
         let provider_ptr = SendPtr(state as *const BootstrapProviderWrapper);
         let _bootstrap_handle = std::thread::spawn(move || {
@@ -1614,11 +2124,12 @@ pub fn build_bootstrap_provider_vtable(
                         }
                     }
                 });
-                let _ = inner
+                let bootstrap_result = inner
                     .inner
                     .bootstrap(request, &context, tokio_tx, None)
                     .await;
                 let _ = forward_handle.await;
+                let _ = result_tx.send(bootstrap_result.map_err(|e| format!("{e:#}")));
             })
         });
 
@@ -1660,7 +2171,70 @@ pub fn build_bootstrap_provider_vtable(
             count += 1;
         }
 
-        count as i64
+        // Collect the BootstrapResult from the provider thread.
+        // If the provider failed, return a null pointer so the host can
+        // detect the error instead of treating it as a successful bootstrap.
+        let provider_result = match result_rx.recv() {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(e)) => {
+                log::error!("Bootstrap provider failed for source '{source_id_str}': {e}");
+                return std::ptr::null_mut();
+            }
+            Err(_) => {
+                log::error!(
+                    "Bootstrap provider thread exited without sending result for source '{source_id_str}'"
+                );
+                return std::ptr::null_mut();
+            }
+        };
+
+        // Build the FFI result with full handover metadata
+        let (
+            last_sequence,
+            sequences_aligned,
+            source_position_ptr,
+            source_position_len,
+            source_position_drop_fn,
+        ) = if let Some(ref br) = provider_result {
+            let last_seq = br.last_sequence.map(|s| s as i64).unwrap_or(-1);
+            let aligned = br.sequences_aligned;
+            if let Some(ref pos) = br.source_position {
+                let pos_vec = pos.to_vec();
+                let len = pos_vec.len();
+                let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                (
+                    last_seq,
+                    aligned,
+                    leaked as *const u8,
+                    len,
+                    Some(ffi_drop_position_bytes as extern "C" fn(*mut u8, usize)),
+                )
+            } else {
+                (last_seq, aligned, std::ptr::null(), 0, None)
+            }
+        } else {
+            (-1i64, false, std::ptr::null(), 0, None)
+        };
+
+        let ffi_result = Box::new(FfiBootstrapResult {
+            event_count: count as i64,
+            last_sequence,
+            sequences_aligned,
+            source_position_ptr,
+            source_position_len,
+            source_position_drop_fn,
+        });
+
+        Box::into_raw(ffi_result)
+    }
+
+    extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
+        if !ptr.is_null() && len > 0 {
+            unsafe {
+                let slice = std::slice::from_raw_parts_mut(ptr, len);
+                drop(Box::from_raw(slice as *mut [u8]));
+            }
+        }
     }
 
     extern "C" fn bootstrap_event_drop(opaque: *mut c_void) {
@@ -2119,12 +2693,23 @@ fn build_source_runtime_context(
     // In the plugin-side context, status updates flow through the FFI lifecycle callback,
     // not through this channel. The receiver is returned so it stays alive.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
+
+    let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
+        if ffi_ctx.wal_provider.is_null() {
+            None
+        } else {
+            Some(Arc::new(super::wal_provider_proxy::FfiWalProviderProxy {
+                vtable: ffi_ctx.wal_provider,
+            }))
+        };
+
     let ctx = SourceRuntimeContext {
         instance_id,
         source_id: component_id,
         update_tx,
         state_store,
         identity_provider,
+        wal_provider,
     };
     (ctx, status_rx)
 }
@@ -2149,6 +2734,16 @@ fn build_reaction_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
+    let snapshot_fetcher: Option<Arc<dyn drasi_lib::SnapshotFetcher>> =
+        if ffi_ctx.snapshot_fetcher.is_null() {
+            None
+        } else {
+            Some(Arc::new(
+                super::snapshot_fetcher_proxy::FfiSnapshotFetcherProxy {
+                    vtable: ffi_ctx.snapshot_fetcher,
+                },
+            ))
+        };
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
@@ -2157,6 +2752,7 @@ fn build_reaction_runtime_context(
         update_tx,
         state_store,
         identity_provider,
+        snapshot_fetcher,
     };
     (ctx, status_rx)
 }
@@ -2464,11 +3060,178 @@ fn wrap_subscription_response(
         std::ptr::null_mut()
     };
 
+    // Transfer position_handle Arc across FFI.
+    // Arc::into_raw transfers one ref-count without decrementing. The host
+    // reconstructs with Arc::from_raw. Both sides (plugin's SourceBase HashMap
+    // and host's query manager) share the same AtomicU64 allocation.
+    let position_handle_ptr = match sub.position_handle {
+        Some(arc) => std::sync::Arc::into_raw(arc) as *const c_void,
+        None => std::ptr::null(),
+    };
+
+    // Wrap bootstrap_result_receiver as push-based FfiBootstrapResultReceiver.
+    // Uses Arc<BootstrapResultState> so drop_fn is safe to call while the
+    // spawned task may still hold a reference.
+    let bootstrap_result_receiver = if let Some(result_rx) = sub.bootstrap_result_receiver {
+        use super::vtables::{FfiBootstrapResultCallbackFn, FfiBootstrapResultReceiver};
+
+        struct BootstrapResultState {
+            rx: tokio::sync::Mutex<
+                Option<
+                    tokio::sync::oneshot::Receiver<
+                        anyhow::Result<drasi_lib::bootstrap::BootstrapResult>,
+                    >,
+                >,
+            >,
+            runtime_handle: tokio::runtime::Handle,
+        }
+
+        extern "C" fn bootstrap_result_start_fn(
+            state: *mut c_void,
+            callback: FfiBootstrapResultCallbackFn,
+            ctx: *mut c_void,
+        ) {
+            ffi_guard((), || {
+                // Reconstruct the Arc without incrementing the ref count,
+                // then clone for the task and re-leak so drop_fn stays valid.
+                let arc = unsafe { Arc::from_raw(state as *const BootstrapResultState) };
+                let rt_handle = arc.runtime_handle.clone();
+                let task_arc = arc.clone();
+                let _ = Arc::into_raw(arc);
+
+                let ctx_raw = ctx as usize;
+
+                // Sentinel guarantees the callback is always invoked exactly
+                // once, even if the async task panics or is cancelled —
+                // same pattern as SourceSentinelOnDrop / BootstrapSentinelOnDrop.
+                struct BootstrapResultSentinel {
+                    ctx_raw: usize,
+                    callback: FfiBootstrapResultCallbackFn,
+                }
+                impl Drop for BootstrapResultSentinel {
+                    fn drop(&mut self) {
+                        let cb = self.callback;
+                        let ctx = self.ctx_raw as *mut c_void;
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cb(ctx, std::ptr::null_mut());
+                        }));
+                    }
+                }
+
+                rt_handle.spawn(async move {
+                    let _sentinel = BootstrapResultSentinel { ctx_raw, callback };
+                    let rx = task_arc.rx.lock().await.take();
+                    if let Some(rx) = rx {
+                        match rx.await {
+                            Ok(Ok(result)) => {
+                                let last_sequence =
+                                    result.last_sequence.map(|s| s as i64).unwrap_or(-1);
+                                let sequences_aligned = result.sequences_aligned;
+
+                                let (
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                ) = if let Some(ref pos) = result.source_position {
+                                    let pos_vec = pos.to_vec();
+                                    let len = pos_vec.len();
+                                    let leaked = Box::into_raw(pos_vec.into_boxed_slice());
+                                    (
+                                        leaked as *const u8,
+                                        len,
+                                        Some(
+                                            ffi_drop_position_bytes
+                                                as extern "C" fn(*mut u8, usize),
+                                        ),
+                                    )
+                                } else {
+                                    (std::ptr::null(), 0, None)
+                                };
+
+                                let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: result.event_count as i64,
+                                    last_sequence,
+                                    sequences_aligned,
+                                    source_position_ptr,
+                                    source_position_len,
+                                    source_position_drop_fn,
+                                }));
+                                // Defuse sentinel — deliver real result instead.
+                                std::mem::forget(_sentinel);
+                                let _ =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        callback(ctx_raw as *mut c_void, ffi_result);
+                                    }));
+                            }
+                            Ok(Err(e)) => {
+                                log::error!("Bootstrap result error: {e}");
+                                let ffi_result = Box::into_raw(Box::new(FfiBootstrapResult {
+                                    event_count: -1,
+                                    last_sequence: -1,
+                                    sequences_aligned: false,
+                                    source_position_ptr: std::ptr::null(),
+                                    source_position_len: 0,
+                                    source_position_drop_fn: None,
+                                }));
+                                std::mem::forget(_sentinel);
+                                let _ =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        callback(ctx_raw as *mut c_void, ffi_result);
+                                    }));
+                            }
+                            Err(_) => {
+                                log::warn!("Bootstrap result oneshot dropped");
+                                // Sentinel fires null callback on drop
+                            }
+                        }
+                    }
+                    // If rx was None (already consumed), sentinel fires null callback
+                });
+            });
+        }
+
+        extern "C" fn ffi_drop_position_bytes(ptr: *mut u8, len: usize) {
+            if !ptr.is_null() && len > 0 {
+                unsafe {
+                    let slice = std::slice::from_raw_parts_mut(ptr, len);
+                    drop(Box::from_raw(slice as *mut [u8]));
+                }
+            }
+        }
+
+        extern "C" fn bootstrap_result_drop_fn(state: *mut c_void) {
+            ffi_guard((), || {
+                if !state.is_null() {
+                    // Drop one Arc reference. The spawned task (if any) holds
+                    // its own clone, so the state stays alive until it completes.
+                    unsafe {
+                        drop(Arc::from_raw(state as *const BootstrapResultState));
+                    }
+                }
+            });
+        }
+
+        let state = Arc::new(BootstrapResultState {
+            rx: tokio::sync::Mutex::new(Some(result_rx)),
+            runtime_handle: runtime_handle.clone(),
+        });
+
+        Box::into_raw(Box::new(FfiBootstrapResultReceiver {
+            state: Arc::into_raw(state) as *mut c_void,
+            start_fn: bootstrap_result_start_fn,
+            drop_fn: bootstrap_result_drop_fn,
+        }))
+    } else {
+        std::ptr::null_mut()
+    };
+
     Box::into_raw(Box::new(FfiSubscriptionResponse {
         query_id: FfiOwnedStr::from_string(sub.query_id),
         source_id: FfiOwnedStr::from_string(sub.source_id),
         receiver: Box::into_raw(ffi_rx),
         bootstrap_receiver,
+        position_handle_ptr,
+        bootstrap_result_receiver,
     }))
 }
 
@@ -2680,6 +3443,179 @@ pub fn build_identity_provider_plugin_vtable<T: IdentityProviderPluginDescriptor
         config_schema_json_fn: config_schema_json_fn::<T>,
         config_schema_name_fn: config_schema_name_fn::<T>,
         create_identity_provider_fn: create_identity_provider_fn::<T>,
+        drop_fn: drop_fn::<T>,
+    }
+}
+
+// ============================================================================
+// Secret store provider instance vtable generation
+// ============================================================================
+
+/// Build a `SecretStoreProviderVtable` from a `Box<dyn SecretStoreProvider>`.
+///
+/// This is used by secret store plugins to wrap their provider instance
+/// into an FFI-safe vtable that the host can call to resolve secrets.
+pub fn build_secret_store_vtable_from_boxed(
+    provider: Box<dyn drasi_lib::secret_store::SecretStoreProvider>,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::secret_store::SecretStoreProviderVtable {
+    use super::secret_store::{FfiGetSecretResult, SecretStoreProviderVtable};
+
+    struct SecretStoreWrapper {
+        inner: Arc<dyn drasi_lib::secret_store::SecretStoreProvider>,
+        runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+    }
+
+    extern "C" fn get_secret_fn(state: *const c_void, name: FfiStr) -> FfiGetSecretResult {
+        let w = unsafe { &*(state as *const SecretStoreWrapper) };
+        let provider = w.inner.clone();
+        let name_owned = unsafe { name.to_string() };
+
+        let handle = (w.runtime_handle)().handle().clone();
+        let result = dispatch_to_runtime(
+            &handle,
+            async move { provider.get_secret(&name_owned).await },
+        );
+
+        match result {
+            Ok(value) => FfiGetSecretResult::ok(value),
+            Err(e) => FfiGetSecretResult::err(e.to_string()),
+        }
+    }
+
+    extern "C" fn drop_fn(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SecretStoreWrapper)) };
+            }
+        });
+    }
+
+    let wrapper = Box::new(SecretStoreWrapper {
+        inner: Arc::from(provider),
+        runtime_handle: runtime,
+    });
+
+    SecretStoreProviderVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        get_secret_fn,
+        drop_fn,
+    }
+}
+
+// ============================================================================
+// Secret store plugin descriptor vtable generation
+// ============================================================================
+
+struct SecretStorePluginWrapper<T: SecretStorePluginDescriptor + 'static> {
+    inner: T,
+    cached_kind: String,
+    cached_config_version: String,
+    cached_schema_name: String,
+    runtime_handle: fn() -> &'static tokio::runtime::Runtime,
+}
+
+/// Build a `SecretStorePluginVtable` from a type implementing
+/// `SecretStorePluginDescriptor`.
+pub fn build_secret_store_plugin_vtable<T: SecretStorePluginDescriptor + 'static>(
+    descriptor: T,
+    executor: AsyncExecutorFn,
+    _lifecycle_emitter: LifecycleEmitterFn,
+    runtime: fn() -> &'static tokio::runtime::Runtime,
+) -> super::vtables::SecretStorePluginVtable {
+    extern "C" fn kind_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_kind)
+    }
+
+    extern "C" fn config_version_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_config_version)
+    }
+
+    extern "C" fn config_schema_json_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiOwnedStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiOwnedStr::from_string(w.inner.config_schema_json())
+    }
+
+    extern "C" fn config_schema_name_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *const c_void,
+    ) -> FfiStr {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        FfiStr::from_str(&w.cached_schema_name)
+    }
+
+    extern "C" fn create_secret_store_fn<T: SecretStorePluginDescriptor + 'static>(
+        state: *mut c_void,
+        config_json: FfiStr,
+    ) -> *mut super::secret_store::SecretStoreProviderVtable {
+        let w = unsafe { &*(state as *const SecretStorePluginWrapper<T>) };
+        let config_str = unsafe { config_json.to_string() };
+
+        let config_value: serde_json::Value = match serde_json::from_str(&config_str) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!(
+                    "Failed to parse config JSON for secret store '{}': {e}",
+                    w.cached_kind
+                );
+                return std::ptr::null_mut();
+            }
+        };
+
+        let handle = (w.runtime_handle)().handle().clone();
+        let ptr = SendPtr(state as *const SecretStorePluginWrapper<T>);
+        let result = dispatch_to_runtime(&handle, async move {
+            let inner = unsafe { ptr.as_ref() };
+            inner.inner.create_secret_store(&config_value).await
+        });
+
+        match result {
+            Ok(provider) => {
+                let vtable = build_secret_store_vtable_from_boxed(provider, w.runtime_handle);
+                Box::into_raw(Box::new(vtable))
+            }
+            Err(e) => {
+                log::error!("Failed to create secret store '{}': {e}", w.cached_kind);
+                std::ptr::null_mut()
+            }
+        }
+    }
+
+    extern "C" fn drop_fn<T: SecretStorePluginDescriptor + 'static>(state: *mut c_void) {
+        ffi_guard((), || {
+            if !state.is_null() {
+                unsafe { drop(Box::from_raw(state as *mut SecretStorePluginWrapper<T>)) };
+            }
+        });
+    }
+
+    let cached_kind = descriptor.kind().to_string();
+    let cached_config_version = descriptor.config_version().to_string();
+    let cached_schema_name = descriptor.config_schema_name().to_string();
+
+    let wrapper = Box::new(SecretStorePluginWrapper {
+        inner: descriptor,
+        cached_kind,
+        cached_config_version,
+        cached_schema_name,
+        runtime_handle: runtime,
+    });
+
+    super::vtables::SecretStorePluginVtable {
+        state: Box::into_raw(wrapper) as *mut c_void,
+        executor,
+        kind_fn: kind_fn::<T>,
+        config_version_fn: config_version_fn::<T>,
+        config_schema_json_fn: config_schema_json_fn::<T>,
+        config_schema_name_fn: config_schema_name_fn::<T>,
+        create_secret_store_fn: create_secret_store_fn::<T>,
         drop_fn: drop_fn::<T>,
     }
 }

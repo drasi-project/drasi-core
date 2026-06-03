@@ -40,6 +40,8 @@ use crate::channels::{ComponentStatus, QueryResult};
 use crate::component_graph::ComponentStatusHandle;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
+use crate::reactions::checkpoint::ReactionCheckpoint;
+use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
 
 /// Parameters for creating a ReactionBase instance.
@@ -68,6 +70,8 @@ pub struct ReactionBaseParams {
     pub priority_queue_capacity: Option<usize>,
     /// Whether this reaction should auto-start - defaults to true
     pub auto_start: bool,
+    /// Optional recovery policy override (takes precedence over the trait default).
+    pub recovery_policy: Option<ReactionRecoveryPolicy>,
 }
 
 impl ReactionBaseParams {
@@ -78,6 +82,7 @@ impl ReactionBaseParams {
             queries,
             priority_queue_capacity: None,
             auto_start: true, // Default to true like queries
+            recovery_policy: None,
         }
     }
 
@@ -92,6 +97,12 @@ impl ReactionBaseParams {
         self.auto_start = auto_start;
         self
     }
+
+    /// Set the recovery policy override for this reaction instance.
+    pub fn with_recovery_policy(mut self, policy: ReactionRecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
 }
 
 /// Base implementation for common reaction functionality
@@ -102,6 +113,8 @@ pub struct ReactionBase {
     pub queries: Vec<String>,
     /// Whether this reaction should auto-start
     pub auto_start: bool,
+    /// Optional recovery policy override
+    pub recovery_policy: Option<ReactionRecoveryPolicy>,
     /// Component status handle — always available, wired to graph during initialize().
     status_handle: ComponentStatusHandle,
     /// Runtime context (set by initialize())
@@ -136,6 +149,7 @@ impl ReactionBase {
             id: params.id.clone(),
             queries: params.queries,
             auto_start: params.auto_start,
+            recovery_policy: params.recovery_policy,
             status_handle: ComponentStatusHandle::new(&params.id),
             context: Arc::new(RwLock::new(None)), // Set by initialize()
             state_store: Arc::new(RwLock::new(None)), // Extracted from context
@@ -253,6 +267,7 @@ impl ReactionBase {
             id: self.id.clone(),
             queries: self.queries.clone(),
             auto_start: self.auto_start,
+            recovery_policy: self.recovery_policy,
             status_handle: self.status_handle.clone(),
             context: self.context.clone(),
             state_store: self.state_store.clone(),
@@ -292,7 +307,7 @@ impl ReactionBase {
         self.status_handle.get_status().await
     }
 
-    /// Returns a clonable [`ComponentStatusHandle`] for use in spawned tasks.
+    /// Returns a cloneable [`ComponentStatusHandle`] for use in spawned tasks.
     ///
     /// The handle can both read and write the component's status and automatically
     /// notifies the graph on every status change (after `initialize()`).
@@ -314,6 +329,67 @@ impl ReactionBase {
     pub async fn enqueue_query_result(&self, result: QueryResult) -> anyhow::Result<()> {
         self.priority_queue.enqueue_wait(Arc::new(result)).await;
         Ok(())
+    }
+
+    // ========================================================================
+    // Checkpoint helpers
+    // ========================================================================
+
+    /// Read the persisted checkpoint for a single query subscription.
+    ///
+    /// Returns `Ok(None)` if no checkpoint exists (fresh start).
+    /// Errors propagate from the state store or deserialization.
+    pub async fn read_checkpoint(&self, query_id: &str) -> Result<Option<ReactionCheckpoint>> {
+        let store = self.state_store.read().await;
+        match store.as_ref() {
+            Some(s) => {
+                crate::reactions::checkpoint::read_checkpoint(s.as_ref(), &self.id, query_id).await
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Read all persisted checkpoints for every query this reaction subscribes to.
+    ///
+    /// Returns a map from query ID to checkpoint. Missing checkpoints (fresh
+    /// subscriptions) are simply omitted from the result.
+    pub async fn read_all_checkpoints(
+        &self,
+    ) -> Result<std::collections::HashMap<String, ReactionCheckpoint>> {
+        let store = self.state_store.read().await;
+        match store.as_ref() {
+            Some(s) => {
+                crate::reactions::checkpoint::read_checkpoints_batch(
+                    s.as_ref(),
+                    &self.id,
+                    &self.queries,
+                )
+                .await
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Persist a checkpoint for a single query subscription.
+    ///
+    /// This atomically writes the checkpoint to the state store. It should be
+    /// called after a batch of query results has been successfully processed.
+    pub async fn write_checkpoint(
+        &self,
+        query_id: &str,
+        checkpoint: &ReactionCheckpoint,
+    ) -> Result<()> {
+        let store = self.state_store.read().await;
+        let store = store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No state store configured — cannot write checkpoint")
+        })?;
+        crate::reactions::checkpoint::write_checkpoint(
+            store.as_ref(),
+            &self.id,
+            query_id,
+            checkpoint,
+        )
+        .await
     }
 
     /// Perform common cleanup operations
@@ -408,6 +484,92 @@ impl ReactionBase {
     /// Set the processing task handle
     pub async fn set_processing_task(&self, task: tokio::task::JoinHandle<()>) {
         *self.processing_task.write().await = Some(task);
+    }
+
+    /// Run a standard dequeue → dedup → handler → checkpoint loop.
+    ///
+    /// This is an optional convenience for reactions that follow the common
+    /// pattern.  Reactions needing custom scheduling, batching, or
+    /// multi-query ordering should implement their own loop.
+    ///
+    /// The loop:
+    /// 1. Dequeues from the priority queue (blocks until available).
+    /// 2. Checks the event's sequence against the persisted checkpoint —
+    ///    events at or before the checkpoint are silently skipped (dedup).
+    /// 3. Calls `handler` with the event.
+    /// 4. On success, writes a new checkpoint with the event's sequence,
+    ///    preserving the `config_hash` from the initial checkpoint map
+    ///    (or 0 if no prior checkpoint exists for that query).
+    /// 5. Breaks when `shutdown_rx` fires.
+    ///
+    /// # Arguments
+    /// * `shutdown_rx` — receiver created via [`create_shutdown_channel`].
+    /// * `initial_checkpoints` — pre-loaded checkpoint map (from bootstrap
+    ///   orchestration). The loop uses these for dedup and preserves each
+    ///   query's `config_hash` when advancing the sequence.
+    /// * `handler` — async function receiving a [`QueryResult`].  Return
+    ///   `Ok(())` to advance the checkpoint, or `Err` to leave it unchanged
+    ///   (the event will NOT be retried automatically).
+    pub async fn run_standard_loop<F, Fut>(
+        &self,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        initial_checkpoints: std::collections::HashMap<String, ReactionCheckpoint>,
+        handler: F,
+    ) -> Result<()>
+    where
+        F: Fn(Arc<crate::channels::QueryResult>) -> Fut + Send + Sync,
+        Fut: std::future::Future<Output = Result<()>> + Send,
+    {
+        let mut checkpoints = initial_checkpoints;
+
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    break;
+                }
+                event = self.priority_queue.dequeue() => event,
+            };
+
+            let query_id = &event.query_id;
+            let seq = event.sequence;
+
+            // Dedup: skip events at or before the checkpoint.
+            if let Some(cp) = checkpoints.get(query_id) {
+                if seq <= cp.sequence {
+                    debug!(
+                        "[{}] Skipping already-processed event: query={}, seq={} (checkpoint={})",
+                        self.id, query_id, seq, cp.sequence
+                    );
+                    continue;
+                }
+            }
+
+            // Invoke the user-provided handler.
+            if let Err(e) = handler(Arc::clone(&event)).await {
+                error!(
+                    "[{}] Handler error for query={}, seq={}: {:#}",
+                    self.id, query_id, seq, e
+                );
+                // Don't advance the checkpoint — the event was not
+                // successfully processed.
+                continue;
+            }
+
+            // Advance the checkpoint, preserving the config_hash from bootstrap.
+            let config_hash = checkpoints
+                .get(query_id)
+                .map(|cp| cp.config_hash)
+                .unwrap_or(0);
+            let cp = ReactionCheckpoint {
+                sequence: seq,
+                config_hash,
+            };
+            self.write_checkpoint(query_id, &cp).await?;
+            checkpoints.insert(query_id.clone(), cp);
+        }
+
+        Ok(())
     }
 }
 
@@ -791,5 +953,170 @@ mod tests {
         if let Some(t) = task {
             t.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_read_write_round_trip() {
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params =
+            ReactionBaseParams::new("ckpt-reaction", vec!["q1".to_string(), "q2".to_string()]);
+        let base = ReactionBase::new(params);
+
+        // Wire up an in-memory state store via context
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "ckpt-reaction",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        // Initially no checkpoints
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+        assert!(base.read_all_checkpoints().await.unwrap().is_empty());
+
+        // Write a checkpoint for q1
+        let cp1 = ReactionCheckpoint {
+            sequence: 10,
+            config_hash: 42,
+        };
+        base.write_checkpoint("q1", &cp1).await.unwrap();
+
+        // Read it back
+        let read = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(read, cp1);
+
+        // q2 still absent
+        assert!(base.read_checkpoint("q2").await.unwrap().is_none());
+
+        // Write q2 and check read_all_checkpoints
+        let cp2 = ReactionCheckpoint {
+            sequence: 20,
+            config_hash: 99,
+        };
+        base.write_checkpoint("q2", &cp2).await.unwrap();
+
+        let all = base.read_all_checkpoints().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["q1"], cp1);
+        assert_eq!(all["q2"], cp2);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_no_state_store() {
+        // Without a state store, reads return None and writes fail
+        let params = ReactionBaseParams::new("no-store", vec!["q1".to_string()]);
+        let base = ReactionBase::new(params);
+
+        // read_checkpoint returns None without error
+        assert!(base.read_checkpoint("q1").await.unwrap().is_none());
+
+        // read_all_checkpoints returns empty
+        assert!(base.read_all_checkpoints().await.unwrap().is_empty());
+
+        // write_checkpoint should error
+        let cp = ReactionCheckpoint {
+            sequence: 1,
+            config_hash: 0,
+        };
+        assert!(base.write_checkpoint("q1", &cp).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_standard_loop_dedup_and_checkpoint() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (graph, _rx) = crate::component_graph::ComponentGraph::new("test-instance");
+        let update_tx = graph.update_sender();
+
+        let params = ReactionBaseParams::new("loop-reaction", vec!["q1".to_string()]);
+        let base = ReactionBase::new(params);
+
+        let store: Arc<dyn StateStoreProvider> =
+            Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let context = crate::context::ReactionRuntimeContext::new(
+            "test-instance",
+            "loop-reaction",
+            Some(store),
+            update_tx,
+            None,
+        );
+        base.initialize(context).await;
+
+        // Initial checkpoints: seq=5 with config_hash=42
+        let initial_checkpoints = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "q1".to_string(),
+                ReactionCheckpoint {
+                    sequence: 5,
+                    config_hash: 42,
+                },
+            );
+            m
+        };
+
+        // Enqueue events: seq 3 (dup), seq 5 (dup), seq 6, seq 7
+        for seq in [3u64, 5, 6, 7] {
+            let result = crate::channels::QueryResult {
+                query_id: "q1".to_string(),
+                sequence: seq,
+                timestamp: chrono::Utc::now(),
+                results: vec![],
+                metadata: Default::default(),
+                profiling: None,
+            };
+            base.enqueue_query_result(result).await.unwrap();
+        }
+
+        // Track which sequences the handler actually processes
+        let processed = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
+        let processed_clone = processed.clone();
+        let handler_count = Arc::new(AtomicU64::new(0));
+        let handler_count_clone = handler_count.clone();
+
+        let shutdown_rx = base.create_shutdown_channel().await;
+        let base_clone = base.clone_shared();
+
+        let loop_handle = tokio::spawn(async move {
+            base_clone
+                .run_standard_loop(shutdown_rx, initial_checkpoints, |event| {
+                    let processed = processed_clone.clone();
+                    let count = handler_count_clone.clone();
+                    async move {
+                        processed.lock().await.push(event.sequence);
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+        });
+
+        // Wait for all non-dup events to be processed (seq 6 and 7)
+        for _ in 0..50 {
+            if handler_count.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Signal shutdown via stop_common (the standard path)
+        let _ = base.stop_common().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+
+        // Verify only seq 6 and 7 were processed (3 and 5 were deduped)
+        let processed = processed.lock().await;
+        assert_eq!(*processed, vec![6, 7]);
+
+        // Checkpoint should now be at seq=7, preserving config_hash=42
+        let cp = base.read_checkpoint("q1").await.unwrap().unwrap();
+        assert_eq!(cp.sequence, 7);
+        assert_eq!(cp.config_hash, 42);
     }
 }

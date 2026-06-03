@@ -34,7 +34,6 @@ use std::collections::HashMap;
 /// - Authentication (one of):
 ///   - Identity provider via [`DataverseSource::builder`] `.with_identity_provider()` (recommended)
 ///   - `tenant_id` + `client_id` + `client_secret` for client credentials flow
-///   - `use_azure_cli = true` for Azure CLI authentication (local dev)
 ///
 /// # Optional Configuration
 ///
@@ -48,21 +47,19 @@ pub struct DataverseSourceConfig {
     pub environment_url: String,
 
     /// Azure AD / Microsoft Entra ID tenant ID for OAuth2 authentication.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub tenant_id: String,
 
     /// Azure AD application (client) ID.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub client_id: String,
 
     /// Azure AD client secret for OAuth2 client credentials flow.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub client_secret: String,
-
-    /// Use Azure CLI (`az account get-access-token`) for authentication.
-    /// When true, `tenant_id`, `client_id`, and `client_secret` are not required.
-    /// Requires `az login` to have been run beforehand.
-    pub use_azure_cli: bool,
 
     /// List of entity logical names to monitor (e.g., `["account", "contact"]`).
     /// These are the singular logical names matching the platform's
@@ -103,7 +100,6 @@ impl std::fmt::Debug for DataverseSourceConfig {
             .field("tenant_id", &self.tenant_id)
             .field("client_id", &self.client_id)
             .field("client_secret", &"[REDACTED]")
-            .field("use_azure_cli", &self.use_azure_cli)
             .field("entities", &self.entities)
             .field("entity_set_overrides", &self.entity_set_overrides)
             .field("entity_columns", &self.entity_columns)
@@ -115,22 +111,26 @@ impl std::fmt::Debug for DataverseSourceConfig {
 }
 
 impl DataverseSourceConfig {
-    /// Validate the configuration, returning an error if required fields are missing.
+    /// Validate the configuration for the built-in client credentials flow.
+    ///
+    /// For Azure CLI / developer tools authentication, configure an Azure
+    /// identity provider (`kind: azure`, `authMethod: developer_tools`) and
+    /// reference it from the source — then [`validate_with_identity_provider`]
+    /// applies instead.
     pub fn validate(&self) -> Result<(), String> {
         if self.environment_url.is_empty() {
             return Err("environment_url is required".to_string());
         }
-        if !self.use_azure_cli {
-            // Client credentials flow requires all three fields
-            if self.tenant_id.is_empty() {
-                return Err("tenant_id is required (or set use_azure_cli = true)".to_string());
-            }
-            if self.client_id.is_empty() {
-                return Err("client_id is required (or set use_azure_cli = true)".to_string());
-            }
-            if self.client_secret.is_empty() {
-                return Err("client_secret is required (or set use_azure_cli = true)".to_string());
-            }
+        if self.tenant_id.is_empty() {
+            return Err("tenant_id is required (or configure an identity provider)".to_string());
+        }
+        if self.client_id.is_empty() {
+            return Err("client_id is required (or configure an identity provider)".to_string());
+        }
+        if self.client_secret.is_empty() {
+            return Err(
+                "client_secret is required (or configure an identity provider)".to_string(),
+            );
         }
         if self.entities.is_empty() {
             return Err("entities list must not be empty".to_string());
@@ -197,7 +197,6 @@ mod tests {
             tenant_id: "tenant-1".to_string(),
             client_id: "client-1".to_string(),
             client_secret: "secret-1".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -209,13 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation_azure_cli_no_secret_needed() {
+    fn test_validate_with_identity_provider_skips_credentials() {
         let config = DataverseSourceConfig {
             environment_url: "https://myorg.crm.dynamics.com".to_string(),
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
-            use_azure_cli: true,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -223,7 +221,7 @@ mod tests {
             max_interval_seconds: 30,
             api_version: "v9.2".to_string(),
         };
-        assert!(config.validate().is_ok());
+        assert!(config.validate_with_identity_provider().is_ok());
     }
 
     #[test]
@@ -233,7 +231,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -251,7 +248,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec![],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -269,7 +265,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -290,7 +285,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["activityparty".to_string()],
             entity_set_overrides: overrides,
             entity_columns: HashMap::new(),
@@ -313,7 +307,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: cols,
@@ -338,7 +331,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns,
@@ -364,7 +356,6 @@ mod tests {
             tenant_id: "t".to_string(),
             client_id: "c".to_string(),
             client_secret: "s".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns,
@@ -387,7 +378,6 @@ mod tests {
             tenant_id: "tenant-1".to_string(),
             client_id: "client-1".to_string(),
             client_secret: "super-secret-do-not-leak".to_string(),
-            use_azure_cli: false,
             entities: vec!["account".to_string()],
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),

@@ -22,12 +22,13 @@ use indexmap::IndexMap;
 use libloading::{Library, Symbol};
 
 use drasi_plugin_sdk::ffi::{
-    FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn, PluginMetadata,
+    ConfigResolverFn, FfiPluginRegistration, LifecycleCallbackFn, LogCallbackFn, PluginMetadata,
 };
 
 use crate::proxies::bootstrap_provider::BootstrapPluginProxy;
 use crate::proxies::identity_provider::IdentityProviderPluginProxy;
 use crate::proxies::reaction::ReactionPluginProxy;
+use crate::proxies::secret_store::SecretStorePluginProxy;
 use crate::proxies::source::SourcePluginProxy;
 
 /// Configuration for the plugin loader.
@@ -49,12 +50,37 @@ pub struct LoadedPlugin {
     pub bootstrap_plugins: Vec<BootstrapPluginProxy>,
     /// Identity provider plugin factories (descriptor proxies).
     pub identity_provider_plugins: Vec<IdentityProviderPluginProxy>,
+    /// Secret store plugin factories (descriptor proxies).
+    pub secret_store_plugins: Vec<SecretStorePluginProxy>,
     /// Plugin metadata string for diagnostics.
     pub metadata_info: Option<String>,
     /// Path to the loaded plugin file.
     pub file_path: PathBuf,
+    /// Config resolver injection function pointer (saved from FfiPluginRegistration).
+    set_config_resolver_fn: extern "C" fn(*mut c_void, ConfigResolverFn),
     /// Keep the library loaded.
     _library: Arc<Library>,
+}
+
+impl LoadedPlugin {
+    /// Inject a config value resolver callback into this plugin.
+    ///
+    /// The plugin will use this callback (via `DtoMapper`) to resolve
+    /// `ConfigValue::Secret` and other reference types back through the host.
+    /// The `ctx` pointer is an opaque host-owned context passed back to the
+    /// callback on every invocation.
+    pub fn inject_config_resolver(&self, ctx: *mut c_void, callback: ConfigResolverFn) {
+        (self.set_config_resolver_fn)(ctx, callback);
+    }
+
+    /// Return the raw config resolver injection function pointer.
+    ///
+    /// This is the `set_config_resolver` extern "C" function from the plugin's
+    /// `FfiPluginRegistration`. Callers can save this fn ptr and invoke it later
+    /// even after the `LoadedPlugin` is consumed.
+    pub fn config_resolver_injection_fn(&self) -> extern "C" fn(*mut c_void, ConfigResolverFn) {
+        self.set_config_resolver_fn
+    }
 }
 
 impl Drop for LoadedPlugin {
@@ -217,7 +243,7 @@ pub fn load_plugin_from_path(
 
     // Step 1: Read and validate metadata
     let metadata_info = read_plugin_metadata(&lib);
-    validate_plugin_metadata(&lib, path)?;
+    let plugin_sdk_version = validate_plugin_metadata(&lib, path)?;
 
     // Step 2: Call drasi_plugin_init()
     let init_fn: Symbol<unsafe extern "C" fn() -> *mut FfiPluginRegistration> = unsafe {
@@ -240,9 +266,19 @@ pub fn load_plugin_from_path(
     (registration.set_log_callback)(log_ctx, log_callback);
     (registration.set_lifecycle_callback)(lifecycle_ctx, lifecycle_callback);
 
+    // Save config resolver injection fn ptr for later use
+    let set_config_resolver_fn = registration.set_config_resolver;
+
     // Step 4: Extract factory vtables into proxies
     // Take ownership of ALL arrays upfront before processing, so if any
     // proxy construction panics, remaining arrays are still dropped correctly.
+    //
+    // ABI contract: the plugin SDK's `register_plugin!` macro converts each
+    // descriptor `Vec` into a boxed slice (via `Vec::into_boxed_slice`) before
+    // exposing the raw pointer. This guarantees the underlying allocation has
+    // capacity == length, which makes `Vec::from_raw_parts(ptr, len, len)`
+    // sound here. Plugins built without that macro must uphold the same
+    // capacity-equals-length invariant.
     let source_vtables =
         if !registration.source_plugins.is_null() && registration.source_plugin_count > 0 {
             Some(unsafe {
@@ -282,16 +318,49 @@ pub fn load_plugin_from_path(
             None
         };
 
-    // NOTE: We intentionally do not read `identity_provider_plugins` /
-    // `identity_provider_plugin_count` from `FfiPluginRegistration` here.
-    // Those fields were added in a later SDK version, and older plugins built
-    // against the previous ABI may provide a smaller `FfiPluginRegistration`
-    // allocation. Accessing the new fields in that case would read beyond the
-    // end of the struct, causing undefined behavior. Until ABI/SDK versioning
-    // guarantees are tightened, we treat identity provider plugins as absent.
+    // NOTE: `identity_provider_plugins` / `identity_provider_plugin_count` are
+    // trailing fields appended to `FfiPluginRegistration` after the initial ABI.
+    // Plugins built against an older SDK allocate the previous (smaller) struct
+    // layout, so reading these fields for such plugins would read past the end
+    // of the allocation (undefined behavior). We therefore gate access on the
+    // plugin's reported `sdk_version` from `drasi_plugin_metadata()`. Only when
+    // that version is at least `MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS` can we
+    // safely read the trailing fields.
     let identity_provider_vtables: Option<
         Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
-    > = None;
+    > = if plugin_sdk_version
+        .as_deref()
+        .and_then(parse_semver)
+        .map(|v| v >= MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS)
+        .unwrap_or(false)
+        && !registration.identity_provider_plugins.is_null()
+        && registration.identity_provider_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.identity_provider_plugins,
+                registration.identity_provider_plugin_count,
+                registration.identity_provider_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
+
+    // Read secret store vtables from the registration.
+    let secret_store_vtables = if !registration.secret_store_plugins.is_null()
+        && registration.secret_store_plugin_count > 0
+    {
+        Some(unsafe {
+            Vec::from_raw_parts(
+                registration.secret_store_plugins,
+                registration.secret_store_plugin_count,
+                registration.secret_store_plugin_count,
+            )
+        })
+    } else {
+        None
+    };
 
     // Now safe to forget the registration — we own all arrays
     std::mem::forget(registration);
@@ -301,6 +370,7 @@ pub fn load_plugin_from_path(
     let mut reaction_plugins = Vec::new();
     let mut bootstrap_plugins = Vec::new();
     let mut identity_provider_plugins = Vec::new();
+    let mut secret_store_plugins = Vec::new();
 
     for v in source_vtables.into_iter().flatten() {
         source_plugins.push(SourcePluginProxy::new(v, lib.clone()));
@@ -318,13 +388,19 @@ pub fn load_plugin_from_path(
         identity_provider_plugins.push(IdentityProviderPluginProxy::new(v, lib.clone()));
     }
 
+    for v in secret_store_vtables.into_iter().flatten() {
+        secret_store_plugins.push(SecretStorePluginProxy::new(v, lib.clone()));
+    }
+
     Ok(LoadedPlugin {
         source_plugins,
         reaction_plugins,
         bootstrap_plugins,
         identity_provider_plugins,
+        secret_store_plugins,
         metadata_info,
         file_path: path.to_path_buf(),
+        set_config_resolver_fn,
         _library: lib,
     })
 }
@@ -356,11 +432,33 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
     }
 }
 
+/// Minimum plugin SDK version that is guaranteed to include the
+/// `identity_provider_plugins` / `identity_provider_plugin_count` trailing
+/// fields in `FfiPluginRegistration`. Plugins reporting an older `sdk_version`
+/// in `drasi_plugin_metadata()` allocated the previous (smaller) struct layout
+/// — reading those trailing fields for such plugins would be undefined
+/// behavior, so the loader treats identity provider plugins as absent.
+const MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS: (u32, u32, u32) = (0, 6, 0);
+
+/// Parse a SemVer version string into `(major, minor, patch)`, ignoring any
+/// pre-release / build metadata. Returns `None` on malformed input.
+///
+/// Backed by the `semver` crate so behaviour matches the SemVer 2.0 spec
+/// (e.g. correct pre-release ordering, strict `MAJOR.MINOR.PATCH` form).
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let v = semver::Version::parse(s).ok()?;
+    Some((v.major as u32, v.minor as u32, v.patch as u32))
+}
+
 /// Validate plugin metadata against the host SDK version.
 ///
 /// Checks that the plugin's SDK version is compatible with the host.
 /// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
-fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
+///
+/// On success returns the plugin's reported `sdk_version` string (if metadata
+/// was present), so callers can gate access to ABI fields introduced in a
+/// later SDK revision.
+fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
     let meta_fn = unsafe {
         match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
             Ok(f) => f,
@@ -369,7 +467,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
                     "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
                     path.display()
                 );
-                return Ok(());
+                return Ok(None);
             }
         }
     };
@@ -380,7 +478,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
             "Plugin '{}' returned null metadata — skipping version check",
             path.display()
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let meta = unsafe { &*meta_ptr };
@@ -434,7 +532,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<()> {
         plugin_target
     );
 
-    Ok(())
+    Ok(Some(plugin_sdk_version))
 }
 
 /// Scan the plugin directory and group files by plugin base name.
@@ -885,5 +983,52 @@ mod tests {
     #[allow(clippy::const_is_empty)]
     fn test_default_patterns_not_empty() {
         assert!(!DEFAULT_PLUGIN_FILE_PATTERNS.is_empty());
+    }
+
+    // ── parse_semver tests ──
+
+    #[test]
+    fn test_parse_semver_canonical() {
+        assert_eq!(parse_semver("0.6.0"), Some((0, 6, 0)));
+        assert_eq!(parse_semver("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_semver("10.20.30"), Some((10, 20, 30)));
+    }
+
+    #[test]
+    fn test_parse_semver_strips_prerelease() {
+        assert_eq!(parse_semver("0.6.0-rc.1"), Some((0, 6, 0)));
+        assert_eq!(parse_semver("1.2.3-alpha"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn test_parse_semver_strips_build_metadata() {
+        assert_eq!(parse_semver("0.6.0+abc"), Some((0, 6, 0)));
+        assert_eq!(parse_semver("1.2.3+build.42"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn test_parse_semver_requires_full_form() {
+        // Strict SemVer 2.0 requires MAJOR.MINOR.PATCH.
+        assert_eq!(parse_semver("0.6"), None);
+        assert_eq!(parse_semver("1"), None);
+    }
+
+    #[test]
+    fn test_parse_semver_malformed_returns_none() {
+        assert_eq!(parse_semver(""), None);
+        assert_eq!(parse_semver("not-a-version"), None);
+        assert_eq!(parse_semver("0.x.0"), None);
+        assert_eq!(parse_semver("0"), None);
+    }
+
+    #[test]
+    fn test_parse_semver_against_min_identity_provider_version() {
+        // Below the threshold
+        assert!(parse_semver("0.5.9").unwrap() < MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
+        // Exactly meets the threshold
+        assert!(parse_semver("0.6.0").unwrap() >= MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
+        // Above the threshold
+        assert!(parse_semver("0.6.1").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
+        assert!(parse_semver("1.0.0").unwrap() > MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS);
     }
 }

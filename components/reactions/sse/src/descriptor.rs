@@ -166,14 +166,31 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = SseReactionSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "reaction.sse.SseReactionConfig")
+            .expect("root schema not found")
+            .field("host", |f| {
+                f.group("Server").order(1).placeholder("0.0.0.0")
+            })
+            .field("port", |f| f.group("Server").order(2).placeholder("8082"))
+            .field("ssePath", |f| {
+                f.group("Server").order(3).placeholder("/events")
+            })
+            .field("heartbeatIntervalMs", |f| {
+                f.group("Server").order(4).placeholder("30000")
+            })
+            .field("defaultTemplate", |f| f.group("Templates").order(1))
+            .field("routes", |f| f.group("Templates").order(2))
+            .annotate()
     }
 
     async fn create_reaction(
@@ -191,16 +208,16 @@ impl ReactionPluginDescriptor for SseReactionDescriptor {
             .with_auto_start(auto_start);
 
         if let Some(ref host) = dto.host {
-            builder = builder.with_host(mapper.resolve_string(host)?);
+            builder = builder.with_host(mapper.resolve_string(host).await?);
         }
         if let Some(ref port) = dto.port {
-            builder = builder.with_port(mapper.resolve_typed(port)?);
+            builder = builder.with_port(mapper.resolve_typed(port).await?);
         }
         if let Some(ref sse_path) = dto.sse_path {
-            builder = builder.with_sse_path(mapper.resolve_string(sse_path)?);
+            builder = builder.with_sse_path(mapper.resolve_string(sse_path).await?);
         }
         if let Some(ref heartbeat) = dto.heartbeat_interval_ms {
-            builder = builder.with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat)?);
+            builder = builder.with_heartbeat_interval_ms(mapper.resolve_typed(heartbeat).await?);
         }
 
         if let Some(ref default_template) = dto.default_template {

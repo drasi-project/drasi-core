@@ -83,8 +83,8 @@ impl BootstrapPluginDescriptor for PlatformBootstrapDescriptor {
         let dto: PlatformBootstrapConfigDto = serde_json::from_value(config_json.clone())?;
         let mapper = DtoMapper::new();
 
-        let query_api_url = mapper.resolve_optional_string(&dto.query_api_url)?;
-        let timeout_seconds = mapper.resolve_typed(&dto.timeout_seconds)?;
+        let query_api_url = mapper.resolve_optional_string(&dto.query_api_url).await?;
+        let timeout_seconds = mapper.resolve_typed(&dto.timeout_seconds).await?;
 
         let config = PlatformBootstrapConfig {
             query_api_url,

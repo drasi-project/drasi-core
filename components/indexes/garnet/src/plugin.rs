@@ -37,6 +37,8 @@ use std::sync::Arc;
 use crate::checkpoint::GarnetCheckpointStore;
 use crate::element_index::GarnetElementIndex;
 use crate::future_queue::GarnetFutureQueue;
+use crate::live_results::GarnetLiveResultsWriter;
+use crate::outbox::GarnetOutboxWriter;
 use crate::result_index::GarnetResultIndex;
 use crate::session_state::{GarnetSessionControl, GarnetSessionState};
 
@@ -150,9 +152,11 @@ impl IndexBackendPlugin for GarnetIndexProvider {
         ));
         let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
             query_id,
-            connection,
+            connection.clone(),
             session_state,
         ));
+        let outbox_writer = Arc::new(GarnetOutboxWriter::new(query_id, connection.clone()));
+        let live_results_writer = Arc::new(GarnetLiveResultsWriter::new(query_id, connection));
 
         Ok(CreatedIndexes {
             set: IndexSet {
@@ -163,6 +167,8 @@ impl IndexBackendPlugin for GarnetIndexProvider {
                 session_control,
             },
             checkpoint_store: Some(checkpoint_store),
+            outbox_writer: Some(outbox_writer),
+            live_results_writer: Some(live_results_writer),
         })
     }
 

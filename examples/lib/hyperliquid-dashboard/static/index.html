@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperliquid Dashboard — Drasi</title>
+<style>
+  :root {
+    --bg-primary: #0b0e14;
+    --bg-card: #131720;
+    --bg-card-hover: #1a1f2c;
+    --bg-row-hover: #181d28;
+    --border: #1e2533;
+    --text-primary: #e6eaf0;
+    --text-secondary: #7a8599;
+    --text-muted: #4a5568;
+    --green: #00e6a0;
+    --green-dim: #00e6a033;
+    --red: #ff4d6a;
+    --red-dim: #ff4d6a33;
+    --blue: #4da6ff;
+    --yellow: #ffc53d;
+    --purple: #a78bfa;
+    --mono: "SF Mono", "Cascadia Code", "Fira Code", "JetBrains Mono", "Consolas", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ─── Header ─── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+  .logo span { color: var(--green); }
+  .badge {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--green-dim);
+    color: var(--green);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.3s;
+  }
+  .status-dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.error { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  #event-count { font-family: var(--mono); color: var(--text-muted); font-size: 11px; }
+
+  /* ─── Price Ticker ─── */
+  .ticker-strip {
+    display: flex;
+    gap: 1px;
+    background: var(--border);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  .ticker-item {
+    flex: 1;
+    min-width: 200px;
+    padding: 16px 20px;
+    background: var(--bg-card);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transition: background 0.15s;
+  }
+  .ticker-item:hover { background: var(--bg-card-hover); }
+  .ticker-coin {
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .coin-icon {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    background: var(--border);
+    color: var(--text-primary);
+  }
+  .coin-icon.btc { background: #f7931a22; color: #f7931a; }
+  .coin-icon.eth { background: #627eea22; color: #627eea; }
+  .coin-icon.sol { background: #9945ff22; color: #9945ff; }
+  .ticker-price {
+    text-align: right;
+  }
+  .ticker-price .price {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .ticker-price .change {
+    font-family: var(--mono);
+    font-size: 11px;
+    margin-top: 2px;
+  }
+  .up { color: var(--green); }
+  .down { color: var(--red); }
+  .flash-up { animation: flashGreen 0.6s ease-out; }
+  .flash-down { animation: flashRed 0.6s ease-out; }
+
+  @keyframes flashGreen {
+    0% { background: var(--green-dim); }
+    100% { background: transparent; }
+  }
+  @keyframes flashRed {
+    0% { background: var(--red-dim); }
+    100% { background: transparent; }
+  }
+
+  /* ─── Main Grid ─── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+    height: calc(100vh - 120px);
+  }
+
+  .panel {
+    background: var(--bg-card);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .panel-header .count {
+    font-family: var(--mono);
+    color: var(--text-muted);
+    font-size: 10px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+  }
+  .panel-body::-webkit-scrollbar { width: 4px; }
+  .panel-body::-webkit-scrollbar-track { background: transparent; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* ─── Trade Feed ─── */
+  .trade-row {
+    display: grid;
+    grid-template-columns: 56px 44px 1fr 1fr 80px;
+    align-items: center;
+    padding: 8px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    border-bottom: 1px solid #1a1f2c;
+    transition: background 0.1s;
+    animation: slideIn 0.25s ease-out;
+  }
+  .trade-row:hover { background: var(--bg-row-hover); }
+  .trade-side {
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ─── Funding Rates ─── */
+  .funding-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 1fr 1fr;
+    align-items: center;
+    padding: 12px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    border-bottom: 1px solid #1a1f2c;
+    transition: background 0.1s;
+  }
+  .funding-row:hover { background: var(--bg-row-hover); }
+  .funding-row .label {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .funding-header {
+    display: grid;
+    grid-template-columns: 80px 1fr 1fr 1fr;
+    padding: 8px 16px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ─── Order Book ─── */
+  .book-coin {
+    padding: 12px 16px;
+    border-bottom: 1px solid #1a1f2c;
+  }
+  .book-coin-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .book-coin-name {
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .book-spread {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .book-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .book-side-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+  }
+  .book-val {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-radius: 3px;
+  }
+  .book-val.bid { background: var(--green-dim); }
+  .book-val.ask { background: var(--red-dim); }
+
+  /* ─── Liquidations ─── */
+  .liq-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #1a1f2c;
+    animation: slideIn 0.3s ease-out;
+  }
+  .liq-icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .liq-icon.long { background: var(--red-dim); }
+  .liq-icon.short { background: var(--green-dim); }
+  .liq-details { flex: 1; }
+  .liq-headline {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+  .liq-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--mono);
+  }
+  .liq-value {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  /* ─── Empty State ─── */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 13px;
+    gap: 8px;
+  }
+  .empty-state .icon { font-size: 28px; opacity: 0.5; }
+  .pulse { animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo"><span>◆</span> Hyperliquid</div>
+    <div class="badge">Live</div>
+  </div>
+  <div class="status">
+    <span id="event-count">0 events</span>
+    <div class="status-dot" id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+  </div>
+</div>
+
+<!-- Price Ticker -->
+<div class="ticker-strip" id="ticker-strip">
+  <div class="ticker-item" id="ticker-BTC">
+    <div class="ticker-coin"><div class="coin-icon btc">B</div> BTC</div>
+    <div class="ticker-price"><div class="price" id="price-BTC">—</div><div class="change" id="change-BTC">&nbsp;</div></div>
+  </div>
+  <div class="ticker-item" id="ticker-ETH">
+    <div class="ticker-coin"><div class="coin-icon eth">E</div> ETH</div>
+    <div class="ticker-price"><div class="price" id="price-ETH">—</div><div class="change" id="change-ETH">&nbsp;</div></div>
+  </div>
+  <div class="ticker-item" id="ticker-SOL">
+    <div class="ticker-coin"><div class="coin-icon sol">S</div> SOL</div>
+    <div class="ticker-price"><div class="price" id="price-SOL">—</div><div class="change" id="change-SOL">&nbsp;</div></div>
+  </div>
+</div>
+
+<!-- Main Grid -->
+<div class="grid">
+  <!-- Trade Feed -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>⚡ Live Trades</span>
+      <span class="count" id="trade-count">0</span>
+    </div>
+    <div class="panel-body" id="trade-feed">
+      <div class="empty-state"><div class="icon pulse">⚡</div>Waiting for trades…</div>
+    </div>
+  </div>
+
+  <!-- Funding Rates -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>📈 Funding Rates</span>
+      <span class="count" id="funding-update"></span>
+    </div>
+    <div class="panel-body" id="funding-panel">
+      <div class="funding-header"><span>Coin</span><span>Rate (8h)</span><span>APR</span><span>Premium</span></div>
+      <div id="funding-body">
+        <div class="empty-state"><div class="icon pulse">📈</div>Waiting for funding data…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Order Book -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>📊 Order Book</span>
+      <span class="count" id="book-update"></span>
+    </div>
+    <div class="panel-body" id="book-panel">
+      <div class="empty-state"><div class="icon pulse">📊</div>Waiting for order book…</div>
+    </div>
+  </div>
+
+  <!-- Liquidations -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>🔥 Liquidations</span>
+      <span class="count" id="liq-count">0</span>
+    </div>
+    <div class="panel-body" id="liq-feed">
+      <div class="empty-state"><div class="icon pulse">🔥</div>Waiting for liquidations…</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  // ── State ──
+  const state = {
+    prices: {},       // { BTC: { price, prev } }
+    trades: [],       // last 100 trades
+    funding: {},      // { BTC: { rate, premium } }
+    books: {},        // { BTC: { bids, asks } }
+    liquidations: [], // last 50 liquidations
+    eventCount: 0,
+  };
+
+  const MAX_TRADES = 100;
+  const MAX_LIQS = 50;
+  const BOOK_LEVELS = 5;
+
+  // ── Formatters ──
+  function fmtPrice(p) {
+    const n = parseFloat(p);
+    if (isNaN(n)) return "—";
+    if (n >= 1000) return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (n >= 1) return "$" + n.toFixed(4);
+    return "$" + n.toPrecision(4);
+  }
+
+  function fmtSize(s) {
+    const n = parseFloat(s);
+    if (isNaN(n)) return "—";
+    if (n >= 1000) return n.toFixed(1);
+    if (n >= 1) return n.toFixed(3);
+    return n.toPrecision(3);
+  }
+
+  function fmtPct(p) {
+    const n = parseFloat(p) * 100;
+    return (n >= 0 ? "+" : "") + n.toFixed(4) + "%";
+  }
+
+  function fmtApr(rate) {
+    const apr = parseFloat(rate) * 3 * 365 * 100;
+    return (apr >= 0 ? "+" : "") + apr.toFixed(1) + "%";
+  }
+
+  function fmtValue(price, size) {
+    const v = parseFloat(price) * parseFloat(size);
+    if (v >= 1e6) return "$" + (v / 1e6).toFixed(2) + "M";
+    if (v >= 1e3) return "$" + (v / 1e3).toFixed(1) + "K";
+    return "$" + v.toFixed(0);
+  }
+
+  function fmtTime(ts) {
+    const d = new Date(typeof ts === "number" ? ts : parseInt(ts));
+    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function rateClass(r) {
+    return parseFloat(r) >= 0 ? "up" : "down";
+  }
+
+  // ── Price Ticker ──
+  function updatePrice(coin, price) {
+    const prev = state.prices[coin]?.price;
+    state.prices[coin] = { price: parseFloat(price), prev: prev ?? parseFloat(price) };
+    const el = document.getElementById("price-" + coin);
+    const changeEl = document.getElementById("change-" + coin);
+    const tickerEl = document.getElementById("ticker-" + coin);
+    if (!el) return;
+
+    el.textContent = fmtPrice(price);
+    const cur = parseFloat(price);
+    const p = state.prices[coin].prev;
+    const diff = p ? ((cur - p) / p) * 100 : 0;
+
+    if (prev !== undefined && prev !== cur) {
+      const direction = cur > prev ? "up" : "down";
+      el.className = "price " + direction;
+      changeEl.className = "change " + direction;
+      changeEl.textContent = (cur > prev ? "▲ " : "▼ ") + Math.abs(((cur - prev) / prev) * 100).toFixed(3) + "%";
+      tickerEl.classList.remove("flash-up", "flash-down");
+      void tickerEl.offsetWidth; // force reflow
+      tickerEl.classList.add("flash-" + direction);
+    }
+  }
+
+  // ── Trade Feed ──
+  let tradeCount = 0;
+  function addTrade(data) {
+    const feed = document.getElementById("trade-feed");
+    if (tradeCount === 0) feed.innerHTML = "";
+    tradeCount++;
+    document.getElementById("trade-count").textContent = tradeCount;
+
+    state.trades.unshift(data);
+    if (state.trades.length > MAX_TRADES) state.trades.pop();
+
+    const isBuy = data.side === "B" || data.side === "Buy" || data.side === "buy";
+    const row = document.createElement("div");
+    row.className = "trade-row";
+    row.innerHTML =
+      '<span class="trade-side ' + (isBuy ? "up" : "down") + '">' + data.coin + '</span>' +
+      '<span class="trade-side ' + (isBuy ? "up" : "down") + '">' + (isBuy ? "BUY" : "SELL") + '</span>' +
+      '<span>' + fmtPrice(data.price) + '</span>' +
+      '<span>' + fmtSize(data.size) + '</span>' +
+      '<span style="color:var(--text-muted)">' + fmtTime(data.ts) + '</span>';
+
+    feed.insertBefore(row, feed.firstChild);
+    while (feed.children.length > MAX_TRADES) feed.removeChild(feed.lastChild);
+  }
+
+  // ── Funding Rates ──
+  function updateFunding(coin, rate, premium) {
+    state.funding[coin] = { rate, premium };
+    document.getElementById("funding-update").textContent = "Updated " + fmtTime(Date.now());
+    renderFunding();
+  }
+
+  function renderFunding() {
+    const body = document.getElementById("funding-body");
+    const coins = Object.keys(state.funding).sort();
+    if (coins.length === 0) return;
+
+    body.innerHTML = coins.map(function(c) {
+      const f = state.funding[c];
+      const cls = rateClass(f.rate);
+      return '<div class="funding-row">' +
+        '<span class="label">' + c + '</span>' +
+        '<span class="' + cls + '">' + fmtPct(f.rate) + '</span>' +
+        '<span class="' + cls + '">' + fmtApr(f.rate) + '</span>' +
+        '<span style="color:var(--text-secondary)">' + fmtPct(f.premium) + '</span>' +
+        '</div>';
+    }).join("");
+  }
+
+  // ── Order Book ──
+  function updateBook(coin, data) {
+    state.books[coin] = {
+      bid: parseFloat(data.bid) || 0,
+      ask: parseFloat(data.ask) || 0,
+      bidSize: parseFloat(data.bid_size) || 0,
+      askSize: parseFloat(data.ask_size) || 0,
+      bidDepth: parseInt(data.bid_depth) || 0,
+      askDepth: parseInt(data.ask_depth) || 0,
+    };
+    document.getElementById("book-update").textContent = "Updated " + fmtTime(Date.now());
+    renderBooks();
+  }
+
+  function renderBooks() {
+    var panel = document.getElementById("book-panel");
+    var coins = Object.keys(state.books).sort();
+    if (coins.length === 0) return;
+
+    panel.innerHTML = coins.map(function(c) {
+      var b = state.books[c];
+      var spread = b.bid && b.ask ? ((b.ask - b.bid) / b.ask * 100).toFixed(4) : "—";
+
+      return '<div class="book-coin">' +
+        '<div class="book-coin-header">' +
+          '<span class="book-coin-name">' + c + '</span>' +
+          '<span class="book-spread">Spread: ' + spread + '%</span>' +
+        '</div>' +
+        '<div class="book-row">' +
+          '<div>' +
+            '<div class="book-side-label up">Best Bid</div>' +
+            '<div class="book-val bid">' +
+              '<span class="up">' + fmtPrice(b.bid) + '</span>' +
+              '<span>' + fmtSize(b.bidSize) + '</span>' +
+            '</div>' +
+            '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">' + b.bidDepth + ' levels</div>' +
+          '</div>' +
+          '<div>' +
+            '<div class="book-side-label down">Best Ask</div>' +
+            '<div class="book-val ask">' +
+              '<span class="down">' + fmtPrice(b.ask) + '</span>' +
+              '<span>' + fmtSize(b.askSize) + '</span>' +
+            '</div>' +
+            '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">' + b.askDepth + ' levels</div>' +
+          '</div>' +
+        '</div></div>';
+    }).join("");
+  }
+
+  // ── Liquidations ──
+  let liqCount = 0;
+  function addLiquidation(data) {
+    const feed = document.getElementById("liq-feed");
+    if (liqCount === 0) feed.innerHTML = "";
+    liqCount++;
+    document.getElementById("liq-count").textContent = liqCount;
+
+    state.liquidations.unshift(data);
+    if (state.liquidations.length > MAX_LIQS) state.liquidations.pop();
+
+    const isLong = data.side === "long" || data.side === "Long" || data.side === "buy" || data.side === "B";
+    const item = document.createElement("div");
+    item.className = "liq-item";
+    item.innerHTML =
+      '<div class="liq-icon ' + (isLong ? "long" : "short") + '">' + (isLong ? "📉" : "📈") + '</div>' +
+      '<div class="liq-details">' +
+        '<div class="liq-headline">' +
+          '<span style="font-weight:700">' + data.coin + '</span> ' +
+          '<span class="' + (isLong ? "down" : "up") + '">' + (isLong ? "LONG" : "SHORT") + '</span> liquidated' +
+        '</div>' +
+        '<div class="liq-meta">' + fmtTime(data.ts) + ' · ' + fmtPrice(data.price) + '</div>' +
+      '</div>' +
+      '<div class="liq-value">' + fmtValue(data.price, data.size) + '</div>';
+
+    feed.insertBefore(item, feed.firstChild);
+    while (feed.children.length > MAX_LIQS) feed.removeChild(feed.lastChild);
+  }
+
+  // ── SSE Connection ──
+  function connect() {
+    const dot = document.getElementById("status-dot");
+    const txt = document.getElementById("status-text");
+    const evtCount = document.getElementById("event-count");
+
+    const es = new EventSource("http://localhost:8080/events");
+
+    es.onopen = function() {
+      dot.className = "status-dot connected";
+      txt.textContent = "Connected";
+    };
+
+    es.onerror = function() {
+      dot.className = "status-dot error";
+      txt.textContent = "Reconnecting…";
+    };
+
+    es.onmessage = function(e) {
+      state.eventCount++;
+      evtCount.textContent = state.eventCount + " events";
+
+      var msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+
+      // Heartbeat
+      if (msg.type === "heartbeat") return;
+
+      var qid = msg.queryId;
+      var results = msg.results;
+      if (!results || !results.length) return;
+
+      results.forEach(function(r) {
+        var d = r.after || r.data || {};
+
+        switch (qid) {
+          case "prices":
+            if (d.coin && d.price !== undefined) updatePrice(d.coin, d.price);
+            break;
+          case "trades":
+            if (r.type === "ADD" && d.coin) addTrade(d);
+            break;
+          case "funding":
+            if (d.coin && d.rate !== undefined) updateFunding(d.coin, d.rate, d.premium);
+            break;
+          case "books":
+            if (d.coin) updateBook(d.coin, d);
+            break;
+          case "liquidations":
+            if (r.type === "ADD" && d.coin) addLiquidation(d);
+            break;
+        }
+      });
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

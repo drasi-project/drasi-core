@@ -173,7 +173,7 @@ impl PluginReference {
             let repo = if ns.is_empty() {
                 ref_without_tag.to_string()
             } else {
-                format!("{}/{}", ns, ref_without_tag)
+                format!("{ns}/{ref_without_tag}")
             };
 
             (reg, repo)

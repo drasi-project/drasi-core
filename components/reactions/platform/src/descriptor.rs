@@ -110,28 +110,28 @@ impl ReactionPluginDescriptor for PlatformReactionDescriptor {
         let mut builder = PlatformReactionBuilder::new(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_redis_url(mapper.resolve_string(&dto.redis_url)?);
+            .with_redis_url(mapper.resolve_string(&dto.redis_url).await?);
 
         if let Some(ref v) = dto.pubsub_name {
-            builder = builder.with_pubsub_name(mapper.resolve_string(v)?);
+            builder = builder.with_pubsub_name(mapper.resolve_string(v).await?);
         }
         if let Some(ref v) = dto.source_name {
-            builder = builder.with_source_name(mapper.resolve_string(v)?);
+            builder = builder.with_source_name(mapper.resolve_string(v).await?);
         }
         if let Some(ref v) = dto.max_stream_length {
-            builder = builder.with_max_stream_length(mapper.resolve_typed(v)?);
+            builder = builder.with_max_stream_length(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.emit_control_events {
-            builder = builder.with_emit_control_events(mapper.resolve_typed(v)?);
+            builder = builder.with_emit_control_events(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.batch_enabled {
-            builder = builder.with_batch_enabled(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_enabled(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.batch_max_size {
-            builder = builder.with_batch_max_size(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_max_size(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.batch_max_wait_ms {
-            builder = builder.with_batch_max_wait_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_batch_max_wait_ms(mapper.resolve_typed(v).await?);
         }
 
         let reaction = builder.build()?;

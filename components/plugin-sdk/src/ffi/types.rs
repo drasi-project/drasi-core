@@ -20,7 +20,8 @@
 
 pub use drasi_ffi_primitives::{
     catch_panic_ffi, now_us, AsyncExecutorFn, FfiCreateResult, FfiGetResult, FfiOwnedStr,
-    FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,
+    FfiResult, FfiStr, FfiStringArray, FfiWalAppendResult, FfiWalEntry, FfiWalOptionalU64Result,
+    FfiWalReadResult, FfiWalU64Result, SendMutPtr, SendPtr,
 };
 
 // ============================================================================

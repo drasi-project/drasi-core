@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2026 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! Azure identity provider plugin for Drasi.
 //!
@@ -52,7 +53,10 @@ impl Default for AzureAuthMethod {
 #[serde(rename_all = "camelCase")]
 pub struct AzureIdentityProviderConfigDto {
     /// The identity name used for authentication (e.g., `user@tenant.onmicrosoft.com`).
-    pub identity_name: String,
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
+    #[schema(value_type = ConfigValueString)]
+    pub identity_name: ConfigValue<String>,
 
     /// Authentication method to use.
     #[serde(default)]
@@ -60,12 +64,18 @@ pub struct AzureIdentityProviderConfigDto {
 
     /// Client ID for user-assigned managed identity (only used when
     /// `auth_method` is `managed_identity_user_assigned`).
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub client_id: Option<ConfigValue<String>>,
 
     /// Custom scope for token acquisition. Defaults to the Azure OSSRDBMS scope.
+    ///
+    /// Supports environment variable interpolation via [`ConfigValue`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    #[schema(value_type = Option<ConfigValueString>)]
+    pub scope: Option<ConfigValue<String>>,
 }
 
 #[derive(utoipa::OpenApi)]
@@ -105,26 +115,32 @@ impl IdentityProviderPluginDescriptor for AzureIdentityProviderDescriptor {
         config_json: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn IdentityProvider>> {
         let dto: AzureIdentityProviderConfigDto = serde_json::from_value(config_json.clone())?;
+        let mapper = DtoMapper::new();
+
+        let identity_name = mapper.resolve_string(&dto.identity_name).await?;
 
         let mut provider = match dto.auth_method {
-            AzureAuthMethod::ManagedIdentity => AzureIdentityProvider::new(&dto.identity_name)?,
+            AzureAuthMethod::ManagedIdentity => AzureIdentityProvider::new(&identity_name)?,
             AzureAuthMethod::ManagedIdentityUserAssigned => {
-                let client_id = dto.client_id.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "client_id is required for managed_identity_user_assigned auth method"
-                    )
-                })?;
-                AzureIdentityProvider::with_managed_identity(&dto.identity_name, client_id)?
+                let client_id = mapper
+                    .resolve_optional_string(&dto.client_id)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "client_id is required for managed_identity_user_assigned auth method"
+                        )
+                    })?;
+                AzureIdentityProvider::with_managed_identity(&identity_name, client_id)?
             }
             AzureAuthMethod::WorkloadIdentity => {
-                AzureIdentityProvider::with_workload_identity(&dto.identity_name)?
+                AzureIdentityProvider::with_workload_identity(&identity_name)?
             }
             AzureAuthMethod::DeveloperTools => {
-                AzureIdentityProvider::with_default_credentials(&dto.identity_name)?
+                AzureIdentityProvider::with_default_credentials(&identity_name)?
             }
         };
 
-        if let Some(scope) = dto.scope {
+        if let Some(scope) = mapper.resolve_optional_string(&dto.scope).await? {
             provider = provider.with_scope(scope);
         }
 

@@ -32,7 +32,6 @@ use std::collections::HashMap;
 ///     tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
 ///     client_id: "00000000-0000-0000-0000-000000000002".to_string(),
 ///     client_secret: "my-secret".to_string(),
-///     use_azure_cli: false,
 ///     entities: vec!["account".to_string(), "contact".to_string()],
 ///     entity_set_overrides: Default::default(),
 ///     entity_columns: Default::default(),
@@ -47,21 +46,19 @@ pub struct DataverseBootstrapConfig {
     pub environment_url: String,
 
     /// Azure AD tenant ID for authentication.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub tenant_id: String,
 
     /// Azure AD application (client) ID.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub client_id: String,
 
     /// Azure AD client secret.
-    /// Required for client credentials flow, ignored when `use_azure_cli` is true.
+    /// Required for the built-in client credentials flow. Not required when an
+    /// identity provider is injected by the host.
     pub client_secret: String,
-
-    /// Use Azure CLI (`az account get-access-token`) for authentication.
-    /// When true, `tenant_id`, `client_id`, and `client_secret` are not required.
-    /// Requires `az login` to have been run beforehand.
-    pub use_azure_cli: bool,
 
     /// Entity logical names to bootstrap (e.g., ["account", "contact"])
     pub entities: Vec<String>,
@@ -90,7 +87,6 @@ impl std::fmt::Debug for DataverseBootstrapConfig {
             .field("tenant_id", &self.tenant_id)
             .field("client_id", &self.client_id)
             .field("client_secret", &"[REDACTED]")
-            .field("use_azure_cli", &self.use_azure_cli)
             .field("entities", &self.entities)
             .field("entity_set_overrides", &self.entity_set_overrides)
             .field("entity_columns", &self.entity_columns)
@@ -115,7 +111,6 @@ impl Default for DataverseBootstrapConfig {
             tenant_id: String::new(),
             client_id: String::new(),
             client_secret: String::new(),
-            use_azure_cli: false,
             entities: Vec::new(),
             entity_set_overrides: HashMap::new(),
             entity_columns: HashMap::new(),
@@ -126,21 +121,26 @@ impl Default for DataverseBootstrapConfig {
 }
 
 impl DataverseBootstrapConfig {
-    /// Validate the configuration.
+    /// Validate the configuration for the built-in client credentials flow.
+    ///
+    /// For Azure CLI / developer tools authentication, configure an Azure
+    /// identity provider (`kind: azure`, `authMethod: developer_tools`) and
+    /// reference it from the source — then [`validate_with_identity_provider`]
+    /// applies instead.
     pub fn validate(&self) -> Result<(), String> {
         if self.environment_url.is_empty() {
             return Err("environment_url is required".to_string());
         }
-        if !self.use_azure_cli {
-            if self.tenant_id.is_empty() {
-                return Err("tenant_id is required (or set use_azure_cli = true)".to_string());
-            }
-            if self.client_id.is_empty() {
-                return Err("client_id is required (or set use_azure_cli = true)".to_string());
-            }
-            if self.client_secret.is_empty() {
-                return Err("client_secret is required (or set use_azure_cli = true)".to_string());
-            }
+        if self.tenant_id.is_empty() {
+            return Err("tenant_id is required (or configure an identity provider)".to_string());
+        }
+        if self.client_id.is_empty() {
+            return Err("client_id is required (or configure an identity provider)".to_string());
+        }
+        if self.client_secret.is_empty() {
+            return Err(
+                "client_secret is required (or configure an identity provider)".to_string(),
+            );
         }
         if self.entities.is_empty() {
             return Err("at least one entity is required".to_string());
@@ -314,16 +314,15 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation_azure_cli_no_secret_needed() {
+    fn test_validate_with_identity_provider_skips_credentials() {
         let config = DataverseBootstrapConfig {
             environment_url: "https://test.crm.dynamics.com".to_string(),
-            use_azure_cli: true,
             entities: vec!["account".to_string()],
             ..Default::default()
         };
         assert!(
-            config.validate().is_ok(),
-            "Azure CLI mode should not require client credentials"
+            config.validate_with_identity_provider().is_ok(),
+            "identity provider mode should not require client credentials"
         );
     }
 

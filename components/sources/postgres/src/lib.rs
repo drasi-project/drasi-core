@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! PostgreSQL Replication Source Plugin for Drasi
 //!
@@ -152,20 +153,20 @@
 //!
 //! # Usage Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
 //! use std::sync::Arc;
 //!
-//! let config = PostgresSourceBuilder::new()
+//! # fn main() -> anyhow::Result<()> {
+//! let source = PostgresReplicationSource::builder("pg-source")
 //!     .with_host("db.example.com")
 //!     .with_database("production")
 //!     .with_user("replication_user")
 //!     .with_password("secret")
 //!     .with_tables(vec!["users".to_string(), "orders".to_string()])
-//!     .build();
-//!
-//! let source = Arc::new(PostgresReplicationSource::new("pg-source", config)?);
-//! drasi.add_source(source).await?;
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod config;
@@ -179,18 +180,106 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use log::{error, info};
+use bytes::Bytes;
+use drasi_lib::schema::{
+    normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
+};
+use log::{debug, error, info};
+use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, Mutex};
 
-use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::component_graph::ComponentStatusHandle;
+use drasi_lib::channels::{ComponentStatus, DispatchMode, *};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
-use drasi_lib::Source;
+use drasi_lib::{Source, SourceError};
 use tracing::Instrument;
+
+/// Shared state tracking WAL progress for subscribe/rewind decisions.
+///
+/// The replication stream atomically publishes `read_lsn` (the highest WAL LSN
+/// received so far). The `subscribe()` method reads this to decide whether a
+/// new subscriber can be served from the current stream position or if a rewind
+/// is needed.
+pub(crate) struct ReplayState {
+    pub(crate) read_lsn: AtomicU64,
+    /// Maximum `flush_lsn` that `send_feedback()` may report to PostgreSQL.
+    ///
+    /// Set to the replay start LSN during `pause_replication_for_restart()` to
+    /// prevent the slot's `restart_lsn` from advancing past the position that
+    /// other (not-yet-subscribed) queries will need.  `u64::MAX` means "no
+    /// fence" (normal operation).
+    pub(crate) flush_fence_lsn: AtomicU64,
+    /// UNIX epoch seconds when the fence was last set. Used for auto-clearing
+    /// the fence after [`FENCE_TIMEOUT_SECS`] as a safety fallback.
+    pub(crate) fence_set_epoch_secs: AtomicU64,
+}
+
+/// Duration (in seconds) after which the flush fence auto-clears.
+///
+/// This is a safety fallback for deployments where no explicit
+/// `on_subscriptions_complete()` signal arrives (e.g., FFI plugin usage).
+/// During normal startup all queries subscribe within a few seconds; the
+/// timeout must be generous enough to cover slow-starting deployments.
+const FENCE_TIMEOUT_SECS: u64 = 60;
+
+impl Default for ReplayState {
+    fn default() -> Self {
+        Self {
+            read_lsn: AtomicU64::new(0),
+            flush_fence_lsn: AtomicU64::new(u64::MAX),
+            fence_set_epoch_secs: AtomicU64::new(0),
+        }
+    }
+}
+
+impl ReplayState {
+    fn current_read_lsn(&self) -> u64 {
+        self.read_lsn.load(Ordering::Acquire)
+    }
+
+    /// Set the flush fence to prevent `send_feedback()` from advancing
+    /// `flush_lsn` past `lsn`.
+    fn set_flush_fence(&self, lsn: u64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.flush_fence_lsn.store(lsn, Ordering::Release);
+        self.fence_set_epoch_secs.store(now_secs, Ordering::Release);
+    }
+
+    /// Clear the flush fence, allowing normal `flush_lsn` advancement.
+    fn clear_flush_fence(&self) {
+        self.flush_fence_lsn.store(u64::MAX, Ordering::Release);
+    }
+
+    /// Returns the effective fence value, auto-clearing if the timeout has
+    /// elapsed. Returns `u64::MAX` if no fence is active.
+    fn effective_flush_fence(&self) -> u64 {
+        let fence = self.flush_fence_lsn.load(Ordering::Acquire);
+        if fence == u64::MAX {
+            return u64::MAX;
+        }
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let set_secs = self.fence_set_epoch_secs.load(Ordering::Acquire);
+        if now_secs.saturating_sub(set_secs) > FENCE_TIMEOUT_SECS {
+            // Timeout expired — auto-clear
+            self.flush_fence_lsn.store(u64::MAX, Ordering::Release);
+            u64::MAX
+        } else {
+            fence
+        }
+    }
+}
 
 /// PostgreSQL replication source that captures changes via logical replication.
 ///
@@ -201,11 +290,137 @@ use tracing::Instrument;
 ///
 /// - `base`: Common source functionality (dispatchers, status, lifecycle)
 /// - `config`: PostgreSQL connection and replication configuration
+/// - `replay_state`: Shared WAL progress for subscribe/rewind decisions
 pub struct PostgresReplicationSource {
     /// Base source implementation providing common functionality
     base: SourceBase,
     /// PostgreSQL source configuration
     config: PostgresSourceConfig,
+    /// Best-effort cached schema populated from information_schema on start.
+    cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+    /// Shared replay progress for subscribe()/rewind decisions and WAL feedback.
+    replay_state: Arc<ReplayState>,
+    /// Serializes subscribe() calls that may restart the replication task.
+    subscribe_lock: Mutex<()>,
+}
+
+fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
+    match data_type {
+        "smallint" | "integer" | "bigint" => Some(PropertyType::Integer),
+        "real" | "double precision" | "numeric" | "decimal" => Some(PropertyType::Float),
+        "boolean" => Some(PropertyType::Boolean),
+        "timestamp without time zone"
+        | "timestamp with time zone"
+        | "date"
+        | "time without time zone"
+        | "time with time zone" => Some(PropertyType::Timestamp),
+        "json" | "jsonb" => Some(PropertyType::Json),
+        "character" | "character varying" | "text" | "uuid" | "bytea" => Some(PropertyType::String),
+        _ => None,
+    }
+}
+
+async fn introspect_postgres_schema(config: &PostgresSourceConfig) -> Result<Option<SourceSchema>> {
+    if config.tables.is_empty() {
+        return Ok(None);
+    }
+
+    let mut pg_config = tokio_postgres::Config::new();
+    pg_config.host(&config.host);
+    pg_config.port(config.port);
+    pg_config.dbname(&config.database);
+    pg_config.user(&config.user);
+    if !config.password.is_empty() {
+        pg_config.password(&config.password);
+    }
+
+    let client = match config.ssl_mode {
+        SslMode::Require => {
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            debug!("Schema introspection: connecting with SSL (require)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Prefer => {
+            // Try TLS first, fall back to plaintext
+            let tls_connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_hostnames(false)
+                .danger_accept_invalid_certs(false)
+                .build()
+                .map_err(|e| anyhow!("Failed to create TLS connector: {e}"))?;
+            let connector = MakeTlsConnector::new(tls_connector);
+
+            pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+            debug!("Schema introspection: connecting with SSL (prefer)");
+            let (client, connection) = pg_config.connect(connector).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+        SslMode::Disable => {
+            debug!("Schema introspection: connecting without SSL");
+            let (client, connection) = pg_config.connect(tokio_postgres::NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    log::warn!("PostgreSQL schema introspection connection closed: {e}");
+                }
+            });
+            client
+        }
+    };
+
+    let mut nodes = Vec::new();
+
+    for table in &config.tables {
+        let (schema_name, table_name) = table
+            .split_once('.')
+            .map(|(schema, name)| (schema.to_string(), name.to_string()))
+            .unwrap_or_else(|| ("public".to_string(), table.to_string()));
+
+        let rows = client
+            .query(
+                "SELECT column_name, data_type \
+                 FROM information_schema.columns \
+                 WHERE table_schema = $1 AND table_name = $2 \
+                 ORDER BY ordinal_position",
+                &[&schema_name, &table_name],
+            )
+            .await?;
+
+        let properties = rows
+            .into_iter()
+            .map(|row| PropertySchema {
+                name: row.get::<_, String>(0),
+                data_type: postgres_type_to_property_type(&row.get::<_, String>(1)),
+                description: None,
+            })
+            .collect();
+
+        nodes.push(NodeSchema {
+            label: normalize_table_label(&table_name),
+            properties,
+        });
+    }
+
+    Ok(Some(SourceSchema {
+        nodes,
+        relations: Vec::new(),
+    }))
 }
 
 impl PostgresReplicationSource {
@@ -213,17 +428,19 @@ impl PostgresReplicationSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
     /// use drasi_source_postgres::PostgresReplicationSource;
     ///
+    /// # fn main() -> anyhow::Result<()> {
     /// let source = PostgresReplicationSource::builder("pg-source")
     ///     .with_host("db.example.com")
     ///     .with_database("production")
     ///     .with_user("replication_user")
     ///     .with_password("secret")
     ///     .with_tables(vec!["users".to_string(), "orders".to_string()])
-    ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(id: impl Into<String>) -> PostgresSourceBuilder {
         PostgresSourceBuilder::new(id)
@@ -249,16 +466,26 @@ impl PostgresReplicationSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceBuilder};
+    /// ```rust,no_run
+    /// use drasi_source_postgres::{PostgresReplicationSource, PostgresSourceConfig, SslMode};
     ///
-    /// let config = PostgresSourceBuilder::new()
-    ///     .with_host("db.example.com")
-    ///     .with_database("mydb")
-    ///     .with_user("replication_user")
-    ///     .build();
+    /// # fn main() -> anyhow::Result<()> {
+    /// let config = PostgresSourceConfig {
+    ///     host: "db.example.com".to_string(),
+    ///     port: 5432,
+    ///     database: "mydb".to_string(),
+    ///     user: "replication_user".to_string(),
+    ///     password: "secret".to_string(),
+    ///     tables: vec!["users".to_string()],
+    ///     slot_name: "drasi_slot".to_string(),
+    ///     publication_name: "drasi_pub".to_string(),
+    ///     ssl_mode: SslMode::Disable,
+    ///     table_keys: vec![],
+    /// };
     ///
     /// let source = PostgresReplicationSource::new("my-pg-source", config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(id: impl Into<String>, config: PostgresSourceConfig) -> Result<Self> {
         let id = id.into();
@@ -266,6 +493,9 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
+            replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
     }
 
@@ -290,7 +520,179 @@ impl PostgresReplicationSource {
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
+            replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
+    }
+}
+
+impl PostgresReplicationSource {
+    /// Spawn the background replication task, optionally starting from a specific LSN.
+    ///
+    /// Waits for the task to confirm successful connection before returning.
+    async fn spawn_replication_task(&self, start_lsn: Option<u64>) -> Result<()> {
+        let config = self.config.clone();
+        let source_id = self.base.id.clone();
+        let reporter = self.base.status_handle();
+        let base = self.base.clone_shared();
+        let replay_state = self.replay_state.clone();
+        let (ready_tx, ready_rx) = oneshot::channel::<std::result::Result<(), String>>();
+
+        let instance_id = self
+            .base
+            .context()
+            .await
+            .map(|c| c.instance_id)
+            .unwrap_or_default();
+
+        let source_id_for_span = source_id.clone();
+        let span = tracing::info_span!(
+            "postgres_replication_task",
+            instance_id = %instance_id,
+            component_id = %source_id_for_span,
+            component_type = "source",
+            start_lsn = ?start_lsn
+        );
+
+        let task = tokio::spawn(
+            async move {
+                info!("Starting replication for source {source_id}");
+
+                let mut stream = stream::ReplicationStream::new(
+                    config,
+                    source_id.clone(),
+                    reporter.clone(),
+                    base,
+                    replay_state,
+                    start_lsn,
+                );
+
+                if let Err(e) = stream.run(Some(ready_tx)).await {
+                    error!("Replication task failed for {source_id}: {e}");
+                    reporter
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Replication failed: {e}")),
+                        )
+                        .await;
+                }
+            }
+            .instrument(span),
+        );
+
+        *self.base.task_handle.write().await = Some(task);
+
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => {
+                let _ = self.base.task_handle.write().await.take();
+                Err(anyhow!(
+                    "Failed to establish PostgreSQL replication: {message}"
+                ))
+            }
+            Err(_) => {
+                let _ = self.base.task_handle.write().await.take();
+                Err(anyhow!(
+                    "PostgreSQL replication task exited before confirming startup"
+                ))
+            }
+        }
+    }
+
+    async fn abort_replication_task(&self) {
+        if let Some(task) = self.base.task_handle.write().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    async fn pause_replication_for_restart(&self, start_lsn: u64) {
+        info!(
+            "Pausing PostgreSQL source '{}' before replay from requested LSN {:x}",
+            self.base.id, start_lsn
+        );
+
+        self.base
+            .set_status(
+                ComponentStatus::Starting,
+                Some(format!(
+                    "Rewinding PostgreSQL replication to LSN {start_lsn:x}"
+                )),
+            )
+            .await;
+
+        self.abort_replication_task().await;
+
+        // Clear stale sequence→position mappings from the pre-replay stream.
+        // Without this, compute_confirmed_source_position() could map a
+        // position handle (initialized with last_sequence) to a WAL position
+        // from the old stream, causing flush_lsn feedback to advance the
+        // slot's restart_lsn past other queries' checkpoints.
+        self.base.clear_sequence_position_map().await;
+
+        // Set the flush fence to prevent send_feedback() from advancing
+        // flush_lsn past start_lsn. This protects subscribers that haven't
+        // connected yet — their checkpoint is at (or near) start_lsn, so the
+        // slot must retain WAL from that point.
+        self.replay_state.set_flush_fence(start_lsn);
+    }
+
+    async fn resume_replication_from(&self, start_lsn: u64) -> Result<()> {
+        self.spawn_replication_task(Some(start_lsn)).await?;
+
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some(format!(
+                    "PostgreSQL replication resumed from LSN {start_lsn:x}"
+                )),
+            )
+            .await;
+
+        Ok(())
+    }
+
+    async fn restart_replication_from(&self, start_lsn: u64) -> Result<()> {
+        info!(
+            "Restarting PostgreSQL source '{}' from requested LSN {:x}",
+            self.base.id, start_lsn
+        );
+
+        self.pause_replication_for_restart(start_lsn).await;
+        self.resume_replication_from(start_lsn).await
+    }
+
+    /// Query the replication slot's consistent_point to determine the earliest
+    /// WAL position that can be replayed.
+    async fn get_earliest_available_lsn(&self) -> Result<u64> {
+        let mut conn = connection::ReplicationConnection::connect(
+            &self.config.host,
+            self.config.port,
+            &self.config.database,
+            &self.config.user,
+            &self.config.password,
+        )
+        .await?;
+
+        let _ = conn.identify_system().await?;
+        let slot_info = conn
+            .get_replication_slot_info(&self.config.slot_name)
+            .await?;
+        let _ = conn.close().await;
+
+        // Use restart_lsn (the earliest WAL the slot retains) when available,
+        // falling back to consistent_point for newly created slots.
+        let lsn_str = slot_info
+            .restart_lsn
+            .as_deref()
+            .unwrap_or(&slot_info.consistent_point);
+
+        if lsn_str.is_empty() || lsn_str == "0/0" {
+            Ok(0)
+        } else {
+            connection::parse_lsn(lsn_str)
+        }
     }
 }
 
@@ -315,6 +717,28 @@ impl Source for PostgresReplicationSource {
         self.base.get_auto_start()
     }
 
+    fn describe_schema(&self) -> Option<SourceSchema> {
+        self.cached_schema
+            .read()
+            .ok()
+            .and_then(|schema| schema.clone())
+            .or_else(|| {
+                if self.config.tables.is_empty() {
+                    None
+                } else {
+                    Some(SourceSchema {
+                        nodes: self
+                            .config
+                            .tables
+                            .iter()
+                            .map(|table| NodeSchema::new(normalize_table_label(table)))
+                            .collect(),
+                        relations: Vec::new(),
+                    })
+                }
+            })
+    }
+
     async fn start(&self) -> Result<()> {
         if self.base.get_status().await == ComponentStatus::Running {
             return Ok(());
@@ -323,46 +747,22 @@ impl Source for PostgresReplicationSource {
         self.base.set_status(ComponentStatus::Starting, None).await;
         info!("Starting PostgreSQL replication source: {}", self.base.id);
 
-        let config = self.config.clone();
-        let source_id = self.base.id.clone();
-        let dispatchers = self.base.dispatchers.clone();
-        let reporter = self.base.status_handle();
-
-        // Get instance_id from context for log routing isolation
-        let instance_id = self
-            .base
-            .context()
-            .await
-            .map(|c| c.instance_id)
-            .unwrap_or_default();
-
-        // Create span for spawned task so log::info!, log::error! etc are routed
-        let source_id_for_span = source_id.clone();
-        let span = tracing::info_span!(
-            "postgres_replication_task",
-            instance_id = %instance_id,
-            component_id = %source_id_for_span,
-            component_type = "source"
-        );
-
-        let task = tokio::spawn(
-            async move {
-                if let Err(e) =
-                    run_replication(source_id.clone(), config, dispatchers, reporter.clone()).await
-                {
-                    error!("Replication task failed for {source_id}: {e}");
-                    reporter
-                        .set_status(
-                            ComponentStatus::Error,
-                            Some(format!("Replication failed: {e}")),
-                        )
-                        .await;
+        match introspect_postgres_schema(&self.config).await {
+            Ok(Some(schema)) => {
+                if let Ok(mut cached) = self.cached_schema.write() {
+                    *cached = Some(schema);
                 }
             }
-            .instrument(span),
-        );
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "Failed to introspect PostgreSQL schema for '{}': {e}",
+                    self.base.id
+                );
+            }
+        }
 
-        *self.base.task_handle.write().await = Some(task);
+        self.spawn_replication_task(None).await?;
         self.base
             .set_status(
                 ComponentStatus::Running,
@@ -382,9 +782,11 @@ impl Source for PostgresReplicationSource {
 
         self.base.set_status(ComponentStatus::Stopping, None).await;
 
-        // Cancel the replication task
-        if let Some(task) = self.base.task_handle.write().await.take() {
-            task.abort();
+        self.abort_replication_task().await;
+
+        // Clear cached schema so a subsequent start() re-introspects
+        if let Ok(mut cached) = self.cached_schema.write() {
+            *cached = None;
         }
 
         self.base
@@ -405,9 +807,83 @@ impl Source for PostgresReplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        self.base
+        // Serialize subscribe calls that may restart the replication task to
+        // prevent TOCTOU races between concurrent callers.
+        let _guard = self.subscribe_lock.lock().await;
+
+        let mut restart_from = None;
+        let mut pause_before_subscribe = false;
+
+        if let Some(ref resume_bytes) = settings.resume_from {
+            // Parse opaque position bytes back to Postgres LSN (8-byte big-endian u64)
+            let resume_lsn = if resume_bytes.len() == 8 {
+                let bytes: [u8; 8] = resume_bytes[..8]
+                    .try_into()
+                    .expect("length already verified as 8");
+                u64::from_be_bytes(bytes)
+            } else {
+                return Err(anyhow!(
+                    "Invalid resume_from position: expected 8 bytes, got {}",
+                    resume_bytes.len()
+                ));
+            };
+
+            let earliest_available = self.get_earliest_available_lsn().await?;
+            if resume_lsn < earliest_available {
+                return Err(SourceError::PositionUnavailable {
+                    source_id: self.base.id.clone(),
+                    requested: resume_bytes.clone(),
+                    earliest_available: Some(Bytes::from(
+                        earliest_available.to_be_bytes().to_vec(),
+                    )),
+                }
+                .into());
+            }
+
+            let read_lsn = self.replay_state.current_read_lsn();
+            let is_running = self.base.get_status().await == ComponentStatus::Running;
+
+            if !is_running || read_lsn == 0 || resume_lsn < read_lsn {
+                restart_from = Some(resume_lsn);
+                pause_before_subscribe = is_running;
+            }
+        }
+
+        if let Some(start_lsn) = restart_from.filter(|_| pause_before_subscribe) {
+            // Quiesce the current replication task before attaching the resumed
+            // receiver so it cannot observe newer live events ahead of replayed
+            // older WAL entries.
+            self.pause_replication_for_restart(start_lsn).await;
+        }
+
+        let response = match self
+            .base
             .subscribe_with_bootstrap(&settings, "PostgreSQL")
             .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if pause_before_subscribe {
+                    self.base
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!("Failed to register replay subscription: {err}")),
+                        )
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+
+        if let Some(start_lsn) = restart_from {
+            if pause_before_subscribe {
+                self.resume_replication_from(start_lsn).await?;
+            } else {
+                self.restart_replication_from(start_lsn).await?;
+            }
+        }
+
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -416,6 +892,20 @@ impl Source for PostgresReplicationSource {
 
     async fn initialize(&self, context: drasi_lib::context::SourceRuntimeContext) {
         self.base.initialize(context).await;
+        // Postgres WAL LSN is an 8-byte big-endian u64 — byte-lexicographic comparison is correct.
+        self.base
+            .set_position_comparator(drasi_lib::sources::ByteLexPositionComparator)
+            .await;
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        self.base.remove_position_handle(query_id).await;
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        // Release the flush fence so that send_feedback() can advance flush_lsn
+        // based on the natural min-watermark of all registered position handles.
+        self.replay_state.clear_flush_fence();
     }
 
     async fn set_bootstrap_provider(
@@ -426,23 +916,6 @@ impl Source for PostgresReplicationSource {
     }
 }
 
-async fn run_replication(
-    source_id: String,
-    config: PostgresSourceConfig,
-    dispatchers: Arc<
-        RwLock<
-            Vec<Box<dyn drasi_lib::channels::ChangeDispatcher<SourceEventWrapper> + Send + Sync>>,
-        >,
-    >,
-    status_handle: ComponentStatusHandle,
-) -> Result<()> {
-    info!("Starting replication for source {source_id}");
-
-    let mut stream = stream::ReplicationStream::new(config, source_id, dispatchers, status_handle);
-
-    stream.run().await
-}
-
 /// Builder for PostgreSQL source configuration.
 ///
 /// Provides a fluent API for constructing PostgreSQL source configurations
@@ -450,9 +923,10 @@ async fn run_replication(
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use drasi_source_postgres::PostgresReplicationSource;
 ///
+/// # fn main() -> anyhow::Result<()> {
 /// let source = PostgresReplicationSource::builder("pg-source")
 ///     .with_host("db.example.com")
 ///     .with_database("production")
@@ -461,6 +935,8 @@ async fn run_replication(
 ///     .with_tables(vec!["users".to_string(), "orders".to_string()])
 ///     .with_slot_name("my_slot")
 ///     .build()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct PostgresSourceBuilder {
     id: String,
@@ -652,6 +1128,9 @@ impl PostgresSourceBuilder {
         Ok(PostgresReplicationSource {
             base: SourceBase::new(params)?,
             config,
+            cached_schema: Arc::new(std::sync::RwLock::new(None)),
+            replay_state: Arc::new(ReplayState::default()),
+            subscribe_lock: Mutex::new(()),
         })
     }
 }
@@ -798,6 +1277,119 @@ mod tests {
             assert_eq!(tables[0], "users");
             assert_eq!(tables[1], "orders");
         }
+
+        #[test]
+        fn test_describe_schema_falls_back_to_configured_tables() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .with_tables(vec!["public.users".to_string(), "orders".to_string()])
+                .build()
+                .unwrap();
+
+            let schema = source
+                .describe_schema()
+                .expect("configured postgres tables should produce fallback schema");
+
+            assert_eq!(schema.nodes.len(), 2);
+            assert!(schema.nodes.iter().any(|node| node.label == "users"));
+            assert!(schema.nodes.iter().any(|node| node.label == "orders"));
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_integer() {
+            assert_eq!(
+                postgres_type_to_property_type("integer"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("bigint"),
+                Some(PropertyType::Integer)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("smallint"),
+                Some(PropertyType::Integer)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_float() {
+            assert_eq!(
+                postgres_type_to_property_type("double precision"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("real"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("numeric"),
+                Some(PropertyType::Float)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("decimal"),
+                Some(PropertyType::Float)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_boolean() {
+            assert_eq!(
+                postgres_type_to_property_type("boolean"),
+                Some(PropertyType::Boolean)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_timestamp() {
+            assert_eq!(
+                postgres_type_to_property_type("timestamp with time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("timestamp without time zone"),
+                Some(PropertyType::Timestamp)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("date"),
+                Some(PropertyType::Timestamp)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_json() {
+            assert_eq!(
+                postgres_type_to_property_type("json"),
+                Some(PropertyType::Json)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("jsonb"),
+                Some(PropertyType::Json)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_string() {
+            assert_eq!(
+                postgres_type_to_property_type("character varying"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("text"),
+                Some(PropertyType::String)
+            );
+            assert_eq!(
+                postgres_type_to_property_type("uuid"),
+                Some(PropertyType::String)
+            );
+        }
+
+        #[test]
+        fn test_postgres_type_to_property_type_unknown_returns_none() {
+            assert_eq!(postgres_type_to_property_type("point"), None);
+            assert_eq!(postgres_type_to_property_type("polygon"), None);
+            assert_eq!(postgres_type_to_property_type("cidr"), None);
+        }
     }
 
     mod lifecycle {
@@ -806,8 +1398,9 @@ mod tests {
         /// A test secret resolver that returns a fixed value for any secret name.
         struct TestSecretResolver;
 
+        #[async_trait::async_trait]
         impl drasi_plugin_sdk::resolver::ValueResolver for TestSecretResolver {
-            fn resolve_to_string(
+            async fn resolve_to_string(
                 &self,
                 value: &drasi_plugin_sdk::ConfigValue<String>,
             ) -> Result<String, drasi_plugin_sdk::resolver::ResolverError> {
@@ -821,7 +1414,7 @@ mod tests {
         }
 
         fn ensure_test_secret_resolver() {
-            let _ = drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
+            drasi_plugin_sdk::resolver::register_secret_resolver(std::sync::Arc::new(
                 TestSecretResolver,
             ));
         }
@@ -955,6 +1548,73 @@ mod tests {
             assert_eq!(
                 props.get("password").and_then(|v| v.as_str()),
                 Some("secret123")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_pause_replication_for_restart_aborts_existing_task() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
+
+            source.base.set_status(ComponentStatus::Running, None).await;
+
+            let task = tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            });
+            *source.base.task_handle.write().await = Some(task);
+
+            source.pause_replication_for_restart(42).await;
+
+            assert!(source.base.task_handle.read().await.is_none());
+            assert_eq!(source.status().await, ComponentStatus::Starting);
+        }
+
+        #[test]
+        fn test_supports_replay_returns_true() {
+            let source = PostgresSourceBuilder::new("test")
+                .with_database("db")
+                .with_user("user")
+                .build()
+                .unwrap();
+            assert!(source.supports_replay());
+        }
+    }
+
+    mod subscribe {
+        use super::*;
+        use drasi_lib::config::SourceSubscriptionSettings;
+        use std::collections::HashSet;
+
+        #[tokio::test]
+        async fn test_malformed_resume_from_rejected() {
+            let source = PostgresSourceBuilder::new("test-source")
+                .with_database("testdb")
+                .with_user("testuser")
+                .build()
+                .unwrap();
+
+            // 4 bytes instead of expected 8
+            let bad_position = bytes::Bytes::from(vec![0u8; 4]);
+            let settings = SourceSubscriptionSettings {
+                source_id: "test-source".to_string(),
+                query_id: "q-bad-position".to_string(),
+                enable_bootstrap: false,
+                nodes: HashSet::new(),
+                relations: HashSet::new(),
+                resume_from: Some(bad_position),
+                request_position_handle: false,
+                last_sequence: None,
+            };
+
+            let result = source.subscribe(settings).await;
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.err().unwrap());
+            assert!(
+                err_msg.contains("expected 8 bytes"),
+                "Error should mention expected byte length, got: {err_msg}"
             );
         }
     }

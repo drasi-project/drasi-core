@@ -1,3 +1,17 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -321,6 +335,16 @@ where
     rx: mpsc::Receiver<Arc<T>>,
 }
 
+impl<T> ChannelChangeReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Creates a new `ChannelChangeReceiver` wrapping the given mpsc receiver.
+    pub fn new(rx: mpsc::Receiver<Arc<T>>) -> Self {
+        Self { rx }
+    }
+}
+
 #[async_trait]
 impl<T> ChangeReceiver<T> for ChannelChangeReceiver<T>
 where
@@ -331,6 +355,53 @@ where
             .recv()
             .await
             .ok_or_else(|| anyhow::anyhow!("Channel closed"))
+    }
+}
+
+/// A composite receiver that yields pre-loaded replay events first, then
+/// delegates to a live channel receiver.
+///
+/// Used by WAL-backed transient sources during subscription: replay events
+/// from the WAL are loaded into memory and served first, guaranteeing correct
+/// ordering before live events begin flowing.
+///
+/// **Memory bound**: The replay buffer size is bounded by the WAL's
+/// `max_events` configuration (typically ≤10,000 events). A streaming
+/// approach could reduce peak memory for very large WALs but is not
+/// needed given the bounded capacity.
+pub struct ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    replay: std::collections::VecDeque<Arc<T>>,
+    live: Box<dyn ChangeReceiver<T>>,
+}
+
+impl<T> ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    /// Create a new composite receiver.
+    ///
+    /// `replay` events are served in order before delegating to `live`.
+    pub fn new(
+        replay: std::collections::VecDeque<Arc<T>>,
+        live: Box<dyn ChangeReceiver<T>>,
+    ) -> Self {
+        Self { replay, live }
+    }
+}
+
+#[async_trait]
+impl<T> ChangeReceiver<T> for ReplayThenLiveReceiver<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    async fn recv(&mut self) -> Result<Arc<T>> {
+        if let Some(event) = self.replay.pop_front() {
+            return Ok(event);
+        }
+        self.live.recv().await
     }
 }
 

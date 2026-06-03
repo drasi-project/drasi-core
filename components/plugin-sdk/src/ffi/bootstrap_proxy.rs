@@ -22,7 +22,9 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use super::types::{now_us, FfiStr};
-use super::vtables::{BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapSender};
+use super::vtables::{
+    BootstrapProviderVtable, FfiBootstrapEvent, FfiBootstrapResult, FfiBootstrapSender,
+};
 use drasi_lib::bootstrap::{BootstrapProvider, BootstrapResult};
 
 /// Plugin-side proxy: wraps a `BootstrapProviderVtable` into a local `BootstrapProvider`.
@@ -95,6 +97,9 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         let vtable_state_usize = vtable_state as usize;
         let bootstrap_fn = vtable_bootstrap_fn;
 
+        // Channel to carry the FfiBootstrapResult pointer back (as usize for Send)
+        let (result_ptr_tx, result_ptr_rx) = std::sync::mpsc::channel::<usize>();
+
         std::thread::spawn(move || {
             let ffi_query_id = FfiStr::from_str(&query_id);
             let ffi_node_labels: Vec<FfiStr> =
@@ -108,7 +113,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             let ffi_source_id = FfiStr::from_str(&source_id);
 
             let ffi_sender_ptr = Box::into_raw(ffi_sender);
-            (bootstrap_fn)(
+            let result_ptr = (bootstrap_fn)(
                 vtable_state_usize as *mut c_void,
                 ffi_query_id,
                 ffi_node_labels.as_ptr(),
@@ -123,6 +128,7 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
             // Properly drop the FfiBootstrapSender: call drop_fn to free inner state
             let ffi_sender = unsafe { Box::from_raw(ffi_sender_ptr) };
             (ffi_sender.drop_fn)(ffi_sender.state);
+            let _ = result_ptr_tx.send(result_ptr as usize);
         });
 
         // Forward from std::sync::mpsc → tokio::sync::mpsc on a blocking thread.
@@ -139,13 +145,47 @@ impl BootstrapProvider for FfiBootstrapProviderProxy {
         .await
         .expect("forwarding task panicked");
 
-        // The FFI ABI (bootstrap_fn in vtables.rs) returns only a count.
-        // `last_sequence` / `sequences_aligned` require a future extension of
-        // the C ABI to flow across the plugin boundary.
+        // Read the FfiBootstrapResult from the vtable thread
+        let ffi_result = result_ptr_rx.recv().ok().and_then(|ptr_usize| {
+            let ptr = ptr_usize as *mut FfiBootstrapResult;
+            if ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { *Box::from_raw(ptr) })
+            }
+        });
+
+        let (last_sequence, sequences_aligned, source_position) = if let Some(ref r) = ffi_result {
+            let last_seq = if r.last_sequence >= 0 {
+                Some(r.last_sequence as u64)
+            } else {
+                None
+            };
+            let pos = if !r.source_position_ptr.is_null() && r.source_position_len > 0 {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(r.source_position_ptr, r.source_position_len)
+                };
+                let owned = bytes::Bytes::copy_from_slice(bytes);
+                // Free the source position allocation
+                if let Some(drop_fn) = r.source_position_drop_fn {
+                    (drop_fn)(r.source_position_ptr as *mut u8, r.source_position_len);
+                }
+                Some(owned)
+            } else {
+                None
+            };
+            (last_seq, r.sequences_aligned, pos)
+        } else {
+            return Err(anyhow::anyhow!(
+                "Bootstrap provider returned null result (plugin-side bootstrap failed)"
+            ));
+        };
+
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
+            last_sequence,
+            sequences_aligned,
+            source_position,
         })
     }
 }

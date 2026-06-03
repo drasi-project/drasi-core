@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-http"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP source plugin for Drasi"
@@ -63,11 +63,14 @@ subtle = "2"
 base64 = "0.22"
 hex = "0.4"
 regex = "1.10"
+bytes = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
-drasi-reaction-application = { path = "../../reactions/application" }
+drasi-reaction-application = { workspace = true }
 env_logger = "0.11"
+tempfile = "3"
+drasi-wal-redb = { path = "../../wals/redb" }
 
 
 [features]

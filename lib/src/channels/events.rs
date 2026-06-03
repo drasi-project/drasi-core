@@ -182,6 +182,8 @@ pub struct SourceChangeEvent {
     pub source_id: String,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// WAL-assigned sequence number, if durability is enabled for this source.
+    pub sequence: Option<u64>,
 }
 
 /// Control events from sources for query coordination
@@ -373,6 +375,11 @@ pub struct SubscriptionResponse {
     /// minimum across all subscribers to advance its upstream cursor.
     /// Sources should initialize this to `u64::MAX` (meaning "no position confirmed yet").
     pub position_handle: Option<Arc<AtomicU64>>,
+    /// Receives the `BootstrapResult` after bootstrap completes, carrying handover
+    /// metadata (`last_sequence`, `sequences_aligned`) for the bootstrap-to-streaming
+    /// transition. `None` when bootstrap is not active or for FFI/plugin sources.
+    pub bootstrap_result_receiver:
+        Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
 }
 
 /// Subscription response from Query to Reaction

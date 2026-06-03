@@ -235,6 +235,7 @@ impl BootstrapProvider for PostgresBootstrapProvider {
             event_count: count,
             last_sequence: None,
             sequences_aligned: false,
+            source_position: None,
         })
     }
 }
@@ -458,6 +459,7 @@ impl PostgresBootstrapHandler {
                 source_id: self.source_id.clone(),
                 change: source_change,
                 timestamp: chrono::Utc::now(),
+                sequence: None,
             });
 
             if batch.len() >= batch_size {

@@ -69,6 +69,44 @@ pub enum SourceError {
     },
 }
 
+/// Trait for comparing source positions during per-subscriber replay filtering.
+///
+/// When a source rewinds to serve a late-joining subscriber, events that a
+/// subscriber has already committed must be suppressed. Since `source_position`
+/// is opaque bytes, the framework cannot compare them directly — the source
+/// must provide the comparison logic.
+///
+/// # Contract
+///
+/// `position_reached(event_pos, resume_pos)` returns `true` when the event at
+/// `event_pos` is **strictly after** `resume_pos` (i.e., it is new for a
+/// subscriber that last committed at `resume_pos`). Events at or before the
+/// resume position are filtered out.
+///
+/// # Default
+///
+/// [`ByteLexPositionComparator`] provides a byte-lexicographic comparison that
+/// works for any position encoded in big-endian (e.g., Postgres u64 LSN,
+/// MSSQL 20-byte LSN).
+pub trait PositionComparator: Send + Sync {
+    /// Returns `true` if `event_pos` is strictly after `resume_pos`.
+    fn position_reached(&self, event_pos: &Bytes, resume_pos: &Bytes) -> bool;
+}
+
+/// Default byte-lexicographic position comparator.
+///
+/// Works correctly for any position encoded as big-endian bytes of equal length.
+/// For positions of unequal length, shorter bytes compare as less than longer ones
+/// with the same prefix.
+#[derive(Debug, Clone, Default)]
+pub struct ByteLexPositionComparator;
+
+impl PositionComparator for ByteLexPositionComparator {
+    fn position_reached(&self, event_pos: &Bytes, resume_pos: &Bytes) -> bool {
+        event_pos.as_ref() > resume_pos.as_ref()
+    }
+}
+
 /// Trait defining the interface for all source implementations.
 ///
 /// This is the core abstraction that all source plugins must implement.
@@ -167,11 +205,22 @@ pub trait Source: Send + Sync {
 
     /// Whether this source supports positional replay via `resume_from`.
     ///
-    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) should
-    /// override this to return `true`. The orchestration layer uses this to
-    /// validate compatibility with persistent queries and to request position handles.
+    /// Sources backed by a persistent log (e.g., Postgres WAL, Kafka) return
+    /// `true` (the default). Volatile sources that cannot replay (e.g.,
+    /// in-memory-only or purely push-based) should override this to return
+    /// `false`. The orchestration layer uses this to validate compatibility
+    /// with persistent queries and to request position handles.
     fn supports_replay(&self) -> bool {
-        false
+        true
+    }
+
+    /// Describe the graph schema this source provides, if known.
+    ///
+    /// This is a best-effort introspection hook used by inspection APIs and
+    /// future MCP adapters. Sources that cannot determine their schema should
+    /// return `None`.
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        None
     }
 
     /// Start the source
@@ -257,6 +306,53 @@ pub trait Source: Send + Sync {
         // Default implementation does nothing - sources that support bootstrap
         // should override this to delegate to their SourceBase
     }
+
+    /// Release the position handle that a query was holding on this source.
+    ///
+    /// Called during query stop to let the source advance its min-watermark.
+    /// Sources that use position handles should delegate to
+    /// `self.base.remove_position_handle(query_id).await`.
+    ///
+    /// The default is a no-op for sources that do not manage position handles.
+    ///
+    /// **Note:** This method has no FFI vtable entry yet. `SourceProxy`
+    /// overrides it with an explicit no-op + log message, and overrides
+    /// `supports_replay()` to return `false` so the orchestration layer
+    /// does not expect plugin sources to support position handles. A future
+    /// FFI SDK update (see issue #371) will add the vtable entry so plugin
+    /// sources can participate in position-handle cleanup.
+    async fn remove_position_handle(&self, _query_id: &str) {}
+
+    /// Signal that the initial batch of query subscriptions is complete.
+    ///
+    /// Called by the lifecycle after all auto-start queries have subscribed
+    /// during startup. Sources that hold back feedback during the subscription
+    /// window (e.g., Postgres flush-fence) should release those guards here.
+    ///
+    /// The default is a no-op for sources that do not need startup fencing.
+    async fn on_subscriptions_complete(&self) {}
+    /// Set the identity provider for this source.
+    ///
+    /// This method allows attaching a per-source identity provider after
+    /// construction (e.g. when wiring up a source from declarative config that
+    /// references a named identity provider). It is optional — sources that do
+    /// not authenticate to external systems can ignore it.
+    ///
+    /// Identity providers set via this method take precedence over any
+    /// instance-wide provider injected through the runtime context during
+    /// `initialize()`.
+    ///
+    /// Implementations backed by a [`SourceBase`](crate::sources::SourceBase)
+    /// should delegate to `self.base.set_identity_provider(provider).await`;
+    /// other implementors should store the provider and apply it during
+    /// `initialize()`.
+    async fn set_identity_provider(
+        &self,
+        _provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        // Default implementation does nothing - sources that consume an
+        // identity provider should override this to delegate to their SourceBase.
+    }
 }
 
 /// Blanket implementation of Source for `Box<dyn Source>`
@@ -282,6 +378,10 @@ impl Source for Box<dyn Source + 'static> {
 
     fn auto_start(&self) -> bool {
         (**self).auto_start()
+    }
+
+    fn describe_schema(&self) -> Option<crate::schema::SourceSchema> {
+        (**self).describe_schema()
     }
 
     fn supports_replay(&self) -> bool {
@@ -324,5 +424,20 @@ impl Source for Box<dyn Source + 'static> {
         provider: Box<dyn crate::bootstrap::BootstrapProvider + 'static>,
     ) {
         (**self).set_bootstrap_provider(provider).await
+    }
+
+    async fn remove_position_handle(&self, query_id: &str) {
+        (**self).remove_position_handle(query_id).await
+    }
+
+    async fn on_subscriptions_complete(&self) {
+        (**self).on_subscriptions_complete().await
+    }
+
+    async fn set_identity_provider(
+        &self,
+        provider: std::sync::Arc<dyn crate::identity::IdentityProvider>,
+    ) {
+        (**self).set_identity_provider(provider).await
     }
 }

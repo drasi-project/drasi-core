@@ -174,14 +174,48 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = PostgresSourceSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "source.postgres.PostgresSourceConfig")
+            .expect("root schema not found")
+            .field("host", |f| {
+                f.group("Connection").order(1).placeholder("localhost")
+            })
+            .field("port", |f| {
+                f.group("Connection").order(2).placeholder("5432")
+            })
+            .field("database", |f| {
+                f.group("Connection").order(3).placeholder("mydb")
+            })
+            .field("user", |f| {
+                f.group("Authentication").order(1).placeholder("postgres")
+            })
+            .field("password", |f| {
+                f.group("Authentication").order(2).widget("password")
+            })
+            .field("tables", |f| f.group("Tables").order(1))
+            .field("tableKeys", |f| f.group("Tables").order(2))
+            .field("slotName", |f| {
+                f.group("Replication")
+                    .order(1)
+                    .placeholder("drasi_slot")
+                    .collapsed(true)
+            })
+            .field("publicationName", |f| {
+                f.group("Replication")
+                    .order(2)
+                    .placeholder("drasi_publication")
+            })
+            .field("sslMode", |f| f.group("SSL").order(1).collapsed(true))
+            .annotate()
     }
 
     async fn create_source(
@@ -194,15 +228,18 @@ impl SourcePluginDescriptor for PostgresSourceDescriptor {
         let mapper = DtoMapper::new();
 
         let config = PostgresSourceConfig {
-            host: mapper.resolve_string(&dto.host)?,
-            port: mapper.resolve_typed(&dto.port)?,
-            database: mapper.resolve_string(&dto.database)?,
-            user: mapper.resolve_string(&dto.user)?,
-            password: mapper.resolve_string(&dto.password)?,
+            host: mapper.resolve_string(&dto.host).await?,
+            port: mapper.resolve_typed(&dto.port).await?,
+            database: mapper.resolve_string(&dto.database).await?,
+            user: mapper.resolve_string(&dto.user).await?,
+            password: mapper.resolve_string(&dto.password).await?,
             tables: dto.tables.clone(),
             slot_name: dto.slot_name.clone(),
             publication_name: dto.publication_name.clone(),
-            ssl_mode: mapper.resolve_typed::<SslModeDto>(&dto.ssl_mode)?.into(),
+            ssl_mode: mapper
+                .resolve_typed::<SslModeDto>(&dto.ssl_mode)
+                .await?
+                .into(),
             table_keys: dto
                 .table_keys
                 .iter()
