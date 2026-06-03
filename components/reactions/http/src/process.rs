@@ -145,7 +145,9 @@ pub(crate) async fn process_result(
 
     // Render body
     let body = if !call_spec.template.is_empty() {
-        debug!("[{reaction_name}] Rendering body template for query '{query_name}' ({result_type})");
+        debug!(
+            "[{reaction_name}] Rendering body template for query '{query_name}' ({result_type})"
+        );
         match handlebars.render_template(&call_spec.template, &context) {
             Ok(b) => b,
             Err(e) => {

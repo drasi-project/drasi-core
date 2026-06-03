@@ -285,7 +285,13 @@ async fn standard_update_template_receives_before_and_after() {
             .unwrap(),
     );
     r.start().await.unwrap();
-    enqueue_update(&r, "q1", json!({"id":1,"v":"old"}), json!({"id":1,"v":"new"})).await;
+    enqueue_update(
+        &r,
+        "q1",
+        json!({"id":1,"v":"old"}),
+        json!({"id":1,"v":"new"}),
+    )
+    .await;
     wait_for_requests(&server, 1, 2000).await;
     r.stop().await.unwrap();
 
