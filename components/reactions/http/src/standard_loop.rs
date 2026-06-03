@@ -74,7 +74,7 @@ pub(crate) async fn run_standard_loop(
             };
 
             let spec_owned: HttpCallSpec;
-            let spec: &HttpCallSpec = match config.get_template_spec(query_name, op) {
+            let spec: &HttpCallSpec = match config.get_template_spec_with_suffix(query_name, op) {
                 Some(s) => s,
                 None => {
                     spec_owned = synthesized_default_spec(query_name);

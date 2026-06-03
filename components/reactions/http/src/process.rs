@@ -123,6 +123,23 @@ pub(crate) async fn process_result(
     };
     let full_url =
         if rendered_spec_url.starts_with("http://") || rendered_spec_url.starts_with("https://") {
+            // SSRF guard: a rendered absolute URL may incorporate graph-data
+            // fields. Only allow it when its host matches the configured
+            // base_url host; otherwise fall back to the safe default POST.
+            let base_host = reqwest::Url::parse(base_url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned));
+            let resolved_host = reqwest::Url::parse(&rendered_spec_url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned));
+            if base_host.is_none() || base_host != resolved_host {
+                warn!(
+                    "[{reaction_name}] Rendered URL '{rendered_spec_url}' host does not match \
+                     base_url '{base_url}' host — falling back to /changes/{query_name}"
+                );
+                return fallback_post(client, base_url, token, data, query_name, reaction_name)
+                    .await;
+            }
             rendered_spec_url
         } else {
             format!("{base_url}{rendered_spec_url}")
@@ -130,10 +147,7 @@ pub(crate) async fn process_result(
 
     // Render body
     let body = if !call_spec.template.is_empty() {
-        debug!(
-            "[{}] Rendering body template: {} with context: {:?}",
-            reaction_name, call_spec.template, context
-        );
+        debug!("[{reaction_name}] Rendering body template for query '{query_name}' ({result_type})");
         match handlebars.render_template(&call_spec.template, &context) {
             Ok(b) => b,
             Err(e) => {

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use log::{error, info};
+use log::{error, info, warn};
 use reqwest::Client;
 
 use drasi_lib::channels::ComponentStatus;
@@ -28,7 +28,7 @@ use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
-use crate::adaptive_batcher::AdaptiveBatchConfig as RuntimeAdaptiveConfig;
+use crate::adaptive_batcher::AdaptiveBatcherConfig;
 use crate::adaptive_loop::run_adaptive_loop;
 use crate::config::{AdaptiveBatchConfig, HttpReactionConfig};
 use crate::process::build_handlebars;
@@ -87,13 +87,17 @@ impl HttpReaction {
         }
     }
 
-    /// Build the always-on HTTP/2 pooled reqwest client.
+    /// Build the pooled reqwest client.
+    ///
+    /// HTTP/2 is negotiated automatically via ALPN for `https://` targets;
+    /// `http://` targets use HTTP/1.1. We deliberately do **not** force
+    /// `http2_prior_knowledge()` (cleartext h2c), which would break the
+    /// common case of HTTP/1.1 webhooks and TLS endpoints.
     fn build_client(&self) -> Result<Client> {
         Ok(Client::builder()
             .timeout(Duration::from_millis(self.config.timeout_ms))
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
-            .http2_prior_knowledge()
             .build()?)
     }
 }
@@ -101,8 +105,8 @@ impl HttpReaction {
 /// Convert the public `AdaptiveBatchConfig` (scalar fields used in
 /// config / serialization) to the runtime `AdaptiveBatchConfig` used by
 /// the batcher (`Duration`-based + enable flag).
-pub(crate) fn to_runtime_adaptive(cfg: &AdaptiveBatchConfig) -> RuntimeAdaptiveConfig {
-    RuntimeAdaptiveConfig {
+pub(crate) fn to_runtime_adaptive(cfg: &AdaptiveBatchConfig) -> AdaptiveBatcherConfig {
+    AdaptiveBatcherConfig {
         min_batch_size: cfg.adaptive_min_batch_size,
         max_batch_size: cfg.adaptive_max_batch_size,
         throughput_window: Duration::from_millis(cfg.adaptive_window_size as u64 * 100),
@@ -151,6 +155,15 @@ impl Reaction for HttpReaction {
             "[{}] HTTP reaction starting in {mode} mode - base URL: {}",
             self.base.id, self.config.base_url
         );
+
+        if self.config.batch_endpoint.is_some() && self.config.adaptive.is_none() {
+            warn!(
+                "[{}] `batchEndpoint` is configured but `adaptive` is not enabled — \
+                 batchEndpoint is ignored in standard (per-result) mode. Set `adaptive` \
+                 to enable coalesced batch delivery.",
+                self.base.id
+            );
+        }
 
         self.base
             .set_status(

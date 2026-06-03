@@ -29,7 +29,7 @@ This crate replaces the previous `drasi-reaction-http-adaptive` crate; both stan
 ## Features
 
 - Forward Drasi continuous-query result diffs to any HTTP endpoint.
-- Handlebars templates for the URL, method, body, and headers — per operation (`add`, `update`, `delete`, `control`).
+- Handlebars templates for the URL, method, body, and headers — per operation (`added`, `updated`, `deleted`).
 - Per-query template overrides plus a shared `outputTemplates` default.
 - Optional **adaptive batching** that dynamically scales batch size between configurable min/max bounds based on observed throughput.
 - Optional **batch endpoint** that coalesces multi-result batches into a single POST, reducing overhead for fan-out scenarios.
@@ -70,10 +70,10 @@ spec:
     timeoutMs: 5000
     batchEndpoint: "/events/batch"
     adaptive:
-      adaptive_min_batch_size: 50
-      adaptive_max_batch_size: 2000
-      adaptive_window_size: 100
-      adaptive_batch_timeout_ms: 500
+      adaptiveMinBatchSize: 50
+      adaptiveMaxBatchSize: 2000
+      adaptiveWindowSize: 100
+      adaptiveBatchTimeoutMs: 500
     queries:
       - queryId: orders-by-region
 ```
@@ -82,26 +82,24 @@ spec:
 
 ## Configuration reference
 
-All top-level fields are camelCase. `config_version` is `2.0.0`.
+All top-level fields are camelCase.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `baseUrl` | `string` | _required_ | Base URL prepended to every per-call URL. |
+| `baseUrl` | `string` | `http://localhost` | Base URL prepended to every relative per-call URL. Optional. |
 | `token` | `string` | _none_ | Bearer token sent as `Authorization: Bearer <token>`. |
 | `timeoutMs` | `u64` | `5000` | Per-request HTTP timeout. |
-| `outputTemplates` | object | _none_ | Shared per-operation templates (see [Templating](#templating)). |
-| `batchEndpoint` | `string` | _none_ | When set **and** the adaptive loop sees a batch with results from a query >1, POST the entire batch to `{baseUrl}{batchEndpoint}` as a single coalesced payload. |
+| `outputTemplates` | object | _none_ | Shared per-operation templates and per-query routes (see [Templating](#templating)). |
+| `batchEndpoint` | `string` | _none_ | When set **and** `adaptive` is enabled, every coalesced batch is POSTed to `{baseUrl}{batchEndpoint}` as a single payload. Ignored in standard mode (a warning is logged at startup). |
 | `adaptive` | object | _none_ | When present, enables adaptive batching (see [Adaptive batching](#adaptive-batching)). |
-| `queries` | array | `[]` | Per-query overrides (see [Per-query routing](#per-query-routing)). |
 
-### `outputTemplates` and per-query `outputTemplates`
+### `outputTemplates` (and per-query `routes`)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `add` | `TemplateSpec<HttpCallExt>` | Template applied when a result is added. |
-| `update` | `TemplateSpec<HttpCallExt>` | Template applied when a result is updated. |
-| `delete` | `TemplateSpec<HttpCallExt>` | Template applied when a result is deleted. |
-| `control` | `TemplateSpec<HttpCallExt>` | Template applied for control events. |
+| `added` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is added. |
+| `updated` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is updated. |
+| `deleted` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is deleted. |
 
 Each `TemplateSpec<HttpCallExt>` looks like:
 
@@ -118,22 +116,23 @@ headers:
 
 ## Templating
 
-Templates use [Handlebars](https://handlebarsjs.com/) syntax. The following data is available in the template context:
+Templates use [Handlebars](https://handlebarsjs.com/) syntax. The context exposes the following variables, depending on the operation:
 
-| Variable | Meaning |
-|----------|---------|
-| `queryId` | The query identifier. |
-| `sequence` | Result sequence number. |
-| `timestamp` | Result timestamp (RFC 3339). |
-| `data` | The result row (`Add`/`Update`/`Delete` payload). |
+| Variable | Available for | Meaning |
+|----------|---------------|---------|
+| `after` | added, updated | The new/current row payload. |
+| `before` | updated, deleted | The previous row payload. |
+| `data` | updated, and non-row results | The raw diff payload. |
+| `query_name` | all | The query identifier. |
+| `operation` | all | The operation: `ADD`, `UPDATE`, or `DELETE`. |
 
 Example body template:
 
 ```handlebars
 {
-  "queryId": "{{queryId}}",
-  "sequence": {{sequence}},
-  "data": {{json data}}
+  "query": "{{query_name}}",
+  "operation": "{{operation}}",
+  "row": {{json after}}
 }
 ```
 
@@ -143,25 +142,34 @@ When `url` or `method` or `headers` are templated, the same context applies.
 
 ## Per-query routing
 
-The `queries` array lets each query opt into per-query template overrides:
+The `outputTemplates.routes` map lets each query opt into per-query template
+overrides, keyed by query id; `outputTemplates.defaultTemplate` applies to any
+query without a matching route:
 
 ```yaml
-queries:
-  - queryId: orders-by-region
-    outputTemplates:
-      add:
-        template: '{"event":"created","order":{{json data}}}'
+outputTemplates:
+  defaultTemplate:
+    added:
+      template: '{{json after}}'
+      url: "/events"
+      method: POST
+  routes:
+    orders-by-region:
+      added:
+        template: '{"event":"created","order":{{json after}}}'
         url: "/orders"
         method: POST
-      delete:
-        template: '{"event":"cancelled","orderId":"{{data.id}}"}'
-        url: "/orders/{{data.id}}"
+      deleted:
+        template: '{"event":"cancelled","orderId":"{{before.id}}"}'
+        url: "/orders/{{before.id}}"
         method: DELETE
-  - queryId: shipments
-    # falls back to top-level `outputTemplates`
 ```
 
-If neither a per-query template nor a top-level template matches the operation, the reaction falls back to a built-in default: POST the raw diff to `{baseUrl}/changes/{queryId}`.
+Route keys are matched against the full query id first; for dotted ids
+(e.g. `source.query`) the last segment (`query`) is also tried before falling
+back to `defaultTemplate`. If neither a route nor a default template matches the
+operation, the reaction falls back to a built-in default: POST the raw diff to
+`{baseUrl}/changes/{queryId}`.
 
 ---
 
@@ -171,10 +179,10 @@ Set the `adaptive` block to enable an internal batcher that dynamically scales b
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `adaptive_min_batch_size` | `usize` | `1` | Lower bound on batch size. |
-| `adaptive_max_batch_size` | `usize` | `100` | Upper bound on batch size. |
-| `adaptive_window_size` | `usize` | `10` | Throughput sample window. |
-| `adaptive_batch_timeout_ms` | `u64` | `100` | Maximum time to wait before flushing a partial batch. |
+| `adaptiveMinBatchSize` | `usize` | `1` | Lower bound on batch size. |
+| `adaptiveMaxBatchSize` | `usize` | `100` | Upper bound on batch size. |
+| `adaptiveWindowSize` | `usize` | `10` | Throughput sample window in 100 ms units (e.g. `10` = 1 s, `50` = 5 s, `100` = 10 s). |
+| `adaptiveBatchTimeoutMs` | `u64` | `100` | Maximum time to wait before flushing a partial batch. |
 
 The adaptive loop:
 
@@ -182,23 +190,24 @@ The adaptive loop:
 2. Groups results into batches whose size is decided by the batcher's throughput monitor.
 3. Delivers each batch either (a) coalesced to `batchEndpoint`, or (b) fanned out per-route using the same templating rules as the standard loop.
 
-> **Tip** — when both `adaptive` and `batchEndpoint` are set, the loop will still fan out per-route if every query in a batch only contributed one result (single-result batches don't benefit from coalescing).
+> **Tip** — when both `adaptive` and `batchEndpoint` are set, every coalesced batch is POSTed to `batchEndpoint` as a single payload. When `batchEndpoint` is not set, each batch is fanned out per-route instead.
 
 ---
 
 ## Batch endpoint coalescing
 
-When `batchEndpoint` is set, the adaptive loop POSTs a single JSON payload like:
+When `batchEndpoint` is set, the adaptive loop POSTs a single JSON array, one
+entry per coalesced query:
 
 ```json
-{
-  "batchSize": 12,
-  "results": [
-    { "queryId": "orders-by-region", "sequence": 41, "data": [...] },
-    { "queryId": "orders-by-region", "sequence": 42, "data": [...] },
-    ...
-  ]
-}
+[
+  {
+    "query_id": "orders-by-region",
+    "results": [ { "type": "ADD", "data": { } } ],
+    "timestamp": "2026-01-01T00:00:00+00:00",
+    "count": 1
+  }
+]
 ```
 
 The URL is `{baseUrl}{batchEndpoint}`. The endpoint must accept POST.
@@ -235,36 +244,54 @@ Drasi's secret-store integrations (`file`, `keyring`, Azure Key Vault) all work 
 Use `HttpReactionBuilder` to construct an `HttpReaction` programmatically (for embedded use or tests):
 
 ```rust
-use drasi_reaction_http::HttpReactionBuilder;
-use drasi_lib::reactions::common::config::OperationType;
+use drasi_reaction_http::{
+    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec,
+};
+use std::collections::HashMap;
 
 let reaction = HttpReactionBuilder::new("my-http")
-    .with_base_url("http://localhost:8080".to_string())
+    .with_queries(vec!["orders".to_string()])
+    .with_base_url("http://localhost:8080")
     .with_timeout_ms(5_000)
-    .with_token(Some("secret".to_string()))
-    .with_default_template(
-        OperationType::Add,
-        /* template */ r#"{"data":{{json data}}}"#.to_string(),
-        /* url */ Some("/events".to_string()),
-        /* method */ Some("POST".to_string()),
-        /* headers */ None,
-    )
+    .with_token("secret")
+    .with_default_template(HttpQueryConfig {
+        added: Some(TemplateSpec {
+            template: r#"{"data":{{json after}}}"#.to_string(),
+            extension: HttpCallExt {
+                url: "/events".to_string(),
+                method: "POST".to_string(),
+                headers: HashMap::new(),
+            },
+        }),
+        ..Default::default()
+    })
     .with_query_template(
         "orders",
-        OperationType::Delete,
-        r#"{"orderId":"{{data.id}}"}"#.to_string(),
-        Some("/orders/{{data.id}}".to_string()),
-        Some("DELETE".to_string()),
-        None,
+        HttpQueryConfig {
+            deleted: Some(TemplateSpec {
+                template: r#"{"orderId":"{{before.id}}"}"#.to_string(),
+                extension: HttpCallExt {
+                    url: "/orders/{{before.id}}".to_string(),
+                    method: "DELETE".to_string(),
+                    headers: HashMap::new(),
+                },
+            }),
+            ..Default::default()
+        },
     )
-    .with_adaptive(true)
-    .with_min_batch_size(10)
-    .with_max_batch_size(500)
-    .with_window_size(50)
-    .with_batch_timeout_ms(250)
-    .with_batch_endpoint(Some("/events/batch".to_string()))
+    .with_adaptive(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 10,
+        adaptive_max_batch_size: 500,
+        adaptive_window_size: 50,
+        adaptive_batch_timeout_ms: 250,
+    })
+    .with_batch_endpoint("/events/batch")
     .build()?;
 ```
+
+> The convenience setters (`with_min_batch_size`, `with_max_batch_size`,
+> `with_window_size`, `with_batch_timeout_ms`) enable adaptive mode implicitly
+> if it is not already enabled.
 
 ---
 

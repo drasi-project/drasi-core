@@ -47,11 +47,50 @@ async fn enqueue_add(r: &HttpReaction, query_id: &str, data: serde_json::Value) 
     r.enqueue_query_result(qr).await.expect("enqueue");
 }
 
+async fn enqueue_update(
+    r: &HttpReaction,
+    query_id: &str,
+    before: serde_json::Value,
+    after: serde_json::Value,
+) {
+    let qr = make_query_result(
+        query_id,
+        vec![ResultDiff::Update {
+            data: json!({}),
+            before,
+            after,
+            grouping_keys: None,
+            row_signature: 0,
+        }],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+}
+
+async fn enqueue_delete(r: &HttpReaction, query_id: &str, data: serde_json::Value) {
+    let qr = make_query_result(
+        query_id,
+        vec![ResultDiff::Delete {
+            data,
+            row_signature: 0,
+        }],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+}
+
+/// Poll until `expected` requests have been observed, failing the test (with
+/// the observed count) if the deadline elapses first. This gives a clear
+/// synchronization point instead of silently returning on timeout.
 async fn wait_for_requests(server: &wiremock::MockServer, expected: usize, max_ms: u64) {
     let deadline = std::time::Instant::now() + Duration::from_millis(max_ms);
-    while std::time::Instant::now() < deadline {
-        if server.received_requests().await.unwrap_or_default().len() >= expected {
+    loop {
+        let count = server.received_requests().await.unwrap_or_default().len();
+        if count >= expected {
             return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out after {max_ms}ms waiting for {expected} request(s); observed {count}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -207,6 +246,135 @@ async fn standard_authorization_header_sent_when_token_set() {
             .get("authorization")
             .map(|v| v.to_str().unwrap()),
         Some("Bearer xyz")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE / DELETE context building
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn standard_update_template_receives_before_and_after() {
+    let server = mock_server::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/items/1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let spec = TemplateSpec {
+        template: r#"{"old":"{{before.v}}","new":"{{after.v}}"}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/items/{{after.id}}".to_string(),
+            method: "PUT".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("standard-update")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    updated: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_update(&r, "q1", json!({"id":1,"v":"old"}), json!({"id":1,"v":"new"})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs[0].url.path(), "/items/1");
+    assert_eq!(reqs[0].method.as_str(), "PUT");
+    let body = std::str::from_utf8(&reqs[0].body).unwrap();
+    assert_eq!(body, r#"{"old":"old","new":"new"}"#);
+}
+
+#[tokio::test]
+async fn standard_delete_template_receives_before() {
+    let server = mock_server::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/items/7"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let spec = TemplateSpec {
+        template: r#"{"gone":{{before.id}}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/items/{{before.id}}".to_string(),
+            method: "DELETE".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    let r = Arc::new(
+        HttpReaction::builder("standard-delete")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    deleted: Some(spec),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+    enqueue_delete(&r, "q1", json!({"id":7})).await;
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(reqs[0].url.path(), "/items/7");
+    assert_eq!(reqs[0].method.as_str(), "DELETE");
+    let body = std::str::from_utf8(&reqs[0].body).unwrap();
+    assert_eq!(body, r#"{"gone":7}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Server error handling
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn standard_continues_after_server_error_response() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("standard-5xx")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    // First result gets a 500; the reaction should log and keep running.
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+    wait_for_requests(&server, 1, 2000).await;
+
+    // A second result must still be delivered (the loop did not exit).
+    enqueue_add(&r, "q1", json!({"id": 2})).await;
+    wait_for_requests(&server, 2, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert!(
+        reqs.len() >= 2,
+        "reaction should keep processing after a 5xx response, got {} requests",
+        reqs.len()
     );
 }
 

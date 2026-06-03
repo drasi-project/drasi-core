@@ -166,6 +166,12 @@ impl HttpReactionBuilder {
         self.with_adaptive(AdaptiveBatchConfig::default())
     }
 
+    /// Set the minimum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if it is not
+    /// already enabled (creating a default [`AdaptiveBatchConfig`]). To
+    /// configure tuning without surprises, prefer
+    /// [`with_adaptive`](Self::with_adaptive) with an explicit config.
     pub fn with_min_batch_size(mut self, n: usize) -> Self {
         let a = self
             .config
@@ -175,6 +181,10 @@ impl HttpReactionBuilder {
         self
     }
 
+    /// Set the maximum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if it is not
+    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
     pub fn with_max_batch_size(mut self, n: usize) -> Self {
         let a = self
             .config
@@ -184,6 +194,10 @@ impl HttpReactionBuilder {
         self
     }
 
+    /// Set the adaptive throughput window size (in 100 ms units).
+    ///
+    /// **Side effect:** calling this enables adaptive mode if it is not
+    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
     pub fn with_window_size(mut self, n: usize) -> Self {
         let a = self
             .config
@@ -193,6 +207,10 @@ impl HttpReactionBuilder {
         self
     }
 
+    /// Set the adaptive batch flush timeout (milliseconds).
+    ///
+    /// **Side effect:** calling this enables adaptive mode if it is not
+    /// already enabled (creating a default [`AdaptiveBatchConfig`]).
     pub fn with_batch_timeout_ms(mut self, ms: u64) -> Self {
         let a = self
             .config
@@ -202,8 +220,13 @@ impl HttpReactionBuilder {
         self
     }
 
-    /// Set the batch endpoint path. Has no effect unless adaptive mode
-    /// is enabled.
+    /// Set the batch endpoint path. Coalesced batches are POSTed to
+    /// `{baseUrl}{endpoint}` as a single payload.
+    ///
+    /// Has no effect unless adaptive mode is enabled
+    /// (via [`with_adaptive`](Self::with_adaptive) or one of the
+    /// `with_*_batch_*` tuning methods). A warning is logged at startup if
+    /// a batch endpoint is set without adaptive mode.
     pub fn with_batch_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.config.batch_endpoint = Some(endpoint.into());
         self

@@ -21,13 +21,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use handlebars::Handlebars;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use reqwest::Client;
 
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::reactions::common::base::ReactionBase;
 
-use crate::adaptive_batcher::{AdaptiveBatchConfig as RuntimeAdaptiveConfig, AdaptiveBatcher};
+use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
 use crate::config::{
     synthesized_default_spec, HttpCallSpec, HttpReactionConfig, OperationType, TemplateRouting,
@@ -41,7 +41,7 @@ pub(crate) async fn run_adaptive_loop(
     reaction_name: String,
     base: ReactionBase,
     config: HttpReactionConfig,
-    runtime_adaptive: RuntimeAdaptiveConfig,
+    runtime_adaptive: AdaptiveBatcherConfig,
     client: Client,
     handlebars: Handlebars<'static>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -131,7 +131,15 @@ pub(crate) async fn run_adaptive_loop(
     }
 
     drop(batch_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), batcher_handle).await;
+    if tokio::time::timeout(Duration::from_secs(5), batcher_handle)
+        .await
+        .is_err()
+    {
+        warn!(
+            "[{reaction_name}] Adaptive batcher did not finish within the 5 s shutdown window — \
+             in-flight batches may have been dropped"
+        );
+    }
 
     info!("[{reaction_name}] HTTP adaptive loop stopped");
     status_handle
@@ -157,20 +165,19 @@ async fn deliver_batch(
         by_query.entry(qid).or_default().extend(results);
     }
 
-    // If a batch_endpoint is configured and any query has multiple results,
-    // use the coalesced batch POST.
+    // If a batch_endpoint is configured, POST every coalesced batch to it as
+    // a single payload — regardless of per-query result counts. An operator
+    // who configures a batch endpoint expects all adaptive-mode traffic there.
     if let Some(batch_endpoint) = config.batch_endpoint.as_ref() {
-        if by_query.values().any(|v| v.len() > 1) {
-            return send_coalesced_batch(
-                client,
-                &config.base_url,
-                batch_endpoint,
-                &config.token,
-                by_query,
-                reaction_name,
-            )
-            .await;
-        }
+        return send_coalesced_batch(
+            client,
+            &config.base_url,
+            batch_endpoint,
+            &config.token,
+            by_query,
+            reaction_name,
+        )
+        .await;
     }
 
     // Otherwise, fan out per-result through the standard rendering path.
@@ -186,7 +193,7 @@ async fn deliver_batch(
             };
 
             let spec_owned: HttpCallSpec;
-            let spec: &HttpCallSpec = match config.get_template_spec(&query_id, op) {
+            let spec: &HttpCallSpec = match config.get_template_spec_with_suffix(&query_id, op) {
                 Some(s) => s,
                 None => {
                     spec_owned = synthesized_default_spec(&query_id);

@@ -34,7 +34,7 @@ Reactions are responsible for:
 | Plugin | Description | Directory |
 |--------|-------------|-----------|
 | `drasi-reaction-log` | Console logging with template support | `log/` |
-| `drasi-reaction-http` | HTTP POST to external endpoints (with optional adaptive batching) | `http/` |
+| `drasi-reaction-http` | HTTP webhooks to external endpoints (with optional adaptive batching) | `http/` |
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
