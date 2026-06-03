@@ -1,6 +1,6 @@
 # gRPC Reaction
 
-`drasi-reaction-grpc` streams Drasi continuous-query results to a downstream gRPC service using the `QueryResultStream` service defined in [`proto/query_result_stream.proto`](proto/query_result_stream.proto).
+`drasi-reaction-grpc` streams Drasi continuous-query results to a downstream gRPC service using the `ReactionService` defined in [`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto).
 
 It supports two batching strategies (selected by configuration) and an optional Handlebars-based output template system that lets you reshape each result item before it is sent on the wire.
 
@@ -44,15 +44,15 @@ batching:
   batchFlushTimeoutMs: 1000   # default 1000
 ```
 
-**Adaptive batching** (snake_case fields — these mirror the shared `AdaptiveBatchConfig` used by all adaptive reactions):
+**Adaptive batching** (camelCase fields, matching the rest of the config schema):
 
 ```yaml
 batching:
   mode: adaptive
-  adaptive_min_batch_size: 10         # default 10
-  adaptive_max_batch_size: 1000       # default 1000
-  adaptive_window_size: 10            # default 10 (= 1 second; units are 100 ms)
-  adaptive_batch_timeout_ms: 500      # default 500
+  adaptiveMinBatchSize: 10          # default 1
+  adaptiveMaxBatchSize: 1000        # default 100
+  adaptiveWindowSize: 10            # default 10 (= 1 second; units are 100 ms)
+  adaptiveBatchTimeoutMs: 500       # default 1000
 ```
 
 ### Output Templates (optional)
@@ -74,10 +74,10 @@ Handlebars context fields available in a template:
 
 | Field | Description |
 |---|---|
-| `before` | The previous row state (object / map, may be empty for `added`). |
-| `after`  | The new row state (object / map, may be empty for `deleted`). |
+| `before` | The previous row state (object / map, absent for `ADD`). |
+| `after`  | The new row state (object / map, absent for `DELETE`). |
 | `data`   | The full diff payload as JSON (the same shape that would be sent without a template). |
-| `operation` | `added`, `updated`, or `deleted`. |
+| `operation` | `ADD`, `UPDATE`, `DELETE`, `AGGREGATION`, or `NOOP`. |
 | `query_id` | The originating query id. |
 
 A `json` helper is registered so templates can emit a nested object/array as JSON (e.g. `{{json after}}`).
@@ -105,10 +105,10 @@ batching:
 endpoint: grpc://collector:50052
 batching:
   mode: adaptive
-  adaptive_min_batch_size: 50
-  adaptive_max_batch_size: 2000
-  adaptive_window_size: 20
-  adaptive_batch_timeout_ms: 250
+  adaptiveMinBatchSize: 50
+  adaptiveMaxBatchSize: 2000
+  adaptiveWindowSize: 20
+  adaptiveBatchTimeoutMs: 250
 outputTemplates:
   defaultTemplate:
     added:   { template: '{"op":"add","row":{{json after}}}' }
@@ -128,13 +128,13 @@ use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpe
 let reaction = GrpcReaction::builder("my-grpc-reaction")
     .with_endpoint("grpc://collector:50052")
     .with_fixed_batching(/* batch_size */ 200, /* flush_ms */ 500)
-    .with_metadata([("x-api-key".into(), "abc".into())].into())
+    .with_metadata("x-api-key", "abc")
     .build()?;
 
 // Adaptive batching with per-query templates.
 let templates = OutputTemplates {
     default_template: Some(QueryConfig {
-        added: Some(TemplateSpec::with_template(
+        added: Some(TemplateSpec::new(
             r#"{"op":"add","row":{{json after}}}"#,
         )),
         ..Default::default()
@@ -151,8 +151,8 @@ let reaction = GrpcReaction::builder("my-grpc-reaction")
 
 ## Operational Notes
 
-- The reaction opens a single bidirectional `StreamResults` RPC and reuses it across batches. On a stream-level error, it reconnects with exponential backoff bounded by `connectionRetryAttempts` × `initialConnectionTimeoutMs`.
-- `maxRetries` controls per-batch retry on transient send errors. Batches that exhaust retries are logged and dropped — the stream is then reconnected.
+- The reaction sends each batch as a unary `ProcessResults` RPC on the `ReactionService`. On a connection-level error it reconnects with exponential backoff bounded by `connectionRetryAttempts` × `initialConnectionTimeoutMs`.
+- `maxRetries` controls per-batch retry on transient send errors. Batches that exhaust retries are logged and dropped, and the client reconnects before the next batch.
 - All event/result delivery is best-effort at-least-once at the gRPC level; downstream consumers should be idempotent.
 - The reaction processing task is supervised by the host runtime via `ComponentStatusHandle`; a panic surfaces as a component failure.
 

@@ -36,7 +36,7 @@ Reactions are responsible for:
 | `drasi-reaction-log` | Console logging with template support | `log/` |
 | `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
 | `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
-| `drasi-reaction-grpc` | gRPC streaming delivery with fixed or adaptive batching, plus optional output templates | `grpc/` |
+| `drasi-reaction-grpc` | gRPC streaming with fixed or adaptive batching | `grpc/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
 | `drasi-reaction-dashboard` | WebSocket dashboard UI with visual designer | `dashboard/` |
 | `drasi-reaction-mcp` | MCP server with resource subscriptions | `mcp/` |
