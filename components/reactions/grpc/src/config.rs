@@ -14,9 +14,7 @@
 
 //! Configuration types for the unified gRPC reaction.
 
-use drasi_lib::reactions::common::{
-    AdaptiveBatchConfig, QueryConfig, TemplateRouting,
-};
+use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateRouting};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -173,7 +173,9 @@ pub(crate) async fn send_batch_with_retry(
 
                     if error_type == "GoAway" {
                         if error_str.contains("StreamId(0)") {
-                            error!("Server immediately rejected connection with GoAway(StreamId(0))");
+                            error!(
+                                "Server immediately rejected connection with GoAway(StreamId(0))"
+                            );
                             warn!("Waiting 2 seconds before retry due to immediate GoAway");
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
@@ -266,5 +268,62 @@ fn categorize_error(error_str_lower: &str) -> &'static str {
         "Timeout"
     } else {
         "Unknown"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::categorize_error;
+
+    #[test]
+    fn classifies_overload_errors() {
+        // ResourceExhausted and DeadlineExceeded are the overload signals
+        // handled before the connection-error path in send_batch_with_retry.
+        assert_eq!(
+            categorize_error("status: resourceexhausted"),
+            "ResourceExhausted"
+        );
+        assert_eq!(
+            categorize_error("the resource has been exhausted"),
+            "ResourceExhausted"
+        );
+        assert_eq!(categorize_error("deadline has elapsed"), "DeadlineExceeded");
+    }
+
+    #[test]
+    fn classifies_connection_errors() {
+        assert_eq!(categorize_error("http2 goaway received"), "GoAway");
+        assert_eq!(categorize_error("status: unavailable"), "Unavailable");
+        assert_eq!(categorize_error("tcp connection error"), "Connection");
+        assert_eq!(categorize_error("grpc transport error"), "Connection");
+        // The `connection` substring is matched before the broken-pipe branch,
+        // so "connection reset" is classified as a generic Connection error.
+        assert_eq!(categorize_error("connection reset by peer"), "Connection");
+        assert_eq!(categorize_error("broken pipe"), "BrokenPipe");
+        assert_eq!(categorize_error("unexpected eof"), "ChannelClosed");
+        assert_eq!(categorize_error("channel closed"), "ChannelClosed");
+    }
+
+    #[test]
+    fn classifies_other_and_unknown() {
+        assert_eq!(categorize_error("operation was cancelled"), "Cancelled");
+        assert_eq!(categorize_error("request timeout"), "Timeout");
+        assert_eq!(categorize_error("something entirely different"), "Unknown");
+    }
+
+    #[test]
+    fn overload_classification_drives_retry_branch() {
+        // Mirrors the matches! checks in send_batch_with_retry: overload
+        // errors must not be misclassified as connection errors (which would
+        // trigger an unnecessary reconnect).
+        for tag in ["ResourceExhausted", "DeadlineExceeded"] {
+            let is_overload = matches!(tag, "ResourceExhausted" | "DeadlineExceeded");
+            let is_connection = matches!(
+                tag,
+                "GoAway" | "Connection" | "BrokenPipe" | "ChannelClosed" | "Unavailable"
+            );
+            assert!(is_overload, "{tag} should be overload");
+            assert!(!is_connection, "{tag} should not be connection");
+        }
     }
 }

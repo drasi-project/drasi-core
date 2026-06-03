@@ -256,3 +256,180 @@ pub(crate) fn build_proto_item(
         after: after.as_ref().map(convert_json_to_proto_struct),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::OutputTemplates;
+    use drasi_lib::reactions::common::{QueryConfig, TemplateRouting, TemplateSpec};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn add(data: Value) -> ResultDiff {
+        ResultDiff::Add {
+            data,
+            row_signature: 0,
+        }
+    }
+
+    fn delete(data: Value) -> ResultDiff {
+        ResultDiff::Delete {
+            data,
+            row_signature: 0,
+        }
+    }
+
+    fn update(before: Value, after: Value) -> ResultDiff {
+        ResultDiff::Update {
+            data: json!({"unused": true}),
+            before,
+            after,
+            grouping_keys: None,
+            row_signature: 0,
+        }
+    }
+
+    fn query_config_add(template: &str) -> QueryConfig {
+        QueryConfig {
+            added: Some(TemplateSpec::new(template)),
+            updated: None,
+            deleted: None,
+        }
+    }
+
+    fn config_with(
+        default: Option<QueryConfig>,
+        routes: HashMap<String, QueryConfig>,
+    ) -> GrpcReactionConfig {
+        GrpcReactionConfig {
+            output_templates: Some(OutputTemplates {
+                default_template: default,
+                routes,
+            }),
+            ..GrpcReactionConfig::default()
+        }
+    }
+
+    #[test]
+    fn diff_to_op_maps_crud_and_skips_aggregation_noop() {
+        assert_eq!(diff_to_op(&add(json!({}))), Some(OperationType::Add));
+        assert_eq!(
+            diff_to_op(&update(json!({}), json!({}))),
+            Some(OperationType::Update)
+        );
+        assert_eq!(diff_to_op(&delete(json!({}))), Some(OperationType::Delete));
+        assert_eq!(diff_to_op(&ResultDiff::Noop), None);
+        assert_eq!(
+            diff_to_op(&ResultDiff::Aggregation {
+                before: None,
+                after: json!({}),
+                row_signature: 0
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn build_context_uses_uppercase_operation_and_injects_query_id() {
+        let ctx = build_context("orders", &add(json!({"id": 1})));
+        assert_eq!(ctx.get("operation").unwrap(), "ADD");
+        assert_eq!(ctx.get("query_id").unwrap(), "orders");
+        assert_eq!(ctx.get("after").unwrap(), &json!({"id": 1}));
+        assert!(ctx.get("before").is_none());
+
+        let ctx = build_context("orders", &delete(json!({"id": 2})));
+        assert_eq!(ctx.get("operation").unwrap(), "DELETE");
+        assert_eq!(ctx.get("before").unwrap(), &json!({"id": 2}));
+        assert!(ctx.get("after").is_none());
+
+        let ctx = build_context(
+            "orders",
+            &update(json!({"id": 3, "v": "old"}), json!({"id": 3, "v": "new"})),
+        );
+        assert_eq!(ctx.get("operation").unwrap(), "UPDATE");
+        assert_eq!(ctx.get("before").unwrap(), &json!({"id": 3, "v": "old"}));
+        assert_eq!(ctx.get("after").unwrap(), &json!({"id": 3, "v": "new"}));
+
+        let ctx = build_context("orders", &ResultDiff::Noop);
+        assert_eq!(ctx.get("operation").unwrap(), "NOOP");
+    }
+
+    #[test]
+    fn render_data_supports_json_helper_and_named_fields() {
+        let engine = TemplateEngine::new();
+        let spec = TemplateSpec::new(r#"{"snapshot":{{json after}},"q":"{{query_id}}"}"#);
+        let out = engine.render_data("orders", &spec, &add(json!({"id": 7, "name": "x"})));
+        assert_eq!(
+            out,
+            json!({"snapshot": {"id": 7, "name": "x"}, "q": "orders"})
+        );
+    }
+
+    #[test]
+    fn render_data_falls_back_to_raw_payload_on_non_json_output() {
+        let engine = TemplateEngine::new();
+        let spec = TemplateSpec::new("this is not json {{after.id}}");
+        let out = engine.render_data("q", &spec, &add(json!({"id": 7})));
+        assert_eq!(out, json!({"id": 7}));
+    }
+
+    #[test]
+    fn build_proto_item_sets_before_after_and_type_per_variant() {
+        let cfg = GrpcReactionConfig::default();
+
+        let item = build_proto_item(&cfg, None, "q", &add(json!({"id": 1})));
+        assert_eq!(item.r#type, "ADD");
+        assert!(item.after.is_some());
+        assert!(item.before.is_none());
+
+        let item = build_proto_item(&cfg, None, "q", &delete(json!({"id": 1})));
+        assert_eq!(item.r#type, "DELETE");
+        assert!(item.before.is_some());
+        assert!(item.after.is_none());
+
+        let item = build_proto_item(&cfg, None, "q", &update(json!({"id": 1}), json!({"id": 2})));
+        assert_eq!(item.r#type, "UPDATE");
+        assert!(item.before.is_some());
+        assert!(item.after.is_some());
+
+        let item = build_proto_item(&cfg, None, "q", &ResultDiff::Noop);
+        assert_eq!(item.r#type, "noop");
+        assert!(item.before.is_none());
+        assert!(item.after.is_none());
+    }
+
+    #[test]
+    fn route_template_takes_precedence_over_default() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "special".to_string(),
+            query_config_add(r#"{"src":"route"}"#),
+        );
+        let cfg = config_with(Some(query_config_add(r#"{"src":"default"}"#)), routes);
+        let engine = TemplateEngine::new();
+
+        let spec = cfg
+            .get_template_spec("special", OperationType::Add)
+            .unwrap();
+        assert_eq!(
+            engine.render_data("special", spec, &add(json!({}))),
+            json!({"src": "route"})
+        );
+
+        let spec = cfg.get_template_spec("other", OperationType::Add).unwrap();
+        assert_eq!(
+            engine.render_data("other", spec, &add(json!({}))),
+            json!({"src": "default"})
+        );
+    }
+
+    #[test]
+    fn empty_template_falls_back_to_raw_payload() {
+        let cfg = config_with(Some(query_config_add("   ")), HashMap::new());
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": 1})));
+        assert_eq!(item.r#type, "ADD");
+        assert!(item.data.is_some());
+        assert!(item.after.is_some());
+    }
+}

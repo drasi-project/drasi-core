@@ -154,6 +154,9 @@ impl GrpcReactionBuilder {
 }
 
 #[cfg(test)]
+mod test_server;
+
+#[cfg(test)]
 mod tests;
 
 /// Dynamic plugin entry point.

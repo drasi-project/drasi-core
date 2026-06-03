@@ -53,6 +53,7 @@ utoipa = { workspace = true }
 [dev-dependencies]
 serde_yaml = "0.9"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [build-dependencies]
 tonic-build = "0.11"
