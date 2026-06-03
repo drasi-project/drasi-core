@@ -148,11 +148,16 @@ impl From<&BatchingConfig> for BatchingConfigDto {
                 batch_size: Some(ConfigValue::Static(*batch_size)),
                 batch_flush_timeout_ms: Some(ConfigValue::Static(*batch_flush_timeout_ms)),
             },
-            BatchingConfig::Adaptive(a) => Self::Adaptive {
-                adaptive_min_batch_size: Some(ConfigValue::Static(a.adaptive_min_batch_size)),
-                adaptive_max_batch_size: Some(ConfigValue::Static(a.adaptive_max_batch_size)),
-                adaptive_window_size: Some(ConfigValue::Static(a.adaptive_window_size)),
-                adaptive_batch_timeout_ms: Some(ConfigValue::Static(a.adaptive_batch_timeout_ms)),
+            BatchingConfig::Adaptive {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            } => Self::Adaptive {
+                adaptive_min_batch_size: Some(ConfigValue::Static(*adaptive_min_batch_size)),
+                adaptive_max_batch_size: Some(ConfigValue::Static(*adaptive_max_batch_size)),
+                adaptive_window_size: Some(ConfigValue::Static(*adaptive_window_size)),
+                adaptive_batch_timeout_ms: Some(ConfigValue::Static(*adaptive_batch_timeout_ms)),
             },
         }
     }
@@ -353,7 +358,7 @@ async fn resolve_batching(
             } else {
                 defaults.adaptive_batch_timeout_ms
             };
-            Ok(BatchingConfig::Adaptive(AdaptiveBatchConfig {
+            Ok(BatchingConfig::adaptive(AdaptiveBatchConfig {
                 adaptive_min_batch_size: min,
                 adaptive_max_batch_size: max,
                 adaptive_window_size: win,

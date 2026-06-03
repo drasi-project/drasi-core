@@ -77,7 +77,7 @@ fn test_adaptive_builder() {
         .unwrap();
     assert!(matches!(
         reaction.config().batching,
-        BatchingConfig::Adaptive(_)
+        BatchingConfig::Adaptive { .. }
     ));
     let props = reaction.properties();
     let batching = props.get("batching").expect("batching present");
@@ -118,6 +118,35 @@ fn test_config_yaml_round_trip_adaptive() {
 endpoint: "grpc://example:50052"
 batching:
   mode: adaptive
+  adaptiveMinBatchSize: 25
+  adaptiveMaxBatchSize: 750
+  adaptiveWindowSize: 12
+  adaptiveBatchTimeoutMs: 1500
+"#;
+    let cfg: GrpcReactionConfig = serde_yaml::from_str(yaml).unwrap();
+    match cfg.batching {
+        BatchingConfig::Adaptive {
+            adaptive_min_batch_size,
+            adaptive_max_batch_size,
+            adaptive_window_size,
+            adaptive_batch_timeout_ms,
+        } => {
+            assert_eq!(adaptive_min_batch_size, 25);
+            assert_eq!(adaptive_max_batch_size, 750);
+            assert_eq!(adaptive_window_size, 12);
+            assert_eq!(adaptive_batch_timeout_ms, 1500);
+        }
+        _ => panic!("expected adaptive batching"),
+    }
+}
+
+#[test]
+fn test_config_yaml_adaptive_snake_case_alias() {
+    // Legacy snake_case keys must still deserialize for backward compatibility.
+    let yaml = r#"
+endpoint: "grpc://example:50052"
+batching:
+  mode: adaptive
   adaptive_min_batch_size: 25
   adaptive_max_batch_size: 750
   adaptive_window_size: 12
@@ -125,14 +154,63 @@ batching:
 "#;
     let cfg: GrpcReactionConfig = serde_yaml::from_str(yaml).unwrap();
     match cfg.batching {
-        BatchingConfig::Adaptive(a) => {
-            assert_eq!(a.adaptive_min_batch_size, 25);
-            assert_eq!(a.adaptive_max_batch_size, 750);
-            assert_eq!(a.adaptive_window_size, 12);
-            assert_eq!(a.adaptive_batch_timeout_ms, 1500);
+        BatchingConfig::Adaptive {
+            adaptive_min_batch_size,
+            adaptive_max_batch_size,
+            adaptive_window_size,
+            adaptive_batch_timeout_ms,
+        } => {
+            assert_eq!(adaptive_min_batch_size, 25);
+            assert_eq!(adaptive_max_batch_size, 750);
+            assert_eq!(adaptive_window_size, 12);
+            assert_eq!(adaptive_batch_timeout_ms, 1500);
         }
         _ => panic!("expected adaptive batching"),
     }
+}
+
+#[test]
+fn test_config_adaptive_serializes_camel_case() {
+    // The runtime config must serialize adaptive keys in camelCase, consistent
+    // with the descriptor DTO and the rest of the gRPC reaction config.
+    let cfg = GrpcReactionConfig {
+        batching: BatchingConfig::adaptive(AdaptiveBatchConfig {
+            adaptive_min_batch_size: 5,
+            adaptive_max_batch_size: 50,
+            adaptive_window_size: 8,
+            adaptive_batch_timeout_ms: 200,
+        }),
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&cfg).unwrap();
+    let batching = value.get("batching").expect("batching present");
+    assert_eq!(
+        batching.get("mode").and_then(|v| v.as_str()),
+        Some("adaptive")
+    );
+    assert_eq!(
+        batching
+            .get("adaptiveMinBatchSize")
+            .and_then(|v| v.as_u64()),
+        Some(5)
+    );
+    assert_eq!(
+        batching
+            .get("adaptiveMaxBatchSize")
+            .and_then(|v| v.as_u64()),
+        Some(50)
+    );
+    assert_eq!(
+        batching.get("adaptiveWindowSize").and_then(|v| v.as_u64()),
+        Some(8)
+    );
+    assert_eq!(
+        batching
+            .get("adaptiveBatchTimeoutMs")
+            .and_then(|v| v.as_u64()),
+        Some(200)
+    );
+    assert!(batching.get("adaptive_min_batch_size").is_none());
 }
 
 #[test]
@@ -459,7 +537,7 @@ mod integration {
         let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
         let config = config_for(
             server.endpoint.clone(),
-            BatchingConfig::Adaptive(AdaptiveBatchConfig::default()),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
             reaction_name: "test-grpc".to_string(),
@@ -494,7 +572,7 @@ mod integration {
         let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
         let config = config_for(
             server.endpoint.clone(),
-            BatchingConfig::Adaptive(AdaptiveBatchConfig::default()),
+            BatchingConfig::adaptive(AdaptiveBatchConfig::default()),
         );
         let handle = tokio::spawn(runner_adaptive::run(AdaptiveRunnerParams {
             reaction_name: "test-grpc".to_string(),

@@ -46,7 +46,28 @@ pub(crate) fn default_initial_connection_timeout_ms() -> u64 {
     10000
 }
 
+pub(crate) fn default_adaptive_min_batch_size() -> usize {
+    1
+}
+
+pub(crate) fn default_adaptive_max_batch_size() -> usize {
+    100
+}
+
+pub(crate) fn default_adaptive_window_size() -> usize {
+    10
+}
+
+pub(crate) fn default_adaptive_batch_timeout_ms() -> u64 {
+    1000
+}
+
 /// Batching strategy used by the gRPC reaction.
+///
+/// All keys serialize and deserialize in `camelCase` to stay consistent with the
+/// rest of the gRPC reaction configuration and its generated descriptor. The
+/// adaptive variant additionally accepts the legacy `snake_case` keys as aliases
+/// for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum BatchingConfig {
@@ -64,7 +85,32 @@ pub enum BatchingConfig {
     },
     /// Throughput-aware adaptive batching.
     #[serde(rename = "adaptive")]
-    Adaptive(AdaptiveBatchConfig),
+    Adaptive {
+        #[serde(
+            default = "default_adaptive_min_batch_size",
+            rename = "adaptiveMinBatchSize",
+            alias = "adaptive_min_batch_size"
+        )]
+        adaptive_min_batch_size: usize,
+        #[serde(
+            default = "default_adaptive_max_batch_size",
+            rename = "adaptiveMaxBatchSize",
+            alias = "adaptive_max_batch_size"
+        )]
+        adaptive_max_batch_size: usize,
+        #[serde(
+            default = "default_adaptive_window_size",
+            rename = "adaptiveWindowSize",
+            alias = "adaptive_window_size"
+        )]
+        adaptive_window_size: usize,
+        #[serde(
+            default = "default_adaptive_batch_timeout_ms",
+            rename = "adaptiveBatchTimeoutMs",
+            alias = "adaptive_batch_timeout_ms"
+        )]
+        adaptive_batch_timeout_ms: u64,
+    },
 }
 
 impl Default for BatchingConfig {
@@ -72,6 +118,36 @@ impl Default for BatchingConfig {
         BatchingConfig::Fixed {
             batch_size: default_batch_size(),
             batch_flush_timeout_ms: default_batch_flush_timeout_ms(),
+        }
+    }
+}
+
+impl BatchingConfig {
+    /// Builds the adaptive batching variant from a shared [`AdaptiveBatchConfig`].
+    pub(crate) fn adaptive(cfg: AdaptiveBatchConfig) -> Self {
+        BatchingConfig::Adaptive {
+            adaptive_min_batch_size: cfg.adaptive_min_batch_size,
+            adaptive_max_batch_size: cfg.adaptive_max_batch_size,
+            adaptive_window_size: cfg.adaptive_window_size,
+            adaptive_batch_timeout_ms: cfg.adaptive_batch_timeout_ms,
+        }
+    }
+
+    /// Returns the shared [`AdaptiveBatchConfig`] when this is the adaptive variant.
+    pub(crate) fn as_adaptive_config(&self) -> Option<AdaptiveBatchConfig> {
+        match *self {
+            BatchingConfig::Adaptive {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            } => Some(AdaptiveBatchConfig {
+                adaptive_min_batch_size,
+                adaptive_max_batch_size,
+                adaptive_window_size,
+                adaptive_batch_timeout_ms,
+            }),
+            BatchingConfig::Fixed { .. } => None,
         }
     }
 }

@@ -122,7 +122,7 @@ impl Reaction for GrpcReaction {
             self.config.endpoint,
             match &self.config.batching {
                 BatchingConfig::Fixed { .. } => "fixed",
-                BatchingConfig::Adaptive(_) => "adaptive",
+                BatchingConfig::Adaptive { .. } => "adaptive",
             }
         );
 
@@ -159,10 +159,10 @@ impl Reaction for GrpcReaction {
                 };
                 tokio::spawn(async move { runner_fixed::run(params).await })
             }
-            BatchingConfig::Adaptive(adaptive) => {
+            adaptive @ BatchingConfig::Adaptive { .. } => {
                 let params = AdaptiveRunnerParams {
                     reaction_name,
-                    adaptive: adaptive.clone(),
+                    adaptive: adaptive.as_adaptive_config().unwrap_or_default(),
                     base,
                     config,
                     shutdown_rx,

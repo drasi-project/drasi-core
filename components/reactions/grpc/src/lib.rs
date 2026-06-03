@@ -119,7 +119,7 @@ impl GrpcReactionBuilder {
         self,
         adaptive: drasi_lib::reactions::common::AdaptiveBatchConfig,
     ) -> Self {
-        self.with_batching(BatchingConfig::Adaptive(adaptive))
+        self.with_batching(BatchingConfig::adaptive(adaptive))
     }
 
     pub fn with_output_templates(mut self, templates: OutputTemplates) -> Self {
