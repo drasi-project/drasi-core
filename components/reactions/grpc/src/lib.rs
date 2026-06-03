@@ -16,7 +16,7 @@
 
 //! Unified gRPC reaction plugin for Drasi.
 
-pub mod adaptive_batcher;
+pub(crate) mod adaptive_batcher;
 pub mod config;
 pub mod connection;
 pub mod descriptor;

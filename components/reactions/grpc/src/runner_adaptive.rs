@@ -88,6 +88,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let template_engine = config
         .output_templates
         .as_ref()
+        .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
     let batcher_handle = tokio::spawn(async move {

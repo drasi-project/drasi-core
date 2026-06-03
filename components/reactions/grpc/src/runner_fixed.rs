@@ -63,6 +63,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
     let template_engine = config
         .output_templates
         .as_ref()
+        .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
     let status_handle = base.status_handle();
@@ -75,14 +76,8 @@ pub(crate) async fn run(params: FixedRunnerParams) {
 
     let mut consecutive_failures = 0u32;
     let mut last_connection_attempt = std::time::Instant::now();
-    let mut last_successful_send = std::time::Instant::now();
     let base_backoff = Duration::from_millis(500);
     let max_backoff = Duration::from_secs(30);
-
-    let mut _total_connection_attempts = 0u32;
-    let mut _successful_sends = 0u32;
-    let mut _failed_sends = 0u32;
-    let mut _goaway_count = 0u32;
 
     let mut batch = Vec::new();
     let mut last_query_id = String::new();
@@ -110,7 +105,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                         initial_connection_timeout_ms,
                         connection_retry_attempts,
                         &mut consecutive_failures,
-                        &mut _total_connection_attempts,
                         &mut last_connection_attempt,
                         base_backoff,
                         max_backoff,
@@ -130,10 +124,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                             &mut connection_state,
                             &mut consecutive_failures,
                             &mut last_connection_attempt,
-                            &mut last_successful_send,
-                            &mut _successful_sends,
-                            &mut _failed_sends,
-                            &mut _goaway_count,
                         )
                         .await;
                         if sent {
@@ -177,7 +167,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 initial_connection_timeout_ms,
                 connection_retry_attempts,
                 &mut consecutive_failures,
-                &mut _total_connection_attempts,
                 &mut last_connection_attempt,
                 base_backoff,
                 max_backoff,
@@ -197,10 +186,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     &mut connection_state,
                     &mut consecutive_failures,
                     &mut last_connection_attempt,
-                    &mut last_successful_send,
-                    &mut _successful_sends,
-                    &mut _failed_sends,
-                    &mut _goaway_count,
                 )
                 .await;
                 if sent {
@@ -223,7 +208,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                     initial_connection_timeout_ms,
                     connection_retry_attempts,
                     &mut consecutive_failures,
-                    &mut _total_connection_attempts,
                     &mut last_connection_attempt,
                     base_backoff,
                     max_backoff,
@@ -243,10 +227,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                         &mut connection_state,
                         &mut consecutive_failures,
                         &mut last_connection_attempt,
-                        &mut last_successful_send,
-                        &mut _successful_sends,
-                        &mut _failed_sends,
-                        &mut _goaway_count,
                     )
                     .await;
                     if sent {
@@ -293,10 +273,6 @@ pub(crate) async fn run(params: FixedRunnerParams) {
             &mut connection_state,
             &mut consecutive_failures,
             &mut last_connection_attempt,
-            &mut last_successful_send,
-            &mut _successful_sends,
-            &mut _failed_sends,
-            &mut _goaway_count,
         )
         .await;
     }
@@ -325,7 +301,6 @@ async fn ensure_client(
     initial_connection_timeout_ms: u64,
     connection_retry_attempts: u32,
     consecutive_failures: &mut u32,
-    total_connection_attempts: &mut u32,
     last_connection_attempt: &mut std::time::Instant,
     base_backoff: Duration,
     max_backoff: Duration,
@@ -348,7 +323,6 @@ async fn ensure_client(
         return;
     }
 
-    *total_connection_attempts += 1;
     *last_connection_attempt = std::time::Instant::now();
 
     match create_client_with_retry(
@@ -367,8 +341,8 @@ async fn ensure_client(
             *connection_state = ConnectionState::Failed;
             *consecutive_failures += 1;
             error!(
-                "State transition: Connecting -> Failed (attempt {}, total: {}): {e}",
-                *consecutive_failures, *total_connection_attempts
+                "State transition: Connecting -> Failed (attempt {}): {e}",
+                *consecutive_failures
             );
         }
     }
@@ -387,10 +361,6 @@ async fn send_with_swap(
     connection_state: &mut ConnectionState,
     consecutive_failures: &mut u32,
     last_connection_attempt: &mut std::time::Instant,
-    last_successful_send: &mut std::time::Instant,
-    successful_sends: &mut u32,
-    failed_sends: &mut u32,
-    goaway_count: &mut u32,
 ) -> bool {
     let mut retry_swaps = 0u32;
     loop {
@@ -410,9 +380,6 @@ async fn send_with_swap(
         {
             Ok((needs_new_client, new_client)) => {
                 if needs_new_client {
-                    if last_successful_send.elapsed() > Duration::from_secs(5) {
-                        *goaway_count += 1;
-                    }
                     if let Some(nc) = new_client {
                         *connection_state = ConnectionState::Connected;
                         *client = Some(nc);
@@ -431,16 +398,11 @@ async fn send_with_swap(
                     }
                 } else {
                     *consecutive_failures = 0;
-                    *successful_sends += 1;
-                    *last_successful_send = std::time::Instant::now();
                     return true;
                 }
             }
             Err(e) => {
-                *failed_sends += 1;
-                error!(
-                    "[{reaction_name}] Failed to send batch (total failures: {failed_sends}): {e}"
-                );
+                error!("[{reaction_name}] Failed to send batch: {e}");
                 return false;
             }
         }

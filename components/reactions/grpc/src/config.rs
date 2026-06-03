@@ -15,7 +15,7 @@
 //! Configuration types for the unified gRPC reaction.
 
 use drasi_lib::reactions::common::{
-    AdaptiveBatchConfig, OperationType, QueryConfig, TemplateRouting, TemplateSpec,
+    AdaptiveBatchConfig, QueryConfig, TemplateRouting,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -91,6 +91,22 @@ pub struct OutputTemplates {
     pub routes: HashMap<String, QueryConfig>,
 }
 
+impl OutputTemplates {
+    /// Returns `true` if at least one non-empty template string is configured
+    /// (either in the default template or any per-query route). Used to avoid
+    /// allocating a Handlebars engine when no template would ever render.
+    pub(crate) fn has_renderable_templates(&self) -> bool {
+        fn has_nonempty(qc: &QueryConfig) -> bool {
+            [qc.added.as_ref(), qc.updated.as_ref(), qc.deleted.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(|spec| !spec.template.trim().is_empty())
+        }
+        self.default_template.as_ref().is_some_and(has_nonempty)
+            || self.routes.values().any(has_nonempty)
+    }
+}
+
 /// Unified gRPC reaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -153,13 +169,4 @@ impl TemplateRouting<()> for GrpcReactionConfig {
             .as_ref()
             .and_then(|t| t.default_template.as_ref())
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn lookup_template_spec<'a>(
-    cfg: &'a GrpcReactionConfig,
-    query_id: &str,
-    op: OperationType,
-) -> Option<&'a TemplateSpec> {
-    cfg.get_template_spec(query_id, op)
 }
