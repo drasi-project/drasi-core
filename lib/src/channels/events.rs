@@ -182,6 +182,8 @@ pub struct SourceChangeEvent {
     pub source_id: String,
     pub change: SourceChange,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// WAL-assigned sequence number, if durability is enabled for this source.
+    pub sequence: Option<u64>,
 }
 
 /// Control events from sources for query coordination

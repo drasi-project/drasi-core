@@ -22,6 +22,7 @@ async fn test_loki_reaction_insert_update_delete() {
 
     let source_config = ApplicationSourceConfig {
         properties: HashMap::new(),
+        durability: None,
     };
     let (source, handle) = ApplicationSource::new("test-source", source_config)
         .expect("Application source should be created");

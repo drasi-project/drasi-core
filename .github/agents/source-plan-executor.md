@@ -57,10 +57,12 @@ If anything is missing, request clarification.
 
 Implement components **exactly as specified** in the plan:
 
-- Refer to **postgres source** (`components/sources/postgres/`) for patterns
+- Refer to **postgres source** (`components/sources/postgres/`) for patterns — especially its replay support (`ReplayState`, pause/rewind/resume in `subscribe()`, `source_position` on events)
+- Also refer to **mssql source** (`components/sources/mssql/`) for CDC-based replay patterns
 - Follow Drasi coding standards
 - Use builder pattern for configuration
 - **Error handling:** Plugin trait methods (`start`, `stop`, `bootstrap`) return `anyhow::Result` — use `.context("what failed")` to build rich error chains. **Never** use `DrasiError` inside plugin implementations; the framework converts `anyhow` errors to structured `DrasiError` at the public API boundary. See `lib/src/error.rs` for details.
+- **Structured errors:** For recoverable error conditions, use `SourceError` variants (e.g., `SourceError::PositionUnavailable`) which the orchestration layer can downcast from the `anyhow::Error`. See `lib/src/sources/traits.rs`.
 - Implement proper logging with `log::info!`/`log::error!`
 - No deviations without documenting rationale
 
@@ -77,10 +79,40 @@ Implement components **exactly as specified** in the plan:
 - Follow plan's data loading strategy
 - Implement all config fields
 - Handle errors gracefully
+- If the target system supports capturing a snapshot position (e.g., LSN, offset), set `source_position` on the `BootstrapResult` return value — this enables checkpoint seeding so recovery can resume from the bootstrap snapshot point
+
+#### Event Dispatch
+- **MUST** use `self.base.dispatch_event(event)` or `self.base.dispatch_events_batch(events)` to emit events — never use raw dispatchers directly
+- Set `source_position` on each `SourceEventWrapper` before dispatch (if `supports_replay()` is true):
+  - Encode the source's native position as `Option<Bytes>` (e.g., 8-byte big-endian `u64` for LSN/offset)
+  - `SourceBase` automatically stamps monotonic `sequence` numbers and stores `sequence → source_position` mappings
+- If `supports_replay()` is false, `source_position` can be `None` on events
+
+#### Subscribe Contract
+- The `subscribe()` implementation **MUST** call `self.base.apply_subscription_settings(&settings)` at the start of the method. Failing to do so will break sequence monotonicity after restarts.
+- Alternatively, use `self.base.subscribe_with_bootstrap()` which calls `apply_subscription_settings` automatically.
+- Check `settings.resume_from: Option<Bytes>` for a replay position:
+  - If `Some(position)`, rewind the stream to the given position
+  - If the position is no longer available (e.g., WAL vacuumed), return `SourceError::PositionUnavailable` with `earliest_available` if known
+  - If `None`, start from the configured initial cursor position
+
+#### Replay Support (if `supports_replay()` is true)
+- Override `supports_replay()` to return `true` (this is the default)
+- **Set a position comparator** during construction or initialization: call `self.base.set_position_comparator(ByteLexPositionComparator).await` if positions are byte-sortable in big-endian encoding. Without a comparator, `SourceBase` will not filter replayed events during replay and duplicates will be delivered to subscribers.
+  - Use `ByteLexPositionComparator` for big-endian u64/u128/multi-byte positions (covers Postgres LSN, MSSQL LSN, etc.)
+  - Implement a custom `PositionComparator` if positions are not lexicographically comparable
+- Override `remove_position_handle()` to delegate to `self.base.remove_position_handle(query_id).await`
+- Override `on_subscriptions_complete()` if the source needs startup fencing (e.g., hold back WAL feedback until all queries have subscribed)
+- Override `deprovision()` if the source manages external resources (e.g., replication slots, CDC cursors)
+
+#### Volatile Sources (if `supports_replay()` is false)
+- Override `supports_replay()` to return `false`
+- No need to set `source_position` on events
+- No need to handle `resume_from` in `subscribe()`
 
 #### Change Detection
 - Implement CDC mechanism from plan (no placeholders)
-- Use StateStore to persist cursor/position/offset
+- Use StateStore for source-internal state only (e.g., custom cursors, subscription metadata) — framework checkpoints handle `sequence + source_position` automatically
 - Handle reconnection and resume scenarios
 - Handle graceful shutdown and restart
 - Add debug logging for troubleshooting
@@ -352,6 +384,10 @@ mod integration_tests {
             .from_source("test-source")
             .auto_start(true)
             .enable_bootstrap(true)
+            // Recovery options (use as appropriate):
+            // .with_recovery_policy(RecoveryPolicy::AutoReset)
+            // .with_outbox_capacity(1000)
+            // .with_bootstrap_timeout_secs(60)
             .build();
         
         // 4. Create application reaction to capture results
@@ -765,8 +801,15 @@ Implementation is complete when ALL are true:
 - [ ] StateStore integration implemented:
   - [ ] Builder has `state_store` field and `with_state_store()` method
   - [ ] State passed to SourceBaseParams
-  - [ ] Cursor/position persisted to StateStore
   - [ ] Config option for initial cursor behavior
+- [ ] Replay & recovery implemented (as per plan):
+  - [ ] `supports_replay()` returns correct value
+  - [ ] Events dispatched via `self.base.dispatch_event()` (not raw dispatchers)
+  - [ ] `source_position` set on events (if supports_replay)
+  - [ ] `subscribe()` calls `apply_subscription_settings()` at start
+  - [ ] `subscribe()` handles `resume_from` parameter (if supports_replay)
+  - [ ] `SourceError::PositionUnavailable` returned when position expired (if applicable)
+  - [ ] `deprovision()` implemented (if source manages external resources)
 - [ ] Evidence of runtime execution documented
 - [ ] All runtime issues FIXED
 - [ ] No placeholders in core code
@@ -788,5 +831,8 @@ Implementation is complete when ALL are true:
 - Tests passing without actually testing change detection
 - External System source: integration test not using real Docker container
 - Protocol/Local source: integration test not using real client harness
+- Using raw dispatchers instead of `self.base.dispatch_event()`
+- Not calling `apply_subscription_settings()` in `subscribe()`
+- `supports_replay()` returns `true` but source doesn't set `source_position` or handle `resume_from`
 
 **If you encounter red flags, fix them immediately. Do not proceed until resolved.**

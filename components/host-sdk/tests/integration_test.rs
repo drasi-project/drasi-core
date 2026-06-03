@@ -1740,6 +1740,7 @@ async fn test_source_with_null_identity_provider() {
         update_tx,
         state_store: None,
         identity_provider: None,
+        wal_provider: None,
     };
 
     // This should not crash — identity_provider is None
@@ -1787,6 +1788,7 @@ async fn test_source_with_identity_provider_injection() {
         update_tx,
         state_store: None,
         identity_provider: Some(provider),
+        wal_provider: None,
     };
 
     // This should not crash — identity_provider is passed through FFI
