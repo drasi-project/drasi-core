@@ -17,10 +17,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use drasi_lib::DurabilityConfig;
+
 /// Application source configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApplicationSourceConfig {
     /// Application-specific properties (for now, keep flexible)
     #[serde(flatten)]
     pub properties: HashMap<String, serde_json::Value>,
+
+    /// Optional WAL durability configuration.
+    ///
+    /// When present and enabled, the source persists incoming events to a
+    /// local Write-Ahead Log before acknowledging the caller, enabling
+    /// crash recovery and replay for persistent queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<DurabilityConfig>,
 }

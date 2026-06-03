@@ -63,9 +63,11 @@ prost-types = "0.12"
 
 [dev-dependencies]
 drasi-bootstrap-postgres = { workspace = true }
+drasi-index-rocksdb = { workspace = true }
 drasi-reaction-application = { workspace = true }
 env_logger = "0.10.0"
 serial_test = "3.0"
+tempfile = "3"
 testcontainers = "0.27"
 tokio-test = "0.4"
 

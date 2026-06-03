@@ -105,6 +105,9 @@ pub struct ReplicationSlotInfo {
     pub consistent_point: String,
     pub snapshot_name: Option<String>,
     pub output_plugin: String,
+    /// The earliest WAL position retained by this slot (`restart_lsn` from pg_replication_slots).
+    /// Only populated when querying an existing slot via `get_replication_slot_info`.
+    pub restart_lsn: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -51,6 +51,8 @@ pub struct HttpSourceConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<source::http::WebhookConfig>)]
     pub webhooks: Option<WebhookConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<drasi_lib::DurabilityConfig>,
 }
 
 fn default_http_timeout_ms() -> ConfigValue<u64> {
@@ -776,6 +778,7 @@ impl From<&HttpSourceConfig> for HttpSourceConfigDto {
             adaptive_window_secs: config.adaptive_window_secs.map(ConfigValue::Static),
             adaptive_enabled: config.adaptive_enabled.map(ConfigValue::Static),
             webhooks: config.webhooks.as_ref().map(WebhookConfigDto::from),
+            durability: config.durability.clone(),
         }
     }
 }
@@ -896,6 +899,7 @@ impl SourcePluginDescriptor for HttpSourceDescriptor {
             } else {
                 None
             },
+            durability: dto.durability.clone(),
         };
 
         let mut source = HttpSourceBuilder::new(id)
