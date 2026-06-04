@@ -42,8 +42,8 @@
 //!         let mapper = DtoMapper::new();
 //!
 //!         // Resolve individual fields
-//!         let host = mapper.resolve_string(&dto.host)?;
-//!         let port = mapper.resolve_typed(&dto.port)?;
+//!         let host = mapper.resolve_string(&dto.host).await?;
+//!         let port = mapper.resolve_typed(&dto.port).await?;
 //!
 //!         // Build the source using resolved values
 //!         Ok(Box::new(MySource::new(id, host, port, auto_start)))
@@ -51,26 +51,6 @@
 //! }
 //! ```
 //!
-//! # The ConfigMapper Pattern
-//!
-//! For complex mappings, implement the [`ConfigMapper`] trait to encapsulate the
-//! conversion logic:
-//!
-//! ```rust,ignore
-//! use drasi_plugin_sdk::prelude::*;
-//!
-//! struct MyConfigMapper;
-//!
-//! impl ConfigMapper<MySourceConfigDto, MySourceConfig> for MyConfigMapper {
-//!     fn map(&self, dto: &MySourceConfigDto, resolver: &DtoMapper) -> Result<MySourceConfig, MappingError> {
-//!         Ok(MySourceConfig {
-//!             host: resolver.resolve_string(&dto.host)?,
-//!             port: resolver.resolve_typed(&dto.port)?,
-//!             timeout: resolver.resolve_optional(&dto.timeout_ms)?,
-//!         })
-//!     }
-//! }
-//! ```
 
 use crate::config_value::ConfigValue;
 use crate::resolver::{
@@ -88,14 +68,6 @@ pub enum MappingError {
     #[error("Failed to resolve config value: {0}")]
     ResolutionError(#[from] ResolverError),
 
-    /// No mapper was found for the given config type.
-    #[error("No mapper found for config type: {0}")]
-    NoMapperFound(String),
-
-    /// The mapper received a DTO type it doesn't handle.
-    #[error("Mapper type mismatch")]
-    MapperTypeMismatch,
-
     /// Source creation failed.
     #[error("Failed to create source: {0}")]
     SourceCreationError(String),
@@ -107,21 +79,6 @@ pub enum MappingError {
     /// A configuration value was invalid.
     #[error("Invalid value: {0}")]
     InvalidValue(String),
-}
-
-/// Trait for converting a specific DTO config type to its domain model.
-///
-/// Implement this trait when you have a complex mapping between a DTO and its
-/// corresponding domain type. The `resolver` parameter provides access to
-/// [`DtoMapper`] for resolving [`ConfigValue`] references.
-///
-/// # Type Parameters
-///
-/// - `TDto` — The DTO (Data Transfer Object) type from the API layer.
-/// - `TDomain` — The domain model type used internally by the plugin.
-pub trait ConfigMapper<TDto, TDomain>: Send + Sync {
-    /// Convert a DTO to its domain model, resolving any config value references.
-    fn map(&self, dto: &TDto, resolver: &DtoMapper) -> Result<TDomain, MappingError>;
 }
 
 /// Main mapping service that resolves [`ConfigValue`] references in plugin DTOs.
@@ -163,7 +120,10 @@ impl DtoMapper {
     }
 
     /// Resolve a `ConfigValue<String>` to its actual string value.
-    pub fn resolve_string(&self, value: &ConfigValue<String>) -> Result<String, ResolverError> {
+    pub async fn resolve_string(
+        &self,
+        value: &ConfigValue<String>,
+    ) -> Result<String, ResolverError> {
         match value {
             ConfigValue::Static(s) => Ok(s.clone()),
 
@@ -172,14 +132,14 @@ impl DtoMapper {
                     .resolvers
                     .get("Secret")
                     .ok_or_else(|| ResolverError::NoResolverFound("Secret".to_string()))?;
-                resolver.resolve_to_string(value)
+                resolver.resolve_to_string(value).await
             }
 
             ConfigValue::EnvironmentVariable { .. } => {
                 let resolver = self.resolvers.get("EnvironmentVariable").ok_or_else(|| {
                     ResolverError::NoResolverFound("EnvironmentVariable".to_string())
                 })?;
-                resolver.resolve_to_string(value)
+                resolver.resolve_to_string(value).await
             }
         }
     }
@@ -188,7 +148,7 @@ impl DtoMapper {
     ///
     /// For `Static` values, returns the value directly. For `EnvironmentVariable` and
     /// `Secret` references, resolves to a string first, then parses to `T` via [`FromStr`].
-    pub fn resolve_typed<T>(&self, value: &ConfigValue<T>) -> Result<T, ResolverError>
+    pub async fn resolve_typed<T>(&self, value: &ConfigValue<T>) -> Result<T, ResolverError>
     where
         T: FromStr + Clone + serde::Serialize + serde::de::DeserializeOwned,
         T::Err: std::fmt::Display,
@@ -202,7 +162,7 @@ impl DtoMapper {
                     .get("Secret")
                     .ok_or_else(|| ResolverError::NoResolverFound("Secret".to_string()))?;
                 let string_cv = ConfigValue::Secret { name: name.clone() };
-                let string_val = resolver.resolve_to_string(&string_cv)?;
+                let string_val = resolver.resolve_to_string(&string_cv).await?;
                 string_val.parse::<T>().map_err(|e| {
                     ResolverError::ParseError(format!("Failed to parse secret '{name}': {e}"))
                 })
@@ -223,7 +183,7 @@ impl DtoMapper {
     }
 
     /// Resolve an optional `ConfigValue<T>`. Returns `Ok(None)` if the value is `None`.
-    pub fn resolve_optional<T>(
+    pub async fn resolve_optional<T>(
         &self,
         value: &Option<ConfigValue<T>>,
     ) -> Result<Option<T>, ResolverError>
@@ -231,32 +191,33 @@ impl DtoMapper {
         T: FromStr + Clone + serde::Serialize + serde::de::DeserializeOwned,
         T::Err: std::fmt::Display,
     {
-        value.as_ref().map(|v| self.resolve_typed(v)).transpose()
+        match value {
+            Some(v) => self.resolve_typed(v).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Resolve an optional `ConfigValue<String>` to `Option<String>`.
-    pub fn resolve_optional_string(
+    pub async fn resolve_optional_string(
         &self,
         value: &Option<ConfigValue<String>>,
     ) -> Result<Option<String>, ResolverError> {
-        value.as_ref().map(|v| self.resolve_string(v)).transpose()
+        match value {
+            Some(v) => self.resolve_string(v).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a slice of `ConfigValue<String>` to `Vec<String>`.
-    pub fn resolve_string_vec(
+    pub async fn resolve_string_vec(
         &self,
         values: &[ConfigValue<String>],
     ) -> Result<Vec<String>, ResolverError> {
-        values.iter().map(|v| self.resolve_string(v)).collect()
-    }
-
-    /// Map a DTO using a [`ConfigMapper`] implementation.
-    pub fn map_with<TDto, TDomain>(
-        &self,
-        dto: &TDto,
-        mapper: &impl ConfigMapper<TDto, TDomain>,
-    ) -> Result<TDomain, MappingError> {
-        mapper.map(dto, self)
+        let mut result = Vec::with_capacity(values.len());
+        for v in values {
+            result.push(self.resolve_string(v).await?);
+        }
+        Ok(result)
     }
 }
 
@@ -270,17 +231,17 @@ impl Default for DtoMapper {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_resolve_string_static() {
+    #[tokio::test]
+    async fn test_resolve_string_static() {
         let mapper = DtoMapper::new();
         let value = ConfigValue::Static("hello".to_string());
 
-        let result = mapper.resolve_string(&value).expect("resolve");
+        let result = mapper.resolve_string(&value).await.expect("resolve");
         assert_eq!(result, "hello");
     }
 
-    #[test]
-    fn test_resolve_string_env_var() {
+    #[tokio::test]
+    async fn test_resolve_string_env_var() {
         std::env::set_var("TEST_SDK_MAPPER_VAR", "mapped_value");
 
         let mapper = DtoMapper::new();
@@ -289,23 +250,23 @@ mod tests {
             default: None,
         };
 
-        let result = mapper.resolve_string(&value).expect("resolve");
+        let result = mapper.resolve_string(&value).await.expect("resolve");
         assert_eq!(result, "mapped_value");
 
         std::env::remove_var("TEST_SDK_MAPPER_VAR");
     }
 
-    #[test]
-    fn test_resolve_typed_u16() {
+    #[tokio::test]
+    async fn test_resolve_typed_u16() {
         let mapper = DtoMapper::new();
         let value = ConfigValue::Static(5432u16);
 
-        let result = mapper.resolve_typed(&value).expect("resolve");
+        let result = mapper.resolve_typed(&value).await.expect("resolve");
         assert_eq!(result, 5432u16);
     }
 
-    #[test]
-    fn test_resolve_typed_u16_from_env() {
+    #[tokio::test]
+    async fn test_resolve_typed_u16_from_env() {
         std::env::set_var("TEST_SDK_PORT", "8080");
 
         let mapper = DtoMapper::new();
@@ -314,14 +275,14 @@ mod tests {
             default: None,
         };
 
-        let result = mapper.resolve_typed(&value).expect("resolve");
+        let result = mapper.resolve_typed(&value).await.expect("resolve");
         assert_eq!(result, 8080u16);
 
         std::env::remove_var("TEST_SDK_PORT");
     }
 
-    #[test]
-    fn test_resolve_typed_parse_error() {
+    #[tokio::test]
+    async fn test_resolve_typed_parse_error() {
         std::env::set_var("TEST_SDK_INVALID_PORT", "not_a_number");
 
         let mapper = DtoMapper::new();
@@ -330,7 +291,7 @@ mod tests {
             default: None,
         };
 
-        let result = mapper.resolve_typed(&value);
+        let result = mapper.resolve_typed(&value).await;
         assert!(result.is_err());
         assert!(matches!(
             result.expect_err("should fail"),
@@ -340,71 +301,42 @@ mod tests {
         std::env::remove_var("TEST_SDK_INVALID_PORT");
     }
 
-    #[test]
-    fn test_resolve_optional_some() {
+    #[tokio::test]
+    async fn test_resolve_optional_some() {
         let mapper = DtoMapper::new();
         let value = Some(ConfigValue::Static("test".to_string()));
 
-        let result = mapper.resolve_optional(&value).expect("resolve");
+        let result = mapper.resolve_optional(&value).await.expect("resolve");
         assert_eq!(result, Some("test".to_string()));
     }
 
-    #[test]
-    fn test_resolve_optional_none() {
+    #[tokio::test]
+    async fn test_resolve_optional_none() {
         let mapper = DtoMapper::new();
         let value: Option<ConfigValue<String>> = None;
 
-        let result = mapper.resolve_optional(&value).expect("resolve");
+        let result = mapper.resolve_optional(&value).await.expect("resolve");
         assert_eq!(result, None);
     }
 
-    #[test]
-    fn test_resolve_string_vec() {
+    #[tokio::test]
+    async fn test_resolve_string_vec() {
         let mapper = DtoMapper::new();
         let values = vec![
             ConfigValue::Static("a".to_string()),
             ConfigValue::Static("b".to_string()),
         ];
 
-        let result = mapper.resolve_string_vec(&values).expect("resolve");
+        let result = mapper.resolve_string_vec(&values).await.expect("resolve");
         assert_eq!(result, vec!["a", "b"]);
     }
 
-    #[test]
-    fn test_config_mapper_trait() {
-        struct TestMapper;
-
-        #[derive(Debug)]
-        struct TestDto {
-            host: ConfigValue<String>,
-        }
-
-        struct TestDomain {
-            host: String,
-        }
-
-        impl ConfigMapper<TestDto, TestDomain> for TestMapper {
-            fn map(&self, dto: &TestDto, resolver: &DtoMapper) -> Result<TestDomain, MappingError> {
-                Ok(TestDomain {
-                    host: resolver.resolve_string(&dto.host)?,
-                })
-            }
-        }
-
-        let mapper = DtoMapper::new();
-        let dto = TestDto {
-            host: ConfigValue::Static("localhost".to_string()),
-        };
-
-        let domain = mapper.map_with(&dto, &TestMapper).expect("map");
-        assert_eq!(domain.host, "localhost");
-    }
-
-    #[test]
-    fn test_custom_resolver() {
+    #[tokio::test]
+    async fn test_custom_resolver() {
         struct AlwaysResolver;
+        #[async_trait::async_trait]
         impl ValueResolver for AlwaysResolver {
-            fn resolve_to_string(
+            async fn resolve_to_string(
                 &self,
                 _value: &ConfigValue<String>,
             ) -> Result<String, ResolverError> {
@@ -417,7 +349,7 @@ mod tests {
             name: "test".to_string(),
         };
 
-        let result = mapper.resolve_string(&value).expect("resolve");
+        let result = mapper.resolve_string(&value).await.expect("resolve");
         assert_eq!(result, "custom-resolved");
     }
 }

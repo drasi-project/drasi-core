@@ -193,13 +193,9 @@ mod tests {
 
         for (triple, expected_os, expected_arch) in cases {
             let p = target_triple_to_oci_platform(triple)
-                .unwrap_or_else(|| panic!("failed to map {}", triple));
-            assert_eq!(p.os, expected_os, "OS mismatch for {}", triple);
-            assert_eq!(
-                p.architecture, expected_arch,
-                "Arch mismatch for {}",
-                triple
-            );
+                .unwrap_or_else(|| panic!("failed to map {triple}"));
+            assert_eq!(p.os, expected_os, "OS mismatch for {triple}");
+            assert_eq!(p.architecture, expected_arch, "Arch mismatch for {triple}");
         }
     }
 
@@ -259,9 +255,7 @@ mod tests {
             // Note: roundtrip may normalize (e.g., musl → gnu)
             assert!(
                 !back.is_empty(),
-                "roundtrip failed for {}: {:?}",
-                triple,
-                platform
+                "roundtrip failed for {triple}: {platform:?}"
             );
         }
     }

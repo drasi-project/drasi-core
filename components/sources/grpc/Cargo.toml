@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-grpc"
-version = "0.1.12"
+version = "0.2.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "gRPC source plugin for Drasi"
@@ -48,9 +48,14 @@ uuid = { version = "1.0", features = ["v4"] }
 tokio-stream = "0.1"
 prost-types = "0.12"
 ordered-float = "3.0"
+bytes = "1"
 
 [build-dependencies]
 tonic-build = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+drasi-wal-redb = { path = "../../wals/redb" }
 
 
 [features]

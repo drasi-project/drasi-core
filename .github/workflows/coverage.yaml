@@ -15,26 +15,28 @@
 name: Generate Rust Code Coverage
 
 on:
+  # Coveralls "Minimum CI Configuration":
+  # - Build push to default branch to establish the baseline.
+  # - Build pull_request builds targeting the default branch for diff reports.
+  # See: https://docs.coveralls.io/recommended-ci-configurations
   push:
     branches:
-      - codecov-test
+      - main
   pull_request:
     branches:
       - main
-      - feature/*
-      - feature-lib
 
 env:
   CARGO_TERM_COLOR: always
 
-permissions: 
+permissions:
   contents: read
 
-  
 jobs:
-  core_code_coverage:
-    name: Generate Code Coverage for drasi-core
-    runs-on: ubuntu-latest-8-cores
+  core-coverage:
+    name: Core Coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     services:
@@ -44,9 +46,9 @@ jobs:
           - 6379:6379
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install libraries
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
@@ -54,8 +56,16 @@ jobs:
       - name: Set JQ_LIB_DIR
         run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
+        with:
+          tool: cargo-llvm-cov
+
       - name: Cache Cargo registry
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
@@ -63,7 +73,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache Cargo index
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
@@ -71,33 +81,142 @@ jobs:
             ${{ runner.os }}-cargo-index-
 
       - name: Cache Cargo build
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-llvm-cov-core-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
-      - name: Show Rust toolchain
-        run: rustup show
+            ${{ runner.os }}-cargo-llvm-cov-core-
 
-      - name: Install Cargo tarpaulin
-        run: cargo install cargo-tarpaulin
-      
-      - name: Clean build artifacts
-        run: cargo clean
-      
-      - name: Generate Code Coverage
+      - name: Generate core coverage
         env:
           REDIS_URL: redis://localhost:6379
-          CARGO_INCREMENTAL: 0
         run: |
-          cargo tarpaulin --release --out Xml
-          mv cobertura.xml drasi-core-tarpaulin-report.xml
-          echo "Code coverage report generated"
+          cargo llvm-cov --workspace \
+            --exclude drasi-host-sdk \
+            --exclude drasi-source-postgres --exclude drasi-source-http --exclude drasi-source-grpc \
+            --exclude drasi-source-platform --exclude drasi-source-application --exclude drasi-source-mock \
+            --exclude drasi-source-mssql \
+            --exclude drasi-reaction-http --exclude drasi-reaction-http-adaptive \
+            --exclude drasi-reaction-grpc --exclude drasi-reaction-grpc-adaptive \
+            --exclude drasi-reaction-sse --exclude drasi-reaction-platform \
+            --exclude drasi-reaction-profiler --exclude drasi-reaction-application \
+            --exclude drasi-reaction-log \
+            --exclude drasi-reaction-storedproc-mssql --exclude drasi-reaction-storedproc-mysql \
+            --exclude drasi-reaction-storedproc-postgres \
+            --exclude drasi-bootstrap-postgres --exclude drasi-bootstrap-platform \
+            --exclude drasi-bootstrap-scriptfile --exclude drasi-bootstrap-application \
+            --exclude drasi-bootstrap-noop --exclude drasi-bootstrap-mssql \
+            --exclude drasi-identity-azure --exclude drasi-identity-aws \
+            --exclude drasi-index-rocksdb --exclude drasi-index-garnet \
+            --exclude drasi-state-store-redb \
+            --exclude drasi-ffi-primitives --exclude drasi-plugin-sdk \
+            --exclude drasi-mssql-common \
+            --exclude xtask --exclude query-perf --exclude query-example \
+            --lcov --output-path core-lcov.info
 
-      - name: Upload Code Coverage Report to Codecov
-        if: "!contains(github.event.head_commit.message, 'clippy fix')"
-        uses: codecov/codecov-action@0561704f0f02c16a585d4c7555e57fa2e44cf909 # v5.5.2
+      - name: Upload core coverage to Coveralls
+        uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
         with:
-          files: drasi-core-tarpaulin-report.xml
-          name: codecov-drasi-core
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: core-lcov.info
+          flag-name: core
+          parallel: true
+
+  plugin-coverage:
+    name: Plugin Coverage
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq libjq-dev libonig-dev protobuf-compiler
+
+      - name: Set JQ_LIB_DIR
+        run: echo "JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@37461a1de4134bec919a737ee9ba018e72011b7c # v2.52.7
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache Cargo registry
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache Cargo build
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-llvm-cov-plugins-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-llvm-cov-plugins-
+
+      - name: Generate plugin coverage (tier 1)
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: |
+          cargo llvm-cov \
+            -p drasi-source-postgres \
+            -p drasi-source-http \
+            -p drasi-source-grpc \
+            -p drasi-source-mssql \
+            -p drasi-source-application \
+            -p drasi-reaction-http \
+            -p drasi-reaction-grpc \
+            -p drasi-reaction-log \
+            -p drasi-reaction-sse \
+            -p drasi-bootstrap-postgres \
+            -p drasi-bootstrap-application \
+            -p drasi-plugin-sdk \
+            --lcov --output-path plugins-lcov.info
+
+      - name: Upload plugin coverage to Coveralls
+        uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: plugins-lcov.info
+          flag-name: plugins
+          parallel: true
+
+  coverage-finalize:
+    name: Finalize Coverage
+    needs: [core-coverage, plugin-coverage]
+    # Run whenever at least one upstream coverage job actually executed (success
+    # or failure). Skip when both are skipped (e.g. draft PRs) so we don't try
+    # to finalize a Coveralls build that was never started.
+    if: ${{ !cancelled() && (needs.core-coverage.result != 'skipped' || needs.plugin-coverage.result != 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finalize Coveralls
+        uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          carryforward: "core,plugins"
+          parallel-finished: true

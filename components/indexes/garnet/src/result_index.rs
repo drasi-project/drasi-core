@@ -348,9 +348,8 @@ impl GarnetResultIndex {
     }
 }
 
-/// Redis key structure (hash-tagged for cluster compatibility):
-/// metadata:{<query_id>}:sequence -> {value}
-/// metadata:{<query_id>}:source_change_id -> {value}
+impl ResultIndex for GarnetResultIndex {}
+
 #[async_trait]
 impl ResultSequenceCounter for GarnetResultIndex {
     async fn apply_sequence(
@@ -446,8 +445,6 @@ impl GarnetResultIndex {
         })
     }
 }
-
-impl ResultIndex for GarnetResultIndex {}
 
 fn get_hash_key(owner: &ResultOwner, key: &ResultKey) -> u64 {
     let mut hasher = SpookyHasher::default();

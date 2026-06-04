@@ -20,7 +20,8 @@
 
 pub use drasi_ffi_primitives::{
     catch_panic_ffi, now_us, AsyncExecutorFn, FfiCreateResult, FfiGetResult, FfiOwnedStr,
-    FfiResult, FfiStr, FfiStringArray, SendMutPtr, SendPtr,
+    FfiResult, FfiStr, FfiStringArray, FfiWalAppendResult, FfiWalEntry, FfiWalOptionalU64Result,
+    FfiWalReadResult, FfiWalU64Result, SendMutPtr, SendPtr,
 };
 
 // ============================================================================
@@ -37,6 +38,8 @@ pub enum FfiComponentStatus {
     Stopping = 3,
     Reconfiguring = 4,
     Error = 5,
+    Added = 6,
+    Removed = 7,
 }
 
 /// Change operation type, FFI-safe.

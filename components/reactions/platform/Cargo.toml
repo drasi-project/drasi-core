@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-reaction-platform"
-version = "0.2.10"
+version = "0.3.2"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Platform reaction plugin for Drasi"
@@ -46,3 +46,7 @@ prost-types = "0.12"
 ordered-float = "3.0"
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
+
+[dev-dependencies]
+shared-tests = { path = "../../../shared-tests" }
+tokio = { version = "1.0", features = ["full"] }

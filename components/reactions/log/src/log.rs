@@ -26,7 +26,7 @@ use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 
 pub struct LogReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: LogReactionConfig,
 }
 
@@ -354,10 +354,7 @@ impl Reaction for LogReaction {
             default_template: self.config.default_template.as_ref().map(map_qc_to_dto),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -478,7 +475,7 @@ impl Reaction for LogReaction {
                         .or(config.default_template.as_ref());
 
                     match result {
-                        ResultDiff::Add { data } => {
+                        ResultDiff::Add { data, .. } => {
                             context.insert("operation".to_string(), Value::String("ADD".into()));
                             context.insert("after".to_string(), data.clone());
 
@@ -509,7 +506,7 @@ impl Reaction for LogReaction {
                                 }
                             }
                         }
-                        ResultDiff::Delete { data } => {
+                        ResultDiff::Delete { data, .. } => {
                             context.insert("operation".to_string(), Value::String("DELETE".into()));
                             context.insert("before".to_string(), data.clone());
 
@@ -645,5 +642,17 @@ impl Reaction for LogReaction {
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
     }
 }

@@ -31,11 +31,14 @@
 //! ```
 
 use async_trait::async_trait;
-use drasi_core::interface::{IndexBackendPlugin, IndexError, IndexSet};
+use drasi_core::interface::{CreatedIndexes, IndexBackendPlugin, IndexError, IndexSet};
 use std::sync::Arc;
 
+use crate::checkpoint::GarnetCheckpointStore;
 use crate::element_index::GarnetElementIndex;
 use crate::future_queue::GarnetFutureQueue;
+use crate::live_results::GarnetLiveResultsWriter;
+use crate::outbox::GarnetOutboxWriter;
 use crate::result_index::GarnetResultIndex;
 use crate::session_state::{GarnetSessionControl, GarnetSessionState};
 
@@ -120,7 +123,7 @@ impl GarnetIndexProvider {
 
 #[async_trait]
 impl IndexBackendPlugin for GarnetIndexProvider {
-    async fn create_index_set(&self, query_id: &str) -> Result<IndexSet, IndexError> {
+    async fn create_indexes(&self, query_id: &str) -> Result<CreatedIndexes, IndexError> {
         let client = redis::Client::open(self.connection_string.as_str())
             .map_err(IndexError::connection_failed)?;
         let connection = client
@@ -142,14 +145,30 @@ impl IndexBackendPlugin for GarnetIndexProvider {
             connection.clone(),
             session_state.clone(),
         ));
-        let future_queue = Arc::new(GarnetFutureQueue::new(query_id, connection, session_state));
+        let future_queue = Arc::new(GarnetFutureQueue::new(
+            query_id,
+            connection.clone(),
+            session_state.clone(),
+        ));
+        let checkpoint_store = Arc::new(GarnetCheckpointStore::new(
+            query_id,
+            connection.clone(),
+            session_state,
+        ));
+        let outbox_writer = Arc::new(GarnetOutboxWriter::new(query_id, connection.clone()));
+        let live_results_writer = Arc::new(GarnetLiveResultsWriter::new(query_id, connection));
 
-        Ok(IndexSet {
-            element_index: element_index.clone(),
-            archive_index: element_index,
-            result_index,
-            future_queue,
-            session_control,
+        Ok(CreatedIndexes {
+            set: IndexSet {
+                element_index: element_index.clone(),
+                archive_index: element_index,
+                result_index,
+                future_queue,
+                session_control,
+            },
+            checkpoint_store: Some(checkpoint_store),
+            outbox_writer: Some(outbox_writer),
+            live_results_writer: Some(live_results_writer),
         })
     }
 

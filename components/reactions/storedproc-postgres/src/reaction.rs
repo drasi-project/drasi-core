@@ -26,6 +26,7 @@ use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
+use serde_json::json;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
 use crate::executor::PostgresExecutor;
@@ -37,7 +38,7 @@ use drasi_lib::reactions::common::OperationType;
 /// Invokes PostgreSQL stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct PostgresStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: PostgresStoredProcReactionConfig,
     executor: RwLock<Option<Arc<PostgresExecutor>>>,
     parser: ParameterParser,
@@ -202,16 +203,19 @@ impl PostgresStoredProcReaction {
 
                 // Process each result item in the batch
                 for result_item in &query_result.results {
+                    let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {
-                            debug!(
-                                "[{reaction_id}] Unknown operation type: aggregation/noop, skipping"
-                            );
-                            continue;
+                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { before, after, .. } => {
+                            aggregation_data = json!({
+                                "before": before,
+                                "after": after,
+                            });
+                            (OperationType::Update, &aggregation_data, "AGGREGATION")
                         }
+                        ResultDiff::Noop => continue,
                     };
 
                     // Get the command template for this query and operation type
@@ -313,14 +317,7 @@ impl Reaction for PostgresStoredProcReaction {
             retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -385,6 +382,18 @@ impl Reaction for PostgresStoredProcReaction {
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::Strict
     }
 }
 
@@ -561,5 +570,28 @@ impl PostgresStoredProcReactionBuilder {
             self.auto_start,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+
+    #[tokio::test]
+    async fn test_recovery_trait_defaults() {
+        let reaction = PostgresStoredProcReaction::builder("test-postgres")
+            .with_connection("localhost", 5432, "testdb", "testuser", "testpass")
+            .with_stored_procedure("test_proc")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::Strict
+        );
     }
 }

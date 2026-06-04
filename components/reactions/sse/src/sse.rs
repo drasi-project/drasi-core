@@ -30,7 +30,7 @@ use tower_http::cors::{Any, CorsLayer};
 use drasi_lib::channels::{ComponentStatus, ResultDiff};
 use drasi_lib::managers::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::Reaction;
+use drasi_lib::{Reaction, SnapshotFetcher};
 
 pub use super::config::SseReactionConfig;
 use super::SseReactionBuilder;
@@ -78,7 +78,7 @@ fn pre_create_broadcasters_for_query_config(
 
 /// SSE reaction exposes query results to browser clients via Server-Sent Events.
 pub struct SseReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: SseReactionConfig,
     broadcasters: Arc<tokio::sync::RwLock<HashMap<String, broadcast::Sender<String>>>>,
     task_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -228,10 +228,10 @@ impl Reaction for SseReaction {
     }
 
     fn properties(&self) -> HashMap<String, serde_json::Value> {
-        match serde_json::to_value(&self.config) {
-            Ok(serde_json::Value::Object(map)) => map.into_iter().collect(),
-            _ => HashMap::new(),
-        }
+        use crate::descriptor::SseReactionConfigDto;
+
+        self.base
+            .properties_or_serialize(&SseReactionConfigDto::from(&self.config))
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -339,7 +339,10 @@ impl Reaction for SseReaction {
                             ResultDiff::Add { .. } => (config.added.as_ref(), "ADD"),
                             ResultDiff::Update { .. } => (config.updated.as_ref(), "UPDATE"),
                             ResultDiff::Delete { .. } => (config.deleted.as_ref(), "DELETE"),
-                            ResultDiff::Aggregation { .. } | ResultDiff::Noop => (None, "NOOP"),
+                            ResultDiff::Aggregation { .. } => {
+                                (config.updated.as_ref(), "AGGREGATION")
+                            }
+                            ResultDiff::Noop => (None, "NOOP"),
                         };
 
                         if let Some(spec) = template_spec {
@@ -347,17 +350,23 @@ impl Reaction for SseReaction {
                             let mut context = Map::new();
 
                             match result {
-                                ResultDiff::Add { data } => {
+                                ResultDiff::Add { data, .. } => {
                                     context.insert("after".to_string(), data.clone());
                                 }
                                 ResultDiff::Update { before, after, .. } => {
                                     context.insert("before".to_string(), before.clone());
                                     context.insert("after".to_string(), after.clone());
                                 }
-                                ResultDiff::Delete { data } => {
+                                ResultDiff::Delete { data, .. } => {
                                     context.insert("before".to_string(), data.clone());
                                 }
-                                ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                                ResultDiff::Aggregation { before, after, .. } => {
+                                    if let Some(before) = before {
+                                        context.insert("before".to_string(), before.clone());
+                                    }
+                                    context.insert("after".to_string(), after.clone());
+                                }
+                                ResultDiff::Noop => {}
                             }
 
                             context.insert(
@@ -508,6 +517,14 @@ impl Reaction for SseReaction {
         let host = self.config.host.clone();
         let port = self.config.port;
         let broadcasters_server = self.broadcasters.clone();
+
+        // Get snapshot_fetcher from the runtime context for the /snapshot/:query_id endpoint
+        let snapshot_fetcher = self
+            .base
+            .context()
+            .await
+            .and_then(|ctx| ctx.snapshot_fetcher.clone());
+
         let server_handle = tokio::spawn(async move {
             // Configure CORS to allow all origins
             let cors = CorsLayer::new()
@@ -549,7 +566,73 @@ impl Reaction for SseReaction {
                 }
             });
 
-            let app = Router::new().fallback(handler).layer(cors);
+            let app = Router::new()
+                .route(
+                    "/snapshot/:query_id",
+                    get({
+                        let sf = snapshot_fetcher.clone();
+                        move |axum::extract::Path(query_id): axum::extract::Path<String>| {
+                            let sf = sf.clone();
+                            async move {
+                                let fetcher = match sf.as_ref() {
+                                    Some(f) => f,
+                                    None => {
+                                        return (
+                                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                            "Snapshot fetcher not available",
+                                        )
+                                            .into_response();
+                                    }
+                                };
+                                match fetcher.fetch_snapshot(&query_id).await {
+                                    Ok(snapshot) => {
+                                        // Stream the snapshot as a JSON array using chunked
+                                        // transfer encoding. This keeps memory proportional to
+                                        // a single row rather than the full result set.
+                                        let is_first = std::sync::Arc::new(
+                                            std::sync::atomic::AtomicBool::new(true),
+                                        );
+                                        let row_stream = snapshot.map(move |row| {
+                                            let json = serde_json::to_string(&row)
+                                                .unwrap_or_else(|_| "null".into());
+                                            if is_first
+                                                .swap(false, std::sync::atomic::Ordering::Relaxed)
+                                            {
+                                                json
+                                            } else {
+                                                format!(",{json}")
+                                            }
+                                        });
+
+                                        let full_stream = tokio_stream::once("[".to_string())
+                                            .chain(row_stream)
+                                            .chain(tokio_stream::once("]".to_string()))
+                                            .map(Ok::<_, std::convert::Infallible>);
+
+                                        let body = axum::body::Body::from_stream(full_stream);
+                                        match axum::response::Response::builder()
+                                            .header("content-type", "application/json")
+                                            .body(body)
+                                        {
+                                            Ok(resp) => resp.into_response(),
+                                            Err(_) => (
+                                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                "Failed to build response",
+                                            )
+                                                .into_response(),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Failed to fetch snapshot: {e}");
+                                        (axum::http::StatusCode::NOT_FOUND, msg).into_response()
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
+                .fallback(handler)
+                .layer(cors);
 
             info!("Starting SSE server on {host}:{port} with CORS enabled");
             let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
@@ -598,5 +681,17 @@ impl Reaction for SseReaction {
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::AutoSkipGap
     }
 }

@@ -160,24 +160,24 @@ impl ReactionPluginDescriptor for MsSqlStoredProcReactionDescriptor {
         let mut builder = MsSqlStoredProcReaction::builder(id)
             .with_queries(query_ids)
             .with_auto_start(auto_start)
-            .with_user(mapper.resolve_string(&dto.user)?)
-            .with_password(mapper.resolve_string(&dto.password)?)
-            .with_database(mapper.resolve_string(&dto.database)?);
+            .with_user(mapper.resolve_string(&dto.user).await?)
+            .with_password(mapper.resolve_string(&dto.password).await?)
+            .with_database(mapper.resolve_string(&dto.database).await?);
 
         if let Some(ref v) = dto.hostname {
-            builder = builder.with_hostname(mapper.resolve_string(v)?);
+            builder = builder.with_hostname(mapper.resolve_string(v).await?);
         }
         if let Some(ref v) = dto.port {
-            builder = builder.with_port(mapper.resolve_typed(v)?);
+            builder = builder.with_port(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.ssl {
-            builder = builder.with_ssl(mapper.resolve_typed(v)?);
+            builder = builder.with_ssl(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.command_timeout_ms {
-            builder = builder.with_command_timeout_ms(mapper.resolve_typed(v)?);
+            builder = builder.with_command_timeout_ms(mapper.resolve_typed(v).await?);
         }
         if let Some(ref v) = dto.retry_attempts {
-            builder = builder.with_retry_attempts(mapper.resolve_typed(v)?);
+            builder = builder.with_retry_attempts(mapper.resolve_typed(v).await?);
         }
 
         if let Some(ref default_template) = dto.default_template {
@@ -188,7 +188,9 @@ impl ReactionPluginDescriptor for MsSqlStoredProcReactionDescriptor {
             builder = builder.with_route(query_id, map_query_config(config));
         }
 
-        let reaction = builder.build().await?;
+        let mut reaction = builder.build().await?;
+        reaction.base.set_raw_config(config_json.clone());
+
         Ok(Box::new(reaction))
     }
 }

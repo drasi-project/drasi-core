@@ -16,14 +16,15 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use drasi_lib::bootstrap::BootstrapProvider;
-use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest};
+use drasi_lib::bootstrap::{BootstrapContext, BootstrapRequest, BootstrapResult};
 use drasi_lib::channels::{BootstrapEvent, SourceChangeEvent};
 use drasi_mssql_common::{
-    validate_sql_identifier, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
+    validate_sql_identifier, Lsn, MsSqlConnection, MsSqlSourceConfig, PrimaryKeyCache,
 };
 use log::{debug, info, warn};
 use ordered_float::OrderedFloat;
@@ -65,7 +66,7 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         context: &BootstrapContext,
         event_tx: tokio::sync::mpsc::Sender<drasi_lib::channels::BootstrapEvent>,
         _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
-    ) -> Result<usize> {
+    ) -> Result<BootstrapResult> {
         info!(
             "Starting MS SQL bootstrap for query '{}' with {} node labels",
             request.query_id,
@@ -79,11 +80,16 @@ impl BootstrapProvider for MsSqlBootstrapProvider {
         let query_id = request.query_id.clone();
 
         // Execute bootstrap
-        let count = handler.execute(request, context, event_tx).await?;
+        let (count, snapshot_lsn) = handler.execute(request, context, event_tx).await?;
 
         info!("Completed MS SQL bootstrap for query {query_id}: sent {count} records");
 
-        Ok(count)
+        Ok(BootstrapResult {
+            event_count: count,
+            last_sequence: None,
+            sequences_aligned: false,
+            source_position: snapshot_lsn.map(|lsn| Bytes::from(lsn.to_bytes())),
+        })
     }
 }
 
@@ -179,13 +185,17 @@ impl MsSqlBootstrapHandler {
         }
     }
 
-    /// Execute bootstrap for the given request
+    /// Execute bootstrap for the given request.
+    ///
+    /// Returns `(event_count, snapshot_lsn)` where `snapshot_lsn` is the
+    /// current CDC max LSN captured *before* the snapshot transaction,
+    /// used as the resume position for the CDC stream on recovery.
     async fn execute(
         &mut self,
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: tokio::sync::mpsc::Sender<BootstrapEvent>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Option<Lsn>)> {
         info!(
             "Bootstrap: Connecting to MS SQL at {}:{}",
             self.config.host, self.config.port
@@ -204,7 +214,7 @@ impl MsSqlBootstrapHandler {
 
         if tables.is_empty() {
             warn!("No tables to bootstrap");
-            return Ok(0);
+            return Ok((0, None));
         }
 
         // Start bootstrap transaction with snapshot isolation
@@ -220,6 +230,17 @@ impl MsSqlBootstrapHandler {
             .await?
             .into_results()
             .await?;
+
+        // Capture the current CDC max LSN *inside* the snapshot transaction.
+        // This ensures the LSN is consistent with the snapshot boundary:
+        // any committed change visible in the snapshot has an LSN ≤ snapshot_lsn,
+        // so the CDC stream can resume from here without overlap or gaps.
+        let snapshot_lsn = Self::get_max_lsn(client).await?;
+        if let Some(ref lsn) = snapshot_lsn {
+            info!("Captured snapshot LSN for checkpoint: {}", lsn.to_hex());
+        } else {
+            warn!("No CDC LSN available — snapshot_lsn will be None");
+        }
 
         let mut total_count = 0;
 
@@ -244,7 +265,25 @@ impl MsSqlBootstrapHandler {
 
         info!("Bootstrap transaction committed");
 
-        Ok(total_count)
+        Ok((total_count, snapshot_lsn))
+    }
+
+    /// Query the current maximum CDC LSN from the database.
+    async fn get_max_lsn(
+        client: &mut tiberius::Client<tokio_util::compat::Compat<tokio::net::TcpStream>>,
+    ) -> Result<Option<Lsn>> {
+        let stream = client
+            .query("SELECT sys.fn_cdc_get_max_lsn() AS max_lsn", &[])
+            .await?;
+        let rows = stream.into_first_result().await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = &rows[0];
+        match row.try_get::<&[u8], _>(0) {
+            Ok(Some(bytes)) => Ok(Some(Lsn::from_bytes(bytes)?)),
+            _ => Ok(None),
+        }
     }
 
     /// Map query labels to table names
@@ -326,6 +365,7 @@ impl MsSqlBootstrapHandler {
                     source_id: self.source_id.clone(),
                     change: source_change,
                     timestamp: chrono::Utc::now(),
+                    sequence: None,
                 });
 
                 if batch.len() >= batch_size {

@@ -108,6 +108,9 @@ pub struct ReplicationSlotInfo {
     pub consistent_point: String,
     pub snapshot_name: Option<String>,
     pub output_plugin: String,
+    /// The earliest WAL position retained by this slot (`restart_lsn` from pg_replication_slots).
+    /// Only populated when querying an existing slot via `get_replication_slot_info`.
+    pub restart_lsn: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,7 +143,14 @@ impl PostgresValue {
                     JsonValue::Null
                 }
             }
-            PostgresValue::Numeric(d) => JsonValue::String(d.to_string()),
+            PostgresValue::Numeric(d) => {
+                // Convert Decimal to Number via string parsing
+                // This ensures precision is maintained and the value is valid JSON number
+                d.to_string()
+                    .parse::<serde_json::Number>()
+                    .map(JsonValue::Number)
+                    .unwrap_or(JsonValue::Null)
+            }
             PostgresValue::Text(s) | PostgresValue::Varchar(s) | PostgresValue::Char(s) => {
                 JsonValue::String(s.clone())
             }
@@ -522,5 +532,80 @@ mod tests {
         let bootstrap =
             decode_column_value_text("550e8400-e29b-41d4-a716-446655440000", 2950).unwrap();
         assert_eq!(cdc, bootstrap, "uuid: CDC vs bootstrap mismatch");
+    use std::str::FromStr;
+
+    #[test]
+    fn test_decimal_to_json_as_number() {
+        // Test that decimal values are serialized as numbers, not strings
+        let decimal = Decimal::from_str("123.45").unwrap();
+        let pg_value = PostgresValue::Numeric(decimal);
+        let json = pg_value.to_json();
+
+        // Should be a Number, not a String
+        assert!(json.is_number(), "Decimal should be serialized as a number");
+
+        // Verify the value is correct
+        let num = json.as_f64().unwrap();
+        assert_eq!(num, 123.45);
+    }
+
+    #[test]
+    fn test_decimal_integer_to_json() {
+        let decimal = Decimal::from_str("100").unwrap();
+        let pg_value = PostgresValue::Numeric(decimal);
+        let json = pg_value.to_json();
+
+        assert!(
+            json.is_number(),
+            "Integer decimal should be serialized as a number"
+        );
+
+        let num = json.as_f64().unwrap();
+        assert_eq!(num, 100.0);
+    }
+
+    #[test]
+    fn test_decimal_small_value_to_json() {
+        let decimal = Decimal::from_str("0.00001").unwrap();
+        let pg_value = PostgresValue::Numeric(decimal);
+        let json = pg_value.to_json();
+
+        assert!(
+            json.is_number(),
+            "Small decimal should be serialized as a number"
+        );
+
+        let num = json.as_f64().unwrap();
+        assert_eq!(num, 0.00001);
+    }
+
+    #[test]
+    fn test_decimal_negative_to_json() {
+        let decimal = Decimal::from_str("-999.99").unwrap();
+        let pg_value = PostgresValue::Numeric(decimal);
+        let json = pg_value.to_json();
+
+        assert!(
+            json.is_number(),
+            "Negative decimal should be serialized as a number"
+        );
+
+        let num = json.as_f64().unwrap();
+        assert_eq!(num, -999.99);
+    }
+
+    #[test]
+    fn test_decimal_zero_to_json() {
+        let decimal = Decimal::from_str("0").unwrap();
+        let pg_value = PostgresValue::Numeric(decimal);
+        let json = pg_value.to_json();
+
+        assert!(
+            json.is_number(),
+            "Zero decimal should be serialized as a number"
+        );
+
+        let num = json.as_f64().unwrap();
+        assert_eq!(num, 0.0);
     }
 }

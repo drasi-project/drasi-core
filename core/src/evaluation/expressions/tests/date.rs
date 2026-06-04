@@ -73,7 +73,7 @@ async fn evaluate_date_empty() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_yy_mm_dd() {
+async fn evaluate_local_time_yy_mm_dd() {
     let expr = "date('2020-11-04')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -118,7 +118,7 @@ async fn evalute_local_time_yy_mm_dd() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_yy_mm() {
+async fn evaluate_local_time_yy_mm() {
     let expr = "date('2020-11')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -163,7 +163,7 @@ async fn evalute_local_time_yy_mm() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_yy_ww_dd() {
+async fn evaluate_local_time_yy_ww_dd() {
     let expr = "date('2015-W30-2')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
@@ -208,7 +208,7 @@ async fn evalute_local_time_yy_ww_dd() {
 }
 
 #[tokio::test]
-async fn evalute_local_time_yy_ww() {
+async fn evaluate_local_time_yy_ww() {
     let expr = "date('2015-W30')";
     let expr = drasi_query_cypher::parse_expression(expr).unwrap();
 
