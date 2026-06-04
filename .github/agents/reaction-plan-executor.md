@@ -72,6 +72,17 @@ Implement components **exactly as specified** in the plan:
 #### Output to target system
 - Follow data format and transmission method from plan
 
+#### Recovery & Idempotency
+- If the plan specifies idempotency requirements, implement deduplication logic in the reaction (e.g., using sequence numbers, upsert operations, or target-system dedup features)
+- The framework handles outbox persistence, live-results snapshots, and sequence gap detection automatically — reactions generally don't need to implement these directly
+- Log warnings for non-idempotent operations that may be replayed after recovery
+
+#### Recovery Trait Hooks (implement as specified in plan)
+- **`is_durable()`** — Override to return `true` if the reaction needs persistent checkpoints. Default is `false`.
+- **`needs_snapshot_on_fresh_start()`** — Override to return `true` if the reaction needs full current state on first start (no prior checkpoint). Default is `false`.
+- **`default_recovery_policy()`** — Override to return the appropriate `ReactionRecoveryPolicy` variant (`Strict`, `AutoReset`, or `AutoSkipGap`). Default is `Strict`. Note: this is separate from the query-level `RecoveryPolicy` which only has `Strict` and `AutoReset`.
+- **`bootstrap(ctx: BootstrapContext)`** — Implement if the reaction needs snapshot/outbox replay during recovery. Use `ctx.fetch_snapshot()` for full state recovery and `ctx.fetch_outbox()` for incremental replay. Write checkpoints only after target-side delivery is durable.
+
 
 ### 4. Testing & Verification
 
@@ -134,6 +145,10 @@ mod integration_tests {
       .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
       .from_source("test-source")
       .auto_start(true)
+      // Query-level recovery options (controls source resume behavior):
+      // .with_recovery_policy(RecoveryPolicy::AutoReset)
+      // .with_outbox_capacity(1000)
+      // .with_bootstrap_timeout_secs(60)
       .build();
     
     // 4. Create the reaction under test
@@ -150,6 +165,8 @@ mod integration_tests {
       .with_source(source)
       .with_query(query)
       .with_reaction(reaction)
+      // Optional: set global query recovery policy
+      // .with_default_recovery_policy(RecoveryPolicy::AutoReset)
       .build()
       .await
       .unwrap();
@@ -218,6 +235,9 @@ mod integration_tests {
       .query("MATCH (n:test_table) RETURN n.id AS id, n.name AS name")
       .from_source("test-source")
       .auto_start(true)
+      // Query-level recovery options (use as appropriate):
+      // .with_recovery_policy(RecoveryPolicy::AutoReset)
+      // .with_outbox_capacity(1000)
       .build();
     
     // 4. Create the reaction - it will host the endpoint
@@ -390,6 +410,14 @@ Implementation is complete when ALL are true:
 - [ ] Integration test RUNS and PASSES (INSERT/UPDATE/DELETE verified)
 - [ ] For system-target: Integration test uses testcontainers
 - [ ] For protocol-target: Integration test uses client harness
+- [ ] Recovery & idempotency addressed (as per plan):
+  - [ ] Idempotency requirements implemented (if applicable)
+  - [ ] Recovery policy recommendation documented
+  - [ ] Recovery trait hooks implemented (if plan calls for durable recovery):
+    - [ ] `is_durable()` returns correct value
+    - [ ] `needs_snapshot_on_fresh_start()` returns correct value
+    - [ ] `default_recovery_policy()` returns appropriate `ReactionRecoveryPolicy`
+    - [ ] `bootstrap(ctx)` implemented (if snapshot/outbox replay needed)
 - [ ] Evidence of runtime execution documented
 - [ ] All runtime issues FIXED
 - [ ] No placeholders in core code

@@ -34,7 +34,7 @@ drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
 utoipa = { workspace = true }
-drasi-source-sui-deepbook = { workspace = true, default-features = false }
+drasi-source-sui-deepbook = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
