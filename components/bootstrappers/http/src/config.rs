@@ -319,7 +319,7 @@ impl ElementMappingConfig {
                 "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.labels must have at least one label"
             ));
         }
-        if self.element_type == ElementType::Relation {
+        if self.element_type == ElementType::Relation && self.operation != OperationType::Delete {
             if self.template.from.is_none() {
                 return Err(anyhow::anyhow!(
                     "Validation error: endpoint[{endpoint_index}].mappings[{mapping_index}].template.from is required for relation mappings"
@@ -388,8 +388,23 @@ pub struct ElementMappingConfig {
     /// Type of element to create.
     pub element_type: ElementType,
 
+    /// Operation type for the source change (default: update for idempotent bootstrap).
+    #[serde(default)]
+    pub operation: OperationType,
+
     /// Template for element creation.
     pub template: ElementTemplate,
+}
+
+/// Operation type for source changes.
+/// Matches the HTTP webhook source naming convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationType {
+    Insert,
+    #[default]
+    Update,
+    Delete,
 }
 
 /// Element type.
@@ -466,6 +481,12 @@ mod tests {
         assert_eq!(config.endpoints.len(), 1);
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.endpoints[0].url, "https://api.example.com/users");
+
+        // Backward compat: missing "operation" field should default to Update
+        assert_eq!(
+            config.endpoints[0].response.mappings[0].operation,
+            OperationType::Update
+        );
     }
 
     #[test]
@@ -555,6 +576,7 @@ mod tests {
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
                         element_type: ElementType::Node,
+                        operation: Default::default(),
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),
                             labels: vec!["User".to_string()],
@@ -643,5 +665,38 @@ mod tests {
             .clear();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("at least one label"));
+    }
+
+    #[test]
+    fn test_validate_relation_delete_skips_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Delete;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = None;
+        // Delete relations don't need from/to
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_relation_update_requires_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Update;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = None;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("from is required"));
+    }
+
+    #[test]
+    fn test_validate_relation_insert_requires_from_to() {
+        let mut config = make_valid_config();
+        config.endpoints[0].response.mappings[0].element_type = ElementType::Relation;
+        config.endpoints[0].response.mappings[0].operation = OperationType::Insert;
+        config.endpoints[0].response.mappings[0].template.from = None;
+        config.endpoints[0].response.mappings[0].template.to = Some("{{item.to}}".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("from is required"));
     }
 }

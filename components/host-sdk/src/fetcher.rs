@@ -147,7 +147,7 @@ pub async fn fetch_from_http(url: &str, dest_dir: &Path) -> Result<FetchedPlugin
     tokio::fs::create_dir_all(dest_dir).await?;
     let dest_path = dest_dir.join(&filename);
 
-    log::info!("Downloading plugin from {}...", url);
+    log::info!("Downloading plugin from {url}...");
 
     let response = reqwest::get(url)
         .await
