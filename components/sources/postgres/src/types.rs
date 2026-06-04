@@ -532,6 +532,8 @@ mod tests {
         let bootstrap =
             decode_column_value_text("550e8400-e29b-41d4-a716-446655440000", 2950).unwrap();
         assert_eq!(cdc, bootstrap, "uuid: CDC vs bootstrap mismatch");
+    }
+
     use std::str::FromStr;
 
     #[test]
