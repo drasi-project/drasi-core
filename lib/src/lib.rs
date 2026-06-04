@@ -103,6 +103,9 @@ pub mod indexes;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod profiling;
 
+// Observability metrics for the Resumable Reactions pipeline
+pub mod metrics;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
@@ -210,7 +213,9 @@ pub use state_store::{
 pub use secret_store::{MemorySecretStoreProvider, SecretStoreProvider};
 
 /// Write-Ahead Log plugin contract and configuration types
-pub use wal::{CapacityPolicy, WalError, WalProvider, WriteAheadLogConfig, MIN_MAX_EVENTS};
+pub use wal::{
+    CapacityPolicy, DurabilityConfig, WalError, WalProvider, WriteAheadLogConfig, MIN_MAX_EVENTS,
+};
 
 /// Runtime context types for plugin initialization
 pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};

@@ -46,13 +46,19 @@ pub struct WriteAheadLogConfig {
 ///
 /// Sources should choose based on their backpressure contract with upstream
 /// producers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CapacityPolicy {
     /// Reject the incoming event with [`WalError::CapacityExhausted`].
     RejectIncoming,
 
     /// Evict the oldest event(s) to make room for the new one.
     OverwriteOldest,
+}
+
+impl Default for CapacityPolicy {
+    fn default() -> Self {
+        Self::RejectIncoming
+    }
 }
 
 impl WriteAheadLogConfig {
@@ -74,6 +80,61 @@ impl Default for WriteAheadLogConfig {
         Self {
             max_events: 10_000,
             capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+    }
+}
+
+/// Default max events for [`DurabilityConfig`].
+fn default_max_events() -> u64 {
+    10_000
+}
+
+/// User-facing durability configuration for transient sources.
+///
+/// When present and `enabled == true` on a transient source (HTTP, gRPC,
+/// Application), the source will persist incoming events to a local WAL
+/// before acknowledging the caller, enabling crash recovery and replay.
+///
+/// When absent or `enabled == false`, the source operates with zero
+/// overhead — no WAL file is created.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct DurabilityConfig {
+    /// Whether WAL durability is enabled. Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum number of events retained in the WAL before the capacity
+    /// policy triggers. Default: 10,000.
+    #[serde(default = "default_max_events")]
+    pub max_events: u64,
+
+    /// Policy to apply when the WAL reaches capacity.
+    /// Default: [`CapacityPolicy::RejectIncoming`].
+    #[serde(default)]
+    pub capacity_policy: CapacityPolicy,
+}
+
+impl Default for DurabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_events: default_max_events(),
+            capacity_policy: CapacityPolicy::RejectIncoming,
+        }
+    }
+}
+
+impl DurabilityConfig {
+    /// Returns `true` if durability is enabled.
+    pub fn is_active(&self) -> bool {
+        self.enabled
+    }
+
+    /// Convert to the internal [`WriteAheadLogConfig`] used by `WalProvider::register()`.
+    pub fn to_wal_config(&self) -> WriteAheadLogConfig {
+        WriteAheadLogConfig {
+            max_events: self.max_events,
+            capacity_policy: self.capacity_policy,
         }
     }
 }

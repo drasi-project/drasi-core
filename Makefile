@@ -1,13 +1,9 @@
 # Makefile for Drasi Core
 
-# RUSTFLAGS for Clippy linting (matching ci-lint.yml workflow)
-RUSTFLAGS := -Dwarnings \
-	-W clippy::print_stdout \
-	-W clippy::unwrap_used \
-	-A unused \
-	-A clippy::module_inception \
-	-A clippy::ptr_arg \
-	-A clippy::type_complexity
+# RUSTFLAGS for Clippy linting
+# Lint configuration lives in [workspace.lints] in Cargo.toml;
+# RUSTFLAGS just ensures warnings are errors.
+RUSTFLAGS := -Dwarnings
 
 .PHONY: clippy clippy-fix help build-test-plugins test-host-sdk \
        build-plugins build-plugins-release list-plugins \
@@ -33,11 +29,16 @@ help:
 	@echo "  merge-manifests-dry-run   - Show what would be merged (no push)"
 	@echo "  help                      - Show this help message"
 
+# Features to enable for clippy linting.
+# We avoid --all-features because bundled-jq triggers a flaky jq source build.
+# The jq feature (system libjq) covers the same Rust code.
+CLIPPY_FEATURES := drasi-middleware/all,drasi-host-sdk/registry,drasi-host-sdk/fetcher,drasi-host-sdk/watcher,drasi-lib/middleware-jq
+
 clippy:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --workspace --all-targets --features "$(CLIPPY_FEATURES)"
 
 clippy-fix:
-	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --all-targets --all-features --fix
+	RUSTFLAGS="$(RUSTFLAGS)" cargo clippy --workspace --all-targets --features "$(CLIPPY_FEATURES)" --fix
 
 # Build the cdylib plugins required by host-sdk integration tests.
 # These are built individually to avoid feature unification issues.

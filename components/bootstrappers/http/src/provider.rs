@@ -32,7 +32,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::BootstrapEvent;
 
 use crate::auth::{self, ResolvedAuth};
-use crate::config::{EndpointConfig, HttpBootstrapConfig, HttpMethod};
+use crate::config::{EndpointConfig, HttpBootstrapConfig, HttpMethod, OperationType};
 use crate::content_parser::{self, ContentType};
 use crate::pagination::{self, NextPage, Paginator};
 use crate::response;
@@ -172,9 +172,16 @@ impl HttpBootstrapProvider {
 
             debug!("Fetching page {page_num} from endpoint: {}", endpoint.url);
 
-            // Make the HTTP request with retries
-            let (response_text, response_headers) = self
-                .fetch_with_retry(&current_url, endpoint, auth, &current_params)
+            // Fetch and parse with retry: both transport errors AND body
+            // parsing failures (truncation) trigger retries.
+            let (parsed_body, response_headers) = self
+                .fetch_and_parse_with_retry(
+                    &current_url,
+                    endpoint,
+                    auth,
+                    &current_params,
+                    &content_type_override,
+                )
                 .await
                 .with_context(|| {
                     format!(
@@ -182,31 +189,6 @@ impl HttpBootstrapProvider {
                         endpoint.url
                     )
                 })?;
-
-            // Determine content type from override or response header
-            let ct = content_type_override.clone().unwrap_or_else(|| {
-                let header_value = response_headers
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok());
-                ContentType::from_header(header_value)
-            });
-
-            // Parse response body using the correct content type
-            let parsed_body = match content_parser::parse_body(&response_text, &ct) {
-                Ok(body) => body,
-                Err(e) => {
-                    error!(
-                        "Failed to parse response from '{}' as {ct:?}. Body length: {}, first 200 chars: {:?}",
-                        endpoint.url,
-                        response_text.len(),
-                        safe_truncate(&response_text, 200)
-                    );
-                    return Err(e.context(format!(
-                        "Failed to parse response from '{}' as {ct:?}",
-                        endpoint.url
-                    )));
-                }
-            };
 
             // Extract items
             let items = response::extract_items(&parsed_body, &endpoint.response.items_path)?;
@@ -232,13 +214,24 @@ impl HttpBootstrapProvider {
 
             for result in element_results {
                 match result {
-                    Ok(element) => {
+                    Ok(mapped) => {
                         // Filter by requested labels
-                        if !should_include_element(&element, request) {
+                        if !should_include_change(&mapped, request) {
                             continue;
                         }
 
-                        let source_change = SourceChange::Insert { element };
+                        let source_change = match mapped {
+                            response::MappedChange::Upsert { element, operation } => {
+                                match operation {
+                                    OperationType::Insert => SourceChange::Insert { element },
+                                    OperationType::Update => SourceChange::Update { element },
+                                    OperationType::Delete => unreachable!(),
+                                }
+                            }
+                            response::MappedChange::Delete { metadata } => {
+                                SourceChange::Delete { metadata }
+                            }
+                        };
                         let sequence = context.next_sequence();
 
                         let bootstrap_event = BootstrapEvent {
@@ -287,14 +280,19 @@ impl HttpBootstrapProvider {
         Ok(total_sent)
     }
 
-    /// Fetch a URL with retry logic.
-    async fn fetch_with_retry(
+    /// Fetch a URL with retry logic, including body parsing validation.
+    /// Both transport errors AND body parsing failures (e.g., truncated responses)
+    /// are treated as retriable errors. This handles the case where an intermediary
+    /// (proxy, load balancer, CDN) returns a properly-terminated HTTP response with
+    /// incomplete body content.
+    async fn fetch_and_parse_with_retry(
         &self,
         url: &str,
         endpoint: &EndpointConfig,
         auth: &Option<ResolvedAuth>,
         query_params: &[(String, String)],
-    ) -> Result<(String, reqwest::header::HeaderMap)> {
+        content_type_override: &Option<ContentType>,
+    ) -> Result<(serde_json::Value, reqwest::header::HeaderMap)> {
         let max_retries = self.config.max_retries;
         let retry_delay = Duration::from_millis(self.config.retry_delay_ms);
 
@@ -310,16 +308,44 @@ impl HttpBootstrapProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            match self.make_request(url, endpoint, auth, query_params).await {
-                Ok(result) => return Ok(result),
+            // Fetch
+            let (response_text, response_headers) =
+                match self.make_request(url, endpoint, auth, query_params).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Request to endpoint failed (attempt {}/{}): {}",
+                            attempt + 1,
+                            max_retries + 1,
+                            e
+                        );
+                        last_error = Some(e);
+                        continue;
+                    }
+                };
+
+            // Determine content type
+            let ct = resolve_content_type(content_type_override, &response_headers);
+
+            // Validate: parse response body
+            match content_parser::parse_body(&response_text, &ct) {
+                Ok(parsed) => return Ok((parsed, response_headers)),
                 Err(e) => {
+                    // Body parsing failed — likely truncated response.
+                    // Treat as retriable: the next attempt may get a complete response.
                     warn!(
-                        "Request to endpoint failed (attempt {}/{}): {}",
+                        "Response body parse failed (attempt {}/{}, possible truncation). \
+                         Body length: {}, content-type: {ct:?}, error: {e}",
                         attempt + 1,
                         max_retries + 1,
-                        e
+                        response_text.len(),
                     );
-                    last_error = Some(e);
+                    last_error = Some(e.context(format!(
+                        "Failed to parse response from '{}' as {ct:?} \
+                         (body length: {}, possible truncation)",
+                        url,
+                        response_text.len()
+                    )));
                 }
             }
         }
@@ -392,30 +418,52 @@ impl HttpBootstrapProvider {
     }
 }
 
+/// Resolve the content type from the override or response headers.
+fn resolve_content_type(
+    override_ct: &Option<ContentType>,
+    headers: &reqwest::header::HeaderMap,
+) -> ContentType {
+    override_ct.clone().unwrap_or_else(|| {
+        let header_value = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok());
+        ContentType::from_header(header_value)
+    })
+}
+
 /// Check if an element should be included based on the bootstrap request's label filters.
-fn should_include_element(
-    element: &drasi_core::models::Element,
-    request: &BootstrapRequest,
-) -> bool {
-    match element {
-        drasi_core::models::Element::Node { metadata, .. } => {
-            if request.node_labels.is_empty() {
-                return true;
-            }
-            metadata
-                .labels
-                .iter()
-                .any(|l| request.node_labels.iter().any(|nl| nl.as_str() == &**l))
+fn should_include_change(change: &response::MappedChange, request: &BootstrapRequest) -> bool {
+    let metadata = match change {
+        response::MappedChange::Upsert { element, .. } => element.get_metadata(),
+        response::MappedChange::Delete { metadata } => metadata,
+    };
+
+    // Determine if this is a relation by checking element type for Upsert,
+    // or fall back to checking relation_labels for Delete
+    let is_relation = matches!(
+        change,
+        response::MappedChange::Upsert {
+            element: drasi_core::models::Element::Relation { .. },
+            ..
         }
-        drasi_core::models::Element::Relation { metadata, .. } => {
-            if request.relation_labels.is_empty() {
-                return true;
-            }
-            metadata
-                .labels
-                .iter()
-                .any(|l| request.relation_labels.iter().any(|rl| rl.as_str() == &**l))
+    );
+
+    if is_relation {
+        if request.relation_labels.is_empty() {
+            return true;
         }
+        metadata
+            .labels
+            .iter()
+            .any(|l| request.relation_labels.iter().any(|rl| rl.as_str() == &**l))
+    } else {
+        if request.node_labels.is_empty() {
+            return true;
+        }
+        metadata
+            .labels
+            .iter()
+            .any(|l| request.node_labels.iter().any(|nl| nl.as_str() == &**l))
     }
 }
 

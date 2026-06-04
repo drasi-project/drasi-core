@@ -63,11 +63,14 @@ subtle = "2"
 base64 = "0.22"
 hex = "0.4"
 regex = "1.10"
+bytes = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
 drasi-reaction-application = { workspace = true }
 env_logger = "0.11"
+tempfile = "3"
+drasi-wal-redb = { path = "../../wals/redb" }
 
 
 [features]

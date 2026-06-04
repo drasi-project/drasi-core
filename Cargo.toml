@@ -184,7 +184,7 @@ drasi-bootstrap-mysql = { version = "0.2.3", path = "components/bootstrappers/my
 drasi-source-mysql = { version = "0.2.0", path = "components/sources/mysql" }
 drasi-source-ris-live = { version = "0.1.1", path = "components/sources/ris-live" }
 drasi-bootstrap-sui-deepbook = { version = "0.1.0", path = "components/bootstrappers/sui-deepbook" }
-drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook" }
+drasi-source-sui-deepbook = { version = "0.1.0", path = "components/sources/sui-deepbook", default-features = false }
 drasi-kubernetes-common = { version = "0.1.2", path = "components/kubernetes-common" }
 drasi-source-kubernetes = { version = "0.1.0", path = "components/sources/kubernetes" }
 drasi-bootstrap-kubernetes = { version = "0.1.0", path = "components/bootstrappers/kubernetes" }
