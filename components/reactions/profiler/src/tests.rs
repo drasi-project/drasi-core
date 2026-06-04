@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
 
 /// Helper to create test profiling metadata with specific timestamps
 fn create_profiling_metadata(
@@ -554,4 +555,19 @@ fn test_variance_with_uniform_distribution() {
     assert_eq!(source_stats.p50, 5000.0);
     assert_eq!(source_stats.p95, 5000.0);
     assert_eq!(source_stats.p99, 5000.0);
+}
+
+#[test]
+fn test_recovery_trait_defaults() {
+    let reaction = ProfilerReaction::builder("test-profiler")
+        .with_query("query1")
+        .build()
+        .unwrap();
+
+    assert!(!reaction.is_durable());
+    assert!(!reaction.needs_snapshot_on_fresh_start());
+    assert_eq!(
+        reaction.default_recovery_policy(),
+        ReactionRecoveryPolicy::AutoSkipGap
+    );
 }
