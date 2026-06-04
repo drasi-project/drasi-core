@@ -125,10 +125,7 @@ mod tests {
         let converted = bolt_type_to_element_value(&bolt_map).unwrap();
         match converted {
             ElementValue::Object(props) => {
-                assert_eq!(
-                    props.get("key").unwrap(),
-                    &ElementValue::Integer(99)
-                );
+                assert_eq!(props.get("key").unwrap(), &ElementValue::Integer(99));
             }
             _ => panic!("expected Object"),
         }

@@ -282,10 +282,7 @@ fn get_nested_string(map: &BoltMap, map_key: &str, value_key: &str) -> Option<St
 }
 
 pub fn now_ms() -> u64 {
-    Utc::now()
-        .timestamp_millis()
-        .try_into()
-        .unwrap_or(0)
+    Utc::now().timestamp_millis().try_into().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -440,8 +437,7 @@ mod tests {
 
     #[test]
     fn test_build_selectors_mixed() {
-        let selectors =
-            build_selectors(&["Person".to_string()], &["KNOWS".to_string()]);
+        let selectors = build_selectors(&["Person".to_string()], &["KNOWS".to_string()]);
         assert_eq!(selectors.len(), 2);
         assert_eq!(
             selectors[0].get("select"),

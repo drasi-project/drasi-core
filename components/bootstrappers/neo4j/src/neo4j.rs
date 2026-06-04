@@ -383,10 +383,7 @@ async fn connect_graph(config: &Neo4jBootstrapConfig) -> Result<Graph> {
 }
 
 fn now_ms() -> u64 {
-    Utc::now()
-        .timestamp_millis()
-        .try_into()
-        .unwrap_or(0)
+    Utc::now().timestamp_millis().try_into().unwrap_or(0)
 }
 
 #[cfg(test)]
