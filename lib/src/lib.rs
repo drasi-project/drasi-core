@@ -103,6 +103,9 @@ pub mod indexes;
 #[cfg_attr(not(test), doc(hidden))]
 pub mod profiling;
 
+// Observability metrics for the Resumable Reactions pipeline
+pub mod metrics;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
