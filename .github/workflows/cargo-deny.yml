@@ -27,6 +27,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: cargo-deny check bans
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.20
         with:
           command: check bans
+
+      # cargo-deny only sees crates in the dependency graph. This complementary check
+      # catches a custom allocator declared directly in workspace source — a vector
+      # cargo-deny cannot observe. Comment/doc-comment mentions (lines starting with //)
+      # are excluded so prose references to `#[global_allocator]` don't trip the gate.
+      - name: Reject custom #[global_allocator] in workspace source
+        run: |
+          matches="$(grep -rn --include='*.rs' --exclude-dir=target \
+            '#\[global_allocator\]' . || true)"
+          offenders="$(printf '%s\n' "$matches" \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::A custom #[global_allocator] was found in workspace source. Plugins and the host must share the default System allocator — see deny.toml and https://github.com/drasi-project/drasi-core/issues/378."
+            printf '%s\n' "$offenders"
+            exit 1
+          fi
