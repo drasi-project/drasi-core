@@ -33,6 +33,7 @@ mod construction {
             port: 50052,
             endpoint: Some("/custom".to_string()),
             timeout_ms: 10000,
+            durability: None,
         };
         let source = GrpcSource::new("custom-source", config).unwrap();
         assert_eq!(source.id(), "custom-source");
@@ -76,6 +77,7 @@ mod properties {
             port: 9000,
             endpoint: None,
             timeout_ms: 5000,
+            durability: None,
         };
         let source = GrpcSource::new("test", config).unwrap();
         let props = source.properties();
@@ -97,6 +99,7 @@ mod properties {
             port: 50051,
             endpoint: Some("/api/v1".to_string()),
             timeout_ms: 5000,
+            durability: None,
         };
         let source = GrpcSource::new("test", config).unwrap();
         let props = source.properties();
@@ -114,6 +117,7 @@ mod properties {
             port: 50051,
             endpoint: None,
             timeout_ms: 5000,
+            durability: None,
         };
         let source = GrpcSource::new("test", config).unwrap();
         let props = source.properties();
@@ -205,6 +209,7 @@ mod config {
             port: 50051,
             endpoint: Some("/api".to_string()),
             timeout_ms: 10000,
+            durability: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();

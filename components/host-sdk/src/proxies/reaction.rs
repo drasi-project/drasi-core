@@ -259,6 +259,7 @@ impl Reaction for ReactionProxy {
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
             snapshot_fetcher: sf_ptr,
+            wal_provider: std::ptr::null(),
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);

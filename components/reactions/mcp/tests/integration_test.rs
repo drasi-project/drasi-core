@@ -162,6 +162,7 @@ async fn test_mcp_reaction_end_to_end() -> Result<()> {
         "test-source",
         ApplicationSourceConfig {
             properties: std::collections::HashMap::new(),
+            durability: None,
         },
     )?;
 

@@ -214,6 +214,7 @@ impl OracleBootstrapHandler {
                     source_id: self.source_id.clone(),
                     change: SourceChange::Insert { element },
                     timestamp,
+                    sequence: None,
                 });
             }
         }

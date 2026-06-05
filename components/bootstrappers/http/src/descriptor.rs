@@ -22,7 +22,8 @@ use utoipa::OpenApi;
 
 use crate::config::{
     ApiKeyLocation, AuthConfig, ContentTypeOverride, ElementMappingConfig, ElementTemplate,
-    ElementType, EndpointConfig, HttpBootstrapConfig, HttpMethod, PaginationConfig, ResponseConfig,
+    ElementType, EndpointConfig, HttpBootstrapConfig, HttpMethod, OperationType, PaginationConfig,
+    ResponseConfig,
 };
 use crate::provider::HttpBootstrapProvider;
 
@@ -277,9 +278,25 @@ pub struct ElementMappingConfigDto {
     #[schema(value_type = bootstrap::http::ElementType)]
     pub element_type: ElementTypeDto,
 
+    /// Operation type for the source change (default: update for idempotent bootstrap).
+    #[serde(default)]
+    #[schema(value_type = bootstrap::http::OperationType)]
+    pub operation: OperationTypeDto,
+
     /// Template for element creation.
     #[schema(value_type = bootstrap::http::ElementTemplate)]
     pub template: ElementTemplateDto,
+}
+
+/// Operation type DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, utoipa::ToSchema)]
+#[schema(as = bootstrap::http::OperationType)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationTypeDto {
+    Insert,
+    #[default]
+    Update,
+    Delete,
 }
 
 /// Element type DTO.
@@ -336,6 +353,14 @@ fn map_element_type(dto: &ElementTypeDto) -> ElementType {
     match dto {
         ElementTypeDto::Node => ElementType::Node,
         ElementTypeDto::Relation => ElementType::Relation,
+    }
+}
+
+fn map_operation_type(dto: &OperationTypeDto) -> OperationType {
+    match dto {
+        OperationTypeDto::Insert => OperationType::Insert,
+        OperationTypeDto::Update => OperationType::Update,
+        OperationTypeDto::Delete => OperationType::Delete,
     }
 }
 
@@ -461,6 +486,7 @@ async fn map_element_mapping(
 ) -> Result<ElementMappingConfig, MappingError> {
     Ok(ElementMappingConfig {
         element_type: map_element_type(&dto.element_type),
+        operation: map_operation_type(&dto.operation),
         template: map_element_template(&dto.template, resolver).await?,
     })
 }
