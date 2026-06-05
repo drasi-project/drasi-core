@@ -178,6 +178,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
         "test-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
     let query = Query::cypher("test-query")
@@ -343,6 +344,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
         "agg-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
 
