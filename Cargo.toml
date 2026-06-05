@@ -70,6 +70,7 @@ members = [
   "components/reactions/profiler",
   "components/reactions/application",
   "components/reactions/log",
+  "components/reactions/azure-storage",
   "components/reactions/loki",
   "components/reactions/file",
   "components/reactions/storedproc-mssql",
@@ -172,6 +173,7 @@ drasi-source-hyperliquid = { version = "0.1.1", path = "components/sources/hyper
 drasi-source-cloudflare-radar = { version = "0.1.0", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.5", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.2", path = "components/reactions/http" }
+drasi-reaction-azure-storage = { version = "0.1.0", path = "components/reactions/azure-storage" }
 drasi-reaction-rabbitmq = { version = "0.1.0", path = "components/reactions/rabbitmq" }
 drasi-reaction-grpc = { version = "0.3.2", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
