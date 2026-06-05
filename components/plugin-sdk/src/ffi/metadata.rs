@@ -13,6 +13,13 @@
 // limitations under the License.
 
 //! Plugin metadata for version validation at load time.
+//!
+//! Beyond the version/target fields validated here, dynamic plugins and the host must
+//! also share the default System allocator. Rich types cross the cdylib boundary as
+//! owned `Box`es freed on the opposite side, so a custom `#[global_allocator]` on
+//! either side causes silent heap corruption. That constraint is not encoded in this
+//! struct; it is enforced at build time by the workspace `cargo-deny` `[bans]` rule.
+//! See issue <https://github.com/drasi-project/drasi-core/issues/378>.
 
 use super::types::FfiStr;
 

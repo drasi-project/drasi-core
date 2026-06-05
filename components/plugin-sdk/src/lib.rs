@@ -96,6 +96,19 @@
 //! the server. See [Creating a Dynamic Plugin](#creating-a-dynamic-plugin) below
 //! for the full workflow.
 //!
+//! <div class="warning">
+//!
+//! **Dynamic plugins must use the default System allocator.** Rich Rust types cross
+//! the cdylib boundary as owned `Box`es (`Box::into_raw` on one side, `Box::from_raw`
+//! on the other, in both directions). This is only sound because the plugin and the
+//! host share the process-global System allocator. A plugin (or host) that installs a
+//! custom `#[global_allocator]` — `jemalloc`, `mimalloc`, `tcmalloc`, `snmalloc`, etc.
+//! — turns every cross-boundary free into **silent heap corruption**. This requirement
+//! is enforced at build time by a `cargo-deny` `[bans]` rule. See issue
+//! [#378](https://github.com/drasi-project/drasi-core/issues/378).
+//!
+//! </div>
+//!
 //! ## Creating a Dynamic Plugin
 //!
 //! Dynamic plugins are compiled as shared libraries (`.so` on Linux, `.dylib` on

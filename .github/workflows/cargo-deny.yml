@@ -1,0 +1,32 @@
+name: Cargo Deny
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feature/*
+      - feature-lib
+      - release/*
+  schedule:
+    - cron: '30 1 * * 1' # runs every Monday at 01:30 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  # Enforce the cross-cdylib shared-System-allocator contract: no crate in the
+  # workspace may pull in a custom global allocator (jemalloc, mimalloc, etc.).
+  # See deny.toml and https://github.com/drasi-project/drasi-core/issues/378.
+  # Advisory/license scanning is handled separately by cargo-audit.yml, so this
+  # workflow runs only the `bans` check.
+  bans:
+    name: cargo-deny bans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: cargo-deny check bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans
