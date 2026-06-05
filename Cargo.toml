@@ -63,6 +63,7 @@ members = [
   "components/reactions/grpc-adaptive",
   "components/reactions/aws-sqs",
   "components/reactions/sse",
+  "components/reactions/rabbitmq",
   "components/reactions/dashboard",
   "components/reactions/mcp",
   "components/reactions/platform",
@@ -171,6 +172,7 @@ drasi-source-hyperliquid = { version = "0.1.1", path = "components/sources/hyper
 drasi-source-cloudflare-radar = { version = "0.1.0", path = "components/sources/cloudflare-radar" }
 drasi-bootstrap-application = { version = "0.2.5", path = "components/bootstrappers/application" }
 drasi-reaction-http = { version = "0.2.2", path = "components/reactions/http" }
+drasi-reaction-rabbitmq = { version = "0.1.0", path = "components/reactions/rabbitmq" }
 drasi-reaction-grpc = { version = "0.3.2", path = "components/reactions/grpc" }
 drasi-reaction-file = { version = "0.1.0", path = "components/reactions/file" }
 drasi-reaction-aws-sqs = { version = "0.1.0", path = "components/reactions/aws-sqs" }
