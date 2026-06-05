@@ -11,6 +11,7 @@ members = [
   "lib",
 
   # Shared component libraries
+  "components/batching-common",
   "components/mssql-common",
   "components/mysql-common",
   "components/kubernetes-common",
@@ -44,6 +45,7 @@ members = [
   "components/sources/application",
   "components/sources/mock",
   "components/sources/ris-live",
+  "components/sources/mqtt",
   "components/sources/mssql",
   "components/sources/dataverse",
   "components/sources/open511",
@@ -190,6 +192,8 @@ drasi-source-oracle = { version = "0.1.0", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.0", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.2", path = "components/oracle-common" }
 drasi-source-gtfs-rt = { version = "0.1.0", path = "components/sources/gtfs-rt" }
+drasi-source-mqtt = { version = "0.1.0", path = "components/sources/mqtt" }
+drasi-batching-common = { version = "0.1.0", path = "components/batching-common" }
 drasi-bootstrap-gtfs-rt = { version = "0.1.0", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
 drasi-bootstrap-open511 = { version = "0.1.0", path = "components/bootstrappers/open511" }

@@ -219,7 +219,6 @@ pub mod config;
 pub mod descriptor;
 pub use config::HttpSourceConfig;
 
-mod adaptive_batcher;
 mod models;
 mod time;
 
@@ -251,6 +250,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
+use drasi_batching_common::{AdaptiveBatchConfig, AdaptiveBatcher};
 use drasi_lib::channels::{ComponentType, *};
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
@@ -258,7 +258,6 @@ use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
 use tracing::Instrument;
 
-use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::auth::{verify_auth, AuthResult};
 use crate::config::{CorsConfig, ErrorBehavior, WebhookConfig};
 use crate::content_parser::{parse_content, ContentType};
