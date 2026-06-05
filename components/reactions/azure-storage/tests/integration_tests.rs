@@ -147,6 +147,7 @@ async fn start_drasi_with_reaction(
         "app-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )?;
     let query = Query::cypher(query_id)
@@ -362,6 +363,7 @@ async fn test_queue_reaction_aggregation() {
         "app-source",
         ApplicationSourceConfig {
             properties: HashMap::new(),
+            durability: None,
         },
     )
     .expect("source should build");
