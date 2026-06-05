@@ -441,6 +441,11 @@ impl Source for SourceProxy {
             .as_ref()
             .map(|ss| StateStoreVtableBuilder::build(ss.clone()));
 
+        let wal_provider_vtable = context
+            .wal_provider
+            .as_ref()
+            .map(|wp| crate::wal_provider_bridge::WalProviderVtableBuilder::build(wp.clone()));
+
         let instance_id_str = context.instance_id.clone();
         let component_id_str = context.source_id.clone();
 
@@ -448,6 +453,10 @@ impl Source for SourceProxy {
         let component_id_ffi = FfiStr::from_str(&component_id_str);
 
         let ss_ptr = state_store_vtable
+            .map(|v| Box::into_raw(Box::new(v)) as *const _)
+            .unwrap_or(std::ptr::null());
+
+        let wp_ptr = wal_provider_vtable
             .map(|v| Box::into_raw(Box::new(v)) as *const _)
             .unwrap_or(std::ptr::null());
 
@@ -497,6 +506,7 @@ impl Source for SourceProxy {
             lifecycle_callback: Some(crate::callbacks::instance_lifecycle_callback),
             lifecycle_ctx: ctx_ptr,
             snapshot_fetcher: std::ptr::null(),
+            wal_provider: wp_ptr,
         };
 
         (self.vtable.initialize_fn)(self.vtable.state, &ffi_ctx as *const FfiRuntimeContext);

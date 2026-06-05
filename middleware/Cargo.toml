@@ -1,6 +1,6 @@
 [package]
 name = "drasi-middleware"
-version = "0.5.3"
+version = "0.5.4"
 edition.workspace = true
 license.workspace = true
 description = "Drasi Core Middleware"
@@ -26,10 +26,10 @@ relabel = []
 unwind = []
 
 # Convenience feature to enable all middleware
-all = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
+all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
 
 [package.metadata.docs.rs]
-features = ["all"]
+features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
 
 [dependencies]
 # Core dependencies (always needed)

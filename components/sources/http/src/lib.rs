@@ -255,6 +255,7 @@ use tower_http::cors::{Any, CorsLayer};
 use drasi_lib::channels::{ComponentType, *};
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
+use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
 use tracing::Instrument;
 
@@ -292,6 +293,10 @@ pub struct HttpSource {
     config: HttpSourceConfig,
     /// Adaptive batching configuration for throughput optimization
     adaptive_config: AdaptiveBatchConfig,
+    /// WAL provider for durable event persistence (if durability is enabled)
+    wal: tokio::sync::RwLock<Option<Arc<dyn WalProvider>>>,
+    /// Handle to the WAL pruning background task (if running)
+    prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Batch event request that can accept multiple events
@@ -311,6 +316,8 @@ struct HttpAppState {
     batch_tx: mpsc::Sender<SourceChangeEvent>,
     /// Webhook configuration (if in webhook mode)
     webhook_config: Option<Arc<WebhookState>>,
+    /// WAL provider for durable persistence (if durability is enabled)
+    wal: Option<Arc<dyn WalProvider>>,
 }
 
 /// State for webhook mode processing
@@ -450,6 +457,8 @@ impl HttpSource {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -512,6 +521,8 @@ impl HttpSource {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -588,10 +599,61 @@ impl HttpSource {
         for (idx, event) in events.iter().enumerate() {
             match convert_http_to_source_change(event, source_id) {
                 Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let sequence = if let Some(ref wal) = state.wal {
+                        match wal.append(&state.source_id, &source_change).await {
+                            Ok(seq) => {
+                                trace!(
+                                    "[{}] WAL append succeeded: sequence={}",
+                                    state.source_id,
+                                    seq
+                                );
+                                Some(seq)
+                            }
+                            Err(WalError::CapacityExhausted(_)) => {
+                                warn!(
+                                    "[{}] WAL capacity exhausted, rejecting event",
+                                    state.source_id
+                                );
+                                return Err((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(EventResponse {
+                                        success: false,
+                                        message: "WAL capacity exhausted".to_string(),
+                                        error: Some("Source durability buffer is full".to_string()),
+                                    }),
+                                ));
+                            }
+                            Err(e) => {
+                                error!(
+                                    "[{}] WAL append failed for event {}: {}",
+                                    state.source_id,
+                                    idx + 1,
+                                    e
+                                );
+                                // WAL durability failure is a server-side error — reject entire batch
+                                return Err((
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    Json(EventResponse {
+                                        success: false,
+                                        message: format!(
+                                            "WAL durability failure at event {}: {e}",
+                                            idx + 1
+                                        ),
+                                        error: Some(format!("WAL error: {e}")),
+                                    }),
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let change_event = SourceChangeEvent {
                         source_id: source_id.to_string(),
                         change: source_change,
                         timestamp: chrono::Utc::now(),
+                        sequence,
                     };
 
                     if let Err(e) = state.batch_tx.send(change_event).await {
@@ -802,10 +864,40 @@ impl HttpSource {
                 .process_mapping(mapping, &context, source_id)
             {
                 Ok(source_change) => {
+                    // WAL append before ACK (if durability enabled)
+                    let sequence = if let Some(ref wal) = state.wal {
+                        match wal.append(&state.source_id, &source_change).await {
+                            Ok(seq) => Some(seq),
+                            Err(WalError::CapacityExhausted(_)) => {
+                                return handle_error(
+                                    error_behavior,
+                                    source_id,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "WAL capacity exhausted",
+                                    None,
+                                );
+                            }
+                            Err(e) => {
+                                error!("[{source_id}] WAL append failed: {e}");
+                                // WAL durability failure — reject to maintain at-least-once guarantee
+                                return handle_error(
+                                    error_behavior,
+                                    source_id,
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    &format!("WAL durability failure: {e}"),
+                                    None,
+                                );
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     let event = SourceChangeEvent {
                         source_id: source_id.clone(),
                         change: source_change,
                         timestamp: chrono::Utc::now(),
+                        sequence,
                     };
 
                     if let Err(e) = state.batch_tx.send(event).await {
@@ -903,12 +995,18 @@ impl HttpSource {
                 let mut profiling = drasi_lib::profiling::ProfilingMetadata::new();
                 profiling.source_send_ns = Some(drasi_lib::profiling::timestamp_ns());
 
-                let wrapper = SourceEventWrapper::with_profiling(
+                let mut wrapper = SourceEventWrapper::with_profiling(
                     event.source_id.clone(),
                     SourceEvent::Change(event.change),
                     event.timestamp,
                     profiling,
                 );
+
+                // Carry WAL-assigned sequence through to the wrapper
+                if let Some(seq) = event.sequence {
+                    wrapper.sequence = Some(seq);
+                    wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+                }
 
                 if let Err(e) =
                     SourceBase::dispatch_from_task(dispatchers.clone(), wrapper.clone(), &source_id)
@@ -994,6 +1092,56 @@ impl Source for HttpSource {
             )
             .await;
 
+        // Initialize WAL if durability is enabled
+        let wal_ref: Option<Arc<dyn WalProvider>> =
+            if self.config.durability.as_ref().is_some_and(|d| d.enabled) {
+                let ctx = self
+                    .base
+                    .context()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("Context not initialized"))?;
+                let wal = ctx.wal_provider.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Durability enabled but no WAL provider configured on DrasiLib")
+                })?;
+                let wal_config = self
+                    .config
+                    .durability
+                    .as_ref()
+                    .expect("durability checked above")
+                    .to_wal_config();
+                wal.register(&self.base.id, wal_config.clone())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to register WAL for source '{}': {}",
+                            self.base.id,
+                            e
+                        )
+                    })?;
+
+                info!(
+                    "[{}] WAL registered: max_events={}, policy={:?}",
+                    self.base.id, wal_config.max_events, wal_config.capacity_policy
+                );
+
+                // Resume sequence counter from WAL head
+                let head = wal.head_sequence(&self.base.id).await.unwrap_or(0);
+                if head > 0 {
+                    self.base.set_next_sequence(head);
+                    info!(
+                        "[{}] WAL resumed from persisted state: head={}, next_sequence={}",
+                        self.base.id,
+                        head,
+                        head + 1
+                    );
+                }
+
+                *self.wal.write().await = Some(wal.clone());
+                Some(wal)
+            } else {
+                None
+            };
+
         let host = self.config.host.clone();
         let port = self.config.port;
 
@@ -1060,6 +1208,7 @@ impl Source for HttpSource {
             source_id: self.base.id.clone(),
             batch_tx,
             webhook_config: webhook_state,
+            wal: wal_ref.clone(),
         };
 
         // Build router based on mode
@@ -1167,6 +1316,37 @@ impl Source for HttpSource {
             }
         }
 
+        // Spawn WAL pruning task if durability is enabled
+        if let Some(wal) = wal_ref {
+            let base = self.base.clone_shared();
+            let source_id = self.base.id.clone();
+            let prune_handle = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    if let Some(confirmed) = base.compute_confirmed_position().await {
+                        if confirmed > 0 {
+                            match wal.prune_up_to(&source_id, confirmed).await {
+                                Ok(pruned) => {
+                                    if pruned > 0 {
+                                        let remaining =
+                                            wal.event_count(&source_id).await.unwrap_or(0);
+                                        debug!(
+                                            "[{source_id}] WAL pruned: count={pruned}, confirmed_seq={confirmed}, remaining={remaining}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("[{source_id}] WAL prune failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            *self.prune_task.write().await = Some(prune_handle);
+        }
+
         Ok(())
     }
 
@@ -1179,6 +1359,11 @@ impl Source for HttpSource {
                 Some("Stopping adaptive HTTP source".to_string()),
             )
             .await;
+
+        // Cancel WAL pruning task
+        if let Some(handle) = self.prune_task.write().await.take() {
+            handle.abort();
+        }
 
         if let Some(tx) = self.base.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -1206,7 +1391,49 @@ impl Source for HttpSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
+        // If WAL is enabled and subscriber is resuming, use WAL replay
+        let wal_guard = self.wal.read().await;
+        if let (Some(wal), Some(ref resume_from)) = (wal_guard.as_ref(), &settings.resume_from) {
+            // Decode resume_from as big-endian u64 sequence
+            if resume_from.len() >= 8 {
+                let resume_seq =
+                    u64::from_be_bytes(resume_from[..8].try_into().unwrap_or_default());
+                let wal_clone = wal.clone();
+                drop(wal_guard);
+                return self
+                    .base
+                    .subscribe_with_replay(&settings, wal_clone.as_ref(), resume_seq, "HTTP")
+                    .await;
+            } else {
+                drop(wal_guard);
+                return Err(anyhow::anyhow!(
+                    "Invalid resume_from position: expected at least 8 bytes, got {}",
+                    resume_from.len()
+                ));
+            }
+        }
+        drop(wal_guard);
         self.base.subscribe_with_bootstrap(&settings, "HTTP").await
+    }
+
+    fn supports_replay(&self) -> bool {
+        self.config.durability.as_ref().is_some_and(|d| d.enabled)
+    }
+
+    async fn deprovision(&self) -> Result<()> {
+        // Delete WAL data if durability was enabled
+        let wal_guard = self.wal.read().await;
+        if let Some(ref wal) = *wal_guard {
+            info!("[{}] Deprovisioning: deleting WAL data", self.base.id);
+            if let Err(e) = wal.delete_wal(&self.base.id).await {
+                warn!(
+                    "[{}] Failed to delete WAL during deprovision: {}",
+                    self.base.id, e
+                );
+            }
+        }
+        drop(wal_guard);
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1258,6 +1485,7 @@ pub struct HttpSourceBuilder {
     adaptive_window_secs: Option<u64>,
     adaptive_enabled: Option<bool>,
     webhooks: Option<WebhookConfig>,
+    durability: Option<drasi_lib::DurabilityConfig>,
     dispatch_mode: Option<DispatchMode>,
     dispatch_buffer_capacity: Option<usize>,
     bootstrap_provider: Option<Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>>,
@@ -1284,6 +1512,7 @@ impl HttpSourceBuilder {
             adaptive_window_secs: None,
             adaptive_enabled: None,
             webhooks: None,
+            durability: None,
             dispatch_mode: None,
             dispatch_buffer_capacity: None,
             bootstrap_provider: None,
@@ -1390,6 +1619,15 @@ impl HttpSourceBuilder {
         self
     }
 
+    /// Set the WAL durability configuration.
+    ///
+    /// When enabled, events are persisted to a Write-Ahead Log before
+    /// acknowledging the caller, enabling crash recovery and replay.
+    pub fn with_durability(mut self, config: drasi_lib::DurabilityConfig) -> Self {
+        self.durability = Some(config);
+        self
+    }
+
     /// Set the full configuration at once
     pub fn with_config(mut self, config: HttpSourceConfig) -> Self {
         self.host = config.host;
@@ -1403,6 +1641,7 @@ impl HttpSourceBuilder {
         self.adaptive_window_secs = config.adaptive_window_secs;
         self.adaptive_enabled = config.adaptive_enabled;
         self.webhooks = config.webhooks;
+        self.durability = config.durability;
         self
     }
 
@@ -1424,6 +1663,7 @@ impl HttpSourceBuilder {
             adaptive_window_secs: self.adaptive_window_secs,
             adaptive_enabled: self.adaptive_enabled,
             webhooks: self.webhooks,
+            durability: self.durability,
         };
 
         // Build SourceBaseParams with all settings
@@ -1463,6 +1703,8 @@ impl HttpSourceBuilder {
             base: SourceBase::new(params)?,
             config,
             adaptive_config,
+            wal: tokio::sync::RwLock::new(None),
+            prune_task: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -1693,6 +1935,7 @@ mod tests {
                 adaptive_window_secs: None,
                 adaptive_enabled: None,
                 webhooks: None,
+                durability: None,
             };
             let source = HttpSource::with_dispatch(
                 "dispatch-source",

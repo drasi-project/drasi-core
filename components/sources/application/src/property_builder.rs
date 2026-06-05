@@ -54,7 +54,7 @@ use std::sync::Arc;
 /// use std::collections::HashMap;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let config = ApplicationSourceConfig { properties: HashMap::new() };
+/// let config = ApplicationSourceConfig { properties: HashMap::new(), durability: None };
 /// let (source, handle) = ApplicationSource::new("events", config)?;
 ///
 /// // Create a user node with multiple properties
