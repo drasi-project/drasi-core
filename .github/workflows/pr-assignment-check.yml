@@ -125,37 +125,54 @@ jobs:
             }
 
             if (!authorAssignedToAny) {
-              // Close the PR with explanation
-              await github.rest.issues.createComment({
+              const prLabels = context.payload.pull_request.labels.map(l => l.name);
+              const alreadyLabeled = prLabels.includes('needs-assignment');
+
+              await github.rest.issues.addLabels({
                 owner,
                 repo,
                 issue_number: prNumber,
-                body: `Hi @${prAuthor}, thanks for your interest in contributing to drasi-core!
+                labels: ['needs-assignment']
+              });
 
-            However, I need to close this PR because you are not assigned to the linked issue(s). Per our [contributing guidelines](https://github.com/drasi-project/drasi-core/blob/main/CONTRIBUTING.md#current-status):
+              // Only comment the first time to avoid spamming on repeated edits
+              if (!alreadyLabeled) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: `Hi @${prAuthor}, thanks for your interest in contributing to drasi-core!
+
+            It looks like you are not currently assigned to the linked issue(s). Per our [contributing guidelines](https://github.com/drasi-project/drasi-core/blob/main/CONTRIBUTING.md#current-status):
 
             > Please start by choosing an existing issue, or opening an issue to work on. The maintainers will respond to your issue, please work with the maintainers to ensure that what you're doing is in scope for the project before writing any code.
 
-            **To contribute:**
+            **To get assigned:**
             1. Comment on the issue you'd like to work on to request assignment
             2. Wait for a maintainer to assign you
-            3. Then open your PR
 
-            This process helps us coordinate work and avoid duplicate efforts. We appreciate your understanding!
-
-            If you believe this was closed in error (e.g., you were assigned but the automation didn't detect it), please let us know.
+            This helps us coordinate work and avoid duplicate efforts. A maintainer will review your PR once assignment is confirmed.
 
             Join our [Discord server](https://aka.ms/drasidiscord) to engage with maintainers and the community!`
-              });
+                });
+              }
 
-              await github.rest.pulls.update({
-                owner,
-                repo,
-                pull_number: prNumber,
-                state: 'closed'
-              });
-
-              console.log(`Closed PR #${prNumber} - author not assigned to linked issues`);
+              console.log(alreadyLabeled
+                ? `PR #${prNumber} already labeled needs-assignment, skipping duplicate comment`
+                : `PR #${prNumber} - author not assigned to linked issues, added label and comment`);
             } else {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: 'needs-assignment'
+                });
+                console.log(`Removed "needs-assignment" label from PR #${prNumber}`);
+              } catch (e) {
+                // Label might not exist, that's fine
+                if (e.status !== 404) throw e;
+              }
+
               console.log(`PR #${prNumber} passed assignment check`);
             }
