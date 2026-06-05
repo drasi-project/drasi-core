@@ -219,10 +219,10 @@ async fn test_relationship_detection() -> Result<()> {
         BootstrapContext::new_minimal("test-server".to_string(), "neo4j-rel-source".to_string());
     let (tx, mut rx) = mpsc::channel(64);
     let emitted = provider.bootstrap(request, &context, tx, None).await?;
-    assert!(emitted >= 3);
+    assert!(emitted.event_count >= 3);
 
     let mut saw_relation = false;
-    for _ in 0..emitted {
+    for _ in 0..emitted.event_count {
         if let Some(event) = rx.recv().await {
             if let SourceChange::Insert {
                 element:
