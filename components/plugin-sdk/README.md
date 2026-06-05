@@ -218,8 +218,10 @@ Both the plugin and the server **must** be compiled with:
   Rich types cross the FFI boundary as owned `Box`es (`Box::into_raw` on one side,
   `Box::from_raw` on the other), so both sides must allocate and free through the same
   process-global `malloc`/`free`. A custom allocator on either side turns every
-  cross-boundary free into silent heap corruption. This is enforced at build time by a
-  `cargo-deny` `[bans]` rule (see the workspace `deny.toml`). See issue
+  cross-boundary free into silent heap corruption. drasi-core CI enforces this with a
+  `cargo-deny` `[bans]` rule (see the workspace `deny.toml`); plugin authors building
+  outside this workspace should likewise avoid a custom global allocator and may add the
+  same check to their own CI. See issue
   [#378](https://github.com/drasi-project/drasi-core/issues/378).
 
 The server performs a two-phase load:

@@ -103,8 +103,10 @@
 //! on the other, in both directions). This is only sound because the plugin and the
 //! host share the process-global System allocator. A plugin (or host) that installs a
 //! custom `#[global_allocator]` — `jemalloc`, `mimalloc`, `tcmalloc`, `snmalloc`, etc.
-//! — turns every cross-boundary free into **silent heap corruption**. This requirement
-//! is enforced at build time by a `cargo-deny` `[bans]` rule. See issue
+//! — turns every cross-boundary free into **silent heap corruption**. drasi-core CI
+//! enforces this with a `cargo-deny` `[bans]` rule; plugin authors building outside this
+//! workspace should not set a custom global allocator (and may add the same `cargo-deny`
+//! check to their own CI). See issue
 //! [#378](https://github.com/drasi-project/drasi-core/issues/378).
 //!
 //! </div>

@@ -10,14 +10,16 @@
 # silent heap corruption.
 #
 # This gate is run in CI via `.github/workflows/cargo-deny.yml` as `cargo deny check
-# bans`. Advisory and license scanning are handled separately by `cargo-audit.yml`, so
-# only the `[bans]` check is configured here.
+# bans`. RustSec advisory scanning is handled separately by `cargo-audit.yml`, so only
+# the `[bans]` check is configured here.
 #
 # See https://github.com/drasi-project/drasi-core/issues/378 for background.
 
 [graph]
-# Evaluate the dependency graph with all features enabled and across all targets, so a
-# custom allocator gated behind a feature or a specific platform is still caught.
+# Evaluate the dependency graph with all features enabled. `targets` is intentionally
+# left unset: cargo-deny then resolves dependencies for every target triple, so a custom
+# allocator gated behind a feature or a specific platform (e.g. Windows/macOS-only) is
+# still caught.
 all-features = true
 
 [bans]
