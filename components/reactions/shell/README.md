@@ -48,6 +48,7 @@ let reaction = ShellReactionBuilder::new("my-shell-reaction")
     )
     .with_env("DRASI_INSTANCE", "production")
     .with_timeout_s(30)
+    .with_memory_limit(512 * 1024 * 1024)
     .with_max_concurrent(50)
     .build()?;
 
@@ -152,6 +153,7 @@ let config = ShellReactionConfig {
         ("ENVIRONMENT".to_string(), "production".to_string()),
     ]),
     timeout_s: 30,
+    memory_limit: 512 * 1024 * 1024,
     max_concurrent: 20,
     ..Default::default()
 };
@@ -178,6 +180,7 @@ let reaction = ShellReaction::new(
 | `capture_limit` | Maximum bytes captured from each command's stdout and stderr. Output is truncated beyond this limit. | `usize` | `4096` (4 KB) |
 | `timeout_s` | Maximum seconds a command may run. Timed-out commands have their entire process group killed. | `u64` | `60` |
 | `kill_on_drop` | Whether to kill running child processes when the reaction is dropped (shutdown). | `bool` | `true` |
+| `memory_limit` | Maximum virtual memory (address space) in bytes for each child process (`RLIMIT_AS`). | `usize` | `268435456` (256 MB) |
 | `max_recent_invocations` | Number of most-recent invocation records to retain for observability. Set to `0` to disable history. | `u32` | `10` |
 
 ### ShellCommand
@@ -223,6 +226,7 @@ Defines per-operation stdin templates and environment variable injections for a 
 | `with_capture_limit(n)` | Set stdout/stderr capture limit in bytes |
 | `with_timeout_s(s)` | Set per-command execution timeout in seconds |
 | `with_kill_on_drop(bool)` | Set whether to kill processes on shutdown |
+| `with_memory_limit(n)` | Set memory limit for child processes in bytes |
 | `with_max_recent_invocations(n)` | Set invocation history window size |
 | `with_priority_queue_capacity(n)` | Set internal priority queue capacity |
 | `with_auto_start(bool)` | Enable/disable auto-start |

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(target_os = "linux")]
+
 #[cfg(test)]
 mod tests {
     use crate::config::{
@@ -43,6 +45,7 @@ mod tests {
             capture_limit: 1024,
             timeout_s: 30,
             kill_on_drop: true,
+            memory_limit: 128 * 1024 * 1024,
             env: HashMap::new(),
             routes: HashMap::new(),
             commands,
@@ -183,6 +186,7 @@ mod tests {
         assert!(props.contains_key("capture_limit"));
         assert!(props.contains_key("timeout_s"));
         assert!(props.contains_key("kill_on_drop"));
+        assert!(props.contains_key("memory_limit"));
         assert!(props.contains_key("max_recent_invocations"));
     }
 
@@ -208,6 +212,7 @@ mod tests {
         let props = reaction.properties();
         assert_eq!(props["max_concurrent"], serde_json::json!(42u32));
         assert_eq!(props["timeout_s"], serde_json::json!(99u64));
+        assert_eq!(props["memory_limit"], serde_json::json!(128 * 1024 * 1024));
     }
 
     //...................more tests.
@@ -224,6 +229,7 @@ mod tests {
             capture_limit: 512,
             timeout_s: 10,
             kill_on_drop: false,
+            memory_limit: 128 * 1024 * 1024,
             env: {
                 let mut e = HashMap::new();
                 e.insert("MY_VAR".to_string(), "val".to_string());

@@ -14,9 +14,6 @@
 
 #![cfg(target_os = "linux")]
 
-use crate::descriptor::ShellReactionConfigDto;
-use crate::ShellReaction;
-use core::error;
 use drasi_lib::reactions::common::TemplateRouting;
 pub use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 use log::{debug, error, warn};
@@ -47,6 +44,10 @@ pub fn default_kill_on_drop() -> bool {
 
 pub fn default_max_recent_invocations() -> u32 {
     10
+}
+
+pub fn default_memory_limit() -> usize {
+    256 * 1024 * 1024 // 256 MB
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -83,6 +84,9 @@ pub struct ShellReactionConfig {
     /// Whether to kill the command if the reaction is dropped. Default: true.
     #[serde(default = "default_kill_on_drop")]
     pub kill_on_drop: bool,
+    /// Memory limit in bytes for the shell command. Default: 256 MB.
+    #[serde(default = "default_memory_limit")]
+    pub memory_limit: usize,
 
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub env: HashMap<String, String>,
@@ -103,6 +107,7 @@ impl Default for ShellReactionConfig {
             capture_limit: default_capture_limit(),
             timeout_s: default_timeout_s(),
             kill_on_drop: default_kill_on_drop(),
+            memory_limit: default_memory_limit(),
             env: HashMap::new(),
             routes: HashMap::new(),
             commands: HashMap::new(),
@@ -361,6 +366,7 @@ mod tests {
             capture_limit: 4 * 1024,
             timeout_s: 60,
             kill_on_drop: true,
+            memory_limit: 256 * 1024 * 1024,
             env: HashMap::new(),
             routes: HashMap::new(),
             commands,

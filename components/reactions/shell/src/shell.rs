@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(target_os = "linux")]
+
 use crate::executor::ShellExecutor;
 
 use super::config::ShellReactionConfig;
@@ -136,6 +138,10 @@ impl Reaction for ShellReaction {
         props.insert(
             "kill_on_drop".to_string(),
             serde_json::json!(self.executor.config.kill_on_drop),
+        );
+        props.insert(
+            "memory_limit".to_string(),
+            serde_json::json!(self.executor.config.memory_limit),
         );
 
         // get dynamic state properties
