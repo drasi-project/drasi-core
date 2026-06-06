@@ -15,6 +15,7 @@ members = [
   "components/mysql-common",
   "components/kubernetes-common",
   "components/oracle-common",
+  "components/sources/mapping",
 
   # Bootstrap Plugins
   "components/bootstrappers/postgres",
@@ -34,6 +35,7 @@ members = [
   "components/bootstrappers/oracle",
   "components/bootstrappers/here-traffic",
   "components/bootstrappers/cloudflare-radar",
+  "components/bootstrappers/kafka",
 
   # Source Plugins
   "components/sources/postgres",
@@ -55,6 +57,7 @@ members = [
   "components/sources/oracle",
   "components/sources/here-traffic",
   "components/sources/cloudflare-radar",
+  "components/sources/kafka",
 
   # Reaction Plugins
   "components/reactions/http",
@@ -189,6 +192,9 @@ drasi-bootstrap-kubernetes = { version = "0.1.1", path = "components/bootstrappe
 drasi-source-oracle = { version = "0.1.1", path = "components/sources/oracle" }
 drasi-bootstrap-oracle = { version = "0.1.1", path = "components/bootstrappers/oracle" }
 drasi-oracle-common = { version = "0.1.2", path = "components/oracle-common" }
+drasi-source-mapping = { version = "0.1.0", path = "components/sources/mapping" }
+drasi-source-kafka = { version = "0.1.0", path = "components/sources/kafka" }
+drasi-bootstrap-kafka = { version = "0.1.0", path = "components/bootstrappers/kafka" }
 drasi-source-gtfs-rt = { version = "0.1.1", path = "components/sources/gtfs-rt" }
 drasi-bootstrap-gtfs-rt = { version = "0.1.1", path = "components/bootstrappers/gtfs-rt" }
 drasi-source-open511 = { version = "0.1.1", path = "components/sources/open511" }
