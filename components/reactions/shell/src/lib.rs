@@ -48,6 +48,7 @@ pub struct ShellReactionBuilder {
     capture_limit: usize,
     timeout_s: u64,
     kill_on_drop: bool,
+    memory_limit: usize,
     max_recent_invocations: u32,
     env: HashMap<String, String>, // global env vars for all commands
 }
@@ -69,6 +70,7 @@ impl ShellReactionBuilder {
             capture_limit: config::default_capture_limit(),
             timeout_s: config::default_timeout_s(),
             kill_on_drop: config::default_kill_on_drop(),
+            memory_limit: config::default_memory_limit(),
             max_recent_invocations: config::default_max_recent_invocations(),
             env: HashMap::new(),
         }
@@ -168,6 +170,12 @@ impl ShellReactionBuilder {
         self
     }
 
+    /// Set the memory limit for the command in bytes
+    pub fn with_memory_limit(mut self, memory_limit: usize) -> Self {
+        self.memory_limit = memory_limit;
+        self
+    }
+
     /// Add a global environment variable for all commands
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.insert(key.into(), value.into());
@@ -187,6 +195,7 @@ impl ShellReactionBuilder {
         self.capture_limit = config.capture_limit;
         self.timeout_s = config.timeout_s;
         self.kill_on_drop = config.kill_on_drop;
+        self.memory_limit = config.memory_limit;
         self.max_recent_invocations = config.max_recent_invocations;
         self.env = config.env;
         self.routes = config.routes;
@@ -203,6 +212,7 @@ impl ShellReactionBuilder {
             capture_limit: self.capture_limit,
             timeout_s: self.timeout_s,
             kill_on_drop: self.kill_on_drop,
+            memory_limit: self.memory_limit,
             env: self.env,
             routes: self.routes,
             default_template: self.default_template,

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![cfg(target_os = "linux")]
+
 use drasi_lib::{DrasiLib, Query, Source};
 
 use anyhow::Result;

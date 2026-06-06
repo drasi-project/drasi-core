@@ -25,6 +25,8 @@
 //!
 //! The tests are ignored by default.
 
+#![cfg(target_os = "linux")]
+
 mod shell_helpers;
 
 use anyhow::Result;
@@ -553,6 +555,124 @@ async fn test_shell_reaction_script_failure() -> Result<()> {
     assert_eq!(
         non_zero_exits, 1,
         "there should be 1 non-zero exit for the script execution, got {non_zero_exits}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the process has a strict memory limit (success case where the script allocates less memory than the limit and completes successfully)
+async fn test_shell_reaction_memory_limit_pass() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test4");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([("SIZE_MB".to_string(), "100".to_string())]),
+        timeout_s: 20,
+        memory_limit: 250 * 1024 * 1024, // 250 MB
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+
+    // 5 secs wating for the script to attempt to allocate memory and get killed
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    assert_eq!(
+        invocations.len(),
+        1,
+        "there should be one invocation of the script, got {}",
+        invocations.len()
+    );
+
+    let exit_status = invocations[0]["exit_status"].as_i64().unwrap_or(0);
+    assert_eq!(
+        exit_status, 0,
+        "test4.sh should exit with status 0 when it completes successfully, got {exit_status}"
+    );
+
+    let stdout = invocations[0]["stdout"].as_str().unwrap_or("");
+    assert!(
+        stdout.contains("Allocated 100 MB"),
+        "test4.sh should print the allocated memory, got {stdout}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+// validate that the process has a strict memory limit (failure case where the script tries to allocate more memory than the limit and gets killed)
+async fn test_shell_reaction_memory_limit_fails() -> Result<()> {
+    init_logging();
+
+    let shell_reaction_slot_name = slot_name();
+
+    // get the script path
+    let script_path = operations_script_path("test4");
+    // make the script executable
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    let reaction_config = ShellReactionConfig {
+        commands: HashMap::from([(
+            "test-query".to_string(),
+            ShellCommand {
+                executable: script_path.clone(),
+                args: vec![],
+            },
+        )]),
+        env: HashMap::from([("SIZE_MB".to_string(), "200".to_string())]),
+        timeout_s: 20,
+        memory_limit: 250 * 1024 * 1024, // 250 MB
+        ..Default::default()
+    };
+
+    let core = build_core(reaction_config, shell_reaction_slot_name.clone()).await?;
+    wait_for_startup!(core, &shell_reaction_slot_name, "test-source");
+
+    send_device_insert_event(9000, "test-source", "device-1", 30.0, "room-34").await?;
+
+    // 5 secs wating for the script to attempt to allocate memory and get killed
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let invocations = get_invocation_details(&core, &shell_reaction_slot_name).await?;
+
+    assert_eq!(
+        invocations.len(),
+        1,
+        "there should be one invocation of the script, got {}",
+        invocations.len()
+    );
+
+    let exit_status = invocations[0]["exit_status"].as_i64().unwrap_or(0);
+    assert_eq!(
+        exit_status, 2,
+        "test4.sh should be killed with exit status 2 when it exceeds the memory limit, got {exit_status}"
+    );
+
+    let stderr = invocations[0]["stderr"].as_str().unwrap_or("");
+    assert!(
+        stderr.contains("xrealloc: cannot allocate 209715328 bytes"),
+        "test4.sh should print an error message about memory allocation, got {stderr}"
     );
 
     Ok(())

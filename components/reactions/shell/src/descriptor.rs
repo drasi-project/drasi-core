@@ -72,7 +72,7 @@ pub struct ShellQueryConfigDto {
 /// Configuration DTO for the shell reaction plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = reaction::shell::ShellReactionConfig)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShellReactionConfigDto {
     /// Maximum number of concurrent shell commands. Default: 100.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +93,10 @@ pub struct ShellReactionConfigDto {
     /// Kill the command if the reaction is dropped. Default: true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kill_on_drop: Option<bool>,
+
+    /// Memory limit for the command in bytes. Default: 256 MB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<usize>,
 
     /// Maximum number of recent invocations to retain. Default: 10.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,6 +204,9 @@ impl ReactionPluginDescriptor for ShellReactionDescriptor {
         }
         if let Some(v) = dto.max_recent_invocations {
             builder = builder.with_max_recent_invocations(v);
+        }
+        if let Some(v) = dto.memory_limit {
+            builder = builder.with_memory_limit(v);
         }
 
         for (name, cmd) in dto.commands {

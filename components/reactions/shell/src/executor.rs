@@ -347,8 +347,18 @@ impl ShellExecutor {
         };
 
         tokio::spawn(async move {
+            struct ActiveGuard(Arc<ShellReactionState>);
+            impl Drop for ActiveGuard {
+                fn drop(&mut self) {
+                    self.0.process_state.decrement_active_processes();
+                }
+            }
+
             // ensure the permit is held for the duration of the task
             let _permit = permit;
+
+            // dropped on exit
+            let _active_guard = ActiveGuard(state.clone());
 
             // increment the active processes counter
             state.process_state.increment_active_processes();
@@ -360,15 +370,13 @@ impl ShellExecutor {
                 context,
                 state.clone(),
                 query_id.clone(),
+                config.memory_limit,
             )
             .await;
 
             if let Err(e) = result {
                 warn!("[{}] Error executing command for query_id: {query_id}, operation: {operation:?}. error: {e:?}", state.reaction_id);
             }
-
-            // decrement the active processes counter
-            state.process_state.decrement_active_processes();
 
             // drop the permit
             drop(_permit);
@@ -386,6 +394,7 @@ impl ShellExecutor {
         context: CommandExecutionContext,
         state: Arc<ShellReactionState>,
         query_id: String,
+        memory_limit: usize,
     ) -> anyhow::Result<()> {
         // create the main process to be executed.
         let mut cmd = tokio::process::Command::new(command.executable.clone());
@@ -398,8 +407,10 @@ impl ShellExecutor {
             .kill_on_drop(context.kill_on_drop);
 
         // process security hardening and memory capping.
+        let reaction_id = state.reaction_id.clone();
+        let command_clone_for_logging = command.clone();
         unsafe {
-            cmd.pre_exec(|| {
+            cmd.pre_exec(move || {
                 // process group ID is set to its pid, to kill the entire process group.
                 // child becomes leader of a new process group where PGID == its own PID
                 nix::unistd::setpgid(
@@ -409,15 +420,25 @@ impl ShellExecutor {
                 .map_err(std::io::Error::from)?;
 
                 // prevent privilage escalation.
-                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                let error = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                if error != 0 {
+                    let err = Error::last_os_error();
+                    warn!("[{reaction_id}] Failed to set no new privileges for command execution. error: {err:?}, command: {command_clone_for_logging:?}");
+                    return Err(err);
+                }
 
                 // set memory cap.
                 let mem_rlim = libc::rlimit {
-                    rlim_cur: 256 * 1024 * 1024, // 256 MB
-                    rlim_max: 256 * 1024 * 1024, // 256 MB
+                    rlim_cur: memory_limit as libc::rlim_t,
+                    rlim_max: memory_limit as libc::rlim_t,
                 };
 
-                libc::setrlimit(libc::RLIMIT_AS, &mem_rlim);
+                let error = libc::setrlimit(libc::RLIMIT_AS, &mem_rlim);
+                if error != 0 {
+                    let err = Error::last_os_error();
+                    warn!("[{reaction_id}] Failed to set memory limit for command execution. error: {err:?}, command: {command_clone_for_logging:?}");
+                    return Err(err);
+                }
 
                 Ok(())
             });
@@ -755,6 +776,15 @@ impl ShellExecutor {
             } else {
                 buf.extend_from_slice(&temp[..limit]);
                 truncated = true;
+                break;
+            }
+        }
+
+        // read until EOF
+        loop {
+            let n = reader.read(&mut temp).await?;
+
+            if n == 0 {
                 break;
             }
         }
