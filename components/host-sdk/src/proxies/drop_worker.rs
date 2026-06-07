@@ -55,7 +55,7 @@ fn drop_worker_tx() -> &'static mpsc::Sender<DropRequest> {
                     let _ = request.done_tx.send(());
                 }
             })
-            .expect("Failed to spawn drasi-drop-worker thread");
+            .expect("Failed to spawn drasi-drop-worker thread: system may be out of resources");
         tx
     })
 }
@@ -67,8 +67,10 @@ pub(crate) fn execute_drop_fn(
     drop_fn: extern "C" fn(*mut c_void),
     state: drasi_plugin_sdk::ffi::SendMutPtr<c_void>,
 ) {
-    let ptr = state.as_ptr();
-    let (done_tx, done_rx) = mpsc::sync_channel(0);
+    // Save the raw pointer before moving `state` into the request, in case
+    // the worker channel is disconnected and we need the fallback path.
+    let raw_ptr = state.as_ptr();
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
     let request = DropRequest {
         drop_fn,
         state,
@@ -80,7 +82,7 @@ pub(crate) fn execute_drop_fn(
     if drop_worker_tx().send(request).is_ok() {
         let _ = done_rx.recv();
     } else {
-        let fallback_state = drasi_plugin_sdk::ffi::SendMutPtr(ptr);
+        let fallback_state = drasi_plugin_sdk::ffi::SendMutPtr(raw_ptr);
         let _ = std::thread::spawn(move || (drop_fn)(fallback_state.as_ptr())).join();
     }
 }
