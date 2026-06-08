@@ -151,3 +151,108 @@ pub(crate) fn execute_drop_fn(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_plugin_sdk::ffi::SendMutPtr;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    extern "C" fn set_flag(state: *mut c_void) {
+        // Safety: tests always pass a pointer to a live `AtomicBool`.
+        let flag = unsafe { &*(state as *const AtomicBool) };
+        flag.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn execute_drop_fn_invokes_the_drop_fn() {
+        let flag = AtomicBool::new(false);
+        let ptr = &flag as *const AtomicBool as *mut c_void;
+
+        execute_drop_fn(set_flag, SendMutPtr(ptr));
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "drop_fn should have been invoked"
+        );
+    }
+
+    extern "C" fn sleep_then_set(state: *mut c_void) {
+        std::thread::sleep(Duration::from_millis(50));
+        let flag = unsafe { &*(state as *const AtomicBool) };
+        flag.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn execute_drop_fn_blocks_until_drop_fn_completes() {
+        let flag = AtomicBool::new(false);
+        let ptr = &flag as *const AtomicBool as *mut c_void;
+
+        let start = Instant::now();
+        execute_drop_fn(sleep_then_set, SendMutPtr(ptr));
+        let elapsed = start.elapsed();
+
+        // The call must not return until the (slow) drop_fn has finished.
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "drop_fn must have completed before execute_drop_fn returned"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "execute_drop_fn returned before the drop_fn slept ({elapsed:?})"
+        );
+    }
+
+    struct SerialProbe {
+        in_flight: AtomicUsize,
+        overlap: AtomicBool,
+        completed: AtomicUsize,
+    }
+
+    extern "C" fn record_serial(state: *mut c_void) {
+        let probe = unsafe { &*(state as *const SerialProbe) };
+        // If any other invocation is in flight, the worker is not serialising.
+        if probe.in_flight.fetch_add(1, Ordering::SeqCst) != 0 {
+            probe.overlap.store(true, Ordering::SeqCst);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        probe.in_flight.fetch_sub(1, Ordering::SeqCst);
+        probe.completed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn execute_drop_fn_serialises_concurrent_drops() {
+        let probe = Arc::new(SerialProbe {
+            in_flight: AtomicUsize::new(0),
+            overlap: AtomicBool::new(false),
+            completed: AtomicUsize::new(0),
+        });
+
+        const N: usize = 8;
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let probe = Arc::clone(&probe);
+                std::thread::spawn(move || {
+                    let ptr = Arc::as_ptr(&probe) as *mut c_void;
+                    execute_drop_fn(record_serial, SendMutPtr(ptr));
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            !probe.overlap.load(Ordering::SeqCst),
+            "drops overlapped — worker did not serialise execution"
+        );
+        assert_eq!(
+            probe.completed.load(Ordering::SeqCst),
+            N,
+            "every queued drop_fn should have run exactly once"
+        );
+    }
+}
