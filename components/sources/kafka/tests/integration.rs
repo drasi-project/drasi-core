@@ -19,8 +19,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+use drasi_bootstrap_kafka::KafkaBootstrapProvider;
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReactionBuilder;
 use drasi_source_kafka::KafkaSource;
@@ -29,6 +30,7 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
@@ -393,5 +395,123 @@ async fn test_kafka_source_custom_mapping() {
         assert_eq!(data["id"], "item-1");
     }
 
+    core.stop().await.unwrap();
+}
+
+async fn produce_order(producer: &FutureProducer, topic: &str, id: &str, total: i64) {
+    let payload = format!(r#"{{"id":"{id}","customer":"handover","total":{total}}}"#);
+    producer
+        .send(
+            FutureRecord::to(topic).key(id).payload(&payload),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("Failed to produce order");
+}
+#[tokio::test]
+#[ignore]
+async fn test_kafka_bootstrap_source_overlap_handover() {
+    let _ = env_logger::try_init();
+    let (_kafka_container, bootstrap_servers) = start_kafka().await;
+    let topic = format!(
+        "test-handover-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    ensure_topic(&bootstrap_servers, &topic, 3).await;
+    let producer = create_producer(&bootstrap_servers);
+    let initial_count = 50;
+    let concurrent_count = 25;
+    for i in 0..initial_count {
+        produce_order(&producer, &topic, &format!("initial-{i}"), 100).await;
+    }
+    let source = KafkaSource::builder("orders_handover_kafka")
+        .bootstrap_servers(&bootstrap_servers)
+        .topic(&topic)
+        .group_id("drasi-test-handover")
+        .node_label("Order")
+        .build()
+        .unwrap();
+    let bootstrap_provider = KafkaBootstrapProvider::builder()
+        .bootstrap_servers(&bootstrap_servers)
+        .topic(&topic)
+        .node_label("Order")
+        .build()
+        .unwrap();
+    source
+        .set_bootstrap_provider(Box::new(bootstrap_provider))
+        .await;
+    let query = Query::cypher("q1")
+        .query("MATCH (o:Order) RETURN o.id AS id")
+        .from_source("orders_handover_kafka")
+        .build();
+    let (reaction, handle) = ApplicationReactionBuilder::new("r1")
+        .with_query("q1")
+        .build();
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let topic_for_concurrent = topic.clone();
+    let bootstrap_servers_for_concurrent = bootstrap_servers.clone();
+    let concurrent_producer = tokio::spawn(async move {
+        let producer = create_producer(&bootstrap_servers_for_concurrent);
+        sleep(Duration::from_millis(25)).await;
+        for i in 0..concurrent_count {
+            produce_order(
+                &producer,
+                &topic_for_concurrent,
+                &format!("concurrent-{i}"),
+                100,
+            )
+            .await;
+            sleep(Duration::from_millis(5)).await;
+        }
+    });
+    core.start().await.unwrap();
+    let mut subscription = handle
+        .subscribe_with_options(
+            SubscriptionOptions::default().with_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .unwrap();
+    concurrent_producer.await.unwrap();
+    let expected_ids: Vec<String> = (0..initial_count)
+        .map(|i| format!("initial-{i}"))
+        .chain((0..concurrent_count).map(|i| format!("concurrent-{i}")))
+        .collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while seen.len() < expected_ids.len() && tokio::time::Instant::now() < deadline {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            break;
+        };
+        let result = tokio::time::timeout(remaining, subscription.recv())
+            .await
+            .expect("Timed out waiting for handover results")
+            .expect("Expected query result");
+        for diff in result.results {
+            let data = match diff {
+                ResultDiff::Add { data, .. } | ResultDiff::Update { data, .. } => data,
+                _ => continue,
+            };
+            if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                if id.starts_with("initial-") || id.starts_with("concurrent-") {
+                    *seen.entry(id.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+    for id in &expected_ids {
+        assert_eq!(seen.get(id).copied().unwrap_or_default(), 1, "id {id}");
+    }
+    assert_eq!(seen.len(), expected_ids.len());
     core.stop().await.unwrap();
 }

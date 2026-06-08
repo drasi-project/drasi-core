@@ -41,7 +41,10 @@ pub mod descriptor;
 mod position;
 
 pub use config::{AutoOffsetReset, KafkaSourceConfig};
-pub use position::{decode_position, encode_position, KafkaPositionComparator};
+pub use position::{
+    decode_partition_offsets, decode_position, encode_partition_offsets, encode_position,
+    KafkaPositionComparator,
+};
 
 use async_trait::async_trait;
 use config::KafkaSourceBuilder;
@@ -64,6 +67,8 @@ pub struct KafkaSource {
     config: KafkaSourceConfig,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     subscriber_resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
+    has_bootstrap_provider: Arc<RwLock<bool>>,
+    await_bootstrap_boundary: Arc<RwLock<bool>>,
 }
 
 impl KafkaSource {
@@ -77,11 +82,14 @@ impl KafkaSource {
         config: KafkaSourceConfig,
         params: SourceBaseParams,
     ) -> anyhow::Result<Self> {
+        let has_bootstrap_provider = params.bootstrap_provider.is_some();
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
             shutdown_tx: Arc::new(RwLock::new(None)),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
+            has_bootstrap_provider: Arc::new(RwLock::new(has_bootstrap_provider)),
+            await_bootstrap_boundary: Arc::new(RwLock::new(false)),
         })
     }
 
@@ -191,6 +199,9 @@ impl Source for KafkaSource {
             )
             .await;
 
+        self.base.reset_bootstrap_boundary();
+        *self.await_bootstrap_boundary.write().await = false;
+
         // Set position comparator for multi-partition replay filtering
         self.base
             .set_position_comparator(KafkaPositionComparator)
@@ -213,6 +224,7 @@ impl Source for KafkaSource {
             source_id: self.base.id.clone(),
             shutdown_rx,
             resume_positions: self.subscriber_resume_positions.clone(),
+            await_bootstrap_boundary: self.await_bootstrap_boundary.clone(),
         };
 
         let source_id = self.base.id.clone();
@@ -274,15 +286,40 @@ impl Source for KafkaSource {
                         .await
                         .insert(settings.query_id.clone(), offsets);
                 }
-                None => {
-                    warn!(
+                None => match position::decode_partition_offsets(resume_bytes) {
+                    Some(partition_offsets) => {
+                        let mut offsets = vec![0; partition_offsets.len()];
+                        for (partition, offset) in partition_offsets {
+                            if partition >= 0 && (partition as usize) < offsets.len() {
+                                offsets[partition as usize] = offset;
+                            }
+                        }
+                        self.subscriber_resume_positions
+                            .write()
+                            .await
+                            .insert(settings.query_id.clone(), offsets);
+                    }
+                    None => warn!(
                         "[{}] Invalid Kafka resume position for query '{}'",
                         self.base.id, settings.query_id
-                    );
-                }
+                    ),
+                },
             }
         }
-        self.base.subscribe_with_bootstrap(&settings, "kafka").await
+        let should_await_boundary = settings.resume_from.is_none()
+            && settings.enable_bootstrap
+            && *self.has_bootstrap_provider.read().await;
+        if should_await_boundary {
+            *self.await_bootstrap_boundary.write().await = true;
+        }
+        let response = self
+            .base
+            .subscribe_with_bootstrap(&settings, "kafka")
+            .await?;
+        if should_await_boundary && response.bootstrap_receiver.is_none() {
+            *self.await_bootstrap_boundary.write().await = false;
+        }
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -298,6 +335,7 @@ impl Source for KafkaSource {
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
         self.base.set_bootstrap_provider(provider).await;
+        *self.has_bootstrap_provider.write().await = true;
     }
 
     async fn remove_position_handle(&self, query_id: &str) {

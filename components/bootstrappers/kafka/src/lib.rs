@@ -33,7 +33,7 @@ use drasi_lib::bootstrap::{
     BootstrapContext, BootstrapProvider, BootstrapRequest, BootstrapResult,
 };
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
-use drasi_source_kafka::encode_position;
+use drasi_source_kafka::encode_partition_offsets;
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
@@ -218,6 +218,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
         // Fetch low/high watermarks for each partition.
         let mut low_watermarks: Vec<i64> = Vec::with_capacity(partition_count);
         let mut high_watermarks: Vec<i64> = Vec::with_capacity(partition_count);
+        let mut boundary_offsets: Vec<(i32, i64)> = Vec::with_capacity(partition_count);
         for partition in 0..partition_count as i32 {
             let (low, high) = consumer
                 .fetch_watermarks(&self.config.topic, partition, Duration::from_secs(10))
@@ -231,6 +232,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             }
             low_watermarks.push(low);
             high_watermarks.push(high);
+            boundary_offsets.push((partition, high));
         }
 
         debug!(
@@ -249,7 +251,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 "Topic '{}' is empty, nothing to bootstrap",
                 self.config.topic
             );
-            let position = encode_position(0, &high_watermarks);
+            let position = encode_partition_offsets(&boundary_offsets);
             return Ok(BootstrapResult {
                 event_count: 0,
                 source_position: Some(position),
@@ -259,8 +261,12 @@ impl BootstrapProvider for KafkaBootstrapProvider {
         // Assign consumer to all partitions starting from beginning
         let mut tpl = TopicPartitionList::new();
         for partition in 0..partition_count as i32 {
-            tpl.add_partition_offset(&self.config.topic, partition, Offset::Beginning)
-                .context("Failed to add partition offset")?;
+            tpl.add_partition_offset(
+                &self.config.topic,
+                partition,
+                Offset::Offset(low_watermarks[partition as usize]),
+            )
+            .context("Failed to add partition offset")?;
         }
         consumer
             .assign(&tpl)
@@ -297,15 +303,16 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                         .unwrap_or_default();
                     let topic = msg.topic().to_string();
 
-                    // Update current offset
-                    if partition < current_offsets.len() {
-                        current_offsets[partition] = offset + 1;
+                    if partition >= current_offsets.len() {
+                        warn!("Kafka bootstrap: received message for unknown partition {} at offset {}", partition, offset);
+                        continue;
                     }
-
-                    // Check if we've reached the high watermark for this partition
-                    if partition < partition_done.len()
-                        && current_offsets[partition] >= high_watermarks[partition]
-                    {
+                    if offset >= high_watermarks[partition] {
+                        partition_done[partition] = true;
+                        continue;
+                    }
+                    current_offsets[partition] = offset + 1;
+                    if current_offsets[partition] >= high_watermarks[partition] {
                         partition_done[partition] = true;
                     }
 
@@ -364,7 +371,7 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             }
         }
 
-        let position = encode_position(0, &high_watermarks);
+        let position = encode_partition_offsets(&boundary_offsets);
 
         info!(
             "Kafka bootstrap completed for query '{}': {} events from {} partitions",
