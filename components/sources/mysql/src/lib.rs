@@ -126,7 +126,7 @@ impl Source for MySqlReplicationSource {
         self.base.set_status(ComponentStatus::Starting, None).await;
         self.shutdown.store(false, Ordering::Relaxed);
         self.initial_bootstrap_pending
-            .store(false, Ordering::Relaxed);
+            .store(false, Ordering::Release);
         self.base.reset_bootstrap_boundary();
         info!("Starting MySQL replication source: {}", self.base.id);
 
@@ -229,7 +229,7 @@ impl Source for MySqlReplicationSource {
     ) -> Result<SubscriptionResponse> {
         if settings.enable_bootstrap && settings.resume_from.is_none() {
             self.initial_bootstrap_pending
-                .store(true, Ordering::Relaxed);
+                .store(true, Ordering::Release);
         }
 
         // If the subscriber has a resume_from position, deserialize it and store
