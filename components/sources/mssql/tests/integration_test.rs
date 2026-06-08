@@ -292,6 +292,190 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        const SEED_COUNT: usize = 200;
+        let mut client = db_config.connect().await?;
+        for chunk_start in (1..=SEED_COUNT).step_by(50) {
+            let chunk_end = (chunk_start + 49).min(SEED_COUNT);
+            let mut sql = String::new();
+            for id in chunk_start..=chunk_end {
+                sql.push_str(&format!(
+                    "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({id}, 'Seed{id}', 1.00);\n"
+                ));
+            }
+            execute_sql(&mut client, &sql).await?;
+        }
+        sleep(Duration::from_secs(3)).await;
+
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:Products)
+                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("app-reaction-overlap")
+            .with_query(QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("mssql-overlap-handover-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        let mut subscription = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to create subscription")?;
+
+        let mutator_config = db_config.clone();
+        let mutator = tokio::spawn(async move {
+            sleep(Duration::from_millis(100)).await;
+            let mut client = mutator_config.connect().await?;
+            execute_sql(
+                &mut client,
+                "UPDATE dbo.Products SET Name = 'UpdatedDuringBootstrap' WHERE ProductId = 1;",
+            )
+            .await?;
+            execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 2;").await?;
+            execute_sql(
+                &mut client,
+                "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (1000, 'InsertedDuringBootstrap', 9.99);",
+            )
+            .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        let mut seed_add_counts = std::collections::HashMap::<String, usize>::new();
+        let mut update_count = 0usize;
+        let mut delete_count = 0usize;
+        let mut insert_count = 0usize;
+
+        for _ in 0..120 {
+            if let Some(result) = subscription.recv().await {
+                for entry in &result.results {
+                    match entry {
+                        ResultDiff::Add { data, .. } => {
+                            if let Some(id) = data.get("id").and_then(value_as_string) {
+                                if id == "1000" {
+                                    if field_matches(data, "name", "InsertedDuringBootstrap") {
+                                        insert_count += 1;
+                                    }
+                                } else if field_matches(data, "name", &format!("Seed{id}")) {
+                                    *seed_add_counts.entry(id).or_default() += 1;
+                                }
+                            }
+                        }
+                        ResultDiff::Update { before, after, .. } => {
+                            if matches_fields(before, &[("id", "1"), ("name", "Seed1")])
+                                && matches_fields(
+                                    after,
+                                    &[("id", "1"), ("name", "UpdatedDuringBootstrap")],
+                                )
+                            {
+                                update_count += 1;
+                            }
+                        }
+                        ResultDiff::Delete { data, .. } => {
+                            if matches_fields(data, &[("id", "2"), ("name", "Seed2")]) {
+                                delete_count += 1;
+                            }
+                        }
+                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                    }
+                }
+            }
+
+            if seed_add_counts.len() == SEED_COUNT
+                && seed_add_counts.values().all(|count| *count == 1)
+                && update_count == 1
+                && delete_count == 1
+                && insert_count == 1
+                && mutator.is_finished()
+            {
+                break;
+            }
+        }
+
+        mutator.await.context("Mutator task panicked")??;
+
+        for id in 1..=SEED_COUNT {
+            let id = id.to_string();
+            let count = seed_add_counts.get(&id).copied().unwrap_or_default();
+            anyhow::ensure!(count == 1, "seed row {id} appeared {count} times");
+        }
+        anyhow::ensure!(update_count == 1, "update appeared {update_count} times");
+        anyhow::ensure!(delete_count == 1, "delete appeared {delete_count} times");
+        anyhow::ensure!(insert_count == 1, "insert appeared {insert_count} times");
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        mssql.cleanup().await;
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_bootstrap_cdc_overlap_handover timed out"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
