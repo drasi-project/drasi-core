@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for the unified HTTP reaction.
+//! Configuration types for the HTTP reaction.
 //!
 //! The HTTP reaction layers reaction-specific fields (URL, method, headers)
 //! on top of the shared template primitives in

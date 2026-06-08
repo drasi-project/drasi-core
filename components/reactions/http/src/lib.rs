@@ -14,12 +14,15 @@
 
 #![allow(unexpected_cfgs)]
 
-//! Unified HTTP reaction plugin for Drasi.
+//! HTTP reaction plugin for Drasi.
 //!
-//! Supports both **per-result** delivery (default) and **adaptive
-//! coalesced batching** via a single optional [`config::AdaptiveBatchConfig`]
-//! field. See [`config::HttpReactionConfig`] for the full configuration
-//! shape and the crate `README.md` for examples.
+//! Forwards continuous query result changes to HTTP endpoints, either as
+//! **single notifications per result** (default) or **batched** using an
+//! **adaptive batching** strategy that scales batch sizes to incoming load
+//! for greater throughput and reduced network traffic. Batching is enabled
+//! by adding an optional [`config::AdaptiveBatchConfig`]. See
+//! [`config::HttpReactionConfig`] for the full configuration shape and the
+//! crate `README.md` for examples.
 //!
 //! ## Quick start (per-result)
 //!
@@ -65,7 +68,7 @@ pub use config::{
 };
 pub use http::HttpReaction;
 
-/// Builder for the unified HTTP reaction.
+/// Builder for the HTTP reaction.
 ///
 /// Provides a fluent API for the common cases. For complex template
 /// routes you can also pass a fully-formed [`HttpOutputTemplates`] or

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Descriptor for the unified HTTP reaction plugin.
+//! Descriptor for the HTTP reaction plugin.
 
 use std::collections::HashMap;
 

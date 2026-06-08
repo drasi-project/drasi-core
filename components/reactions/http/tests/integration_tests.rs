@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! End-to-end tests for the unified HTTP reaction against a wiremock
+//! End-to-end tests for the HTTP reaction against a wiremock
 //! server. Covers both standard per-result delivery and adaptive
 //! coalesced batching, including the render-error fallback path.
 
