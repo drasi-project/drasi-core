@@ -79,8 +79,23 @@ fn drop_worker_tx() -> &'static mpsc::Sender<DropRequest> {
             .spawn(move || {
                 for request in rx {
                     ON_DROP_WORKER.with(|f| f.set(true));
-                    (request.drop_fn)(request.state.as_ptr());
+                    // Wrap the FFI call in a panic barrier. Unwinding across an
+                    // `extern "C"` boundary is UB, but buggy plugins can still
+                    // panic; without this, a single panicking `drop_fn` would
+                    // terminate the worker thread permanently. The `OnceLock`
+                    // sender would then stay disconnected, forcing every future
+                    // drop onto the per-thread fallback and reinstating the very
+                    // TLS-destructor race this worker exists to prevent.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (request.drop_fn)(request.state.as_ptr());
+                    }));
                     ON_DROP_WORKER.with(|f| f.set(false));
+                    if result.is_err() {
+                        eprintln!(
+                            "[drasi-drop-worker] plugin drop_fn panicked; worker thread \
+                             recovered and will continue processing drops"
+                        );
+                    }
                     let _ = request.done_tx.send(());
                 }
             })
@@ -117,12 +132,15 @@ pub(crate) fn execute_drop_fn(
     };
 
     // If the worker thread has been shut down (channel disconnected), fall back
-    // to a dedicated thread spawn. This should not happen in normal operation.
+    // to a dedicated thread spawn. This should not happen in normal operation:
+    // the worker loop catches `drop_fn` panics, so the only realistic way to
+    // reach the fallback is a failure to spawn the worker thread in the first
+    // place.
     if drop_worker_tx().send(request).is_ok() {
-        // A `RecvError` means the worker exited before signalling completion
-        // (e.g. it panicked or was terminated). `extern "C"` unwinding aborts
-        // the process, so this is not expected — but if it ever happens, emit a
-        // diagnostic rather than silently proceeding as if the drop completed.
+        // A `RecvError` means the worker exited without signalling completion.
+        // The worker loop catches panics, so this is not expected — but if it
+        // ever happens, emit a diagnostic rather than silently proceeding as if
+        // the drop completed.
         if done_rx.recv().is_err() {
             eprintln!(
                 "[drasi-drop-worker] worker exited before completing drop_fn; \
@@ -130,6 +148,13 @@ pub(crate) fn execute_drop_fn(
             );
         }
     } else {
+        // The shared worker is unavailable, so fall back to a dedicated thread.
+        // This reintroduces the per-thread TLS-destructor race on macOS arm64,
+        // so make the regression observable rather than silent.
+        eprintln!(
+            "[drasi-drop-worker] worker channel disconnected; falling back to a \
+             per-thread spawn (TLS-destructor race may reappear on macOS arm64)"
+        );
         let fallback_state = drasi_plugin_sdk::ffi::SendMutPtr(raw_ptr);
         let _ = std::thread::spawn(move || (drop_fn)(fallback_state.as_ptr())).join();
     }
