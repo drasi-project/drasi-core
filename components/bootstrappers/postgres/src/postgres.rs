@@ -226,15 +226,12 @@ impl BootstrapProvider for PostgresBootstrapProvider {
 
         info!("Completed PostgreSQL bootstrap for query {query_id}: sent {count} records");
 
-        // `last_sequence` / `sequences_aligned` are intentionally left at their
-        // defaults here. The handler already captures the snapshot LSN via
-        // `SELECT pg_current_wal_lsn()`; a follow-up issue will parse that LSN
-        // and populate these fields so Postgres→Postgres handover can dedup
-        // buffered stream events.
+        // `source_position` is left at its default here for now. The handler
+        // already captures the snapshot LSN via `SELECT pg_current_wal_lsn()`;
+        // Part 1 of issue #455 parses that LSN and returns it so the source can
+        // start CDC exactly at the snapshot boundary.
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: None,
         })
     }

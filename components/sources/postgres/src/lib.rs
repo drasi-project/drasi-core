@@ -626,7 +626,7 @@ impl PostgresReplicationSource {
 
         // Clear stale sequence→position mappings from the pre-replay stream.
         // Without this, compute_confirmed_source_position() could map a
-        // position handle (initialized with last_sequence) to a WAL position
+        // position handle (seeded from the recovery checkpoint) to a WAL position
         // from the old stream, causing flush_lsn feedback to advance the
         // slot's restart_lsn past other queries' checkpoints.
         self.base.clear_sequence_position_map().await;
@@ -1606,7 +1606,6 @@ mod tests {
                 relations: HashSet::new(),
                 resume_from: Some(bad_position),
                 request_position_handle: false,
-                last_sequence: None,
             };
 
             let result = source.subscribe(settings).await;

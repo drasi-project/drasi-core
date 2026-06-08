@@ -252,8 +252,6 @@ impl BootstrapProvider for KafkaBootstrapProvider {
             let position = encode_position(0, &high_watermarks);
             return Ok(BootstrapResult {
                 event_count: 0,
-                last_sequence: None,
-                sequences_aligned: false,
                 source_position: Some(position),
             });
         }
@@ -375,8 +373,6 @@ impl BootstrapProvider for KafkaBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: Some(position),
         })
     }

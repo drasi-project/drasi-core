@@ -526,38 +526,14 @@ impl SourceBase {
     /// Apply subscription settings that affect the source base.
     ///
     /// Should be called at the start of `Source::subscribe()` implementations.
-    /// Handles:
-    /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
-    ///   across restarts.
-    /// - Clearing stale sequence→position mappings when the counter advances, so
-    ///   that `compute_confirmed_source_position()` cannot map a position handle to
-    ///   a WAL position that predates the subscriber's actual checkpoint.
+    /// Sequence-counter monotonicity across restarts is recovered from the WAL
+    /// head (via [`SourceBase::set_next_sequence`]) for replay-capable sources,
+    /// or from the source's native `resume_from` position; this hook is retained
+    /// as the integration point for per-subscription base handling.
     pub fn apply_subscription_settings(
         &self,
-        settings: &crate::config::SourceSubscriptionSettings,
+        _settings: &crate::config::SourceSubscriptionSettings,
     ) {
-        if let Some(last_seq) = settings.last_sequence {
-            // Atomically advance to last_seq+1, never go backwards.
-            // fetch_max is safe under concurrent subscriptions.
-            let next = last_seq.saturating_add(1);
-            let prev = self.next_sequence.fetch_max(next, Ordering::Relaxed);
-            if next > prev {
-                info!(
-                    "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
-                    self.id, next, last_seq
-                );
-                // The counter jumped forward, meaning sequences currently in the
-                // position map were assigned before this subscriber's checkpoint
-                // was created. Those mappings are stale and would cause
-                // compute_confirmed_source_position() to return incorrect
-                // positions. Clear the map synchronously (try_write avoids
-                // async in a non-async fn; contention here is near-zero since
-                // dispatching is paused during subscribe).
-                if let Ok(mut map) = self.sequence_position_map.try_write() {
-                    map.clear();
-                }
-            }
-        }
     }
 
     /// Returns a cloneable [`ComponentStatusHandle`] for use in spawned tasks.
@@ -772,16 +748,13 @@ impl SourceBase {
         // Only persistent (replay-capable) queries request a handle. Volatile
         // queries are deliberately excluded from the min-watermark so they
         // cannot pin upstream advancement.
+        //
+        // The handle is created at the default u64::MAX ("no position confirmed
+        // yet"); the query manager seeds it with the query's checkpoint sequence
+        // (when resuming) so a resuming subscriber is included in the
+        // min-watermark from the start.
         let position_handle = if settings.request_position_handle {
             let handle = self.create_position_handle(&settings.query_id).await;
-            // Initialize the handle to the query's checkpoint sequence so that
-            // compute_confirmed_position() includes this subscriber from the
-            // start. Without this, a resuming query whose handle stays at
-            // u64::MAX would be invisible to the min-watermark, letting
-            // flush_lsn advance past its checkpoint.
-            if let Some(last_seq) = settings.last_sequence {
-                handle.store(last_seq, Ordering::Release);
-            }
             Some(handle)
         } else {
             None
@@ -911,12 +884,13 @@ impl SourceBase {
             dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
 
-        // Position handle
+        // Position handle — initialize to the resume sequence so a resuming
+        // subscriber is included in the min-watermark from the start (without
+        // this, a handle left at u64::MAX would be invisible to the watermark,
+        // letting upstream advance past the subscriber's checkpoint).
         let position_handle = if settings.request_position_handle {
             let handle = self.create_position_handle(&settings.query_id).await;
-            if let Some(last_seq) = settings.last_sequence {
-                handle.store(last_seq, Ordering::Release);
-            }
+            handle.store(resume_seq, Ordering::Release);
             Some(handle)
         } else {
             None
@@ -1016,11 +990,14 @@ impl SourceBase {
                         Ok(result) => {
                             info!(
                                 "Bootstrap completed successfully for query '{}', sent {} events \
-                                 (last_sequence={:?}, sequences_aligned={})",
+                                 (source_position: {} bytes)",
                                 settings_clone.query_id,
                                 result.event_count,
-                                result.last_sequence,
-                                result.sequences_aligned
+                                result
+                                    .source_position
+                                    .as_ref()
+                                    .map(|p| p.len())
+                                    .unwrap_or(0)
                             );
                         }
                         Err(e) => {
@@ -1620,7 +1597,6 @@ mod tests {
             relations: HashSet::new(),
             resume_from,
             request_position_handle,
-            last_sequence: None,
         }
     }
 
@@ -2344,7 +2320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_position_handle_initialized_to_last_sequence() {
+    async fn test_position_handle_not_seeded_by_base() {
         use crate::config::SourceSubscriptionSettings;
 
         let params = SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
@@ -2355,7 +2331,6 @@ mod tests {
             source_id: "ph-init".to_string(),
             enable_bootstrap: false,
             resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
-            last_sequence: Some(42),
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2366,12 +2341,14 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.expect("should have handle");
-        // Handle should be initialized to last_sequence, not u64::MAX
-        assert_eq!(handle.load(Ordering::Relaxed), 42);
+        // The base no longer self-seeds the handle on this path; it stays at
+        // u64::MAX ("no position confirmed yet") and the query manager seeds it
+        // from the checkpoint sequence when resuming.
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[tokio::test]
-    async fn test_position_handle_stays_max_without_last_sequence() {
+    async fn test_position_handle_stays_max_on_fresh_bootstrap() {
         use crate::config::SourceSubscriptionSettings;
 
         let params = SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
@@ -2382,7 +2359,6 @@ mod tests {
             source_id: "ph-no-ls".to_string(),
             enable_bootstrap: true,
             resume_from: None,
-            last_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2393,7 +2369,7 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.expect("should have handle");
-        // No last_sequence → handle stays at u64::MAX
+        // Fresh bootstrap (no checkpoint) → handle stays at u64::MAX
         assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
     }
 

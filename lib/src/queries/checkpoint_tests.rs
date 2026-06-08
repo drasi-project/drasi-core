@@ -51,8 +51,6 @@ mod tests {
         base: SourceBase,
         /// Stores all resume_from values received during subscribe calls
         received_resume_from: Arc<RwLock<Vec<Option<Bytes>>>>,
-        /// Stores all last_sequence values received during subscribe calls
-        received_last_sequence: Arc<RwLock<Vec<Option<u64>>>>,
         /// Whether to provide a position_handle on subscribe
         provide_position_handle: bool,
         /// The position handle (shared with query manager after subscribe)
@@ -65,7 +63,6 @@ mod tests {
             Ok(Self {
                 base,
                 received_resume_from: Arc::new(RwLock::new(Vec::new())),
-                received_last_sequence: Arc::new(RwLock::new(Vec::new())),
                 provide_position_handle: false,
                 position_handle: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             })
@@ -96,11 +93,6 @@ mod tests {
         /// Get all resume_from values received during subscribe calls
         async fn get_resume_from_history(&self) -> Vec<Option<Bytes>> {
             self.received_resume_from.read().await.clone()
-        }
-
-        /// Get all last_sequence values received during subscribe calls
-        async fn get_last_sequence_history(&self) -> Vec<Option<u64>> {
-            self.received_last_sequence.read().await.clone()
         }
 
         /// Get the current value of the position handle
@@ -159,15 +151,11 @@ mod tests {
             // Apply settings (sequence recovery, etc.)
             self.base.apply_subscription_settings(&settings);
 
-            // Record the resume_from and last_sequence for test assertions
+            // Record the resume_from for test assertions
             self.received_resume_from
                 .write()
                 .await
                 .push(settings.resume_from.clone());
-            self.received_last_sequence
-                .write()
-                .await
-                .push(settings.last_sequence);
 
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
@@ -341,7 +329,6 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
-            last_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -407,7 +394,6 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
-            last_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -930,7 +916,6 @@ mod tests {
             relations: std::collections::HashSet::new(),
             resume_from: None,
             request_position_handle: false,
-            last_sequence: None,
         };
         let sub = source.subscribe(settings).await.unwrap();
         let mut receiver = sub.receiver;
@@ -2043,20 +2028,21 @@ mod tests {
         .await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify that last_sequence was NOT passed to the source on restart
-        // (in-memory backend, checkpoint recovery not propagated)
-        let last_seq_history = test_source.get_last_sequence_history().await;
+        // Verify the source was re-subscribed on restart. With an in-memory
+        // backend, checkpoint recovery is not propagated, so resume_from stays
+        // None on both subscribe calls.
+        let resume_history = test_source.get_resume_from_history().await;
         assert!(
-            last_seq_history.len() >= 2,
+            resume_history.len() >= 2,
             "Expected at least 2 subscribe calls"
         );
         assert_eq!(
-            last_seq_history[0], None,
-            "First subscribe should have no last_sequence"
+            resume_history[0], None,
+            "First subscribe should have no resume_from"
         );
         assert_eq!(
-            last_seq_history[1], None,
-            "Second subscribe should have no last_sequence (in-memory backend)"
+            resume_history[1], None,
+            "Second subscribe should have no resume_from (in-memory backend)"
         );
 
         // Inject a new event after restart — with in-memory, sequence starts fresh from 0
@@ -2097,294 +2083,6 @@ mod tests {
             "Checkpoint should be updated for the new event"
         );
     }
-
-    // ========================================================================
-    // Handover dedup test source + test
-    // ========================================================================
-
-    /// A test source that provides bootstrap events via a channel and a
-    /// BootstrapResult via oneshot, allowing tests to verify dedup filtering
-    /// at the bootstrap-to-streaming handover boundary.
-    struct HandoverTestSource {
-        base: SourceBase,
-        bootstrap_rx: Arc<tokio::sync::Mutex<Option<BootstrapEventReceiver>>>,
-        bootstrap_result_rx: Arc<
-            tokio::sync::Mutex<
-                Option<
-                    tokio::sync::oneshot::Receiver<
-                        anyhow::Result<crate::bootstrap::BootstrapResult>,
-                    >,
-                >,
-            >,
-        >,
-    }
-
-    impl HandoverTestSource {
-        fn new(
-            id: &str,
-            bootstrap_rx: BootstrapEventReceiver,
-            bootstrap_result_rx: tokio::sync::oneshot::Receiver<
-                anyhow::Result<crate::bootstrap::BootstrapResult>,
-            >,
-        ) -> anyhow::Result<Self> {
-            let base = SourceBase::new(SourceBaseParams::new(id))?;
-            Ok(Self {
-                base,
-                bootstrap_rx: Arc::new(tokio::sync::Mutex::new(Some(bootstrap_rx))),
-                bootstrap_result_rx: Arc::new(tokio::sync::Mutex::new(Some(bootstrap_result_rx))),
-            })
-        }
-
-        async fn inject_change(
-            &self,
-            change: drasi_core::models::SourceChange,
-        ) -> anyhow::Result<()> {
-            let wrapper = SourceEventWrapper::new(
-                self.base.get_id().to_string(),
-                SourceEvent::Change(change),
-                chrono::Utc::now(),
-            );
-            self.base.dispatch_event(wrapper).await
-        }
-
-        fn set_next_sequence(&self, seq: u64) {
-            self.base.set_next_sequence(seq);
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Source for HandoverTestSource {
-        fn id(&self) -> &str {
-            self.base.get_id()
-        }
-
-        fn type_name(&self) -> &str {
-            "handover-test"
-        }
-
-        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
-            std::collections::HashMap::new()
-        }
-
-        fn auto_start(&self) -> bool {
-            true
-        }
-
-        async fn start(&self) -> anyhow::Result<()> {
-            self.base
-                .set_status(ComponentStatus::Starting, Some("Starting".to_string()))
-                .await;
-            self.base
-                .set_status(ComponentStatus::Running, Some("Running".to_string()))
-                .await;
-            Ok(())
-        }
-
-        async fn stop(&self) -> anyhow::Result<()> {
-            self.base
-                .set_status(ComponentStatus::Stopping, Some("Stopping".to_string()))
-                .await;
-            self.base
-                .set_status(ComponentStatus::Stopped, Some("Stopped".to_string()))
-                .await;
-            Ok(())
-        }
-
-        async fn status(&self) -> ComponentStatus {
-            self.base.status_handle().get_status().await
-        }
-
-        async fn subscribe(
-            &self,
-            settings: crate::config::SourceSubscriptionSettings,
-        ) -> anyhow::Result<SubscriptionResponse> {
-            self.base.apply_subscription_settings(&settings);
-            let receiver = self.base.create_streaming_receiver().await?;
-            let bootstrap_rx = self.bootstrap_rx.lock().await.take();
-            let bootstrap_result_rx = self.bootstrap_result_rx.lock().await.take();
-
-            Ok(SubscriptionResponse {
-                query_id: settings.query_id,
-                source_id: self.id().to_string(),
-                receiver,
-                bootstrap_receiver: bootstrap_rx,
-                position_handle: None,
-                bootstrap_result_receiver: bootstrap_result_rx,
-            })
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        async fn initialize(&self, context: crate::context::SourceRuntimeContext) {
-            self.base.initialize(context).await;
-        }
-    }
-
-    /// Helper to create a Person node insert event.
-    fn make_person_insert(
-        source_id: &str,
-        node_id: &str,
-        name: &str,
-    ) -> drasi_core::models::SourceChange {
-        drasi_core::models::SourceChange::Insert {
-            element: drasi_core::models::Element::Node {
-                metadata: drasi_core::models::ElementMetadata {
-                    reference: drasi_core::models::ElementReference::new(source_id, node_id),
-                    labels: Arc::new([Arc::from("Person")]),
-                    effective_from: 1000,
-                },
-                properties: drasi_core::models::ElementPropertyMap::from(
-                    vec![(
-                        "name".to_string(),
-                        drasi_core::evaluation::variable_value::VariableValue::String(
-                            name.to_string(),
-                        ),
-                    )]
-                    .into_iter()
-                    .collect::<std::collections::BTreeMap<_, _>>(),
-                ),
-            },
-        }
-    }
-
-    /// Test that streaming events at or below the handover sequence are filtered
-    /// (dedup'd) while events above the handover sequence pass through.
-    ///
-    /// Flow:
-    /// 1. Source provides bootstrap events + BootstrapResult{last_sequence=5, sequences_aligned=true}
-    /// 2. After bootstrap, source dispatches streaming events with sequences 3..8
-    /// 3. Events ≤5 are filtered by dedup, events 6+ are processed
-    /// 4. Checkpoint should reflect only the latest processed sequence
-    #[tokio::test]
-    async fn test_handover_dedup_filters_pre_handover_events() {
-        let (query_manager, source_manager, graph) =
-            create_test_env_with_persistent_backend().await;
-        let mut event_rx = graph.read().await.subscribe();
-
-        // Create bootstrap channel + result oneshot
-        let (bootstrap_tx, bootstrap_rx) = tokio::sync::mpsc::channel::<BootstrapEvent>(100);
-        let (result_tx, result_rx) =
-            tokio::sync::oneshot::channel::<anyhow::Result<crate::bootstrap::BootstrapResult>>();
-
-        // Create and register the handover test source
-        let source = HandoverTestSource::new("handover-src", bootstrap_rx, result_rx).unwrap();
-        add_source(&source_manager, &graph, source).await.unwrap();
-        source_manager
-            .start_source("handover-src".to_string())
-            .await
-            .unwrap();
-        wait_for_component_status(
-            &mut event_rx,
-            "handover-src",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-
-        // Send a bootstrap event through the channel
-        bootstrap_tx
-            .send(BootstrapEvent {
-                source_id: "handover-src".to_string(),
-                change: make_person_insert("handover-src", "bootstrap-p1", "BootstrapAlice"),
-                timestamp: chrono::Utc::now(),
-                sequence: 1,
-            })
-            .await
-            .unwrap();
-
-        // Close the bootstrap channel to signal completion
-        drop(bootstrap_tx);
-
-        // Send the bootstrap result with last_sequence=5, sequences_aligned=true
-        result_tx
-            .send(Ok(crate::bootstrap::BootstrapResult {
-                event_count: 1,
-                last_sequence: Some(5),
-                sequences_aligned: true,
-                source_position: None,
-            }))
-            .unwrap();
-
-        // Create query config with persistent backend, subscribed to this source
-        let config =
-            create_persistent_query_config("handover-query", vec!["handover-src".to_string()]);
-        add_query(&query_manager, &graph, config).await.unwrap();
-        query_manager
-            .start_query("handover-query".to_string())
-            .await
-            .unwrap();
-        wait_for_component_status(
-            &mut event_rx,
-            "handover-query",
-            ComponentStatus::Running,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-
-        // Wait for bootstrap to complete and gate to open
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Get a reference to the source for injecting streaming events
-        let source_instance = source_manager
-            .get_source_instance("handover-src")
-            .await
-            .unwrap();
-        let test_source = source_instance
-            .as_any()
-            .downcast_ref::<HandoverTestSource>()
-            .unwrap();
-
-        // Set the source's sequence counter to 3 so streaming events start at seq=3
-        // (simulating buffered events that overlap with bootstrap)
-        test_source.set_next_sequence(2); // next_sequence starts at 3
-
-        // Inject streaming events: seq 3, 4, 5 should be deduped; 6, 7, 8 should pass
-        for (node_id, name) in [
-            ("p3", "Person3"), // seq 3 — should be dedup'd
-            ("p4", "Person4"), // seq 4 — should be dedup'd
-            ("p5", "Person5"), // seq 5 — should be dedup'd
-            ("p6", "Person6"), // seq 6 — should pass
-            ("p7", "Person7"), // seq 7 — should pass
-            ("p8", "Person8"), // seq 8 — should pass
-        ] {
-            test_source
-                .inject_change(make_person_insert("handover-src", node_id, name))
-                .await
-                .unwrap();
-        }
-
-        // Allow processing time
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-        // Verify: checkpoint should reflect the last processed sequence (8),
-        // not the dedup'd sequences (3-5).
-        let query_instance = query_manager
-            .get_query_instance("handover-query")
-            .await
-            .unwrap();
-        let cp_store = query_instance
-            .as_any()
-            .downcast_ref::<DrasiQuery>()
-            .unwrap()
-            .get_checkpoint_store()
-            .await
-            .expect("Should have checkpoint store");
-
-        let cp = cp_store.read_checkpoint("handover-src").await.unwrap();
-        assert!(
-            cp.is_some(),
-            "Checkpoint should exist after processing post-handover events"
-        );
-        let checkpoint = cp.unwrap();
-        assert_eq!(
-            checkpoint.sequence, 8,
-            "Checkpoint should be 8 (last processed sequence), \
-             events ≤5 should have been filtered by handover dedup"
-        );
-    }
-
     // ========================================================================
     // Error-path tests — failable checkpoint store
     // ========================================================================

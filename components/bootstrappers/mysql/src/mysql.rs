@@ -83,8 +83,6 @@ impl MySqlBootstrapHandler {
             warn!("No tables selected for bootstrap; check configured allowlist and query labels");
             return Ok(BootstrapResult {
                 event_count: 0,
-                last_sequence: None,
-                sequences_aligned: false,
                 source_position: None,
             });
         }
@@ -103,8 +101,6 @@ impl MySqlBootstrapHandler {
 
         Ok(BootstrapResult {
             event_count: total,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position,
         })
     }
