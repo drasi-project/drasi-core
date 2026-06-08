@@ -113,9 +113,13 @@ pub struct HttpReactionConfig {
     pub adaptive: Option<AdaptiveBatchConfig>,
 
     /// Path appended to `base_url` for coalesced batch POSTs.
-    /// Ignored when `adaptive` is `None`. When `None` under adaptive
-    /// mode, coalesced batches are still delivered per-route rather
-    /// than via a single batch endpoint.
+    ///
+    /// Requires `adaptive` to be `Some(...)`. If `batch_endpoint` is set
+    /// while `adaptive` is `None`, the reaction fails fast at startup
+    /// (logs an error, sets status to `Stopped`, and returns an error)
+    /// rather than silently ignoring it. Under adaptive mode with
+    /// `batch_endpoint` set to `None`, coalesced batches are still
+    /// delivered per-route rather than via a single batch endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_endpoint: Option<String>,
 }

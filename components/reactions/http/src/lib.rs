@@ -223,10 +223,11 @@ impl HttpReactionBuilder {
     /// Set the batch endpoint path. Coalesced batches are POSTed to
     /// `{baseUrl}{endpoint}` as a single payload.
     ///
-    /// Has no effect unless adaptive mode is enabled
-    /// (via [`with_adaptive`](Self::with_adaptive) or one of the
-    /// `with_*_batch_*` tuning methods). A warning is logged at startup if
-    /// a batch endpoint is set without adaptive mode.
+    /// Requires adaptive mode (enable it via [`with_adaptive`](Self::with_adaptive)
+    /// or one of the `with_*_batch_*` tuning methods). If a batch endpoint is
+    /// set without adaptive mode, [`HttpReaction::start`](crate::HttpReaction)
+    /// fails fast at startup: it logs an error, sets the reaction status to
+    /// `Stopped`, and returns an error.
     pub fn with_batch_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.config.batch_endpoint = Some(endpoint.into());
         self
