@@ -234,6 +234,27 @@ pub struct SourceBase {
     /// Pruned explicitly via `prune_position_map()` after the source has
     /// successfully acknowledged the confirmed position to its upstream.
     sequence_position_map: Arc<RwLock<BTreeMap<u64, Bytes>>>,
+    /// Bootstrap-to-CDC boundary handoff for the first-ever bootstrap (Part 1
+    /// of issue #455 — overlap elimination).
+    ///
+    /// For "bootstrap-first" sources (Postgres, MSSQL, MySQL, Kafka) the
+    /// bootstrapper captures the source's native CDC boundary (WAL LSN, CDC log
+    /// LSN, binlog file+offset, partition→offset vector) *atomically* with the
+    /// snapshot and returns it as `BootstrapResult.source_position`. The
+    /// framework publishes that token here (see `handle_bootstrap_subscription`)
+    /// so the source's CDC-start task can begin streaming exactly at the
+    /// snapshot boundary — no overlap, no gap, no after-the-fact dedup.
+    ///
+    /// For "source-first" sources (Oracle) the source captures the boundary
+    /// itself inside `subscribe()` and publishes it here directly while also
+    /// injecting it into the `BootstrapContext` (`AS OF SCN`).
+    ///
+    /// A `watch` channel initialized to `None`. The first *initial* bootstrap
+    /// (`resume_from == None`) that yields a `source_position` wins; later
+    /// bootstraps never overwrite it. Crash-recovery subscriptions
+    /// (`resume_from.is_some()`) bypass this entirely and use the existing
+    /// `resume_from` path.
+    bootstrap_boundary: Arc<tokio::sync::watch::Sender<Option<Bytes>>>,
 }
 
 impl SourceBase {
@@ -286,6 +307,7 @@ impl SourceBase {
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
             position_comparator: Arc::new(RwLock::new(None)),
             sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
+            bootstrap_boundary: Arc::new(tokio::sync::watch::channel(None).0),
         })
     }
 
@@ -569,6 +591,7 @@ impl SourceBase {
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
             position_comparator: self.position_comparator.clone(),
             sequence_position_map: self.sequence_position_map.clone(),
+            bootstrap_boundary: self.bootstrap_boundary.clone(),
         }
     }
 
@@ -662,6 +685,68 @@ impl SourceBase {
             drop(dispatchers);
             self.subscriber_notify.notified().await;
         }
+    }
+
+    /// Publish the bootstrap-to-CDC boundary token (Part 1 — overlap
+    /// elimination).
+    ///
+    /// Records the source's native CDC boundary captured atomically with the
+    /// initial snapshot so the CDC-start task can begin streaming exactly at
+    /// that boundary. Only the first non-`None` boundary wins; subsequent
+    /// calls are ignored. Returns `true` if this call set the boundary.
+    ///
+    /// Called automatically by the framework from
+    /// `handle_bootstrap_subscription` for "bootstrap-first" sources, or
+    /// directly by "source-first" sources (Oracle) that capture the boundary
+    /// in `subscribe()`.
+    pub fn publish_bootstrap_boundary(&self, position: Bytes) -> bool {
+        let mut set = false;
+        self.bootstrap_boundary.send_if_modified(|current| {
+            if current.is_none() {
+                *current = Some(position);
+                set = true;
+                true
+            } else {
+                false
+            }
+        });
+        set
+    }
+
+    /// Return the bootstrap boundary token if one has already been published,
+    /// without waiting.
+    pub fn try_bootstrap_boundary(&self) -> Option<Bytes> {
+        self.bootstrap_boundary.borrow().clone()
+    }
+
+    /// Await the bootstrap-to-CDC boundary token (Part 1 — overlap
+    /// elimination).
+    ///
+    /// Resolves as soon as a boundary has been published via
+    /// [`publish_bootstrap_boundary`](Self::publish_bootstrap_boundary).
+    /// "Bootstrap-first" sources call this from their CDC-start task on the
+    /// first-ever start (no `resume_from`) to learn where to begin streaming.
+    ///
+    /// Returns `None` if the boundary channel has been closed (the source is
+    /// shutting down) before any boundary was published.
+    pub async fn wait_for_bootstrap_boundary(&self) -> Option<Bytes> {
+        let mut rx = self.bootstrap_boundary.subscribe();
+        loop {
+            if let Some(pos) = rx.borrow_and_update().clone() {
+                return Some(pos);
+            }
+            if rx.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Reset the bootstrap boundary so a fresh first-ever bootstrap can publish
+    /// a new token. Sources call this from `start()` so a restart that has no
+    /// stored checkpoint re-negotiates the boundary instead of reusing a stale
+    /// one from a previous run.
+    pub fn reset_bootstrap_boundary(&self) {
+        self.bootstrap_boundary.send_replace(None);
     }
 
     /// Subscribe to this source with optional bootstrap
@@ -966,6 +1051,12 @@ impl SourceBase {
             let settings_clone = settings.clone();
             let source_id = self.id.clone();
 
+            // Boundary handoff: for the first-ever bootstrap (no resume_from)
+            // publish the captured source_position so the CDC-start task can
+            // begin streaming exactly at the snapshot boundary (Part 1).
+            let boundary = self.bootstrap_boundary.clone();
+            let is_initial_bootstrap = settings.resume_from.is_none();
+
             // Get instance_id from context for log routing isolation
             let instance_id = self
                 .context()
@@ -999,6 +1090,29 @@ impl SourceBase {
                                     .map(|p| p.len())
                                     .unwrap_or(0)
                             );
+
+                            // Publish the bootstrap-to-CDC boundary for the
+                            // first-ever bootstrap so the source's CDC stream
+                            // starts exactly at the snapshot boundary. Only the
+                            // first non-None boundary wins.
+                            if is_initial_bootstrap {
+                                if let Some(position) = result.source_position.clone() {
+                                    let set = boundary.send_if_modified(|current| {
+                                        if current.is_none() {
+                                            *current = Some(position);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if set {
+                                        info!(
+                                            "Published bootstrap-to-CDC boundary for query '{}'",
+                                            settings_clone.query_id
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             error!(
@@ -1523,6 +1637,60 @@ mod tests {
         assert_eq!(base.id, "my-source");
         assert!(base.auto_start);
         assert_eq!(base.get_status().await, ComponentStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_boundary_first_publish_wins() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-src")).unwrap();
+
+        assert!(base.try_bootstrap_boundary().is_none());
+
+        assert!(base.publish_bootstrap_boundary(Bytes::from_static(b"lsn-1")));
+        // Second publish is ignored — first boundary wins.
+        assert!(!base.publish_bootstrap_boundary(Bytes::from_static(b"lsn-2")));
+
+        assert_eq!(
+            base.try_bootstrap_boundary(),
+            Some(Bytes::from_static(b"lsn-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_bootstrap_boundary_resolves_on_publish() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-wait")).unwrap();
+        let waiter = base.clone_shared();
+
+        let handle = tokio::spawn(async move { waiter.wait_for_bootstrap_boundary().await });
+
+        // Give the waiter a chance to park.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        base.publish_bootstrap_boundary(Bytes::from_static(b"scn-42"));
+
+        let got = handle.await.unwrap();
+        assert_eq!(got, Some(Bytes::from_static(b"scn-42")));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_bootstrap_boundary_returns_immediately_if_set() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-set")).unwrap();
+        base.publish_bootstrap_boundary(Bytes::from_static(b"pos"));
+        assert_eq!(
+            base.wait_for_bootstrap_boundary().await,
+            Some(Bytes::from_static(b"pos"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_bootstrap_boundary_allows_new_publish() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-reset")).unwrap();
+        base.publish_bootstrap_boundary(Bytes::from_static(b"old"));
+        base.reset_bootstrap_boundary();
+        assert!(base.try_bootstrap_boundary().is_none());
+        assert!(base.publish_bootstrap_boundary(Bytes::from_static(b"new")));
+        assert_eq!(
+            base.try_bootstrap_boundary(),
+            Some(Bytes::from_static(b"new"))
+        );
     }
 
     #[tokio::test]
