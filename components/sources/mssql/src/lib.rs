@@ -98,6 +98,7 @@ use drasi_lib::schema::{
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::sources::Source;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
@@ -132,6 +133,11 @@ pub struct MsSqlSource {
 
     /// Best-effort cached schema populated from SQL Server catalog metadata.
     cached_schema: Arc<std::sync::RwLock<Option<SourceSchema>>>,
+
+    /// Set in `subscribe()` when a subscription requests an initial bootstrap
+    /// (enable_bootstrap and no resume_from). Gates the CDC stream's wait for
+    /// the bootstrap boundary so streaming-only subscriptions don't block.
+    initial_bootstrap_pending: Arc<AtomicBool>,
 }
 
 fn mssql_type_to_property_type(data_type: &str) -> Option<PropertyType> {
@@ -230,6 +236,7 @@ impl MsSqlSource {
             shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
+            initial_bootstrap_pending: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -358,6 +365,8 @@ impl Source for MsSqlSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         self.base.reset_bootstrap_boundary();
+        self.initial_bootstrap_pending
+            .store(false, Ordering::Release);
         log::info!("Starting MS SQL CDC source: {}", self.base.id);
 
         // Create a brand-new shutdown channel so the CDC task gets a pristine
@@ -384,6 +393,7 @@ impl Source for MsSqlSource {
         let source_id = self.base.id.clone();
         let base = self.base.clone_shared();
         let subscriber_resume_lsns = self.subscriber_resume_lsns.clone();
+        let initial_bootstrap_pending = self.initial_bootstrap_pending.clone();
 
         // Spawn CDC polling task
         let task_handle = tokio::spawn(async move {
@@ -393,6 +403,7 @@ impl Source for MsSqlSource {
                 base,
                 shutdown_rx,
                 subscriber_resume_lsns,
+                initial_bootstrap_pending,
             )
             .await
             {
@@ -480,6 +491,14 @@ impl Source for MsSqlSource {
                     );
                 }
             }
+        }
+
+        // Record that an initial bootstrap was requested so the CDC stream waits
+        // for the boundary. Must be set before subscribe_with_bootstrap
+        // registers the dispatcher (which releases wait_for_subscribers).
+        if settings.enable_bootstrap && settings.resume_from.is_none() {
+            self.initial_bootstrap_pending
+                .store(true, Ordering::Release);
         }
 
         self.base
@@ -657,6 +676,7 @@ impl MsSqlSourceBuilder {
             shutdown_tx: Arc::new(RwLock::new(shutdown_tx)),
             subscriber_resume_lsns: Arc::new(RwLock::new(HashMap::new())),
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
+            initial_bootstrap_pending: Arc::new(AtomicBool::new(false)),
         })
     }
 }
