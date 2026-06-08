@@ -121,9 +121,6 @@ pub(crate) fn execute_drop_fn(
         return;
     }
 
-    // Save the raw pointer before moving `state` into the request, in case
-    // the worker channel is disconnected and we need the fallback path.
-    let raw_ptr = state.as_ptr();
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let request = DropRequest {
         drop_fn,
@@ -131,31 +128,26 @@ pub(crate) fn execute_drop_fn(
         done_tx,
     };
 
-    // If the worker thread has been shut down (channel disconnected), fall back
-    // to a dedicated thread spawn. This should not happen in normal operation:
-    // the worker loop catches `drop_fn` panics, so the only realistic way to
-    // reach the fallback is a failure to spawn the worker thread in the first
-    // place.
-    if drop_worker_tx().send(request).is_ok() {
-        // A `RecvError` means the worker exited without signalling completion.
-        // The worker loop catches panics, so this is not expected — but if it
-        // ever happens, emit a diagnostic rather than silently proceeding as if
-        // the drop completed.
-        if done_rx.recv().is_err() {
-            eprintln!(
-                "[drasi-drop-worker] worker exited before completing drop_fn; \
-                 plugin resources may have leaked"
-            );
-        }
-    } else {
-        // The shared worker is unavailable, so fall back to a dedicated thread.
-        // This reintroduces the per-thread TLS-destructor race on macOS arm64,
-        // so make the regression observable rather than silent.
+    // The worker's receiver lives for the entire process: the sender is held in
+    // a static `OnceLock`, and the worker loop never exits (it catches `drop_fn`
+    // panics, so a buggy plugin cannot terminate it). The channel therefore
+    // cannot disconnect, so this send cannot fail. We `expect` rather than fall
+    // back to a per-thread spawn: a panic here is far preferable to silently
+    // reintroducing the TLS-destructor race this module exists to prevent. If a
+    // deliberate worker-shutdown path is ever added, it must be designed to
+    // tear down drops safely at that point.
+    drop_worker_tx()
+        .send(request)
+        .expect("drasi-drop-worker channel unexpectedly disconnected");
+
+    // A `RecvError` means the worker exited without signalling completion. Given
+    // the panic barrier in the worker loop this is not expected, but if it ever
+    // happens, emit a diagnostic rather than silently proceeding as if the drop
+    // completed.
+    if done_rx.recv().is_err() {
         eprintln!(
-            "[drasi-drop-worker] worker channel disconnected; falling back to a \
-             per-thread spawn (TLS-destructor race may reappear on macOS arm64)"
+            "[drasi-drop-worker] worker exited before completing drop_fn; \
+             plugin resources may have leaked"
         );
-        let fallback_state = drasi_plugin_sdk::ffi::SendMutPtr(raw_ptr);
-        let _ = std::thread::spawn(move || (drop_fn)(fallback_state.as_ptr())).join();
     }
 }
