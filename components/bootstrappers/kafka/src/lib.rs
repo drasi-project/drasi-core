@@ -35,7 +35,7 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::{BootstrapEvent, BootstrapEventSender};
 use drasi_source_kafka::encode_partition_offsets;
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde_json::Value as JsonValue;
@@ -93,7 +93,7 @@ impl KafkaBootstrapProvider {
     }
 
     /// Create a base consumer for bootstrap reading.
-    fn create_consumer(&self, source_id: &str) -> Result<BaseConsumer> {
+    fn create_consumer(&self, source_id: &str) -> Result<StreamConsumer> {
         let group_id = format!("__drasi_bootstrap_{}_{}", source_id, uuid::Uuid::new_v4());
         let mut client_config = ClientConfig::new();
         client_config
@@ -119,7 +119,7 @@ impl KafkaBootstrapProvider {
             client_config.set(key, value);
         }
 
-        let consumer: BaseConsumer = client_config
+        let consumer: StreamConsumer = client_config
             .create()
             .context("Failed to create Kafka bootstrap consumer")?;
 
@@ -290,11 +290,14 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                 break;
             }
 
-            // Use block_in_place so the blocking poll doesn't starve the Tokio runtime.
-            let poll_result = tokio::task::block_in_place(|| consumer.poll(poll_timeout));
+            // Use the async StreamConsumer so bootstrap works on any Tokio
+            // runtime flavor (no block_in_place, which requires a multi-thread
+            // runtime). A timeout bounds each wait so missing messages can't hang
+            // the loop indefinitely.
+            let poll_result = tokio::time::timeout(poll_timeout, consumer.recv()).await;
 
             match poll_result {
-                Some(Ok(msg)) => {
+                Ok(Ok(msg)) => {
                     let partition = msg.partition() as usize;
                     let offset = msg.offset();
                     let key = msg
@@ -361,12 +364,12 @@ impl BootstrapProvider for KafkaBootstrapProvider {
                         }
                     }
                 }
-                Some(Err(e)) => {
+                Ok(Err(e)) => {
                     warn!("Kafka bootstrap: consumer error: {}", e);
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                None => {
-                    // Poll returned no message (timeout) — continue checking
+                Err(_) => {
+                    // recv timed out (no message available) — continue checking
                 }
             }
         }

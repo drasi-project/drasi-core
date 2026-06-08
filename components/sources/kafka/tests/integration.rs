@@ -411,7 +411,7 @@ async fn produce_order(producer: &FutureProducer, topic: &str, id: &str, total: 
         .await
         .expect("Failed to produce order");
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 #[ignore]
 async fn test_kafka_bootstrap_source_overlap_handover() {
     let _ = env_logger::try_init();
