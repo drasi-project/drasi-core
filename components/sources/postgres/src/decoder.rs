@@ -846,7 +846,8 @@ mod tests {
             .expect("should parse timestamptz with short negative offset");
         match value {
             PostgresValue::TimestampTz(ts) => {
-                // -05:00 offset means UTC is 5 hours ahead.
+                // Local time has a -05:00 offset, so the UTC representation
+                // is 5 hours ahead of the wall-clock time in the input.
                 assert_eq!(
                     ts,
                     Utc.with_ymd_and_hms(2026, 5, 14, 3, 3, 45).unwrap()
