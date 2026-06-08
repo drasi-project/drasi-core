@@ -158,6 +158,7 @@ async fn test_bootstrapped_nodes_queryable_via_cypher() {
                 items_path: "$".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -293,6 +294,7 @@ async fn test_paginated_bootstrap_queryable_via_cypher() {
                 items_path: "$.items".to_string(),
                 content_type: None,
                 mappings: vec![ElementMappingConfig {
+                    operation: Default::default(),
                     element_type: ElementType::Node,
                     template: ElementTemplate {
                         id: "{{item.id}}".to_string(),
@@ -414,6 +416,7 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
                     items_path: "$".to_string(),
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
+                        operation: Default::default(),
                         element_type: ElementType::Node,
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),
@@ -439,6 +442,7 @@ async fn test_bootstrapped_relationships_queryable_via_cypher() {
                     items_path: "$".to_string(),
                     content_type: None,
                     mappings: vec![ElementMappingConfig {
+                        operation: Default::default(),
                         element_type: ElementType::Relation,
                         template: ElementTemplate {
                             id: "{{item.id}}".to_string(),

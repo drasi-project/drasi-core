@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-secret-store-file"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "File-based secret store plugin for Drasi (dev/testing)"

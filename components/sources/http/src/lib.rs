@@ -186,17 +186,18 @@
 //!
 //! ## Rust
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use drasi_source_http::{HttpSource, HttpSourceBuilder};
+//! use std::sync::Arc;
 //!
-//! let config = HttpSourceBuilder::new()
+//! # async fn example() -> anyhow::Result<()> {
+//! let source = HttpSource::builder("http-source")
 //!     .with_host("0.0.0.0")
 //!     .with_port(8080)
 //!     .with_adaptive_enabled(true)
-//!     .build();
-//!
-//! let source = Arc::new(HttpSource::new("http-source", config)?);
-//! drasi.add_source(source).await?;
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## curl (Single Event)
@@ -414,15 +415,16 @@ impl HttpSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use drasi_source_http::{HttpSource, HttpSourceBuilder};
+    /// ```rust,no_run
+    /// use drasi_source_http::HttpSource;
     ///
-    /// let config = HttpSourceBuilder::new()
+    /// # fn example() -> anyhow::Result<()> {
+    /// let source = HttpSource::builder("my-http-source")
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
-    ///     .build();
-    ///
-    /// let source = HttpSource::new("my-http-source", config)?;
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(id: impl Into<String>, config: HttpSourceConfig) -> Result<Self> {
         let id = id.into();
@@ -1458,15 +1460,17 @@ impl Source for HttpSource {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
 /// use drasi_source_http::HttpSource;
 ///
+/// # fn example() -> anyhow::Result<()> {
 /// let source = HttpSource::builder("my-source")
 ///     .with_host("0.0.0.0")
 ///     .with_port(8080)
 ///     .with_adaptive_enabled(true)
-///     .with_bootstrap_provider(my_provider)
 ///     .build()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct HttpSourceBuilder {
     id: String,
@@ -1716,12 +1720,16 @@ impl HttpSource {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use drasi_source_http::HttpSource;
+    ///
+    /// # fn example() -> anyhow::Result<()> {
     /// let source = HttpSource::builder("my-source")
     ///     .with_host("0.0.0.0")
     ///     .with_port(8080)
-    ///     .with_bootstrap_provider(my_provider)
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(id: impl Into<String>) -> HttpSourceBuilder {
         HttpSourceBuilder::new(id)
