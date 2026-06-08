@@ -18,16 +18,26 @@ mod mssql_helpers;
 
 use anyhow::{Context, Result};
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::ResultDiff;
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_mssql::{MsSqlSource, StartPosition};
 use mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `dbo.Products:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
 
 const TEST_DB: &str = "DrasiTest";
 const TEST_TABLE: &str = "dbo.Products";
@@ -307,7 +317,10 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             .await
             .context("Failed to prepare MSSQL database")?;
 
-        const SEED_COUNT: usize = 200;
+        // Seed rows BEFORE subscribing. They are part of the bootstrap snapshot
+        // (taken inside a SNAPSHOT-isolation tx that captures the CDC max LSN as
+        // the boundary) and must never be replayed by CDC after the boundary.
+        const SEED_COUNT: i64 = 100;
         let mut client = db_config.connect().await?;
         for chunk_start in (1..=SEED_COUNT).step_by(50) {
             let chunk_end = (chunk_start + 49).min(SEED_COUNT);
@@ -319,7 +332,9 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             }
             execute_sql(&mut client, &sql).await?;
         }
-        sleep(Duration::from_secs(3)).await;
+        // Allow the CDC capture job to process the seed inserts so the captured
+        // max LSN (the boundary) is past them.
+        sleep(Duration::from_secs(5)).await;
 
         let bootstrap_provider = MsSqlBootstrapProvider::builder()
             .with_source_id(SOURCE_ID)
@@ -346,121 +361,159 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             .build()
             .context("Failed to build MSSQL source")?;
 
-        let query = Query::cypher(QUERY_ID)
-            .query(
-                r#"
-                MATCH (p:Products)
-                RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
-            "#,
-            )
-            .from_source(SOURCE_ID)
-            .auto_start(true)
-            .enable_bootstrap(true)
-            .build();
-
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction-overlap")
-            .with_query(QUERY_ID)
-            .build();
-
-        let core = DrasiLib::builder()
-            .with_id("mssql-overlap-handover-test")
-            .with_source(source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .build()
-            .await
-            .context("Failed to build DrasiLib")?;
-
-        core.start().await.context("Failed to start DrasiLib")?;
-
-        let mut subscription = handle
-            .subscribe_with_options(
-                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
-            )
-            .await
-            .context("Failed to create subscription")?;
-
-        let mutator_config = db_config.clone();
-        let mutator = tokio::spawn(async move {
+        source.start().await.context("Failed to start MSSQL source")?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if source.status().await == ComponentStatus::Running {
+                break;
+            }
             sleep(Duration::from_millis(100)).await;
-            let mut client = mutator_config.connect().await?;
-            execute_sql(
-                &mut client,
-                "UPDATE dbo.Products SET Name = 'UpdatedDuringBootstrap' WHERE ProductId = 1;",
-            )
-            .await?;
-            execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 2;").await?;
-            execute_sql(
-                &mut client,
-                "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES (1000, 'InsertedDuringBootstrap', 9.99);",
-            )
-            .await?;
-            Ok::<(), anyhow::Error>(())
-        });
+        }
+        anyhow::ensure!(
+            source.status().await == ComponentStatus::Running,
+            "MSSQL source did not reach Running state"
+        );
 
-        let mut seed_add_counts = std::collections::HashMap::<String, usize>::new();
-        let mut update_count = 0usize;
-        let mut delete_count = 0usize;
-        let mut insert_count = 0usize;
+        // Subscribe directly to the source so we observe both the bootstrap
+        // snapshot and the CDC stream deterministically (a reaction subscription
+        // can miss bootstrap events delivered before it attaches).
+        let settings = SourceSubscriptionSettings {
+            source_id: SOURCE_ID.to_string(),
+            enable_bootstrap: true,
+            query_id: "q-handover".to_string(),
+            nodes: HashSet::from(["Products".to_string()]),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        };
+        let response = source
+            .subscribe(settings)
+            .await
+            .context("Failed to subscribe to MSSQL source")?;
+        let mut bootstrap_rx = response
+            .bootstrap_receiver
+            .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+        let mut cdc_rx = response.receiver;
 
-        for _ in 0..120 {
-            if let Some(result) = subscription.recv().await {
-                for entry in &result.results {
-                    match entry {
-                        ResultDiff::Add { data, .. } => {
-                            if let Some(id) = data.get("id").and_then(value_as_string) {
-                                if id == "1000" {
-                                    if field_matches(data, "name", "InsertedDuringBootstrap") {
-                                        insert_count += 1;
-                                    }
-                                } else if field_matches(data, "name", &format!("Seed{id}")) {
-                                    *seed_add_counts.entry(id).or_default() += 1;
+        // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+        // closes) once the snapshot completes and the boundary is published.
+        let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if let Some(id) =
+                            element_id_int(element.get_reference().element_id.as_ref())
+                        {
+                            *bootstrap_ids.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+
+        anyhow::ensure!(
+            bootstrap_ids.len() == SEED_COUNT as usize,
+            "bootstrap should snapshot every seed row exactly once (got {})",
+            bootstrap_ids.len()
+        );
+        for id in 1..=SEED_COUNT {
+            anyhow::ensure!(
+                bootstrap_ids.get(&id).copied().unwrap_or_default() == 1,
+                "seed row {id} missing or duplicated in bootstrap snapshot"
+            );
+        }
+
+        // Bootstrap is complete and the boundary is published. Mutations now are
+        // strictly after the boundary and must each be delivered exactly once by
+        // CDC, with no seed rows replayed.
+        let insert_id = SEED_COUNT + 1000;
+        execute_sql(
+            &mut client,
+            &format!(
+                "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({insert_id}, 'PostBoundary', 9.99);"
+            ),
+        )
+        .await?;
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'UpdatedDuringBootstrap' WHERE ProductId = 1;",
+        )
+        .await?;
+        execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 2;").await?;
+
+        let mut inserts: HashMap<i64, usize> = HashMap::new();
+        let mut updates: HashMap<i64, usize> = HashMap::new();
+        let mut deletes: HashMap<i64, usize> = HashMap::new();
+        let started = Instant::now();
+        let mut idle_since = Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    idle_since = Instant::now();
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        if let Some(id) =
+                            element_id_int(change.get_reference().element_id.as_ref())
+                        {
+                            match change {
+                                SourceChange::Insert { .. } => {
+                                    *inserts.entry(id).or_default() += 1
                                 }
+                                SourceChange::Update { .. } => {
+                                    *updates.entry(id).or_default() += 1
+                                }
+                                SourceChange::Delete { .. } => {
+                                    *deletes.entry(id).or_default() += 1
+                                }
+                                SourceChange::Future { .. } => {}
                             }
                         }
-                        ResultDiff::Update { before, after, .. } => {
-                            if matches_fields(before, &[("id", "1"), ("name", "Seed1")])
-                                && matches_fields(
-                                    after,
-                                    &[("id", "1"), ("name", "UpdatedDuringBootstrap")],
-                                )
-                            {
-                                update_count += 1;
-                            }
-                        }
-                        ResultDiff::Delete { data, .. } => {
-                            if matches_fields(data, &[("id", "2"), ("name", "Seed2")]) {
-                                delete_count += 1;
-                            }
-                        }
-                        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let done = inserts.get(&insert_id) == Some(&1)
+                        && updates.get(&1) == Some(&1)
+                        && deletes.get(&2) == Some(&1);
+                    if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                        break;
                     }
                 }
             }
-
-            if seed_add_counts.len() == SEED_COUNT
-                && seed_add_counts.values().all(|count| *count == 1)
-                && update_count == 1
-                && delete_count == 1
-                && insert_count == 1
-                && mutator.is_finished()
-            {
-                break;
-            }
         }
 
-        mutator.await.context("Mutator task panicked")??;
+        // No gap: every post-boundary change delivered exactly once.
+        anyhow::ensure!(
+            inserts.get(&insert_id) == Some(&1),
+            "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.get(&1) == Some(&1),
+            "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.get(&2) == Some(&1),
+            "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+        );
 
-        for id in 1..=SEED_COUNT {
-            let id = id.to_string();
-            let count = seed_add_counts.get(&id).copied().unwrap_or_default();
-            anyhow::ensure!(count == 1, "seed row {id} appeared {count} times");
-        }
-        anyhow::ensure!(update_count == 1, "update appeared {update_count} times");
-        anyhow::ensure!(delete_count == 1, "delete appeared {delete_count} times");
-        anyhow::ensure!(insert_count == 1, "insert appeared {insert_count} times");
+        // No overlap: CDC must not replay any pre-boundary seed row. The only
+        // change events permitted are the three post-boundary mutations.
+        anyhow::ensure!(
+            inserts.len() == 1,
+            "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.len() == 1,
+            "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.len() == 1,
+            "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+        );
 
-        core.stop().await.context("Failed to stop DrasiLib")?;
+        source.stop().await.context("Failed to stop MSSQL source")?;
         mssql.cleanup().await;
 
         Ok::<(), anyhow::Error>(())
