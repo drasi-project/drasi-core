@@ -138,6 +138,8 @@ pub fn value_to_string(value: &ElementValue) -> String {
         ElementValue::String(s) => s.to_string(),
         ElementValue::Bool(b) => b.to_string(),
         ElementValue::Null => "null".to_string(),
+        ElementValue::LocalDateTime(dt) => dt.to_string(),
+        ElementValue::ZonedDateTime(dt) => dt.to_rfc3339(),
         _ => format!("{value:?}"),
     }
 }
