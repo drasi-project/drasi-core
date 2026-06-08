@@ -734,8 +734,7 @@ impl SourceBase {
         }
     }
 
-    /// Publish the bootstrap-to-CDC boundary token (Part 1 — overlap
-    /// elimination).
+    /// Publish the bootstrap-to-CDC boundary token.
     ///
     /// Records the source's native CDC boundary captured atomically with the
     /// initial snapshot so the CDC-start task can begin streaming exactly at
@@ -751,13 +750,12 @@ impl SourceBase {
     }
 
     /// Return the bootstrap boundary token if one has already been published,
-    /// without waiting.
+    /// without waiting. Returns `None` if no boundary has been published yet.
     pub fn try_bootstrap_boundary(&self) -> Option<Bytes> {
         self.bootstrap_boundary.borrow().clone()
     }
 
-    /// Await the bootstrap-to-CDC boundary token (Part 1 — overlap
-    /// elimination).
+    /// Await the bootstrap-to-CDC boundary token.
     ///
     /// Resolves as soon as a boundary has been published via
     /// [`publish_bootstrap_boundary`](Self::publish_bootstrap_boundary).
