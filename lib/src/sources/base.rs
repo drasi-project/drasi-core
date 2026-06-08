@@ -1293,8 +1293,8 @@ impl SourceBase {
     /// It properly handles both Broadcast and Channel dispatch modes by delegating
     /// to `create_streaming_receiver()`, making the dispatch mode transparent to tests.
     ///
-    /// This helper is intended for async test contexts and avoids blocking the
-    /// active Tokio runtime thread.
+    /// This method is designed for async test contexts and is compatible with
+    /// both `current_thread` and `multi_thread` Tokio runtimes.
     ///
     /// # Returns
     /// A receiver that will receive all events dispatched by this source,
@@ -1305,7 +1305,7 @@ impl SourceBase {
         self.create_streaming_receiver().await
     }
 
-    /// Create a test subscription to this source (async wrapper)
+    /// Create a test subscription to this source
     ///
     /// Convenience wrapper around [`try_test_subscribe`](Self::try_test_subscribe)
     /// that panics on failure. Prefer `try_test_subscribe()` in new code.
