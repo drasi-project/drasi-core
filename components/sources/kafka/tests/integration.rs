@@ -20,8 +20,11 @@
 #![allow(clippy::unwrap_used)]
 
 use drasi_bootstrap_kafka::KafkaBootstrapProvider;
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::ResultDiff;
-use drasi_lib::{DrasiLib, Query, Source};
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReactionBuilder;
 use drasi_source_kafka::KafkaSource;
@@ -30,9 +33,9 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::apache;
 use tokio::time::sleep;
@@ -408,7 +411,7 @@ async fn produce_order(producer: &FutureProducer, topic: &str, id: &str, total: 
         .await
         .expect("Failed to produce order");
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn test_kafka_bootstrap_source_overlap_handover() {
     let _ = env_logger::try_init();
@@ -422,11 +425,16 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
     );
     ensure_topic(&bootstrap_servers, &topic, 3).await;
     let producer = create_producer(&bootstrap_servers);
+
+    // Produce the initial messages BEFORE subscribing. These are consumed as the
+    // bootstrap snapshot (low watermark → high watermark captured at bootstrap
+    // time). The high watermark becomes the boundary; CDC starts there so these
+    // messages must never be replayed.
     let initial_count = 50;
-    let concurrent_count = 25;
     for i in 0..initial_count {
         produce_order(&producer, &topic, &format!("initial-{i}"), 100).await;
     }
+
     let source = KafkaSource::builder("orders_handover_kafka")
         .bootstrap_servers(&bootstrap_servers)
         .topic(&topic)
@@ -443,75 +451,120 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
     source
         .set_bootstrap_provider(Box::new(bootstrap_provider))
         .await;
-    let query = Query::cypher("q1")
-        .query("MATCH (o:Order) RETURN o.id AS id")
-        .from_source("orders_handover_kafka")
-        .build();
-    let (reaction, handle) = ApplicationReactionBuilder::new("r1")
-        .with_query("q1")
-        .build();
-    let core = Arc::new(
-        DrasiLib::builder()
-            .with_source(source)
-            .with_query(query)
-            .with_reaction(reaction)
-            .build()
-            .await
-            .unwrap(),
-    );
-    let topic_for_concurrent = topic.clone();
-    let bootstrap_servers_for_concurrent = bootstrap_servers.clone();
-    let concurrent_producer = tokio::spawn(async move {
-        let producer = create_producer(&bootstrap_servers_for_concurrent);
-        sleep(Duration::from_millis(25)).await;
-        for i in 0..concurrent_count {
-            produce_order(
-                &producer,
-                &topic_for_concurrent,
-                &format!("concurrent-{i}"),
-                100,
-            )
-            .await;
-            sleep(Duration::from_millis(5)).await;
-        }
-    });
-    core.start().await.unwrap();
-    let mut subscription = handle
-        .subscribe_with_options(
-            SubscriptionOptions::default().with_timeout(Duration::from_secs(30)),
-        )
-        .await
-        .unwrap();
-    concurrent_producer.await.unwrap();
-    let expected_ids: Vec<String> = (0..initial_count)
-        .map(|i| format!("initial-{i}"))
-        .chain((0..concurrent_count).map(|i| format!("concurrent-{i}")))
-        .collect();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while seen.len() < expected_ids.len() && tokio::time::Instant::now() < deadline {
-        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+
+    source.start().await.unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        if source.status().await == ComponentStatus::Running {
             break;
-        };
-        let result = tokio::time::timeout(remaining, subscription.recv())
-            .await
-            .expect("Timed out waiting for handover results")
-            .expect("Expected query result");
-        for diff in result.results {
-            let data = match diff {
-                ResultDiff::Add { data, .. } | ResultDiff::Update { data, .. } => data,
-                _ => continue,
-            };
-            if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                if id.starts_with("initial-") || id.starts_with("concurrent-") {
-                    *seen.entry(id.to_string()).or_default() += 1;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(source.status().await, ComponentStatus::Running);
+
+    // Subscribe directly to the source so we observe both the bootstrap snapshot
+    // and the CDC stream deterministically.
+    let settings = SourceSubscriptionSettings {
+        source_id: "orders_handover_kafka".to_string(),
+        enable_bootstrap: true,
+        query_id: "q-handover".to_string(),
+        nodes: HashSet::from(["Order".to_string()]),
+        relations: HashSet::new(),
+        resume_from: None,
+        request_position_handle: true,
+    };
+    let response = source.subscribe(settings).await.unwrap();
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+    let mut cdc_rx = response.receiver;
+
+    // Drain the entire bootstrap snapshot. Bootstrap events stop (channel closes)
+    // once the snapshot completes and the boundary is published.
+    let mut bootstrap_ids: HashMap<String, usize> = HashMap::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = &event.change {
+                    let id = element.get_reference().element_id.to_string();
+                    *bootstrap_ids.entry(id).or_default() += 1;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("Timed out draining bootstrap snapshot"),
+        }
+    }
+
+    assert_eq!(
+        bootstrap_ids.len(),
+        initial_count as usize,
+        "bootstrap should snapshot every initial message exactly once (got {})",
+        bootstrap_ids.len()
+    );
+    for i in 0..initial_count {
+        let id = format!("initial-{i}");
+        assert_eq!(
+            bootstrap_ids.get(&id).copied().unwrap_or_default(),
+            1,
+            "initial message {id} missing or duplicated in bootstrap snapshot"
+        );
+    }
+
+    // Bootstrap is complete and the boundary (high watermark) is published.
+    // Messages produced now are strictly after the boundary and must each be
+    // delivered exactly once by CDC, with no initial messages replayed.
+    let concurrent_count = 25;
+    for i in 0..concurrent_count {
+        produce_order(&producer, &topic, &format!("concurrent-{i}"), 100).await;
+    }
+
+    let mut cdc_ids: HashMap<String, usize> = HashMap::new();
+    let started = Instant::now();
+    let mut idle_since = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                idle_since = Instant::now();
+                if let SourceEvent::Change(change) = &wrapper.event {
+                    if let SourceChange::Insert { .. } | SourceChange::Update { .. } = change {
+                        let id = change.get_reference().element_id.to_string();
+                        *cdc_ids.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                let all_seen = (0..concurrent_count)
+                    .all(|i| cdc_ids.get(&format!("concurrent-{i}")) == Some(&1));
+                if all_seen && idle_since.elapsed() >= Duration::from_secs(2) {
+                    break;
                 }
             }
         }
     }
-    for id in &expected_ids {
-        assert_eq!(seen.get(id).copied().unwrap_or_default(), 1, "id {id}");
+
+    // No gap: every post-boundary message delivered exactly once.
+    for i in 0..concurrent_count {
+        let id = format!("concurrent-{i}");
+        assert_eq!(
+            cdc_ids.get(&id).copied().unwrap_or_default(),
+            1,
+            "post-boundary message {id} missing or duplicated in CDC stream"
+        );
     }
-    assert_eq!(seen.len(), expected_ids.len());
-    core.stop().await.unwrap();
+
+    // No overlap: CDC must not replay any pre-boundary initial message.
+    for id in cdc_ids.keys() {
+        assert!(
+            !id.starts_with("initial-"),
+            "CDC replayed pre-boundary message {id}"
+        );
+    }
+    assert_eq!(
+        cdc_ids.len(),
+        concurrent_count as usize,
+        "CDC delivered unexpected extra messages: {cdc_ids:?}"
+    );
+
+    source.stop().await.unwrap();
 }
