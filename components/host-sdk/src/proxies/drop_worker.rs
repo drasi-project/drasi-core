@@ -29,16 +29,18 @@ use std::sync::mpsc;
 use std::sync::OnceLock;
 
 /// A request to execute a `drop_fn` on the worker thread.
+///
+/// This is automatically `Send` because all of its fields are `Send`: the
+/// `extern "C" fn` pointer, `SendMutPtr<c_void>` (which carries its own
+/// `unsafe impl Send`), and the `SyncSender`. Adding a manual `unsafe impl Send`
+/// here would be redundant and would suppress the compiler's check if a
+/// non-`Send` field were ever added.
 struct DropRequest {
     drop_fn: extern "C" fn(*mut c_void),
     state: drasi_plugin_sdk::ffi::SendMutPtr<c_void>,
     /// Sender to notify the caller that the drop has completed.
     done_tx: mpsc::SyncSender<()>,
 }
-
-// Safety: DropRequest is sent between threads; the contained function pointer
-// and SendMutPtr are designed for cross-thread use.
-unsafe impl Send for DropRequest {}
 
 /// Channel sender for the global drop worker.
 static DROP_WORKER: OnceLock<mpsc::Sender<DropRequest>> = OnceLock::new();
