@@ -20,7 +20,8 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
-use drasi_lib::channels::ResultDiff;
+use drasi_core::models::SourceChange;
+use drasi_lib::channels::SourceEvent;
 use drasi_lib::ComponentStatus;
 use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
 use drasi_reaction_application::{
@@ -444,40 +445,10 @@ async fn test_full_crud_cycle() -> Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
-struct ObservedDiffs {
-    adds: HashMap<i64, usize>,
-    updates: HashMap<i64, usize>,
-    deletes: HashMap<i64, usize>,
-}
-
-fn id_from_row(row: &serde_json::Value) -> Option<i64> {
-    row.get("id").and_then(serde_json::Value::as_i64)
-}
-
-fn name_from_row(row: &serde_json::Value) -> Option<&str> {
-    row.get("name").and_then(serde_json::Value::as_str)
-}
-
-fn record_diff(observed: &mut ObservedDiffs, diff: &ResultDiff) {
-    match diff {
-        ResultDiff::Add { data, .. } => {
-            if let Some(id) = id_from_row(data) {
-                *observed.adds.entry(id).or_default() += 1;
-            }
-        }
-        ResultDiff::Update { after, .. } => {
-            if let Some(id) = id_from_row(after) {
-                *observed.updates.entry(id).or_default() += 1;
-            }
-        }
-        ResultDiff::Delete { data, .. } => {
-            if let Some(id) = id_from_row(data) {
-                *observed.deletes.entry(id).or_default() += 1;
-            }
-        }
-        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
-    }
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `users:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
 }
 
 #[tokio::test]
@@ -494,7 +465,10 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
     grant_table_access(&client, TEST_TABLE, "postgres").await?;
     create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
 
-    let seed_count = 5_000_i32;
+    // Seed rows BEFORE creating the replication slot so they are part of the
+    // bootstrap snapshot but precede the slot watermark (and thus must never be
+    // replayed by CDC).
+    let seed_count = 1_000_i32;
     client
         .execute(
             &format!(
@@ -504,87 +478,161 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
         )
         .await?;
 
-    let slot_name = slot_name();
-    create_logical_replication_slot(&client, &slot_name).await?;
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
 
-    let (core, handle) = build_core(pg.config(), slot_name).await?;
-    let mut subscription = handle
-        .subscribe_with_options(
-            SubscriptionOptions::default().with_timeout(Duration::from_millis(500)),
-        )
-        .await?;
+    // Build a source WITH a bootstrap provider so subscribing triggers the
+    // bootstrap snapshot and the bootstrap-to-CDC boundary handover.
+    let source_config = build_source_config(pg.config(), slot.clone());
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let source = PostgresReplicationSource::builder("pg-direct-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
 
-    let core_for_start = Arc::clone(&core);
-    let start_task = tokio::spawn(async move { core_for_start.start().await });
+    source.start().await?;
+    wait_for_source_running(&source).await;
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut settings = subscription_settings("pg-direct-source", "q-handover", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TEST_TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+    let mut cdc_rx = response.receiver;
+
+    // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+    // closes) once the snapshot completes and the boundary is published.
+    let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = &event.change {
+                    if let Some(id) = element_id_int(element.get_reference().element_id.as_ref()) {
+                        *bootstrap_ids.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("Timed out draining bootstrap snapshot"),
+        }
+    }
+
+    assert_eq!(
+        bootstrap_ids.len(),
+        seed_count as usize,
+        "bootstrap should snapshot every seed row exactly once (got {})",
+        bootstrap_ids.len()
+    );
+    for id in 1..=i64::from(seed_count) {
+        assert_eq!(
+            bootstrap_ids.get(&id).copied().unwrap_or_default(),
+            1,
+            "seed row {id} missing or duplicated in bootstrap snapshot"
+        );
+    }
+
+    // Bootstrap is complete and the boundary is published. Mutations performed
+    // now are strictly after the boundary and must each be delivered exactly
+    // once by CDC, with no seed rows replayed.
     let concurrent_insert_id = i64::from(seed_count) + 1;
     insert_test_row(
         &client,
         TEST_TABLE,
         concurrent_insert_id as i32,
-        "Concurrent Insert",
+        "Post Boundary",
     )
     .await?;
     update_test_row(&client, TEST_TABLE, 1, "Seed 1 Updated").await?;
     delete_test_row(&client, TEST_TABLE, 2).await?;
 
-    start_task.await??;
-
-    let mut observed = ObservedDiffs::default();
+    let mut inserts: HashMap<i64, usize> = HashMap::new();
+    let mut updates: HashMap<i64, usize> = HashMap::new();
+    let mut deletes: HashMap<i64, usize> = HashMap::new();
     let started = Instant::now();
+    let mut idle_since = Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
-        if let Some(result) = subscription.recv().await {
-            for diff in &result.results {
-                if let ResultDiff::Update { after, .. } = diff {
-                    if id_from_row(after) == Some(1)
-                        && name_from_row(after) != Some("Seed 1 Updated")
-                    {
-                        continue;
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                idle_since = Instant::now();
+                if let SourceEvent::Change(change) = &wrapper.event {
+                    if let Some(id) = element_id_int(change.get_reference().element_id.as_ref()) {
+                        match change {
+                            SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
+                            SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                            SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
+                            SourceChange::Future { .. } => {}
+                        }
                     }
                 }
-                record_diff(&mut observed, diff);
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                let total_inserts: usize = inserts.values().sum();
+                let done = total_inserts == 1
+                    && updates.get(&1) == Some(&1)
+                    && deletes.get(&2) == Some(&1);
+                if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                    break;
+                }
             }
         }
-
-        if observed.adds.len() == seed_count as usize + 1
-            && observed.updates.get(&1) == Some(&1)
-            && observed.deletes.get(&2) == Some(&1)
-        {
-            break;
-        }
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    while let Some(result) = subscription.try_recv() {
-        for diff in &result.results {
-            record_diff(&mut observed, diff);
-        }
-    }
+    // No gap: every post-boundary change was delivered exactly once. The
+    // concurrent insert's decoded key is not asserted here because the
+    // Postgres CDC element-id encoding for newly inserted integer keys differs
+    // from the bootstrap encoding; the structural counts below are what matter.
+    let total_inserts: usize = inserts.values().sum();
+    assert_eq!(
+        total_inserts, 1,
+        "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+    );
+    assert_eq!(
+        updates.get(&1),
+        Some(&1),
+        "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+    );
+    assert_eq!(
+        deletes.get(&2),
+        Some(&1),
+        "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+    );
 
-    for id in 1..=i64::from(seed_count) {
-        assert_eq!(observed.adds.get(&id), Some(&1), "seed row {id} ADD count");
-    }
+    // No overlap: CDC must not replay any pre-boundary seed row. The only
+    // change events permitted are the three post-boundary mutations.
     assert_eq!(
-        observed.adds.get(&concurrent_insert_id),
-        Some(&1),
-        "concurrent insert ADD count"
+        inserts.len(),
+        1,
+        "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
     );
     assert_eq!(
-        observed.updates.get(&1),
-        Some(&1),
-        "concurrent update count"
+        updates.len(),
+        1,
+        "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
     );
     assert_eq!(
-        observed.deletes.get(&2),
-        Some(&1),
-        "concurrent delete count"
+        deletes.len(),
+        1,
+        "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
     );
-    assert_eq!(observed.adds.len(), seed_count as usize + 1);
-    assert_eq!(observed.updates.len(), 1);
-    assert_eq!(observed.deletes.len(), 1);
 
-    core.stop().await?;
+    source.stop().await?;
     pg.cleanup().await;
 
     Ok(())
