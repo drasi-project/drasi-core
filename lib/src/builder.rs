@@ -72,8 +72,10 @@ use crate::indexes::IndexBackendPlugin;
 use crate::indexes::StorageBackendConfig;
 use crate::lib_core::DrasiLib;
 use crate::reactions::Reaction as ReactionTrait;
+use crate::secret_store::SecretStoreProvider;
 use crate::sources::Source as SourceTrait;
 use crate::state_store::StateStoreProvider;
+use crate::wal::WalProvider;
 use drasi_core::models::SourceMiddlewareConfig;
 
 // ============================================================================
@@ -130,9 +132,19 @@ pub struct DrasiLibBuilder {
         Box<dyn ReactionTrait>,
         std::collections::HashMap<String, String>,
     )>,
+    /// Bootstrap provider metadata to register in the component graph.
+    /// Each entry: (source_id, kind, properties).
+    bootstrap_metadata: Vec<(
+        String,
+        String,
+        std::collections::HashMap<String, serde_json::Value>,
+    )>,
     index_provider: Option<Arc<dyn IndexBackendPlugin>>,
     state_store_provider: Option<Arc<dyn StateStoreProvider>>,
     identity_provider: Option<Arc<dyn IdentityProvider>>,
+    wal_provider: Option<Arc<dyn WalProvider>>,
+    secret_store_provider: Option<Arc<dyn SecretStoreProvider>>,
+    default_recovery_policy: Option<crate::recovery::RecoveryPolicy>,
 }
 
 impl Default for DrasiLibBuilder {
@@ -152,9 +164,13 @@ impl DrasiLibBuilder {
             query_configs: Vec::new(),
             source_instances: Vec::new(),
             reaction_instances: Vec::new(),
+            bootstrap_metadata: Vec::new(),
             index_provider: None,
             state_store_provider: None,
             identity_provider: None,
+            wal_provider: None,
+            secret_store_provider: None,
+            default_recovery_policy: None,
         }
     }
 
@@ -257,6 +273,69 @@ impl DrasiLibBuilder {
         self
     }
 
+    /// Set the Write-Ahead Log provider for transient source durability.
+    ///
+    /// WAL providers enable transient sources (HTTP, gRPC, Application) to persist
+    /// incoming events before acknowledging the caller. This enables crash recovery
+    /// and replay for persistent queries subscribing to those sources.
+    ///
+    /// If no WAL provider is set, transient sources cannot enable durability and
+    /// will operate in their default fire-and-forget mode.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_wal_redb::RedbWalProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let wal = RedbWalProvider::new("/data/wal");
+    /// let core = DrasiLib::builder()
+    ///     .with_wal_provider(Arc::new(wal))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_wal_provider(mut self, provider: Arc<dyn WalProvider>) -> Self {
+        self.wal_provider = Some(provider);
+        self
+    }
+
+    /// Set the secret store provider for resolving `ConfigValue::Secret` references.
+    ///
+    /// Secret store providers resolve named secret references (e.g., database passwords,
+    /// API keys) from external secret management systems like Azure Key Vault, OS keyrings,
+    /// or local secret files.
+    ///
+    /// The secret store provider is initialized **before** any source/reaction/bootstrap
+    /// plugins, and its resolved values are injected into `DtoMapper` via the global
+    /// secret resolver registry.
+    ///
+    /// If no secret store provider is set, `ConfigValue::Secret` references will fail
+    /// with a "not implemented" error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use drasi_secret_store_file::FileSecretStoreProvider;
+    /// use std::sync::Arc;
+    ///
+    /// let secrets = FileSecretStoreProvider::new("/etc/drasi/secrets.json").await?;
+    /// let core = DrasiLib::builder()
+    ///     .with_secret_store_provider(Arc::new(secrets))
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_secret_store_provider(mut self, provider: Arc<dyn SecretStoreProvider>) -> Self {
+        self.secret_store_provider = Some(provider);
+        self
+    }
+
+    /// Set the global default recovery policy for all queries.
+    ///
+    /// Per-query `QueryConfig::recovery_policy` overrides this.
+    /// If neither is set, defaults to [`RecoveryPolicy::Strict`](crate::RecoveryPolicy::Strict).
+    pub fn with_default_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
+        self.default_recovery_policy = Some(policy);
+        self
+    }
+
     /// Add a source instance, taking ownership.
     ///
     /// Source instances are created externally by plugins with their own typed configurations.
@@ -279,7 +358,7 @@ impl DrasiLibBuilder {
     /// Add a source instance with additional component metadata.
     ///
     /// Like [`with_source`](Self::with_source) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_source_metadata(
         mut self,
         source: impl SourceTrait + 'static,
@@ -293,6 +372,35 @@ impl DrasiLibBuilder {
     /// Add a query configuration.
     pub fn with_query(mut self, config: QueryConfig) -> Self {
         self.query_configs.push(config);
+        self
+    }
+
+    /// Register bootstrap provider metadata for a source.
+    ///
+    /// This records the bootstrap provider's kind and configuration properties
+    /// so they can be persisted in the component graph and included in
+    /// `snapshot_configuration()` output.
+    ///
+    /// # Arguments
+    /// * `source_id` - The ID of the source this bootstrap provider is attached to
+    /// * `kind` - Bootstrap provider kind (e.g., "http", "postgres", "scriptfile")
+    /// * `properties` - Configuration properties for persistence (raw config with
+    ///   ConfigValue envelopes intact for lossless roundtripping)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let builder = DrasiLib::builder()
+    ///     .with_source(my_source)
+    ///     .with_bootstrap_for_source("my-source", "http", config_properties);
+    /// ```
+    pub fn with_bootstrap_for_source(
+        mut self,
+        source_id: impl Into<String>,
+        kind: impl Into<String>,
+        properties: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.bootstrap_metadata
+            .push((source_id.into(), kind.into(), properties));
         self
     }
 
@@ -318,7 +426,7 @@ impl DrasiLibBuilder {
     /// Add a reaction instance with additional component metadata.
     ///
     /// Like [`with_reaction`](Self::with_reaction) but merges `extra_metadata`
-    /// (e.g. `pluginId`, `pluginGeneration`) into the component graph node.
+    /// (e.g. `pluginId`) into the component graph node.
     pub fn with_reaction_metadata(
         mut self,
         reaction: impl ReactionTrait + 'static,
@@ -354,6 +462,8 @@ impl DrasiLibBuilder {
             self.index_provider,
             self.state_store_provider,
             self.identity_provider,
+            self.secret_store_provider,
+            self.default_recovery_policy,
         ));
         let mut core = DrasiLib::new(runtime_config);
 
@@ -363,6 +473,12 @@ impl DrasiLibBuilder {
             .inject_state_store(state_store.clone())
             .await;
         core.reaction_manager.inject_state_store(state_store).await;
+
+        // Inject WAL provider into SourceManager (if configured)
+        // This allows transient sources to persist events for crash recovery
+        if let Some(wal_provider) = self.wal_provider {
+            core.source_manager.inject_wal_provider(wal_provider).await;
+        }
 
         // Register the component graph source BEFORE initialize (which loads query config).
         // Queries reference sources, so sources must exist in the graph first.
@@ -444,6 +560,26 @@ impl DrasiLibBuilder {
                     "add",
                     format!("Failed to provision: {e}"),
                 ));
+            }
+        }
+
+        // Register bootstrap provider metadata in the component graph.
+        // This enables snapshot_configuration() to persist and reconstruct
+        // bootstrap provider configurations.
+        for (source_id, kind, properties) in self.bootstrap_metadata {
+            let bp_id = format!("{source_id}-bootstrap");
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("kind".to_string(), kind);
+            for (key, value) in properties {
+                metadata.insert(key, serde_json::to_string(&value).unwrap_or_default());
+            }
+            let mut graph = core.component_graph.write().await;
+            if let Err(e) =
+                graph.register_bootstrap_provider(&bp_id, metadata, &[source_id.clone()])
+            {
+                log::warn!(
+                    "Failed to register bootstrap provider metadata for source '{source_id}': {e}"
+                );
             }
         }
 
@@ -548,6 +684,9 @@ pub struct Query {
     dispatch_buffer_capacity: Option<usize>,
     dispatch_mode: Option<DispatchMode>,
     storage_backend: Option<crate::indexes::StorageBackendRef>,
+    recovery_policy: Option<crate::recovery::RecoveryPolicy>,
+    outbox_capacity: usize,
+    bootstrap_timeout_secs: u64,
 }
 
 impl Query {
@@ -567,6 +706,9 @@ impl Query {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -586,6 +728,9 @@ impl Query {
             dispatch_buffer_capacity: None,
             dispatch_mode: None,
             storage_backend: None,
+            recovery_policy: None,
+            outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
+            bootstrap_timeout_secs: 300,
         }
     }
 
@@ -678,6 +823,29 @@ impl Query {
         self
     }
 
+    /// Set the recovery policy. Applies only to queries with a persistent
+    /// storage backend. See [`RecoveryPolicy`](crate::RecoveryPolicy).
+    pub fn with_recovery_policy(mut self, policy: crate::recovery::RecoveryPolicy) -> Self {
+        self.recovery_policy = Some(policy);
+        self
+    }
+
+    /// Set the outbox capacity (number of recent QueryResult emissions retained).
+    /// Default: 1000.
+    pub fn with_outbox_capacity(mut self, capacity: usize) -> Self {
+        self.outbox_capacity = capacity;
+        self
+    }
+
+    /// Set the bootstrap timeout in seconds.
+    /// This controls how long `fetch_snapshot` / `fetch_outbox` will wait for
+    /// the query to finish bootstrapping before returning `FetchError::TimedOut`.
+    /// Default: 300 (5 minutes).
+    pub fn with_bootstrap_timeout_secs(mut self, secs: u64) -> Self {
+        self.bootstrap_timeout_secs = secs;
+        self
+    }
+
     /// Build the query configuration.
     pub fn build(self) -> QueryConfig {
         QueryConfig {
@@ -694,6 +862,9 @@ impl Query {
             dispatch_buffer_capacity: self.dispatch_buffer_capacity,
             dispatch_mode: self.dispatch_mode,
             storage_backend: self.storage_backend,
+            recovery_policy: self.recovery_policy,
+            outbox_capacity: self.outbox_capacity,
+            bootstrap_timeout_secs: self.bootstrap_timeout_secs,
         }
     }
 }

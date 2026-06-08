@@ -110,7 +110,7 @@ impl DrasiLib {
 
     /// Check if a component can be safely removed without breaking dependents.
     ///
-    /// Returns `Ok(())` if safe to remove, or `Err(DrasiError::HasDependents)`
+    /// Returns `Ok(())` if safe to remove, or `Err(DrasiError::Validation { .. })`
     /// with the list of dependent component IDs if removal would break the graph.
     ///
     /// # Example

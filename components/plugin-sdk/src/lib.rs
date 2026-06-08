@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! # Drasi Plugin SDK
 //!
@@ -63,8 +64,8 @@
 //!     ) -> anyhow::Result<Box<dyn drasi_lib::sources::Source>> {
 //!         let dto: MySourceConfigDto = serde_json::from_value(config_json.clone())?;
 //!         let mapper = DtoMapper::new();
-//!         let host = mapper.resolve_string(&dto.host)?;
-//!         let port = mapper.resolve_typed(&dto.port)?;
+//!         let host = mapper.resolve_string(&dto.host).await?;
+//!         let port = mapper.resolve_typed(&dto.port).await?;
 //!         // Build and return your source implementation...
 //!         todo!()
 //!     }
@@ -175,7 +176,7 @@
 //! - [`config_value`] — The [`ConfigValue<T>`](config_value::ConfigValue) enum for
 //!   configuration fields that support static values, environment variables, and secrets.
 //! - [`resolver`] — Value resolvers that convert config references to actual values.
-//! - [`mapper`] — The [`DtoMapper`](mapper::DtoMapper) service and [`ConfigMapper`](mapper::ConfigMapper)
+//! - [`mapper`] — The [`DtoMapper`](mapper::DtoMapper) service and mapping errors
 //!   trait for DTO-to-domain conversions.
 //! - [`descriptor`] — Plugin descriptor traits
 //!   ([`SourcePluginDescriptor`](descriptor::SourcePluginDescriptor),
@@ -211,6 +212,7 @@ pub mod mapper;
 pub mod prelude;
 pub mod registration;
 pub mod resolver;
+pub mod schema_ui;
 
 // Top-level re-exports for convenience
 pub use config_value::ConfigValue;
@@ -218,7 +220,7 @@ pub use descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
     SourcePluginDescriptor,
 };
-pub use mapper::{ConfigMapper, DtoMapper, MappingError};
+pub use mapper::{DtoMapper, MappingError};
 pub use registration::{PluginRegistration, SDK_VERSION};
 pub use resolver::{register_secret_resolver, ResolverError};
 
@@ -226,6 +228,16 @@ pub use resolver::{register_secret_resolver, ResolverError};
 /// without requiring plugins to declare a direct tokio dependency.
 #[doc(hidden)]
 pub use tokio as __tokio;
+
+/// Re-export serde_json so the `export_plugin!` macro can reference it
+/// without requiring plugins to declare a direct serde_json dependency.
+#[doc(hidden)]
+pub use serde_json as __serde_json;
+
+/// Re-export async_trait so the `export_plugin!` macro can reference it
+/// without requiring plugins to declare a direct async_trait dependency.
+#[doc(hidden)]
+pub use async_trait as __async_trait;
 
 /// Export dynamic plugin entry points with FFI vtables.
 ///
@@ -264,7 +276,7 @@ pub use tokio as __tokio;
 /// ```
 #[macro_export]
 macro_rules! export_plugin {
-    // ── Declarative form: descriptors listed inline ──
+    // ── Full form: all descriptor types + worker_threads ──
     (
         plugin_id = $plugin_id:expr,
         core_version = $core_ver:expr,
@@ -274,6 +286,7 @@ macro_rules! export_plugin {
         reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
         bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
         identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ],
+        secret_store_descriptors = [ $($ss_desc:expr),* $(,)? ],
         worker_threads = $workers:expr $(,)?
     ) => {
         fn __auto_create_plugin_vtables() -> (
@@ -281,6 +294,7 @@ macro_rules! export_plugin {
             Vec<$crate::ffi::ReactionPluginVtable>,
             Vec<$crate::ffi::BootstrapPluginVtable>,
             Vec<$crate::ffi::IdentityProviderPluginVtable>,
+            Vec<$crate::ffi::SecretStorePluginVtable>,
         ) {
             let source_descs = vec![
                 $( $crate::ffi::build_source_plugin_vtable(
@@ -314,7 +328,15 @@ macro_rules! export_plugin {
                     __plugin_runtime,
                 ), )*
             ];
-            (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs)
+            let secret_store_descs = vec![
+                $( $crate::ffi::build_secret_store_plugin_vtable(
+                    $ss_desc,
+                    __plugin_executor,
+                    __emit_lifecycle,
+                    __plugin_runtime,
+                ), )*
+            ];
+            (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs, secret_store_descs)
         }
 
         $crate::export_plugin!(
@@ -327,7 +349,57 @@ macro_rules! export_plugin {
             default_workers = $workers,
         );
     };
-    // ── Declarative form: descriptors listed inline (default worker threads) ──
+    // ── Full form: all descriptor types (default worker threads) ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ],
+        secret_store_descriptors = [ $($ss_desc:expr),* $(,)? ] $(,)?
+    ) => {
+        $crate::export_plugin!(
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            source_descriptors = [ $($source_desc),* ],
+            reaction_descriptors = [ $($reaction_desc),* ],
+            bootstrap_descriptors = [ $($bootstrap_desc),* ],
+            identity_provider_descriptors = [ $($ip_desc),* ],
+            secret_store_descriptors = [ $($ss_desc),* ],
+            worker_threads = 2usize,
+        );
+    };
+    // ── Backward-compat: identity_provider_descriptors but no secret_store_descriptors (with worker_threads) ──
+    (
+        plugin_id = $plugin_id:expr,
+        core_version = $core_ver:expr,
+        lib_version = $lib_ver:expr,
+        plugin_version = $plugin_ver:expr,
+        source_descriptors = [ $($source_desc:expr),* $(,)? ],
+        reaction_descriptors = [ $($reaction_desc:expr),* $(,)? ],
+        bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
+        identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ],
+        worker_threads = $workers:expr $(,)?
+    ) => {
+        $crate::export_plugin!(
+            plugin_id = $plugin_id,
+            core_version = $core_ver,
+            lib_version = $lib_ver,
+            plugin_version = $plugin_ver,
+            source_descriptors = [ $($source_desc),* ],
+            reaction_descriptors = [ $($reaction_desc),* ],
+            bootstrap_descriptors = [ $($bootstrap_desc),* ],
+            identity_provider_descriptors = [ $($ip_desc),* ],
+            secret_store_descriptors = [],
+            worker_threads = $workers,
+        );
+    };
+    // ── Backward-compat: identity_provider_descriptors but no secret_store_descriptors (default workers) ──
     (
         plugin_id = $plugin_id:expr,
         core_version = $core_ver:expr,
@@ -338,58 +410,19 @@ macro_rules! export_plugin {
         bootstrap_descriptors = [ $($bootstrap_desc:expr),* $(,)? ],
         identity_provider_descriptors = [ $($ip_desc:expr),* $(,)? ] $(,)?
     ) => {
-        fn __auto_create_plugin_vtables() -> (
-            Vec<$crate::ffi::SourcePluginVtable>,
-            Vec<$crate::ffi::ReactionPluginVtable>,
-            Vec<$crate::ffi::BootstrapPluginVtable>,
-            Vec<$crate::ffi::IdentityProviderPluginVtable>,
-        ) {
-            let source_descs = vec![
-                $( $crate::ffi::build_source_plugin_vtable(
-                    $source_desc,
-                    __plugin_executor,
-                    __emit_lifecycle,
-                    __plugin_runtime,
-                ), )*
-            ];
-            let reaction_descs = vec![
-                $( $crate::ffi::build_reaction_plugin_vtable(
-                    $reaction_desc,
-                    __plugin_executor,
-                    __emit_lifecycle,
-                    __plugin_runtime,
-                ), )*
-            ];
-            let bootstrap_descs = vec![
-                $( $crate::ffi::build_bootstrap_plugin_vtable(
-                    $bootstrap_desc,
-                    __plugin_executor,
-                    __emit_lifecycle,
-                    __plugin_runtime,
-                ), )*
-            ];
-            let identity_provider_descs = vec![
-                $( $crate::ffi::build_identity_provider_plugin_vtable(
-                    $ip_desc,
-                    __plugin_executor,
-                    __emit_lifecycle,
-                    __plugin_runtime,
-                ), )*
-            ];
-            (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs)
-        }
-
         $crate::export_plugin!(
-            @internal
             plugin_id = $plugin_id,
             core_version = $core_ver,
             lib_version = $lib_ver,
             plugin_version = $plugin_ver,
-            init_fn = __auto_create_plugin_vtables,
-            default_workers = 2usize,
+            source_descriptors = [ $($source_desc),* ],
+            reaction_descriptors = [ $($reaction_desc),* ],
+            bootstrap_descriptors = [ $($bootstrap_desc),* ],
+            identity_provider_descriptors = [ $($ip_desc),* ],
+            secret_store_descriptors = [],
         );
     };
-    // ── Backward-compatible form: no identity_provider_descriptors (with worker_threads) ──
+    // ── Backward-compat: no identity_provider_descriptors, no secret_store_descriptors (with worker_threads) ──
     (
         plugin_id = $plugin_id:expr,
         core_version = $core_ver:expr,
@@ -409,10 +442,11 @@ macro_rules! export_plugin {
             reaction_descriptors = [ $($reaction_desc),* ],
             bootstrap_descriptors = [ $($bootstrap_desc),* ],
             identity_provider_descriptors = [],
+            secret_store_descriptors = [],
             worker_threads = $workers,
         );
     };
-    // ── Backward-compatible form: no identity_provider_descriptors (default workers) ──
+    // ── Backward-compat: no identity_provider_descriptors, no secret_store_descriptors (default workers) ──
     (
         plugin_id = $plugin_id:expr,
         core_version = $core_ver:expr,
@@ -431,6 +465,7 @@ macro_rules! export_plugin {
             reaction_descriptors = [ $($reaction_desc),* ],
             bootstrap_descriptors = [ $($bootstrap_desc),* ],
             identity_provider_descriptors = [],
+            secret_store_descriptors = [],
         );
     };
 
@@ -580,6 +615,64 @@ macro_rules! export_plugin {
             );
         }
 
+        // ── Config resolver callback storage ──
+        static __CONFIG_RESOLVER_CB: ::std::sync::atomic::AtomicPtr<()> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+        static __CONFIG_RESOLVER_CTX: ::std::sync::atomic::AtomicPtr<::std::ffi::c_void> =
+            ::std::sync::atomic::AtomicPtr::new(::std::ptr::null_mut());
+
+        extern "C" fn __set_config_resolver_impl(
+            ctx: *mut ::std::ffi::c_void,
+            callback: $crate::ffi::ConfigResolverFn,
+        ) {
+            __CONFIG_RESOLVER_CTX.store(ctx, ::std::sync::atomic::Ordering::Release);
+            __CONFIG_RESOLVER_CB.store(callback as *mut (), ::std::sync::atomic::Ordering::Release);
+
+            // Create a ValueResolver that calls the host's callback to resolve
+            // ConfigValue references (secrets, env vars, etc.) across the FFI boundary.
+            struct FfiHostValueResolver;
+
+            #[$crate::__async_trait::async_trait]
+            impl $crate::resolver::ValueResolver for FfiHostValueResolver {
+                async fn resolve_to_string(
+                    &self,
+                    value: &$crate::ConfigValue<String>,
+                ) -> ::std::result::Result<String, $crate::resolver::ResolverError> {
+                    let ptr = __CONFIG_RESOLVER_CB.load(::std::sync::atomic::Ordering::Acquire);
+                    if ptr.is_null() {
+                        return Err($crate::resolver::ResolverError::SecretResolutionFailed(
+                            "No config resolver callback registered".to_string(),
+                        ));
+                    }
+                    let cb: $crate::ffi::ConfigResolverFn =
+                        unsafe { ::std::mem::transmute(ptr) };
+                    let ctx =
+                        __CONFIG_RESOLVER_CTX.load(::std::sync::atomic::Ordering::Acquire);
+
+                    let json = $crate::__serde_json::to_string(value).map_err(|e| {
+                        $crate::resolver::ResolverError::ParseError(format!(
+                            "Failed to serialize ConfigValue: {e}"
+                        ))
+                    })?;
+
+                    let ffi_result =
+                        cb(ctx as *const ::std::ffi::c_void, $crate::ffi::FfiStr::from_str(&json));
+                    unsafe {
+                        ffi_result.into_result().map_err(|e| {
+                            $crate::resolver::ResolverError::SecretResolutionFailed(format!(
+                                "Host config resolver failed: {e}"
+                            ))
+                        })
+                    }
+                }
+            }
+
+            // Register the FFI resolver as the global secret resolver.
+            $crate::resolver::register_secret_resolver(
+                ::std::sync::Arc::new(FfiHostValueResolver),
+            );
+        }
+
         /// Emit a lifecycle event to the host.
         pub fn __emit_lifecycle(
             component_id: &str,
@@ -645,7 +738,19 @@ macro_rules! export_plugin {
         pub extern "C" fn drasi_plugin_init() -> *mut $crate::ffi::FfiPluginRegistration {
             match ::std::panic::catch_unwind(|| {
                 let _ = __plugin_runtime();
-                let (mut source_descs, mut reaction_descs, mut bootstrap_descs, mut identity_provider_descs) = $init_fn();
+                let (source_descs, reaction_descs, bootstrap_descs, identity_provider_descs, secret_store_descs) = $init_fn();
+
+                // Convert each Vec to a boxed slice so the underlying allocation's
+                // capacity exactly matches its length. This is required by the host's
+                // ABI contract: the host reconstructs each array via
+                // `Vec::from_raw_parts(ptr, len, len)`, which is only sound when the
+                // original allocation has capacity == len. `Vec::into_boxed_slice`
+                // shrinks the allocation to fit before yielding the raw pointer.
+                let mut source_descs = source_descs.into_boxed_slice();
+                let mut reaction_descs = reaction_descs.into_boxed_slice();
+                let mut bootstrap_descs = bootstrap_descs.into_boxed_slice();
+                let mut identity_provider_descs = identity_provider_descs.into_boxed_slice();
+                let mut secret_store_descs = secret_store_descs.into_boxed_slice();
 
                 let registration = Box::new($crate::ffi::FfiPluginRegistration {
                     source_plugins: source_descs.as_mut_ptr(),
@@ -656,13 +761,19 @@ macro_rules! export_plugin {
                     bootstrap_plugin_count: bootstrap_descs.len(),
                     identity_provider_plugins: identity_provider_descs.as_mut_ptr(),
                     identity_provider_plugin_count: identity_provider_descs.len(),
+                    secret_store_plugins: secret_store_descs.as_mut_ptr(),
+                    secret_store_plugin_count: secret_store_descs.len(),
                     set_log_callback: __set_log_callback_impl,
                     set_lifecycle_callback: __set_lifecycle_callback_impl,
+                    set_config_resolver: __set_config_resolver_impl,
                 });
-                ::std::mem::forget(source_descs);
-                ::std::mem::forget(reaction_descs);
-                ::std::mem::forget(bootstrap_descs);
-                ::std::mem::forget(identity_provider_descs);
+                // Host takes ownership of the boxed-slice allocations. It will
+                // reclaim them via `Vec::from_raw_parts(ptr, len, len)` + drop.
+                let _ = ::std::boxed::Box::into_raw(source_descs);
+                let _ = ::std::boxed::Box::into_raw(reaction_descs);
+                let _ = ::std::boxed::Box::into_raw(bootstrap_descs);
+                let _ = ::std::boxed::Box::into_raw(identity_provider_descs);
+                let _ = ::std::boxed::Box::into_raw(secret_store_descs);
                 Box::into_raw(registration)
             }) {
                 Ok(ptr) => ptr,

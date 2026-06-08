@@ -319,12 +319,25 @@ mod exceeds_one_standard_deviation {
 
 mod unit_tests {
     use crate::sequence_counter;
+    use drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore;
     use drasi_core::in_memory_index::in_memory_result_index::InMemoryResultIndex;
 
     #[tokio::test]
     pub async fn sequence_counter() {
-        let subject = InMemoryResultIndex::new();
+        let subject = InMemoryCheckpointStore::new();
         sequence_counter::sequence_counter(&subject).await;
+    }
+
+    #[tokio::test]
+    pub async fn checkpoint_round_trip() {
+        let subject = InMemoryCheckpointStore::new();
+        sequence_counter::checkpoint_round_trip(&subject).await;
+    }
+
+    #[tokio::test]
+    pub async fn result_sequence_counter() {
+        let subject = InMemoryResultIndex::new();
+        sequence_counter::result_sequence_counter(&subject).await;
     }
 }
 
@@ -639,5 +652,28 @@ mod source_update_upsert {
     async fn test_aggregation_with_upserts() {
         let test_config = InMemoryQueryConfig::new();
         source_update_upsert::test_aggregation_with_upserts(&test_config).await;
+    }
+}
+
+mod string_operators {
+    use super::InMemoryQueryConfig;
+    use crate::use_cases::*;
+
+    #[tokio::test]
+    async fn starts_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::starts_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn ends_with() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::ends_with(&test_config).await;
+    }
+
+    #[tokio::test]
+    async fn contains_op() {
+        let test_config = InMemoryQueryConfig::new();
+        string_operators::contains_op(&test_config).await;
     }
 }

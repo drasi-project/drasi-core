@@ -97,7 +97,14 @@ impl LifecycleManager {
 
     /// Start all components with auto_start enabled
     ///
-    /// Components are started in dependency order: Sources → Queries → Reactions
+    /// Components are started in dependency order: Sources → Queries → Reactions.
+    ///
+    /// Queries start before reactions so they are in Running state when reactions
+    /// subscribe. Reactions may need to fetch a snapshot from a running query
+    /// during their startup (e.g., for fresh-start recovery). Query results
+    /// produced before reactions subscribe are buffered in the query's outbox
+    /// and replayed to the reaction during its bootstrap.
+    ///
     /// Only components with auto_start=true will be started.
     pub async fn start_components(&self) -> Result<()> {
         info!("Starting all auto-start components in sequence: Sources → Queries → Reactions");
@@ -107,14 +114,29 @@ impl LifecycleManager {
         self.source_manager.start_all().await?;
         info!("All auto-start sources started successfully");
 
-        // Start queries after sources
-        // QueryManager.start_all() reads from graph and checks auto_start internally
+        // Start queries — by this point sources are running, so queries can
+        // subscribe and begin processing CDC events. Results are buffered in
+        // each query's outbox until reactions subscribe.
+        //
+        // Query startup is best-effort: individual queries that fail to start
+        // (e.g., PositionUnavailable after a gap) are placed in Error state by
+        // `start_all_components` but must NOT crash the server. Other healthy
+        // queries continue running.
         info!("Starting auto-start queries");
-        self.query_manager.start_all().await?;
-        info!("All auto-start queries started successfully");
+        if let Err(e) = self.query_manager.start_all().await {
+            log::warn!("Some queries failed to start (they are now in Error state): {e}");
+        } else {
+            info!("All auto-start queries started successfully");
+        }
 
-        // Start reactions after queries
-        // ReactionManager.start_all() handles auto_start logic internally
+        // Notify sources that all initial subscriptions are done. Sources that
+        // held back upstream feedback (e.g., Postgres flush-fence) can now
+        // resume normal advancement based on the min-watermark of all handles.
+        self.source_manager.subscriptions_complete().await;
+
+        // Start reactions last — queries are running so snapshot fetching works.
+        // The reaction subscribes to the query outbox and catches up on any
+        // results produced between query start and reaction start.
         info!("Starting auto-start reactions");
         self.reaction_manager.start_all().await?;
         info!("All auto-start reactions started successfully");
@@ -163,8 +185,22 @@ impl LifecycleManager {
 
         let mut failures = Vec::new();
 
-        for (id, kind, status) in shutdown_order {
-            if !matches!(status, ComponentStatus::Running | ComponentStatus::Starting) {
+        for (id, kind, _snapshot_status) in shutdown_order {
+            // Re-check the live status — it may have changed since we took the
+            // snapshot (e.g., a reaction can race to Error after its source is
+            // stopped).
+            let live_status = {
+                let g = self.graph.read().await;
+                g.get_component(&id).map(|n| n.status)
+            };
+            let live_status = match live_status {
+                Some(s) => s,
+                None => continue, // component removed concurrently
+            };
+            if !matches!(
+                live_status,
+                ComponentStatus::Running | ComponentStatus::Starting
+            ) {
                 continue;
             }
 
@@ -255,9 +291,9 @@ mod tests {
 
         core.start().await.unwrap();
 
-        // Non-autostart source should remain Stopped
+        // Non-autostart source should remain Added
         let status = core.get_source_status("manual-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     // ========================================================================
@@ -302,13 +338,13 @@ mod tests {
 
         core.start().await.unwrap();
 
-        // Source is not auto-started, so it's already Stopped.
+        // Source is not auto-started, so it's still in Added state.
         // Stopping should succeed without errors for user components.
         // Internal components may fail, so we just verify the server marks as stopped.
         let _ = core.stop().await;
 
         let status = core.get_source_status("idle-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     // ========================================================================
@@ -342,8 +378,8 @@ mod tests {
             "Query 'cfg-query' should exist after build; got: {queries:?}"
         );
 
-        // Query should be in Stopped state (not yet started)
+        // Query should be in Added state (not yet started)
         let (_, status) = queries.iter().find(|(id, _)| id == "cfg-query").unwrap();
-        assert_eq!(*status, ComponentStatus::Stopped);
+        assert_eq!(*status, ComponentStatus::Added);
     }
 }

@@ -77,6 +77,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // =========================================================================
     let config = ApplicationSourceConfig {
         properties: HashMap::new(),
+        durability: None,
     };
     let (app_source, app_handle) = ApplicationSource::new("test-app-source", config)?;
 
@@ -209,7 +210,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
 
     // Extract the data from the ResultDiff
     let data = match row {
-        ResultDiff::Add { data } => data,
+        ResultDiff::Add { data, .. } => data,
         _ => panic!("Expected Add result, got {row:?}"),
     };
 
@@ -256,7 +257,7 @@ async fn test_application_source_relationship_direction_e2e() -> Result<()> {
     // For updates, we should get either an Update or Add
     let updated_data = match updated_row {
         ResultDiff::Update { after, .. } => after,
-        ResultDiff::Add { data } => data,
+        ResultDiff::Add { data, .. } => data,
         _ => panic!("Expected Update or Add result, got {updated_row:?}"),
     };
 
@@ -327,6 +328,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
     // Create source and handle
     let config = ApplicationSourceConfig {
         properties: HashMap::new(),
+        durability: None,
     };
     let (app_source, app_handle) = ApplicationSource::new("multi-rel-source", config)?;
 
@@ -421,7 +423,7 @@ async fn test_application_source_multiple_relationships() -> Result<()> {
 
             if let Some(row) = result.results.first() {
                 let data = match row {
-                    ResultDiff::Add { data } => data,
+                    ResultDiff::Add { data, .. } => data,
                     ResultDiff::Aggregation { after, .. } => after,
                     _ => continue,
                 };

@@ -35,10 +35,13 @@ Reactions are responsible for:
 |--------|-------------|-----------|
 | `drasi-reaction-log` | Console logging with template support | `log/` |
 | `drasi-reaction-http` | HTTP POST to external endpoints | `http/` |
+| `drasi-reaction-rabbitmq` | RabbitMQ exchange publisher | `rabbitmq/` |
 | `drasi-reaction-http-adaptive` | HTTP with adaptive batching | `http-adaptive/` |
 | `drasi-reaction-grpc` | gRPC streaming delivery | `grpc/` |
 | `drasi-reaction-grpc-adaptive` | gRPC with adaptive batching | `grpc-adaptive/` |
 | `drasi-reaction-sse` | Server-Sent Events streaming | `sse/` |
+| `drasi-reaction-dashboard` | WebSocket dashboard UI with visual designer | `dashboard/` |
+| `drasi-reaction-mcp` | MCP server with resource subscriptions | `mcp/` |
 | `drasi-reaction-application` | Programmatic/in-memory for embedded use | `application/` |
 | `drasi-reaction-platform` | Redis Streams publisher for platform integration | `platform/` |
 | `drasi-reaction-profiler` | Performance profiling and metrics | `profiler/` |

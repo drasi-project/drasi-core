@@ -1,3 +1,17 @@
+// Copyright 2025 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use serde::Deserialize;
@@ -67,7 +81,13 @@ struct PluginArtifactMetadata {
 ///       "drasi-bootstrap-mssql" → ("bootstrap", "mssql")
 fn parse_plugin_type_kind(crate_name: &str) -> Option<(String, String)> {
     let stripped = crate_name.strip_prefix("drasi-")?;
-    for prefix in &["source-", "reaction-", "bootstrap-", "identity-"] {
+    for prefix in &[
+        "source-",
+        "reaction-",
+        "bootstrap-",
+        "identity-",
+        "secret-store-",
+    ] {
         if let Some(kind) = stripped.strip_prefix(prefix) {
             let plugin_type = prefix.trim_end_matches('-');
             return Some((plugin_type.to_string(), kind.to_string()));
@@ -872,7 +892,9 @@ fn make_tag(
 
 /// Sign an OCI artifact with cosign after publishing.
 ///
-/// Shells out to the `cosign` CLI. Supports:
+/// Uses cosign keyless signing which stores signatures as OCI referrers.
+///
+/// Supports:
 /// - Keyless mode (default): uses ambient OIDC credentials (GitHub Actions, etc.)
 /// - Key-based mode: set `COSIGN_KEY` env var to a private key path
 ///

@@ -386,11 +386,13 @@ async fn test_source_event_streaming() {
         .await
         .expect("Failed to subscribe to source events");
 
-    // Initial events should be empty before start
-    assert!(
-        initial_events.is_empty(),
-        "Expected no events before start, got: {initial_events:?}"
+    // Initial events should contain the Added event from registration
+    assert_eq!(
+        initial_events.len(),
+        1,
+        "Expected exactly one initial event (Added), got: {initial_events:?}"
     );
+    assert_eq!(initial_events[0].status, ComponentStatus::Added);
 
     // Start the server
     drasi.start().await.expect("Failed to start DrasiLib");
@@ -455,11 +457,13 @@ async fn test_query_event_streaming() {
         .await
         .expect("Failed to subscribe to query events");
 
-    // Initial events should be empty before start
-    assert!(
-        initial_events.is_empty(),
-        "Expected no events before start, got: {initial_events:?}"
+    // Initial events should contain the Added event from registration
+    assert_eq!(
+        initial_events.len(),
+        1,
+        "Expected exactly one initial event (Added), got: {initial_events:?}"
     );
+    assert_eq!(initial_events[0].status, ComponentStatus::Added);
 
     // Start the server
     drasi.start().await.expect("Failed to start DrasiLib");
@@ -565,11 +569,13 @@ async fn test_reaction_event_streaming() {
         .await
         .expect("Failed to subscribe to reaction events");
 
-    // Initial events should be empty before start
-    assert!(
-        initial_events.is_empty(),
-        "Expected no events before start, got: {initial_events:?}"
+    // Initial events should contain the Added event from registration
+    assert_eq!(
+        initial_events.len(),
+        1,
+        "Expected exactly one initial event (Added), got: {initial_events:?}"
     );
+    assert_eq!(initial_events[0].status, ComponentStatus::Added);
 
     // Start the server
     drasi.start().await.expect("Failed to start DrasiLib");

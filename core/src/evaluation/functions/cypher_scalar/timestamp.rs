@@ -49,7 +49,7 @@ impl ScalarFunction for Timestamp {
                 }
             }
             Err(_e) => {
-                // This should never happen, since duration_since will ony return an error if the time is before the UNIX_EPOCH
+                // This should never happen, since duration_since will only return an error if the time is before the UNIX_EPOCH
                 // return a zero duration this case
                 0
             }

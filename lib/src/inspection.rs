@@ -139,6 +139,59 @@ impl InspectionAPI {
             .map_err(|e| classify_component_error(e, "source", id, "get_status"))
     }
 
+    /// Get best-effort schema information for a specific source.
+    pub async fn get_source_schema(
+        &self,
+        id: &str,
+    ) -> crate::error::Result<Option<crate::schema::SourceSchema>> {
+        self.state_guard.require_initialized()?;
+        self.source_manager
+            .get_source_schema(id.to_string())
+            .await
+            .map_err(|e| classify_component_error(e, "source", id, "get_schema"))
+    }
+
+    /// Get the merged graph schema across all registered sources and queries.
+    pub async fn get_graph_schema(&self) -> crate::error::Result<crate::schema::GraphSchema> {
+        self.state_guard.require_initialized()?;
+
+        let mut schema = crate::schema::GraphSchema::default();
+
+        for (source_id, _) in self.source_manager.list_sources().await {
+            if source_id == crate::sources::COMPONENT_GRAPH_SOURCE_ID {
+                continue;
+            }
+
+            match self
+                .source_manager
+                .get_source_schema(source_id.clone())
+                .await
+            {
+                Ok(Some(source_schema)) if !source_schema.is_empty() => {
+                    schema.merge_source_schema(&source_id, &source_schema);
+                }
+                Ok(_) => schema.record_source_without_schema(&source_id),
+                Err(e) => {
+                    log::warn!("Failed to inspect schema for source '{source_id}': {e}");
+                    schema.record_source_without_schema(&source_id);
+                }
+            }
+        }
+
+        for (query_id, labels) in self.query_manager.get_all_query_labels().await {
+            schema.mark_queried_nodes(
+                labels.node_labels.iter().map(|label| label.as_str()),
+                &query_id,
+            );
+            schema.mark_queried_relations(
+                labels.relation_labels.iter().map(|label| label.as_str()),
+                &query_id,
+            );
+        }
+
+        Ok(schema)
+    }
+
     // ============================================================================
     // Query Inspection Methods
     // ============================================================================
@@ -719,6 +772,66 @@ impl InspectionAPI {
             .await
             .ok_or_else(|| DrasiError::component_not_found("reaction", id))
     }
+
+    // ============================================================================
+    // Metrics Inspection Methods
+    // ============================================================================
+
+    /// Get per-query output metrics for a specific query.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the query does not exist or
+    /// has no metrics attached.
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_query_output_metrics(
+        &self,
+        query_id: &str,
+    ) -> crate::error::Result<crate::metrics::QueryOutputMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        let instance = self.query_manager.get_query_instance(query_id).await.ok();
+        match instance {
+            Some(q) => match q.output_metrics() {
+                Some(m) => Ok(m.snapshot()),
+                None => Err(crate::error::DrasiError::component_not_found(
+                    "query", query_id,
+                )),
+            },
+            None => Err(crate::error::DrasiError::component_not_found(
+                "query", query_id,
+            )),
+        }
+    }
+
+    /// Get per-reaction metrics for a specific reaction.
+    ///
+    /// Returns a map from query_id to its `ReactionMetricsSnapshot`.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::ComponentNotFound` if the reaction does not exist.
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_reaction_metrics(
+        &self,
+        reaction_id: &str,
+    ) -> crate::error::Result<
+        std::collections::HashMap<String, crate::metrics::ReactionMetricsSnapshot>,
+    > {
+        self.state_guard.require_initialized()?;
+        self.reaction_manager
+            .get_reaction_metrics(reaction_id)
+            .await
+            .map_err(|_| crate::error::DrasiError::component_not_found("reaction", reaction_id))
+    }
+
+    /// Get global lifecycle metrics.
+    ///
+    /// # Errors
+    /// Returns `DrasiError::InvalidState` if the system is not initialized.
+    pub async fn get_lifecycle_metrics(
+        &self,
+    ) -> crate::error::Result<crate::metrics::LifecycleMetricsSnapshot> {
+        self.state_guard.require_initialized()?;
+        Ok(self.reaction_manager.lifecycle_metrics().snapshot())
+    }
 }
 
 #[cfg(test)]
@@ -896,7 +1009,7 @@ mod tests {
         core.add_source(source).await.unwrap();
 
         let status = core.get_source_status("status-src").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
@@ -936,7 +1049,7 @@ mod tests {
     async fn get_query_status_found() {
         let core = build_with_source_and_query().await;
         let status = core.get_query_status("q1").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]
@@ -982,7 +1095,7 @@ mod tests {
         core.add_reaction(reaction).await.unwrap();
 
         let status = core.get_reaction_status("r1").await.unwrap();
-        assert_eq!(status, ComponentStatus::Stopped);
+        assert_eq!(status, ComponentStatus::Added);
     }
 
     #[tokio::test]

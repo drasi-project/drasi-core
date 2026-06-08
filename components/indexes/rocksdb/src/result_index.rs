@@ -290,6 +290,8 @@ impl LazySortedSetStore for RocksDbResultIndex {
     }
 }
 
+impl ResultIndex for RocksDbResultIndex {}
+
 #[async_trait]
 impl ResultSequenceCounter for RocksDbResultIndex {
     async fn apply_sequence(
@@ -328,33 +330,30 @@ impl ResultSequenceCounter for RocksDbResultIndex {
             let metadata_cf = db.cf_handle(METADATA_CF).expect("metadata cf not found");
 
             session_state.with_txn(|txn| {
-                let seq_data = txn.get_cf(&metadata_cf, "sequence");
-                match seq_data {
-                    Ok(Some(v)) => {
-                        let seq_bytes: [u8; 8] = match v.try_into() {
-                            Ok(v) => v,
-                            Err(_) => return Err(IndexError::CorruptedData),
-                        };
-                        let sequence: u64 = u64::from_be_bytes(seq_bytes);
-
-                        let source_change_id_data = txn.get_cf(&metadata_cf, "source_change_id");
-
-                        let source_change_id: Arc<str> = match source_change_id_data {
-                            Ok(Some(v)) => match String::from_utf8(v) {
-                                Ok(v) => Arc::from(v),
-                                Err(e) => return Err(IndexError::other(e)),
-                            },
-                            Ok(None) => Arc::from(""),
-                            Err(e) => return Err(IndexError::other(e)),
-                        };
-                        Ok(ResultSequence {
-                            sequence,
-                            source_change_id,
-                        })
+                let sequence = match txn
+                    .get_cf(&metadata_cf, "sequence")
+                    .map_err(IndexError::other)?
+                {
+                    Some(v) => {
+                        let mut buf = [0u8; 8];
+                        buf.copy_from_slice(&v);
+                        u64::from_be_bytes(buf)
                     }
-                    Ok(None) => Ok(ResultSequence::default()),
-                    Err(e) => Err(IndexError::other(e)),
-                }
+                    None => 0,
+                };
+
+                let source_change_id = match txn
+                    .get_cf(&metadata_cf, "source_change_id")
+                    .map_err(IndexError::other)?
+                {
+                    Some(v) => Arc::from(String::from_utf8(v).map_err(IndexError::other)?.as_str()),
+                    None => Arc::from(""),
+                };
+
+                Ok(ResultSequence {
+                    sequence,
+                    source_change_id,
+                })
             })
         });
 
@@ -364,8 +363,6 @@ impl ResultSequenceCounter for RocksDbResultIndex {
         }
     }
 }
-
-impl ResultIndex for RocksDbResultIndex {}
 
 pub(crate) fn get_lss_cf_options() -> Options {
     let mut lss_opts = Options::default();

@@ -15,6 +15,7 @@ drasi-core.workspace = true
 drasi-query-cypher.workspace = true
 drasi-functions-cypher.workspace = true
 drasi-middleware = { workspace = true, features = ["decoder", "map", "parse_json", "promote", "relabel", "unwind"] }
+bytes = "1"
 serde = "1.0.163"
 serde_json = "1.0.96"
 async-trait = "0.1.68"
@@ -25,12 +26,13 @@ futures = "0.3.28"
 chrono = "0.4.31"
 base64 = "0.22.0"
 anyhow = "1.0"
+ordered-float = "3.7"
 uuid = { version = "1.0", features = ["v4"] }
 
 # Redis testing utilities
 redis = { version = "0.27", features = ["tokio-comp"] }
-testcontainers = "0.26"
-testcontainers-modules = { version = "0.14", features = ["redis"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["redis"] }
 # For test utilities that need to create test sources/queries
 drasi-lib.workspace = true
 

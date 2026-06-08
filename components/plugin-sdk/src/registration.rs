@@ -60,7 +60,7 @@
 
 use crate::descriptor::{
     BootstrapPluginDescriptor, IdentityProviderPluginDescriptor, ReactionPluginDescriptor,
-    SourcePluginDescriptor,
+    SecretStorePluginDescriptor, SourcePluginDescriptor,
 };
 
 /// The version of the Drasi Plugin SDK.
@@ -139,6 +139,9 @@ pub struct PluginRegistration {
 
     /// Identity provider plugin descriptors provided by this plugin.
     pub identity_providers: Vec<Box<dyn IdentityProviderPluginDescriptor>>,
+
+    /// Secret store plugin descriptors provided by this plugin.
+    pub secret_stores: Vec<Box<dyn SecretStorePluginDescriptor>>,
 }
 
 impl PluginRegistration {
@@ -153,6 +156,7 @@ impl PluginRegistration {
             reactions: Vec::new(),
             bootstrappers: Vec::new(),
             identity_providers: Vec::new(),
+            secret_stores: Vec::new(),
         }
     }
 
@@ -187,12 +191,20 @@ impl PluginRegistration {
         self
     }
 
+    /// Register a secret store plugin descriptor.
+    #[must_use]
+    pub fn with_secret_store(mut self, descriptor: Box<dyn SecretStorePluginDescriptor>) -> Self {
+        self.secret_stores.push(descriptor);
+        self
+    }
+
     /// Returns true if this registration contains no descriptors.
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
             && self.reactions.is_empty()
             && self.bootstrappers.is_empty()
             && self.identity_providers.is_empty()
+            && self.secret_stores.is_empty()
     }
 
     /// Returns the total number of descriptors in this registration.
@@ -201,6 +213,7 @@ impl PluginRegistration {
             + self.reactions.len()
             + self.bootstrappers.len()
             + self.identity_providers.len()
+            + self.secret_stores.len()
     }
 }
 
@@ -239,6 +252,14 @@ impl std::fmt::Debug for PluginRegistration {
                     .identity_providers
                     .iter()
                     .map(|ip| ip.kind())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "secret_stores",
+                &self
+                    .secret_stores
+                    .iter()
+                    .map(|ss| ss.kind())
                     .collect::<Vec<_>>(),
             )
             .finish()

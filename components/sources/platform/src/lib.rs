@@ -1,4 +1,3 @@
-#![allow(unexpected_cfgs)]
 // Copyright 2025 The Drasi Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#![allow(unexpected_cfgs)]
 
 //! Platform Source Plugin for Drasi
 //!
@@ -1361,7 +1362,7 @@ fn transform_platform_event(
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'properties' field"))?;
 
-        let properties = convert_json_to_element_properties(properties_obj)?;
+        let properties = convert_json_to_element_properties(properties_obj);
 
         // Build element based on type
         let element = match element_type {

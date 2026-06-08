@@ -38,7 +38,7 @@ use crate::parser::ParameterParser;
 /// Invokes MS SQL Server stored procedures when continuous query results change.
 /// Supports different procedures for ADD, UPDATE, and DELETE operations.
 pub struct MsSqlStoredProcReaction {
-    base: ReactionBase,
+    pub(crate) base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
     executor: RwLock<Option<Arc<MsSqlExecutor>>>,
     parser: ParameterParser,
@@ -195,10 +195,10 @@ impl MsSqlStoredProcReaction {
                 for result_item in &query_result.results {
                     let aggregation_data;
                     let (operation, data_value, result_type) = match result_item {
-                        ResultDiff::Add { data } => (OperationType::Add, data, "ADD"),
+                        ResultDiff::Add { data, .. } => (OperationType::Add, data, "ADD"),
                         ResultDiff::Update { data, .. } => (OperationType::Update, data, "UPDATE"),
-                        ResultDiff::Delete { data } => (OperationType::Delete, data, "DELETE"),
-                        ResultDiff::Aggregation { before, after } => {
+                        ResultDiff::Delete { data, .. } => (OperationType::Delete, data, "DELETE"),
+                        ResultDiff::Aggregation { before, after, .. } => {
                             aggregation_data = json!({
                                 "before": before,
                                 "after": after,
@@ -306,14 +306,7 @@ impl Reaction for MsSqlStoredProcReaction {
             retry_attempts: Some(ConfigValue::Static(self.config.retry_attempts)),
         };
 
-        match serde_json::to_value(&dto) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                // Don't expose password
-                map.remove("password");
-                map.into_iter().collect()
-            }
-            _ => HashMap::new(),
-        }
+        self.base.properties_or_serialize(&dto)
     }
 
     fn query_ids(&self) -> Vec<String> {
@@ -384,6 +377,18 @@ impl Reaction for MsSqlStoredProcReaction {
         result: drasi_lib::channels::QueryResult,
     ) -> anyhow::Result<()> {
         self.base.enqueue_query_result(result).await
+    }
+
+    fn is_durable(&self) -> bool {
+        false
+    }
+
+    fn needs_snapshot_on_fresh_start(&self) -> bool {
+        false
+    }
+
+    fn default_recovery_policy(&self) -> drasi_lib::recovery::ReactionRecoveryPolicy {
+        drasi_lib::recovery::ReactionRecoveryPolicy::Strict
     }
 }
 
@@ -556,5 +561,28 @@ impl MsSqlStoredProcReactionBuilder {
             self.auto_start,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drasi_lib::{recovery::ReactionRecoveryPolicy, Reaction};
+
+    #[tokio::test]
+    async fn test_recovery_trait_defaults() {
+        let reaction = MsSqlStoredProcReaction::builder("test-mssql")
+            .with_connection("localhost", 1433, "testdb", "testuser", "testpass")
+            .with_stored_procedure("test_proc")
+            .build()
+            .await
+            .unwrap();
+
+        assert!(!reaction.is_durable());
+        assert!(!reaction.needs_snapshot_on_fresh_start());
+        assert_eq!(
+            reaction.default_recovery_policy(),
+            ReactionRecoveryPolicy::Strict
+        );
     }
 }
