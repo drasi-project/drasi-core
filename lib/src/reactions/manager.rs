@@ -25,6 +25,9 @@ use crate::config::ReactionRuntime;
 use crate::context::ReactionRuntimeContext;
 use crate::identity::IdentityProvider;
 use crate::managers::{log_component_error, ComponentLogKey, ComponentLogRegistry};
+use crate::metrics::{
+    LifecycleMetrics, ReactionMetrics, RecoveryPolicyKind, StartupRejectionReason,
+};
 use crate::queries::output_state::FetchError;
 use crate::queries::Query;
 use crate::reactions::bootstrap_context::BootstrapContext;
@@ -33,6 +36,33 @@ use crate::reactions::snapshot_fetcher::InProcessSnapshotFetcher;
 use crate::reactions::{QueryProvider, Reaction};
 use crate::recovery::ReactionRecoveryPolicy;
 use crate::state_store::StateStoreProvider;
+
+/// Key for per-reaction per-query metrics: `(reaction_id, query_id)`.
+type MetricsKey = (String, String);
+
+/// Convert a domain recovery policy to the metrics-level kind enum.
+fn to_policy_kind(policy: &ReactionRecoveryPolicy) -> RecoveryPolicyKind {
+    match policy {
+        ReactionRecoveryPolicy::Strict => RecoveryPolicyKind::Strict,
+        ReactionRecoveryPolicy::AutoReset => RecoveryPolicyKind::AutoReset,
+        ReactionRecoveryPolicy::AutoSkipGap => RecoveryPolicyKind::AutoSkipGap,
+    }
+}
+
+/// Context passed to `handle_broadcast_gap` to avoid excessive parameter counts.
+///
+/// Groups the shared forwarder-task state that the recovery function needs.
+struct BroadcastGapContext<'a> {
+    reaction_id: &'a str,
+    query_id: &'a str,
+    reaction: &'a Arc<dyn Reaction>,
+    query: &'a Arc<dyn Query>,
+    policy: ReactionRecoveryPolicy,
+    state_store: &'a Option<Arc<dyn StateStoreProvider>>,
+    checkpoints: &'a Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
+    bootstrap_mutex: &'a Arc<tokio::sync::Mutex<()>>,
+    metrics: &'a Arc<ReactionMetrics>,
+}
 
 pub struct ReactionManager {
     instance_id: String,
@@ -53,6 +83,10 @@ pub struct ReactionManager {
     /// Managers send transitional states (Starting, Stopping, Reconfiguring) here;
     /// the loop applies them to the graph and records events automatically.
     update_tx: ComponentUpdateSender,
+    /// Per-(reaction, query) metrics for observability.
+    reaction_metrics: Arc<RwLock<HashMap<MetricsKey, Arc<ReactionMetrics>>>>,
+    /// Global lifecycle metrics shared across all reactions.
+    lifecycle_metrics: Arc<LifecycleMetrics>,
 }
 
 impl ReactionManager {
@@ -77,6 +111,8 @@ impl ReactionManager {
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
             graph,
             update_tx,
+            reaction_metrics: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_metrics: Arc::new(LifecycleMetrics::new()),
         }
     }
 
@@ -228,6 +264,8 @@ impl ReactionManager {
             let store = self.state_store.read().await;
             match store.as_ref() {
                 None => {
+                    self.lifecycle_metrics
+                        .record_startup_rejection(StartupRejectionReason::DurableNoStore);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but no state store is configured",
@@ -235,6 +273,8 @@ impl ReactionManager {
                     ));
                 }
                 Some(s) if !s.is_durable() => {
+                    self.lifecycle_metrics
+                        .record_startup_rejection(StartupRejectionReason::DurableOnVolatile);
                     return Err(anyhow::anyhow!(
                         "Reaction '{}' requires a durable state store (is_durable=true), \
                          but the configured state store is volatile",
@@ -247,6 +287,8 @@ impl ReactionManager {
 
         // Rule 2: snapshot + AutoSkipGap is contradictory
         if needs_snapshot && policy == ReactionRecoveryPolicy::AutoSkipGap {
+            self.lifecycle_metrics
+                .record_startup_rejection(StartupRejectionReason::SnapshotSkipGap);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=true is incompatible with \
                  AutoSkipGap recovery policy (cannot skip gap if snapshot is required)",
@@ -256,6 +298,8 @@ impl ReactionManager {
 
         // Rule 3: !snapshot + AutoReset is contradictory
         if !needs_snapshot && policy == ReactionRecoveryPolicy::AutoReset {
+            self.lifecycle_metrics
+                .record_startup_rejection(StartupRejectionReason::NoSnapshotAutoReset);
             return Err(anyhow::anyhow!(
                 "Reaction '{}': needs_snapshot_on_fresh_start=false is incompatible with \
                  AutoReset recovery policy (AutoReset re-bootstraps from a snapshot)",
@@ -332,6 +376,17 @@ impl ReactionManager {
         for query_id in &query_ids {
             let query = query_provider.get_query_instance(query_id).await?;
 
+            // Pre-create the metrics entry for this (reaction, query) pair so all
+            // bootstrap methods can instrument without acquiring the write lock.
+            let metrics_key = (reaction_id.to_string(), query_id.clone());
+            let per_query_metrics = {
+                let mut metrics_map = self.reaction_metrics.write().await;
+                metrics_map
+                    .entry(metrics_key)
+                    .or_insert_with(|| Arc::new(ReactionMetrics::new()))
+                    .clone()
+            };
+
             match existing_checkpoints.get(query_id) {
                 None => {
                     // No checkpoint — fresh start for this query.
@@ -343,6 +398,7 @@ impl ReactionManager {
                             &query,
                             &state_store,
                             &mut bootstrap_queries,
+                            &per_query_metrics,
                         )
                         .await?;
                     initial_checkpoints.insert(query_id.clone(), cp);
@@ -353,6 +409,7 @@ impl ReactionManager {
                         crate::queries::compute_config_hash(query.get_config());
                     if cp.config_hash != current_config_hash {
                         // Hash mismatch → treat as gap → apply recovery policy.
+                        self.lifecycle_metrics.record_hash_mismatch();
                         info!(
                             "[{reaction_id}] Config hash mismatch for query '{query_id}': \
                              checkpoint={}, current={}",
@@ -367,6 +424,7 @@ impl ReactionManager {
                                 policy,
                                 &state_store,
                                 &mut bootstrap_queries,
+                                &per_query_metrics,
                             )
                             .await?;
                         initial_checkpoints.insert(query_id.clone(), new_cp);
@@ -382,6 +440,7 @@ impl ReactionManager {
                                 policy,
                                 &state_store,
                                 &mut bootstrap_queries,
+                                &per_query_metrics,
                             )
                             .await?;
                         initial_checkpoints.insert(query_id.clone(), new_cp);
@@ -444,11 +503,13 @@ impl ReactionManager {
         query: &Arc<dyn Query>,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
+        metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
         if reaction.needs_snapshot_on_fresh_start() {
             info!("[{reaction_id}] Fresh start for query '{query_id}' — fetching snapshot");
+            metrics.record_fetch_snapshot();
             let snapshot = query.fetch_snapshot().await.map_err(|e| {
                 anyhow::anyhow!("Failed to fetch snapshot for query '{query_id}': {e}")
             })?;
@@ -465,6 +526,7 @@ impl ReactionManager {
             // startup cycle (e.g., from source replay) and record the checkpoint.
             // Without this replay, results produced before the reaction subscribes
             // to the broadcast channel would be silently skipped.
+            metrics.record_fetch_outbox();
             let seq = match query.fetch_outbox(0).await {
                 Ok(resp) => {
                     if resp.results.is_empty() {
@@ -553,7 +615,9 @@ impl ReactionManager {
         policy: ReactionRecoveryPolicy,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
+        metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
+        metrics.record_fetch_outbox();
         match query.fetch_outbox(checkpoint.sequence).await {
             Ok(outbox_resp) => {
                 // Replay outbox entries by enqueuing them.
@@ -609,6 +673,7 @@ impl ReactionManager {
                     policy,
                     state_store,
                     bootstrap_queries,
+                    metrics,
                 )
                 .await
             }
@@ -626,15 +691,17 @@ impl ReactionManager {
     }
 
     /// Apply the recovery policy when a gap or hash mismatch is detected.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_recovery_policy(
         &self,
         reaction_id: &str,
         query_id: &str,
-        reaction: &Arc<dyn Reaction>,
+        _reaction: &Arc<dyn Reaction>,
         query: &Arc<dyn Query>,
         policy: ReactionRecoveryPolicy,
         state_store: &Option<Arc<dyn StateStoreProvider>>,
         bootstrap_queries: &mut Vec<(String, Arc<dyn Query>)>,
+        metrics: &Arc<ReactionMetrics>,
     ) -> Result<ReactionCheckpoint> {
         let config_hash = crate::queries::compute_config_hash(query.get_config());
 
@@ -648,6 +715,7 @@ impl ReactionManager {
                     "[{reaction_id}] AutoReset for query '{query_id}' — \
                      fetching fresh snapshot"
                 );
+                metrics.record_fetch_snapshot();
                 let snapshot = query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
                         "AutoReset: failed to fetch snapshot for query '{query_id}': {e}"
@@ -659,6 +727,9 @@ impl ReactionManager {
                     config_hash,
                 };
 
+                // Record successful auto-reset in lifecycle metrics
+                self.lifecycle_metrics.record_auto_reset_completion();
+
                 bootstrap_queries.push((query_id.to_string(), query.clone()));
                 Ok(cp)
             }
@@ -669,6 +740,7 @@ impl ReactionManager {
                 );
 
                 // Get current sequence from the query.
+                metrics.record_fetch_outbox();
                 let current_seq = match query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
@@ -806,6 +878,13 @@ impl ReactionManager {
 
         // Also abort any remaining subscription tasks after teardown
         self.abort_subscription_tasks(&id).await;
+
+        // Remove metrics entries for this reaction to prevent unbounded memory growth
+        {
+            let mut metrics_map = self.reaction_metrics.write().await;
+            metrics_map.retain(|(rid, _), _| rid != &id);
+        }
+
         Ok(())
     }
 
@@ -1015,6 +1094,16 @@ impl ReactionManager {
             let subscription = query.subscribe(reaction_id.to_string()).await?;
             let mut receiver = subscription.receiver;
 
+            // Create or retrieve per-(reaction, query) metrics
+            let metrics_key = (reaction_id.to_string(), query_id.clone());
+            let forwarder_metrics = {
+                let mut metrics_map = self.reaction_metrics.write().await;
+                metrics_map
+                    .entry(metrics_key)
+                    .or_insert_with(|| Arc::new(ReactionMetrics::new()))
+                    .clone()
+            };
+
             let reaction = reaction.clone();
             let query_id_clone = query_id.clone();
             let reaction_id_owned = reaction_id.to_string();
@@ -1023,6 +1112,7 @@ impl ReactionManager {
             let state_store_clone = state_store.clone();
             let checkpoints = shared_checkpoints.clone();
             let bootstrap_mutex = bootstrap_mutex.clone();
+            let lifecycle_metrics = self.lifecycle_metrics.clone();
 
             let span = tracing::info_span!(
                 "reaction_forwarder",
@@ -1064,6 +1154,7 @@ impl ReactionManager {
                             Ok(query_result) => {
                                 // Skip events already covered by the bootstrap snapshot/outbox catchup.
                                 if query_result.sequence <= initial_seq {
+                                    forwarder_metrics.record_dedup_skip();
                                     log::debug!(
                                         "[{reaction_id_owned}] Skipping seq={} <= last_forwarded={last_forwarded_seq} for query '{query_id_clone}'",
                                         query_result.sequence
@@ -1077,22 +1168,26 @@ impl ReactionManager {
                                 if last_forwarded_seq > 0
                                     && query_result.sequence > last_forwarded_seq.saturating_add(1)
                                 {
+                                    forwarder_metrics.record_gap_detection();
+                                    forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
                                     log::warn!(
                                         "[{reaction_id_owned}] Sequence gap for query '{query_id_clone}': \
                                          expected seq={}, got seq={}",
                                         last_forwarded_seq.saturating_add(1),
                                         query_result.sequence
                                     );
-                                    match Self::handle_broadcast_gap(
-                                        &reaction_id_owned,
-                                        &query_id_clone,
-                                        &reaction,
-                                        &query_clone,
+                                    let gap_ctx = BroadcastGapContext {
+                                        reaction_id: &reaction_id_owned,
+                                        query_id: &query_id_clone,
+                                        reaction: &reaction,
+                                        query: &query_clone,
                                         policy,
-                                        &state_store_clone,
-                                        &checkpoints,
-                                        &bootstrap_mutex,
-                                    )
+                                        state_store: &state_store_clone,
+                                        checkpoints: &checkpoints,
+                                        bootstrap_mutex: &bootstrap_mutex,
+                                        metrics: &forwarder_metrics,
+                                    };
+                                    match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
                                     {
                                         Ok(()) => {
@@ -1140,25 +1235,36 @@ impl ReactionManager {
                                     };
                                     let cp = ReactionCheckpoint { sequence: seq, config_hash };
                                     checkpoints.write().await.insert(query_id_clone.clone(), cp);
+
+                                    // Update reaction metrics: checkpoint position
+                                    let query_latest = query_clone
+                                        .output_metrics()
+                                        .map(|m| m.load_outbox_latest_seq())
+                                        .unwrap_or(seq);
+                                    forwarder_metrics.record_checkpoint(seq, query_latest);
                                 }
                             }
                             Err(e) => {
                                 let error_str = e.to_string();
                                 if error_str.contains("lagged") {
                                     // §6: Broadcast gap detected.
+                                    forwarder_metrics.record_gap_detection();
+                                    forwarder_metrics.record_recovery_trigger(to_policy_kind(&policy));
                                     log::warn!(
                                         "[{reaction_id_owned}] Broadcast lag for query '{query_id_clone}': {error_str}"
                                     );
-                                    match Self::handle_broadcast_gap(
-                                        &reaction_id_owned,
-                                        &query_id_clone,
-                                        &reaction,
-                                        &query_clone,
+                                    let gap_ctx = BroadcastGapContext {
+                                        reaction_id: &reaction_id_owned,
+                                        query_id: &query_id_clone,
+                                        reaction: &reaction,
+                                        query: &query_clone,
                                         policy,
-                                        &state_store_clone,
-                                        &checkpoints,
-                                        &bootstrap_mutex,
-                                    )
+                                        state_store: &state_store_clone,
+                                        checkpoints: &checkpoints,
+                                        bootstrap_mutex: &bootstrap_mutex,
+                                        metrics: &forwarder_metrics,
+                                    };
+                                    match Self::handle_broadcast_gap(&gap_ctx)
                                     .await
                                     {
                                         Ok(()) => continue,
@@ -1241,31 +1347,29 @@ impl ReactionManager {
     /// - `Strict`: return error (forwarder will break)
     /// - `AutoReset`: re-bootstrap from snapshot, update checkpoint (serialized via mutex)
     /// - `AutoSkipGap`: jump to current sequence, update checkpoint
-    async fn handle_broadcast_gap(
-        reaction_id: &str,
-        query_id: &str,
-        reaction: &Arc<dyn Reaction>,
-        query: &Arc<dyn Query>,
-        policy: ReactionRecoveryPolicy,
-        state_store: &Option<Arc<dyn StateStoreProvider>>,
-        checkpoints: &Arc<RwLock<HashMap<String, ReactionCheckpoint>>>,
-        bootstrap_mutex: &Arc<tokio::sync::Mutex<()>>,
-    ) -> Result<()> {
-        let config_hash = crate::queries::compute_config_hash(query.get_config());
+    async fn handle_broadcast_gap(ctx: &BroadcastGapContext<'_>) -> Result<()> {
+        let config_hash = crate::queries::compute_config_hash(ctx.query.get_config());
 
-        match policy {
+        match ctx.policy {
             ReactionRecoveryPolicy::Strict => Err(anyhow::anyhow!(
-                "Strict recovery policy — broadcast lag for query '{query_id}' \
-                     is unrecoverable"
+                "Strict recovery policy — broadcast lag for query '{}' \
+                     is unrecoverable",
+                ctx.query_id
             )),
             ReactionRecoveryPolicy::AutoReset => {
                 // Serialize bootstrap calls — multiple forwarders may hit gaps concurrently.
-                let _guard = bootstrap_mutex.lock().await;
+                let _guard = ctx.bootstrap_mutex.lock().await;
 
-                log::info!("[{reaction_id}] AutoReset on broadcast gap for query '{query_id}'");
-                let snapshot = query.fetch_snapshot().await.map_err(|e| {
+                log::info!(
+                    "[{}] AutoReset on broadcast gap for query '{}'",
+                    ctx.reaction_id,
+                    ctx.query_id
+                );
+                ctx.metrics.record_fetch_snapshot();
+                let snapshot = ctx.query.fetch_snapshot().await.map_err(|e| {
                     anyhow::anyhow!(
-                        "AutoReset broadcast gap: failed to fetch snapshot for '{query_id}': {e}"
+                        "AutoReset broadcast gap: failed to fetch snapshot for '{}': {e}",
+                        ctx.query_id
                     )
                 })?;
 
@@ -1276,46 +1380,57 @@ impl ReactionManager {
 
                 // Invoke bootstrap hook BEFORE persisting checkpoint — a crash
                 // during bootstrap will re-trigger recovery on next start.
-                let ctx = BootstrapContext::new(
-                    query_id.to_string(),
+                let bootstrap_ctx = BootstrapContext::new(
+                    ctx.query_id.to_string(),
                     true,
-                    query.clone(),
-                    reaction_id.to_string(),
-                    state_store.clone(),
+                    ctx.query.clone(),
+                    ctx.reaction_id.to_string(),
+                    ctx.state_store.clone(),
                 );
-                reaction.bootstrap(ctx).await?;
+                ctx.reaction.bootstrap(bootstrap_ctx).await?;
 
                 // Bootstrap succeeded — now safe to persist checkpoint.
-                if let Some(store) = state_store.as_ref() {
+                if let Some(store) = ctx.state_store.as_ref() {
                     crate::reactions::checkpoint::write_checkpoint(
                         store.as_ref(),
-                        reaction_id,
-                        query_id,
+                        ctx.reaction_id,
+                        ctx.query_id,
                         &cp,
                     )
                     .await?;
                 }
 
-                checkpoints.write().await.insert(query_id.to_string(), cp);
+                ctx.checkpoints
+                    .write()
+                    .await
+                    .insert(ctx.query_id.to_string(), cp);
 
                 Ok(())
             }
             ReactionRecoveryPolicy::AutoSkipGap => {
-                log::info!("[{reaction_id}] AutoSkipGap on broadcast gap for query '{query_id}'");
-                let current_seq = match query.fetch_outbox(0).await {
+                log::info!(
+                    "[{}] AutoSkipGap on broadcast gap for query '{}'",
+                    ctx.reaction_id,
+                    ctx.query_id
+                );
+                ctx.metrics.record_fetch_outbox();
+                let current_seq = match ctx.query.fetch_outbox(0).await {
                     Ok(resp) => resp.latest_sequence,
                     Err(FetchError::OutboxGap(gap)) => gap.latest_sequence,
                     Err(FetchError::NotRunning { .. } | FetchError::TimedOut) => {
                         // Query not running — fall back to existing checkpoint sequence.
-                        let existing_seq = checkpoints
+                        let existing_seq = ctx
+                            .checkpoints
                             .read()
                             .await
-                            .get(query_id)
+                            .get(ctx.query_id)
                             .map(|cp| cp.sequence)
                             .unwrap_or(0);
                         log::info!(
-                            "[{reaction_id}] AutoSkipGap: query '{query_id}' not running, \
-                             keeping checkpoint at seq={existing_seq}"
+                            "[{}] AutoSkipGap: query '{}' not running, \
+                             keeping checkpoint at seq={existing_seq}",
+                            ctx.reaction_id,
+                            ctx.query_id
                         );
                         existing_seq
                     }
@@ -1326,17 +1441,20 @@ impl ReactionManager {
                     config_hash,
                 };
 
-                if let Some(store) = state_store.as_ref() {
+                if let Some(store) = ctx.state_store.as_ref() {
                     crate::reactions::checkpoint::write_checkpoint(
                         store.as_ref(),
-                        reaction_id,
-                        query_id,
+                        ctx.reaction_id,
+                        ctx.query_id,
                         &cp,
                     )
                     .await?;
                 }
 
-                checkpoints.write().await.insert(query_id.to_string(), cp);
+                ctx.checkpoints
+                    .write()
+                    .await
+                    .insert(ctx.query_id.to_string(), cp);
 
                 Ok(())
             }
@@ -1357,6 +1475,39 @@ impl ReactionManager {
                 handle.abort();
             }
         }
+    }
+
+    /// Get the per-(reaction, query) metrics for a specific reaction.
+    ///
+    /// Returns a map from query_id to its metrics snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the reaction does not exist.
+    pub async fn get_reaction_metrics(
+        &self,
+        reaction_id: &str,
+    ) -> Result<HashMap<String, crate::metrics::ReactionMetricsSnapshot>> {
+        // Verify the reaction exists in the component graph
+        let graph = self.graph.read().await;
+        if graph
+            .get_runtime::<Arc<dyn Reaction>>(reaction_id)
+            .is_none()
+        {
+            return Err(anyhow::anyhow!("Reaction '{reaction_id}' not found",));
+        }
+        drop(graph);
+
+        let metrics = self.reaction_metrics.read().await;
+        Ok(metrics
+            .iter()
+            .filter(|((rid, _), _)| rid == reaction_id)
+            .map(|((_, qid), m)| (qid.clone(), m.snapshot()))
+            .collect())
+    }
+
+    /// Get the global lifecycle metrics.
+    pub fn lifecycle_metrics(&self) -> &Arc<LifecycleMetrics> {
+        &self.lifecycle_metrics
     }
 }
 
@@ -1911,16 +2062,17 @@ mod tests {
         let checkpoints = Arc::new(RwLock::new(HashMap::new()));
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let result = ReactionManager::handle_broadcast_gap(
-            "r1",
-            "q1",
-            &reaction,
-            &query,
-            ReactionRecoveryPolicy::Strict,
-            &None,
-            &checkpoints,
-            &bootstrap_mutex,
-        )
+        let result = ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction,
+            query: &query,
+            policy: ReactionRecoveryPolicy::Strict,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+        })
         .await;
 
         assert!(result.is_err(), "Strict policy should return error on gap");
@@ -1944,16 +2096,17 @@ mod tests {
         let checkpoints = Arc::new(RwLock::new(HashMap::new()));
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let result = ReactionManager::handle_broadcast_gap(
-            "r1",
-            "q1",
-            &reaction_trait,
-            &query,
-            ReactionRecoveryPolicy::AutoReset,
-            &None,
-            &checkpoints,
-            &bootstrap_mutex,
-        )
+        let result = ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoReset,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+        })
         .await;
 
         assert!(
@@ -1993,16 +2146,17 @@ mod tests {
         let checkpoints = Arc::new(RwLock::new(HashMap::new()));
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let result = ReactionManager::handle_broadcast_gap(
-            "r1",
-            "q1",
-            &reaction_trait,
-            &query,
-            ReactionRecoveryPolicy::AutoSkipGap,
-            &None,
-            &checkpoints,
-            &bootstrap_mutex,
-        )
+        let result = ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoSkipGap,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+        })
         .await;
 
         assert!(
@@ -2162,16 +2316,17 @@ mod tests {
         let checkpoints = Arc::new(RwLock::new(HashMap::new()));
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let result = ReactionManager::handle_broadcast_gap(
-            "r1",
-            "q1",
-            &reaction_trait,
-            &query,
-            ReactionRecoveryPolicy::AutoReset,
-            &None,
-            &checkpoints,
-            &bootstrap_mutex,
-        )
+        let result = ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoReset,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+        })
         .await;
 
         // Should fail because fetch_snapshot returns error.
@@ -2289,16 +2444,17 @@ mod tests {
         let checkpoints = Arc::new(RwLock::new(HashMap::new()));
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
-        let result = ReactionManager::handle_broadcast_gap(
-            "r1",
-            "q1",
-            &reaction_trait,
-            &query,
-            ReactionRecoveryPolicy::AutoReset,
-            &None,
-            &checkpoints,
-            &bootstrap_mutex,
-        )
+        let result = ReactionManager::handle_broadcast_gap(&BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoReset,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &Arc::new(ReactionMetrics::new()),
+        })
         .await;
 
         // Should fail because bootstrap() returns error.
@@ -2338,27 +2494,33 @@ mod tests {
         let bootstrap_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
         // Launch two concurrent gap recoveries for different query IDs.
+        let metrics_q1 = Arc::new(ReactionMetrics::new());
+        let metrics_q2 = Arc::new(ReactionMetrics::new());
+        let ctx_q1 = BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q1",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoReset,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &metrics_q1,
+        };
+        let ctx_q2 = BroadcastGapContext {
+            reaction_id: "r1",
+            query_id: "q2",
+            reaction: &reaction_trait,
+            query: &query,
+            policy: ReactionRecoveryPolicy::AutoReset,
+            state_store: &None,
+            checkpoints: &checkpoints,
+            bootstrap_mutex: &bootstrap_mutex,
+            metrics: &metrics_q2,
+        };
         let (r1, r2) = tokio::join!(
-            ReactionManager::handle_broadcast_gap(
-                "r1",
-                "q1",
-                &reaction_trait,
-                &query,
-                ReactionRecoveryPolicy::AutoReset,
-                &None,
-                &checkpoints,
-                &bootstrap_mutex,
-            ),
-            ReactionManager::handle_broadcast_gap(
-                "r1",
-                "q2",
-                &reaction_trait,
-                &query,
-                ReactionRecoveryPolicy::AutoReset,
-                &None,
-                &checkpoints,
-                &bootstrap_mutex,
-            ),
+            ReactionManager::handle_broadcast_gap(&ctx_q1),
+            ReactionManager::handle_broadcast_gap(&ctx_q2),
         );
 
         assert!(
