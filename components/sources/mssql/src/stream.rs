@@ -26,7 +26,6 @@ use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChang
 use drasi_lib::channels::SourceEventWrapper;
 use drasi_lib::sources::base::SourceBase;
 use log::{debug, error, info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -54,7 +53,6 @@ pub async fn run_cdc_stream(
     base: SourceBase,
     mut shutdown_rx: watch::Receiver<bool>,
     subscriber_resume_lsns: Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
-    initial_bootstrap_pending: Arc<AtomicBool>,
 ) -> Result<()> {
     info!("Starting CDC stream for source '{source_id}'");
 
@@ -74,7 +72,6 @@ pub async fn run_cdc_stream(
             &base,
             &mut shutdown_rx,
             &subscriber_resume_lsns,
-            &initial_bootstrap_pending,
         )
         .await
         {
@@ -142,7 +139,6 @@ async fn run_cdc_polling_loop(
     base: &SourceBase,
     shutdown_rx: &mut watch::Receiver<bool>,
     subscriber_resume_lsns: &Arc<RwLock<std::collections::HashMap<String, Lsn>>>,
-    initial_bootstrap_pending: &Arc<AtomicBool>,
 ) -> Result<()> {
     // Connect to MS SQL
     info!("Connecting to MS SQL Server for source '{source_id}'");
@@ -192,7 +188,7 @@ async fn run_cdc_polling_loop(
         }
     };
 
-    if !has_resume_checkpoint && initial_bootstrap_pending.swap(false, Ordering::AcqRel) {
+    if !has_resume_checkpoint && base.take_pending_initial_bootstrap() {
         // Initial bootstrap handover: wait until the bootstrapper publishes the
         // snapshot CDC boundary, then start strictly after it. Resume/crash
         // recovery skips this path and continues to use subscriber checkpoints.

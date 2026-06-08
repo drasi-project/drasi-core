@@ -54,7 +54,6 @@ use drasi_lib::sources::{SourceBase, SourceBaseParams};
 use drasi_lib::{ComponentStatus, DispatchMode, Source, SubscriptionResponse};
 use drasi_source_mapping::{SourceMapping, SourceMappingEngine};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tracing::{error, info, warn};
@@ -68,8 +67,6 @@ pub struct KafkaSource {
     config: KafkaSourceConfig,
     shutdown_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     subscriber_resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
-    has_bootstrap_provider: Arc<AtomicBool>,
-    await_bootstrap_boundary: Arc<AtomicBool>,
 }
 
 impl KafkaSource {
@@ -83,14 +80,11 @@ impl KafkaSource {
         config: KafkaSourceConfig,
         params: SourceBaseParams,
     ) -> anyhow::Result<Self> {
-        let has_bootstrap_provider = params.bootstrap_provider.is_some();
         Ok(Self {
             base: SourceBase::new(params)?,
             config,
             shutdown_tx: Arc::new(RwLock::new(None)),
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
-            has_bootstrap_provider: Arc::new(AtomicBool::new(has_bootstrap_provider)),
-            await_bootstrap_boundary: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -201,8 +195,6 @@ impl Source for KafkaSource {
             .await;
 
         self.base.reset_bootstrap_boundary();
-        self.await_bootstrap_boundary
-            .store(false, Ordering::Release);
 
         // Set position comparator for multi-partition replay filtering
         self.base
@@ -226,7 +218,6 @@ impl Source for KafkaSource {
             source_id: self.base.id.clone(),
             shutdown_rx,
             resume_positions: self.subscriber_resume_positions.clone(),
-            await_bootstrap_boundary: self.await_bootstrap_boundary.clone(),
         };
 
         let source_id = self.base.id.clone();
@@ -308,20 +299,10 @@ impl Source for KafkaSource {
                 },
             }
         }
-        let should_await_boundary = settings.resume_from.is_none()
-            && settings.enable_bootstrap
-            && self.has_bootstrap_provider.load(Ordering::Acquire);
-        if should_await_boundary {
-            self.await_bootstrap_boundary.store(true, Ordering::Release);
-        }
         let response = self
             .base
             .subscribe_with_bootstrap(&settings, "kafka")
             .await?;
-        if should_await_boundary && response.bootstrap_receiver.is_none() {
-            self.await_bootstrap_boundary
-                .store(false, Ordering::Release);
-        }
         Ok(response)
     }
 
@@ -338,7 +319,6 @@ impl Source for KafkaSource {
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
         self.base.set_bootstrap_provider(provider).await;
-        self.has_bootstrap_provider.store(true, Ordering::Release);
     }
 
     async fn remove_position_handle(&self, query_id: &str) {

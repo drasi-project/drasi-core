@@ -26,7 +26,6 @@ use rdkafka::message::Message;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tracing::{error, info, warn};
@@ -40,7 +39,6 @@ pub struct KafkaConsumerTask {
     pub source_id: String,
     pub shutdown_rx: watch::Receiver<bool>,
     pub resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
-    pub await_bootstrap_boundary: Arc<AtomicBool>,
 }
 
 impl KafkaConsumerTask {
@@ -84,7 +82,8 @@ impl KafkaConsumerTask {
 
         let min_resume_offsets = self.minimum_resume_offsets(partition_count).await;
         let bootstrap_offsets = if min_resume_offsets.is_none()
-            && self.await_bootstrap_boundary.load(Ordering::Acquire)
+            && self.base.has_bootstrap_provider()
+            && self.base.take_pending_initial_bootstrap()
         {
             match self
                 .wait_for_initial_bootstrap_offsets(partition_count)
@@ -448,7 +447,6 @@ mod tests {
             source_id: "test-source".to_string(),
             shutdown_rx,
             resume_positions: Arc::new(RwLock::new(HashMap::new())),
-            await_bootstrap_boundary: Arc::new(AtomicBool::new(false)),
         }
     }
 

@@ -53,7 +53,6 @@ pub struct MySqlReplicationSource {
     /// Populated during subscribe() when a query provides resume_from bytes.
     /// The replication stream uses the minimum position as its start point.
     subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
-    initial_bootstrap_pending: StdArc<AtomicBool>,
 }
 
 impl MySqlReplicationSource {
@@ -65,7 +64,6 @@ impl MySqlReplicationSource {
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
-            initial_bootstrap_pending: StdArc::new(AtomicBool::new(false)),
         })
     }
 
@@ -88,7 +86,6 @@ impl MySqlReplicationSource {
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
-            initial_bootstrap_pending: StdArc::new(AtomicBool::new(false)),
         })
     }
 
@@ -125,8 +122,6 @@ impl Source for MySqlReplicationSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         self.shutdown.store(false, Ordering::Relaxed);
-        self.initial_bootstrap_pending
-            .store(false, Ordering::Release);
         self.base.reset_bootstrap_boundary();
         info!("Starting MySQL replication source: {}", self.base.id);
 
@@ -136,7 +131,6 @@ impl Source for MySqlReplicationSource {
         let reporter = self.base.status_handle();
         let shutdown = self.shutdown.clone();
         let subscriber_resume_positions = self.subscriber_resume_positions.clone();
-        let initial_bootstrap_pending = self.initial_bootstrap_pending.clone();
 
         let instance_id = self
             .base
@@ -161,7 +155,6 @@ impl Source for MySqlReplicationSource {
                     base,
                     shutdown,
                     subscriber_resume_positions,
-                    initial_bootstrap_pending,
                 );
                 if let Err(e) = stream.run().await {
                     error!("Replication task failed for {source_id}: {e}");
@@ -227,11 +220,6 @@ impl Source for MySqlReplicationSource {
         &self,
         settings: drasi_lib::config::SourceSubscriptionSettings,
     ) -> Result<SubscriptionResponse> {
-        if settings.enable_bootstrap && settings.resume_from.is_none() {
-            self.initial_bootstrap_pending
-                .store(true, Ordering::Release);
-        }
-
         // If the subscriber has a resume_from position, deserialize it and store
         // keyed by query_id. The replication stream uses the minimum position
         // across all subscribers to determine where to start the binlog stream.
@@ -448,7 +436,6 @@ impl MySqlSourceBuilder {
             config,
             shutdown: StdArc::new(AtomicBool::new(false)),
             subscriber_resume_positions: StdArc::new(RwLock::new(HashMap::new())),
-            initial_bootstrap_pending: StdArc::new(AtomicBool::new(false)),
         })
     }
 }

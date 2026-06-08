@@ -89,18 +89,18 @@ impl ReplicationStream {
 
     pub async fn run(
         &mut self,
-        ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
+        startup_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     ) -> Result<()> {
         info!("Starting replication stream for source {}", self.source_id);
 
         // Connect and setup replication
         if let Err(error) = self.connect_and_setup().await {
-            if let Some(tx) = ready_tx {
+            if let Some(tx) = startup_tx {
                 let _ = tx.send(Err(format!("{error:#}")));
             }
             return Err(error);
         }
-        if let Some(tx) = ready_tx {
+        if let Some(tx) = startup_tx {
             let _ = tx.send(Ok(()));
         }
 

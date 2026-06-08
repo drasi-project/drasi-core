@@ -148,9 +148,6 @@ mod tests {
             &self,
             settings: crate::config::SourceSubscriptionSettings,
         ) -> anyhow::Result<SubscriptionResponse> {
-            // Apply settings (sequence recovery, etc.)
-            self.base.apply_subscription_settings(&settings);
-
             // Record the resume_from for test assertions
             self.received_resume_from
                 .write()
@@ -2483,7 +2480,6 @@ mod orchestration_tests {
             &self,
             settings: crate::config::SourceSubscriptionSettings,
         ) -> anyhow::Result<SubscriptionResponse> {
-            self.base.apply_subscription_settings(&settings);
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
                 query_id: settings.query_id,
@@ -2598,7 +2594,6 @@ mod orchestration_tests {
                 .into());
             }
 
-            self.base.apply_subscription_settings(&settings);
             let receiver = self.base.create_streaming_receiver().await?;
             Ok(SubscriptionResponse {
                 query_id: settings.query_id,

@@ -52,7 +52,6 @@ pub struct ReplicationStream {
     current_event_timestamp: u64,
     shutdown: StdArc<AtomicBool>,
     subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
-    initial_bootstrap_pending: StdArc<AtomicBool>,
 }
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -74,7 +73,6 @@ impl ReplicationStream {
         base: SourceBase,
         shutdown: StdArc<AtomicBool>,
         subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
-        initial_bootstrap_pending: StdArc<AtomicBool>,
     ) -> Self {
         let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
         Self {
@@ -89,7 +87,6 @@ impl ReplicationStream {
             current_event_timestamp: 0,
             shutdown,
             subscriber_resume_positions,
-            initial_bootstrap_pending,
         }
     }
 
@@ -524,11 +521,7 @@ impl ReplicationStream {
         let positions = self.subscriber_resume_positions.read().await;
         if positions.is_empty() {
             drop(positions);
-            if self
-                .initial_bootstrap_pending
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.base.take_pending_initial_bootstrap() {
                 info!(
                     "Source '{}': waiting for initial MySQL bootstrap boundary before starting binlog stream",
                     self.source_id
