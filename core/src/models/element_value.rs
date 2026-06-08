@@ -41,6 +41,8 @@ pub enum ElementValue {
     List(Vec<ElementValue>),
     Object(ElementPropertyMap),
     LocalDateTime(NaiveDateTime),
+    // ElementValue stores zoned datetimes as fixed offsets only; optional
+    // IANA timezone names from VariableValue are not represented here.
     ZonedDateTime(DateTime<FixedOffset>),
 }
 
@@ -66,6 +68,7 @@ impl From<&ElementValue> for VariableValue {
             ElementValue::Object(o) => o.into(),
             ElementValue::LocalDateTime(dt) => VariableValue::LocalDateTime(*dt),
             ElementValue::ZonedDateTime(dt) => {
+                // ElementValue cannot carry IANA timezone names, so we emit None.
                 VariableValue::ZonedDateTime(VarZonedDateTime::new(*dt, None))
             }
         }
@@ -89,6 +92,7 @@ impl TryInto<ElementValue> for &VariableValue {
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
             VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(*dt)),
+            // Preserve the fixed-offset instant; timezone_name metadata is dropped.
             VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
             _ => Err(ConversionError {}),
         }
@@ -112,6 +116,7 @@ impl TryInto<ElementValue> for VariableValue {
             )),
             VariableValue::Object(o) => Ok(ElementValue::Object(o.into())),
             VariableValue::LocalDateTime(dt) => Ok(ElementValue::LocalDateTime(dt)),
+            // Preserve the fixed-offset instant; timezone_name metadata is dropped.
             VariableValue::ZonedDateTime(zdt) => Ok(ElementValue::ZonedDateTime(*zdt.datetime())),
             _ => Err(ConversionError {}),
         }
@@ -119,10 +124,12 @@ impl TryInto<ElementValue> for VariableValue {
 }
 
 /// Tag used inside JSON envelopes to preserve `ElementValue` datetime type
-/// information across serialization round-trips.  Uses a generic key with
-/// namespaced values (e.g. `"drasi.LocalDateTime"`) to reduce collision risk
-/// with user-data properties.
-const DRASI_TYPE_TAG: &str = "_type";
+/// information across serialization round-trips.
+/// This key is intentionally specific to minimize collisions with user data.
+/// This envelope is for internal round-trips, not an external API shape.
+const DRASI_TYPE_TAG: &str = "__drasi_v1_type__";
+const DRASI_ENVELOPE_MARKER_TAG: &str = "__drasi_v1_envelope__";
+const DRASI_ENVELOPE_MARKER_VALUE: &str = "drasi.element_value.datetime";
 
 impl From<&ElementValue> for serde_json::Value {
     fn from(val: &ElementValue) -> Self {
@@ -138,12 +145,14 @@ impl From<&ElementValue> for serde_json::Value {
             ElementValue::Object(o) => serde_json::Value::Object(o.into()),
             ElementValue::LocalDateTime(dt) => {
                 serde_json::json!({
+                    DRASI_ENVELOPE_MARKER_TAG: DRASI_ENVELOPE_MARKER_VALUE,
                     DRASI_TYPE_TAG: "drasi.LocalDateTime",
                     "value": dt.to_string()
                 })
             }
             ElementValue::ZonedDateTime(dt) => {
                 serde_json::json!({
+                    DRASI_ENVELOPE_MARKER_TAG: DRASI_ENVELOPE_MARKER_VALUE,
                     DRASI_TYPE_TAG: "drasi.ZonedDateTime",
                     "value": dt.to_rfc3339()
                 })
@@ -170,28 +179,27 @@ impl From<&serde_json::Value> for ElementValue {
             serde_json::Value::Array(a) => ElementValue::List(a.iter().map(|x| x.into()).collect()),
             serde_json::Value::Object(o) => {
                 // Check for tagged datetime envelope
-                if let Some(type_tag) = o.get(DRASI_TYPE_TAG).and_then(|v| v.as_str()) {
-                    if let Some(val_str) = o.get("value").and_then(|v| v.as_str()) {
-                        match type_tag {
-                            "drasi.LocalDateTime" => {
-                                if let Ok(dt) =
-                                    NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S")
-                                {
-                                    return ElementValue::LocalDateTime(dt);
+                let has_internal_marker = o.get(DRASI_ENVELOPE_MARKER_TAG).and_then(|v| v.as_str())
+                    == Some(DRASI_ENVELOPE_MARKER_VALUE);
+                if has_internal_marker {
+                    if let Some(type_tag) = o.get(DRASI_TYPE_TAG).and_then(|v| v.as_str()) {
+                        if let Some(val_str) = o.get("value").and_then(|v| v.as_str()) {
+                            match type_tag {
+                                "drasi.LocalDateTime" => {
+                                    if let Ok(dt) = NaiveDateTime::parse_from_str(
+                                        val_str,
+                                        "%Y-%m-%d %H:%M:%S%.f",
+                                    ) {
+                                        return ElementValue::LocalDateTime(dt);
+                                    }
                                 }
-                                // Also try formats with fractional seconds
-                                if let Ok(dt) =
-                                    NaiveDateTime::parse_from_str(val_str, "%Y-%m-%d %H:%M:%S%.f")
-                                {
-                                    return ElementValue::LocalDateTime(dt);
+                                "drasi.ZonedDateTime" => {
+                                    if let Ok(dt) = DateTime::parse_from_rfc3339(val_str) {
+                                        return ElementValue::ZonedDateTime(dt);
+                                    }
                                 }
+                                _ => {}
                             }
-                            "drasi.ZonedDateTime" => {
-                                if let Ok(dt) = DateTime::parse_from_rfc3339(val_str) {
-                                    return ElementValue::ZonedDateTime(dt);
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -433,7 +441,8 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "_type": "drasi.LocalDateTime",
+                "__drasi_v1_envelope__": "drasi.element_value.datetime",
+                "__drasi_v1_type__": "drasi.LocalDateTime",
                 "value": dt.to_string()
             })
         );
@@ -447,7 +456,8 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "_type": "drasi.ZonedDateTime",
+                "__drasi_v1_envelope__": "drasi.element_value.datetime",
+                "__drasi_v1_type__": "drasi.ZonedDateTime",
                 "value": dt.to_rfc3339()
             })
         );
@@ -518,10 +528,11 @@ mod tests {
 
     #[test]
     fn tagged_object_with_unknown_type_stays_object() {
-        // An object with _type set to an unknown type should
+        // An object with the internal tag set to an unknown type should
         // be deserialized as a regular Object, not a datetime.
         let json = serde_json::json!({
-            "_type": "UnknownType",
+            "__drasi_v1_envelope__": "drasi.element_value.datetime",
+            "__drasi_v1_type__": "UnknownType",
             "value": "some-value"
         });
         let ev: ElementValue = (&json).into();
@@ -533,8 +544,33 @@ mod tests {
         // A tagged envelope with an unparseable value should fall back
         // to Object rather than panic.
         let json = serde_json::json!({
-            "_type": "drasi.ZonedDateTime",
+            "__drasi_v1_envelope__": "drasi.element_value.datetime",
+            "__drasi_v1_type__": "drasi.ZonedDateTime",
             "value": "not-a-datetime"
+        });
+        let ev: ElementValue = (&json).into();
+        assert!(matches!(ev, ElementValue::Object(_)));
+    }
+
+    #[test]
+    fn object_with_common_type_key_does_not_get_interpreted_as_datetime() {
+        // User objects using a common `_type` key must not collide with internal tags.
+        let json = serde_json::json!({
+            "_type": "drasi.LocalDateTime",
+            "value": "2024-06-15 10:30:45",
+            "timezone_name": "UTC"
+        });
+        let ev: ElementValue = (&json).into();
+        assert!(matches!(ev, ElementValue::Object(_)));
+    }
+
+    #[test]
+    fn object_with_internal_type_but_no_marker_stays_object() {
+        // Objects that happen to contain the internal type key are not interpreted
+        // as datetime envelopes unless the dedicated marker is also present.
+        let json = serde_json::json!({
+            "__drasi_v1_type__": "drasi.ZonedDateTime",
+            "value": "1970-01-01T00:00:00+00:00"
         });
         let ev: ElementValue = (&json).into();
         assert!(matches!(ev, ElementValue::Object(_)));

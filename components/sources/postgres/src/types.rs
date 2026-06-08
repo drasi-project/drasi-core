@@ -16,6 +16,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use drasi_core::models::ElementValue;
 use ordered_float::OrderedFloat;
 use postgres_types::Oid;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -172,7 +173,18 @@ impl PostgresValue {
         }
     }
 
-    /// Convert PostgresValue to ElementValue, preserving datetime types
+    /// Converts this `PostgresValue` to an `ElementValue`.
+    ///
+    /// Type mapping:
+    /// - `Timestamp` -> `LocalDateTime`, `TimestampTz` -> `ZonedDateTime`
+    ///   (datetime types preserved).
+    /// - `Numeric` -> `Float` (converted through `f64`; precision may be lost
+    ///   for very large or high-precision values).
+    /// - `Date`, `Time`, `Uuid` -> `String`.
+    /// - `Json`, `Jsonb` -> `String` (JSON serialized as text).
+    /// - `Composite`, `Bytea` -> `String` (via JSON representation fallback).
+    /// - Other primitive scalar types map directly to their
+    ///   `ElementValue` counterparts.
     pub fn to_element_value(&self) -> ElementValue {
         match self {
             PostgresValue::Null => ElementValue::Null,
@@ -183,8 +195,8 @@ impl PostgresValue {
             PostgresValue::Float4(f) => ElementValue::Float(OrderedFloat(*f as f64)),
             PostgresValue::Float8(f) => ElementValue::Float(OrderedFloat(*f)),
             PostgresValue::Numeric(d) => {
-                // Convert Decimal to f64 for storage
-                ElementValue::Float(OrderedFloat(d.to_string().parse::<f64>().unwrap_or(0.0)))
+                // Convert Decimal directly to f64; use NaN sentinel if out of range.
+                ElementValue::Float(OrderedFloat(d.to_f64().unwrap_or(f64::NAN)))
             }
             PostgresValue::Text(s) | PostgresValue::Varchar(s) | PostgresValue::Char(s) => {
                 ElementValue::String(Arc::from(s.as_str()))

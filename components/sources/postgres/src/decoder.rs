@@ -710,15 +710,13 @@ pub fn decode_column_value_text(
         }
         1114 => {
             // timestamp (without timezone)
-            // Try parsing as NaiveDateTime first, then fall back to zoned formats
+            // Parse only standard NaiveDateTime forms for OID 1114.
+            // If timezone-bearing text is present, treat it as malformed for
+            // this OID and preserve the original text as String.
             if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f") {
                 Ok(ElementValue::LocalDateTime(dt))
             } else if let Ok(dt) = NaiveDateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S") {
                 Ok(ElementValue::LocalDateTime(dt))
-            } else if let Ok(dt) = DateTime::parse_from_rfc3339(text.trim()) {
-                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
-            } else if let Ok(dt) = DateTime::parse_from_str(text.trim(), "%Y-%m-%d %H:%M:%S%.f%z") {
-                Ok(ElementValue::ZonedDateTime(dt.fixed_offset()))
             } else {
                 // Fall back to string if parsing fails
                 Ok(ElementValue::String(Arc::from(text)))
@@ -926,11 +924,12 @@ mod tests {
 
     #[test]
     fn decode_timestamp_oid_with_rfc3339_string() {
-        // OID 1114 (timestamp) but the string has tz info → ZonedDateTime
+        // OID 1114 (timestamp) with tz info is malformed for this OID,
+        // so it must remain String.
         let ev = decode_column_value_text("2024-06-15T10:30:45+05:00", 1114).unwrap();
         assert!(
-            matches!(ev, ElementValue::ZonedDateTime(_)),
-            "Expected ZonedDateTime for rfc3339 input on timestamp OID, got {ev:?}"
+            matches!(ev, ElementValue::String(_)),
+            "Expected String fallback for rfc3339 input on timestamp OID, got {ev:?}"
         );
     }
 

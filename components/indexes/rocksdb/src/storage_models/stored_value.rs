@@ -213,17 +213,28 @@ impl From<StoredValueContainer> for ElementValue {
             }
             Some(StoredValue::Object(o)) => ElementValue::Object(o.into()),
             Some(StoredValue::LocalDateTime(micros)) => {
-                let dt = DateTime::from_timestamp_micros(micros)
-                    .unwrap_or_default()
-                    .naive_utc();
-                ElementValue::LocalDateTime(dt)
+                match DateTime::from_timestamp_micros(micros) {
+                    Some(dt) => ElementValue::LocalDateTime(dt.naive_utc()),
+                    None => {
+                        tracing::warn!(micros, "out-of-range LocalDateTime in storage; using Null");
+                        ElementValue::Null
+                    }
+                }
             }
             Some(StoredValue::ZonedDateTime(zdt)) => {
                 let offset = FixedOffset::east_opt(zdt.offset_seconds).unwrap_or_else(|| {
                     FixedOffset::east_opt(0).expect("zero offset is always valid")
                 });
-                let utc_dt =
-                    DateTime::from_timestamp_micros(zdt.timestamp_micros).unwrap_or_default();
+                let utc_dt = match DateTime::from_timestamp_micros(zdt.timestamp_micros) {
+                    Some(dt) => dt,
+                    None => {
+                        tracing::warn!(
+                            micros = zdt.timestamp_micros,
+                            "out-of-range ZonedDateTime in storage; using Null"
+                        );
+                        return ElementValue::Null;
+                    }
+                };
                 let dt = offset.from_utc_datetime(&utc_dt.naive_utc());
                 ElementValue::ZonedDateTime(dt)
             }
