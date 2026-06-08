@@ -76,6 +76,16 @@ pub struct ReactionManager {
     log_registry: Arc<ComponentLogRegistry>,
     /// Abort handles to subscription forwarder + supervisor tasks per reaction
     subscription_tasks: Arc<RwLock<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
+    /// In-memory checkpoint maps per reaction, preserved across stop/start.
+    ///
+    /// Keyed by reaction id → shared checkpoint map (query id → checkpoint). The
+    /// forwarder advances these as it delivers results. When a reaction has no
+    /// durable state store, this map is used as the source of existing checkpoints
+    /// on restart, so a non-durable reaction resumes from its last delivered
+    /// position within the same process instead of replaying its entire outbox
+    /// from sequence 0 (which would re-deliver already-seen results as duplicates).
+    in_memory_checkpoints:
+        Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<String, ReactionCheckpoint>>>>>>,
     /// Shared component graph — the single source of truth for component metadata,
     /// state, relationships, runtime instances, AND event history.
     graph: Arc<RwLock<ComponentGraph>>,
@@ -109,6 +119,7 @@ impl ReactionManager {
             identity_provider: Arc::new(RwLock::new(None)),
             log_registry,
             subscription_tasks: Arc::new(RwLock::new(HashMap::new())),
+            in_memory_checkpoints: Arc::new(RwLock::new(HashMap::new())),
             graph,
             update_tx,
             reaction_metrics: Arc::new(RwLock::new(HashMap::new())),
@@ -340,8 +351,16 @@ impl ReactionManager {
         let policy = reaction.default_recovery_policy();
 
         // Shared checkpoint map — populated during bootstrap, read by forwarders after gate opens.
-        let shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        // For reactions without durable checkpoint persistence, reuse a per-reaction map that
+        // survives stop/start. The forwarder advances it as it enqueues results but (by design)
+        // does NOT persist that advancement to the state store, so on a same-process restart it
+        // is the only accurate record of the reaction's last delivered position.
+        let shared_checkpoints: Arc<RwLock<HashMap<String, ReactionCheckpoint>>> = {
+            let mut map = self.in_memory_checkpoints.write().await;
+            map.entry(reaction_id.to_string())
+                .or_insert_with(|| Arc::new(RwLock::new(HashMap::new())))
+                .clone()
+        };
 
         // 1. Wire subscriptions FIRST so events buffer in broadcast channels
         //    while bootstrap runs. Forwarders wait on gate before processing.
@@ -356,7 +375,7 @@ impl ReactionManager {
         .await?;
 
         // 2. Read existing checkpoints from the state store (batch).
-        let existing_checkpoints = match state_store.as_ref() {
+        let mut existing_checkpoints = match state_store.as_ref() {
             Some(store) => {
                 crate::reactions::checkpoint::read_checkpoints_batch(
                     store.as_ref(),
@@ -367,6 +386,29 @@ impl ReactionManager {
             }
             None => HashMap::new(),
         };
+
+        // 2b. For non-durable reactions, overlay the in-memory checkpoints that were
+        //     advanced by the forwarder and preserved across stop/start. The forwarder
+        //     does not persist its position durably (see wire_subscriptions), so the
+        //     durable store only holds the initial fresh-start sequence. On a same-process
+        //     restart the in-memory position is further ahead and reflects what was actually
+        //     delivered; using it prevents re-delivering already-seen results as duplicates.
+        //     Durable reactions are excluded: they persist their checkpoint after processing
+        //     each event, so the durable store is authoritative and the (enqueue-based)
+        //     in-memory position must not cause unprocessed events to be skipped on recovery.
+        if !reaction.is_durable() {
+            let in_memory = shared_checkpoints.read().await;
+            for (query_id, cp) in in_memory.iter() {
+                existing_checkpoints
+                    .entry(query_id.clone())
+                    .and_modify(|existing| {
+                        if cp.sequence > existing.sequence {
+                            *existing = cp.clone();
+                        }
+                    })
+                    .or_insert_with(|| cp.clone());
+            }
+        }
 
         // 3. Per-query bootstrap: build the initial checkpoint map and collect
         //    any queries that need a full bootstrap hook call.
@@ -883,6 +925,13 @@ impl ReactionManager {
         {
             let mut metrics_map = self.reaction_metrics.write().await;
             metrics_map.retain(|(rid, _), _| rid != &id);
+        }
+
+        // Drop the preserved in-memory checkpoints — the reaction is being removed,
+        // so a future re-add should start fresh rather than resume a stale position.
+        {
+            let mut cps = self.in_memory_checkpoints.write().await;
+            cps.remove(&id);
         }
 
         Ok(())
@@ -2230,6 +2279,102 @@ mod tests {
             3,
             "Expected exactly 3 new events, got {} (stale events should be filtered)",
             results.len()
+        );
+    }
+
+    /// Regression: a non-durable reaction (no durable checkpoint persistence) must
+    /// resume from its last delivered position on a same-process stop/restart, instead
+    /// of replaying its entire outbox from sequence 0 and re-delivering already-seen
+    /// results as duplicates.
+    ///
+    /// The forwarder advances the in-memory checkpoint as it enqueues results but does
+    /// not persist that advancement durably, so the state store only holds the initial
+    /// fresh-start sequence (0). Without preserving the in-memory checkpoint across
+    /// restart, `handle_outbox_catchup` would fetch the outbox from 0 and re-enqueue
+    /// every prior result.
+    #[tokio::test]
+    async fn non_durable_reaction_resumes_from_in_memory_checkpoint_on_restart() {
+        let store = Arc::new(crate::state_store::MemoryStateStoreProvider::new());
+        let core = build_core_with_store(store.clone()).await;
+        core.start().await.unwrap();
+
+        let mut event_rx = core.subscribe_all_component_events();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "q1",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+
+        // Start a non-durable reaction while the outbox is empty: fresh start persists
+        // a durable checkpoint at seq=0.
+        let reaction = MockReaction::new("r_nondurable", vec!["q1".into()])
+            .with_durable(false)
+            .with_snapshot_on_fresh(false)
+            .with_policy(ReactionRecoveryPolicy::Strict);
+        let enqueued = reaction.enqueued.clone();
+        core.add_reaction(reaction).await.unwrap();
+        core.start_reaction("r_nondurable").await.unwrap();
+
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_nondurable",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        // Forward 3 results — the in-memory checkpoint advances to 3, but the durable
+        // store stays at seq=0 (the forwarder does not persist its advancement).
+        inject_events(&core, 3).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            enqueued.lock().await.len(),
+            3,
+            "Expected 3 results forwarded before restart"
+        );
+
+        // The durable checkpoint is still behind the in-memory one.
+        let durable_cp =
+            crate::reactions::checkpoint::read_checkpoint(store.as_ref(), "r_nondurable", "q1")
+                .await
+                .unwrap()
+                .expect("Checkpoint should exist");
+        assert_eq!(
+            durable_cp.sequence, 0,
+            "Durable checkpoint should remain at the fresh-start sequence"
+        );
+
+        // Stop and restart the reaction within the same process.
+        core.stop_reaction("r_nondurable").await.unwrap();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_nondurable",
+            ComponentStatus::Stopped,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        enqueued.lock().await.clear();
+
+        core.start_reaction("r_nondurable").await.unwrap();
+        crate::test_helpers::wait_for_component_status(
+            &mut event_rx,
+            "r_nondurable",
+            ComponentStatus::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // The reaction must NOT re-enqueue the 3 already-delivered results.
+        let after_restart = enqueued.lock().await;
+        assert!(
+            after_restart.is_empty(),
+            "Non-durable reaction re-delivered {} already-seen results on restart \
+             (should resume from in-memory checkpoint)",
+            after_restart.len()
         );
     }
 
