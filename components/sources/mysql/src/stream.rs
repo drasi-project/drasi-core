@@ -52,6 +52,7 @@ pub struct ReplicationStream {
     current_event_timestamp: u64,
     shutdown: StdArc<AtomicBool>,
     subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
+    initial_bootstrap_pending: StdArc<AtomicBool>,
 }
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -73,6 +74,7 @@ impl ReplicationStream {
         base: SourceBase,
         shutdown: StdArc<AtomicBool>,
         subscriber_resume_positions: StdArc<RwLock<HashMap<String, ReplicationState>>>,
+        initial_bootstrap_pending: StdArc<AtomicBool>,
     ) -> Self {
         let decoder = MySqlDecoder::new(source_id.clone(), &config.table_keys);
         Self {
@@ -87,6 +89,7 @@ impl ReplicationStream {
             current_event_timestamp: 0,
             shutdown,
             subscriber_resume_positions,
+            initial_bootstrap_pending,
         }
     }
 
@@ -113,7 +116,7 @@ impl ReplicationStream {
                 return Ok(());
             }
 
-            let start_position = self.determine_start_position().await;
+            let start_position = self.determine_start_position().await?;
 
             match self.run_replication_loop(start_position).await {
                 Ok(()) => return Ok(()),
@@ -489,12 +492,12 @@ impl ReplicationStream {
 
     /// Build a position token from the current replication state with a given timestamp.
     fn position_bytes_with_timestamp(&self, timestamp: u64) -> bytes::Bytes {
-        let state = ReplicationState {
-            binlog_file: self.current_binlog_file.clone(),
-            binlog_position: self.current_binlog_position,
-            gtid_set: self.current_gtid.clone(),
-            last_processed_timestamp: timestamp,
-        };
+        let state = ReplicationState::new(
+            self.current_binlog_file.clone(),
+            self.current_binlog_position,
+            self.current_gtid.clone(),
+            timestamp,
+        );
         state.to_position_bytes()
     }
 
@@ -517,10 +520,36 @@ impl ReplicationStream {
     /// Determine the start position for the binlog stream based on subscriber resume positions.
     /// The minimum position across all subscribers is used so no subscriber misses events.
     /// If no subscribers have a resume position, fall back to the configured start_position.
-    async fn determine_start_position(&self) -> StartPosition {
+    async fn determine_start_position(&self) -> Result<StartPosition> {
         let positions = self.subscriber_resume_positions.read().await;
         if positions.is_empty() {
-            return self.config.start_position.clone();
+            drop(positions);
+            if self
+                .initial_bootstrap_pending
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                info!(
+                    "Source '{}': waiting for initial MySQL bootstrap boundary before starting binlog stream",
+                    self.source_id
+                );
+                if let Some(boundary) = self.base.wait_for_bootstrap_boundary().await {
+                    let state = ReplicationState::from_position_bytes(&boundary)
+                        .context("Failed to decode MySQL bootstrap boundary position")?;
+                    info!(
+                        "Source '{}': starting binlog stream from bootstrap boundary {}:{}",
+                        self.source_id, state.binlog_file, state.binlog_position
+                    );
+                    return Self::start_position_from_state(&state).ok_or_else(|| {
+                        anyhow!("MySQL bootstrap boundary did not contain a usable position")
+                    });
+                }
+                warn!(
+                    "Source '{}': bootstrap boundary channel closed before a boundary was published; falling back to configured start position",
+                    self.source_id
+                );
+            }
+            return Ok(self.config.start_position.clone());
         }
 
         // Find the minimum (earliest) position across all subscribers.
@@ -540,20 +569,22 @@ impl ReplicationStream {
             });
         }
 
-        match min_state {
-            Some(state) => {
-                if let Some(ref gtid) = state.gtid_set {
-                    StartPosition::FromGtid(gtid.clone())
-                } else if !state.binlog_file.is_empty() {
-                    StartPosition::FromPosition {
-                        file: state.binlog_file.clone(),
-                        position: state.binlog_position,
-                    }
-                } else {
-                    self.config.start_position.clone()
-                }
-            }
+        Ok(match min_state.and_then(Self::start_position_from_state) {
+            Some(position) => position,
             None => self.config.start_position.clone(),
+        })
+    }
+
+    fn start_position_from_state(state: &ReplicationState) -> Option<StartPosition> {
+        if let Some(ref gtid) = state.gtid_set {
+            Some(StartPosition::FromGtid(gtid.clone()))
+        } else if !state.binlog_file.is_empty() {
+            Some(StartPosition::FromPosition {
+                file: state.binlog_file.clone(),
+                position: state.binlog_position,
+            })
+        } else {
+            None
         }
     }
 

@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use log::{info, warn};
 use mysql_async::prelude::*;
@@ -44,6 +44,12 @@ struct BootstrapBinlogPosition {
     binlog_position: u32,
     gtid_set: Option<String>,
     last_processed_timestamp: u64,
+}
+
+fn encode_bootstrap_position(position: &BootstrapBinlogPosition) -> Result<bytes::Bytes> {
+    serde_json::to_vec(position)
+        .map(bytes::Bytes::from)
+        .context("Failed to encode MySQL bootstrap boundary position")
 }
 
 pub struct MySqlBootstrapHandler {
@@ -79,30 +85,54 @@ impl MySqlBootstrapHandler {
 
         let mut conn = self.connect().await?;
         let tables = self.determine_tables(&request).await?;
-        if tables.is_empty() {
-            warn!("No tables selected for bootstrap; check configured allowlist and query labels");
-            return Ok(BootstrapResult {
-                event_count: 0,
-                source_position: None,
-            });
+
+        conn.query_drop("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .context("Failed to set MySQL bootstrap transaction isolation level")?;
+        conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            .await
+            .context("Failed to start MySQL consistent snapshot transaction")?;
+
+        let snapshot_result = async {
+            if tables.is_empty() {
+                warn!(
+                    "No tables selected for bootstrap; check configured allowlist and query labels"
+                );
+            }
+
+            let source_position = self.capture_binlog_position(&mut conn).await?;
+
+            let mut total = 0usize;
+            for (label, table_name) in tables {
+                let count = self
+                    .bootstrap_table(&mut conn, &label, &table_name, context, &event_tx)
+                    .await?;
+                total += count;
+            }
+
+            Ok::<_, anyhow::Error>((total, source_position))
         }
+        .await;
 
-        // Capture the current binlog position before reading snapshot data.
-        // This becomes the resume point for checkpoint recovery.
-        let source_position = self.capture_binlog_position(&mut conn).await?;
-
-        let mut total = 0usize;
-        for (label, table_name) in tables {
-            let count = self
-                .bootstrap_table(&mut conn, &label, &table_name, context, &event_tx)
-                .await?;
-            total += count;
+        match snapshot_result {
+            Ok((total, source_position)) => {
+                conn.query_drop("COMMIT")
+                    .await
+                    .context("Failed to commit MySQL bootstrap snapshot transaction")?;
+                Ok(BootstrapResult {
+                    event_count: total,
+                    source_position,
+                })
+            }
+            Err(err) => {
+                if let Err(rollback_err) = conn.query_drop("ROLLBACK").await {
+                    warn!(
+                        "Failed to roll back MySQL bootstrap snapshot transaction: {rollback_err}"
+                    );
+                }
+                Err(err).context("MySQL bootstrap snapshot failed")
+            }
         }
-
-        Ok(BootstrapResult {
-            event_count: total,
-            source_position,
-        })
     }
 
     async fn connect(&self) -> Result<Conn> {
@@ -131,19 +161,25 @@ impl MySqlBootstrapHandler {
             return Ok(None);
         };
 
-        let file: String = row.get(0).unwrap_or_default();
-        let position: u64 = row.get(1).unwrap_or(0);
-        let gtid_set: Option<String> = row.get(4);
+        let file: String = row
+            .get(0)
+            .context("MySQL binlog status did not return a binlog filename")?;
+        let position: u64 = row
+            .get(1)
+            .context("MySQL binlog status did not return a binlog position")?;
+        let gtid_set = row
+            .get::<String, _>(4)
+            .filter(|gtid| !gtid.trim().is_empty());
 
         let state = BootstrapBinlogPosition {
             binlog_file: file,
-            binlog_position: position as u32,
+            binlog_position: u32::try_from(position)
+                .context("MySQL binlog position exceeds supported range")?,
             gtid_set,
             last_processed_timestamp: 0,
         };
 
-        let bytes = serde_json::to_vec(&state)?;
-        Ok(Some(bytes::Bytes::from(bytes)))
+        encode_bootstrap_position(&state).map(Some)
     }
 
     async fn determine_tables(&self, request: &BootstrapRequest) -> Result<Vec<(String, String)>> {
