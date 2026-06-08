@@ -144,6 +144,19 @@ pub fn insert_product(oracle: &OracleGuard, id: i64, name: &str, price: f64) -> 
     Ok(())
 }
 
+pub fn insert_products_batch(oracle: &OracleGuard, products: &[(i64, String, f64)]) -> Result<()> {
+    let mut sql = String::from("WHENEVER SQLERROR EXIT FAILURE;\n");
+    for (id, name, price) in products {
+        sql.push_str(&format!(
+            "INSERT INTO SYSTEM.DRASI_PRODUCTS (ID, NAME, PRICE) VALUES ({id}, '{name}', {price});\n"
+        ));
+    }
+    sql.push_str("COMMIT;\nEXIT;\n");
+
+    exec_sqlplus(oracle.container_id(), &oracle.config().password, &sql)?;
+    Ok(())
+}
+
 pub fn update_product(oracle: &OracleGuard, id: i64, name: &str, price: f64) -> Result<()> {
     exec_sqlplus(
         oracle.container_id(),
