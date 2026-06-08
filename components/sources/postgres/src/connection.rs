@@ -609,6 +609,6 @@ pub(crate) fn position_bytes_to_lsn(position: &Bytes) -> Result<u64> {
 
     let bytes: [u8; 8] = position[..8]
         .try_into()
-        .expect("length already verified as 8");
+        .map_err(|_| anyhow!("unexpected: array conversion failed after length check"))?;
     Ok(u64::from_be_bytes(bytes))
 }

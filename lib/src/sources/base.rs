@@ -1097,6 +1097,11 @@ impl SourceBase {
                             // first non-None boundary wins.
                             if is_initial_bootstrap {
                                 if let Some(position) = result.source_position.clone() {
+                                    // Same semantics as
+                                    // SourceBase::publish_bootstrap_boundary: first
+                                    // non-None value wins, later calls are no-ops.
+                                    // Inlined here because the closure captures the
+                                    // boundary sender rather than &self.
                                     let set = boundary.send_if_modified(|current| {
                                         if current.is_none() {
                                             *current = Some(position);
