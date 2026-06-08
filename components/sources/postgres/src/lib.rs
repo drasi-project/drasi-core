@@ -180,16 +180,15 @@ pub mod types;
 
 pub use config::{PostgresSourceConfig, SslMode, TableKeyConfig};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
 use drasi_lib::schema::{
     normalize_table_label, NodeSchema, PropertySchema, PropertyType, SourceSchema,
 };
 use log::{debug, error, info};
 use postgres_native_tls::MakeTlsConnector;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
@@ -302,6 +301,8 @@ pub struct PostgresReplicationSource {
     replay_state: Arc<ReplayState>,
     /// Serializes subscribe() calls that may restart the replication task.
     subscribe_lock: Mutex<()>,
+    /// Whether the initial CDC task should wait for the bootstrap snapshot boundary.
+    wait_for_bootstrap_boundary_on_start: AtomicBool,
 }
 
 fn postgres_type_to_property_type(data_type: &str) -> Option<PropertyType> {
@@ -496,6 +497,7 @@ impl PostgresReplicationSource {
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
             subscribe_lock: Mutex::new(()),
+            wait_for_bootstrap_boundary_on_start: AtomicBool::new(false),
         })
     }
 
@@ -523,6 +525,7 @@ impl PostgresReplicationSource {
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
             subscribe_lock: Mutex::new(()),
+            wait_for_bootstrap_boundary_on_start: AtomicBool::new(false),
         })
     }
 }
@@ -530,8 +533,13 @@ impl PostgresReplicationSource {
 impl PostgresReplicationSource {
     /// Spawn the background replication task, optionally starting from a specific LSN.
     ///
-    /// Waits for the task to confirm successful connection before returning.
-    async fn spawn_replication_task(&self, start_lsn: Option<u64>) -> Result<()> {
+    /// Waits for the task to confirm successful connection before returning, except for the
+    /// initial bootstrap handoff path where the task must wait for the snapshot boundary first.
+    async fn spawn_replication_task(
+        &self,
+        start_lsn: Option<u64>,
+        wait_for_bootstrap_boundary: bool,
+    ) -> Result<()> {
         let config = self.config.clone();
         let source_id = self.base.id.clone();
         let reporter = self.base.status_handle();
@@ -558,6 +566,47 @@ impl PostgresReplicationSource {
         let task = tokio::spawn(
             async move {
                 info!("Starting replication for source {source_id}");
+                let mut ready_tx = Some(ready_tx);
+
+                let effective_start_lsn = if wait_for_bootstrap_boundary {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Ok(()));
+                    }
+
+                    info!(
+                        "PostgreSQL source '{source_id}' waiting for bootstrap snapshot boundary"
+                    );
+                    match base.wait_for_bootstrap_boundary().await {
+                        Some(boundary) => match connection::position_bytes_to_lsn(&boundary)
+                            .context("invalid PostgreSQL bootstrap boundary position")
+                        {
+                            Ok(lsn) => {
+                                info!(
+                                    "PostgreSQL source '{source_id}' starting CDC from bootstrap boundary LSN {lsn:x}"
+                                );
+                                Some(lsn)
+                            }
+                            Err(e) => {
+                                error!("Replication task failed for {source_id}: {e}");
+                                reporter
+                                    .set_status(
+                                        ComponentStatus::Error,
+                                        Some(format!("Replication failed: {e}")),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        },
+                        None => {
+                            info!(
+                                "PostgreSQL source '{source_id}' stopped before bootstrap boundary was published"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    start_lsn
+                };
 
                 let mut stream = stream::ReplicationStream::new(
                     config,
@@ -565,10 +614,10 @@ impl PostgresReplicationSource {
                     reporter.clone(),
                     base,
                     replay_state,
-                    start_lsn,
+                    effective_start_lsn,
                 );
 
-                if let Err(e) = stream.run(Some(ready_tx)).await {
+                if let Err(e) = stream.run(ready_tx).await {
                     error!("Replication task failed for {source_id}: {e}");
                     reporter
                         .set_status(
@@ -639,7 +688,7 @@ impl PostgresReplicationSource {
     }
 
     async fn resume_replication_from(&self, start_lsn: u64) -> Result<()> {
-        self.spawn_replication_task(Some(start_lsn)).await?;
+        self.spawn_replication_task(Some(start_lsn), false).await?;
 
         self.base
             .set_status(
@@ -745,6 +794,7 @@ impl Source for PostgresReplicationSource {
         }
 
         self.base.set_status(ComponentStatus::Starting, None).await;
+        self.base.reset_bootstrap_boundary();
         info!("Starting PostgreSQL replication source: {}", self.base.id);
 
         match introspect_postgres_schema(&self.config).await {
@@ -762,7 +812,11 @@ impl Source for PostgresReplicationSource {
             }
         }
 
-        self.spawn_replication_task(None).await?;
+        let wait_for_bootstrap_boundary = self
+            .wait_for_bootstrap_boundary_on_start
+            .load(Ordering::Acquire);
+        self.spawn_replication_task(None, wait_for_bootstrap_boundary)
+            .await?;
         self.base
             .set_status(
                 ComponentStatus::Running,
@@ -815,27 +869,14 @@ impl Source for PostgresReplicationSource {
         let mut pause_before_subscribe = false;
 
         if let Some(ref resume_bytes) = settings.resume_from {
-            // Parse opaque position bytes back to Postgres LSN (8-byte big-endian u64)
-            let resume_lsn = if resume_bytes.len() == 8 {
-                let bytes: [u8; 8] = resume_bytes[..8]
-                    .try_into()
-                    .expect("length already verified as 8");
-                u64::from_be_bytes(bytes)
-            } else {
-                return Err(anyhow!(
-                    "Invalid resume_from position: expected 8 bytes, got {}",
-                    resume_bytes.len()
-                ));
-            };
+            let resume_lsn = connection::position_bytes_to_lsn(resume_bytes)?;
 
             let earliest_available = self.get_earliest_available_lsn().await?;
             if resume_lsn < earliest_available {
                 return Err(SourceError::PositionUnavailable {
                     source_id: self.base.id.clone(),
                     requested: resume_bytes.clone(),
-                    earliest_available: Some(Bytes::from(
-                        earliest_available.to_be_bytes().to_vec(),
-                    )),
+                    earliest_available: Some(connection::lsn_to_position_bytes(earliest_available)),
                 }
                 .into());
             }
@@ -912,6 +953,8 @@ impl Source for PostgresReplicationSource {
         &self,
         provider: Box<dyn drasi_lib::bootstrap::BootstrapProvider + 'static>,
     ) {
+        self.wait_for_bootstrap_boundary_on_start
+            .store(true, Ordering::Release);
         self.base.set_bootstrap_provider(provider).await;
     }
 }
@@ -1121,6 +1164,7 @@ impl PostgresSourceBuilder {
         if let Some(capacity) = self.dispatch_buffer_capacity {
             params = params.with_dispatch_buffer_capacity(capacity);
         }
+        let has_bootstrap_provider = self.bootstrap_provider.is_some();
         if let Some(provider) = self.bootstrap_provider {
             params = params.with_bootstrap_provider(provider);
         }
@@ -1131,6 +1175,7 @@ impl PostgresSourceBuilder {
             cached_schema: Arc::new(std::sync::RwLock::new(None)),
             replay_state: Arc::new(ReplayState::default()),
             subscribe_lock: Mutex::new(()),
+            wait_for_bootstrap_boundary_on_start: AtomicBool::new(has_bootstrap_provider),
         })
     }
 }

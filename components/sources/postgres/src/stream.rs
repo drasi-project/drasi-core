@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
 use chrono::Utc;
 use log::{debug, error, info, trace, warn};
 use std::collections::HashMap;
@@ -730,7 +729,7 @@ impl ReplicationStream {
         );
 
         // Attach the WAL LSN as opaque source_position bytes for checkpoint/recovery
-        wrapper.set_source_position(Bytes::from(lsn.to_be_bytes().to_vec()));
+        wrapper.set_source_position(super::connection::lsn_to_position_bytes(lsn));
 
         // Use dispatch_event() which stamps the monotonic sequence
         if let Err(e) = self.base.dispatch_event(wrapper).await {

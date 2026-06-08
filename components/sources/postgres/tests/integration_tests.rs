@@ -20,9 +20,12 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
+use drasi_lib::channels::ResultDiff;
 use drasi_lib::ComponentStatus;
 use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
-use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
+use drasi_reaction_application::{
+    subscription::SubscriptionOptions, ApplicationReaction, ApplicationReactionHandle,
+};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
@@ -33,7 +36,7 @@ use postgres_helpers::{
     setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -434,6 +437,152 @@ async fn test_full_crud_cycle() -> Result<()> {
 
     delete_test_row(&client, TEST_TABLE, 1).await?;
     wait_for_query_results(&core, "test-query", |results| results.is_empty()).await?;
+
+    core.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
+#[derive(Default)]
+struct ObservedDiffs {
+    adds: HashMap<i64, usize>,
+    updates: HashMap<i64, usize>,
+    deletes: HashMap<i64, usize>,
+}
+
+fn id_from_row(row: &serde_json::Value) -> Option<i64> {
+    row.get("id").and_then(serde_json::Value::as_i64)
+}
+
+fn name_from_row(row: &serde_json::Value) -> Option<&str> {
+    row.get("name").and_then(serde_json::Value::as_str)
+}
+
+fn record_diff(observed: &mut ObservedDiffs, diff: &ResultDiff) {
+    match diff {
+        ResultDiff::Add { data, .. } => {
+            if let Some(id) = id_from_row(data) {
+                *observed.adds.entry(id).or_default() += 1;
+            }
+        }
+        ResultDiff::Update { after, .. } => {
+            if let Some(id) = id_from_row(after) {
+                *observed.updates.entry(id).or_default() += 1;
+            }
+        }
+        ResultDiff::Delete { data, .. } => {
+            if let Some(id) = id_from_row(data) {
+                *observed.deletes.entry(id).or_default() += 1;
+            }
+        }
+        ResultDiff::Aggregation { .. } | ResultDiff::Noop => {}
+    }
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    let seed_count = 5_000_i32;
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {TEST_TABLE} (id, name) SELECT i, 'Seed ' || i::text FROM generate_series(1, $1) AS i"
+            ),
+            &[&seed_count],
+        )
+        .await?;
+
+    let slot_name = slot_name();
+    create_logical_replication_slot(&client, &slot_name).await?;
+
+    let (core, handle) = build_core(pg.config(), slot_name).await?;
+    let mut subscription = handle
+        .subscribe_with_options(
+            SubscriptionOptions::default().with_timeout(Duration::from_millis(500)),
+        )
+        .await?;
+
+    let core_for_start = Arc::clone(&core);
+    let start_task = tokio::spawn(async move { core_for_start.start().await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let concurrent_insert_id = i64::from(seed_count) + 1;
+    insert_test_row(
+        &client,
+        TEST_TABLE,
+        concurrent_insert_id as i32,
+        "Concurrent Insert",
+    )
+    .await?;
+    update_test_row(&client, TEST_TABLE, 1, "Seed 1 Updated").await?;
+    delete_test_row(&client, TEST_TABLE, 2).await?;
+
+    start_task.await??;
+
+    let mut observed = ObservedDiffs::default();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        if let Some(result) = subscription.recv().await {
+            for diff in &result.results {
+                if let ResultDiff::Update { after, .. } = diff {
+                    if id_from_row(after) == Some(1)
+                        && name_from_row(after) != Some("Seed 1 Updated")
+                    {
+                        continue;
+                    }
+                }
+                record_diff(&mut observed, diff);
+            }
+        }
+
+        if observed.adds.len() == seed_count as usize + 1
+            && observed.updates.get(&1) == Some(&1)
+            && observed.deletes.get(&2) == Some(&1)
+        {
+            break;
+        }
+    }
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    while let Some(result) = subscription.try_recv() {
+        for diff in &result.results {
+            record_diff(&mut observed, diff);
+        }
+    }
+
+    for id in 1..=i64::from(seed_count) {
+        assert_eq!(observed.adds.get(&id), Some(&1), "seed row {id} ADD count");
+    }
+    assert_eq!(
+        observed.adds.get(&concurrent_insert_id),
+        Some(&1),
+        "concurrent insert ADD count"
+    );
+    assert_eq!(
+        observed.updates.get(&1),
+        Some(&1),
+        "concurrent update count"
+    );
+    assert_eq!(
+        observed.deletes.get(&2),
+        Some(&1),
+        "concurrent delete count"
+    );
+    assert_eq!(observed.adds.len(), seed_count as usize + 1);
+    assert_eq!(observed.updates.len(), 1);
+    assert_eq!(observed.deletes.len(), 1);
 
     core.stop().await?;
     pg.cleanup().await;
