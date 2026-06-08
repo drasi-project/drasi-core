@@ -22,7 +22,8 @@ use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_oracle::{OracleSource, StartPosition};
 use oracle_helpers::{
-    delete_product, insert_product, prepare_oracle_database, setup_oracle, update_product,
+    delete_product, insert_product, insert_products_batch, prepare_oracle_database, setup_oracle,
+    update_product,
 };
 use serde_json::Value;
 use serial_test::serial;
@@ -814,6 +815,251 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Oracle full restart checkpoint test timed out after 300 seconds"),
+    }
+
+    Ok(())
+}
+
+/// Verifies the bootstrap-to-CDC handover eliminates overlap: rows mutated
+/// concurrently with the initial bootstrap snapshot must be observed exactly
+/// once via CDC (no duplicates) and no seed row may be replayed by CDC after
+/// the bootstrap boundary (no gaps), leaving a correct final materialized state.
+#[tokio::test]
+#[ignore]
+#[serial]
+async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> Result<()> {
+    use std::collections::HashMap;
+
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    const SEED_COUNT: i64 = 200;
+
+    // Oracle JSON values may be returned as either numbers or numeric strings.
+    fn as_i64(value: &Value) -> Option<i64> {
+        match value {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(420), async {
+        let oracle = setup_oracle()
+            .await
+            .context("Failed to start Oracle container")?;
+        prepare_oracle_database(&oracle)
+            .await
+            .context("Failed to prepare Oracle database")?;
+
+        let seed: Vec<(i64, String, f64)> = (1..=SEED_COUNT)
+            .map(|id| (id, format!("Seed{id}"), id as f64))
+            .collect();
+        insert_products_batch(&oracle, &seed).context("Failed to seed Oracle rows")?;
+
+        let config = oracle.config().clone();
+        let bootstrap_provider = OracleBootstrapProvider::builder()
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .build()
+            .context("Failed to build Oracle bootstrap provider")?;
+
+        let source = OracleSource::builder(SOURCE_ID)
+            .with_host(&config.host)
+            .with_port(config.port)
+            .with_service(&config.service)
+            .with_user(&config.user)
+            .with_password(&config.password)
+            .with_table(TABLE_NAME)
+            .with_poll_interval_ms(1_000)
+            .with_start_position(StartPosition::Current)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build Oracle source")?;
+
+        let query = Query::cypher(QUERY_ID)
+            .query(
+                r#"
+                MATCH (p:drasi_products)
+                RETURN p.id AS id, p.name AS name, p.price AS price
+            "#,
+            )
+            .from_source(SOURCE_ID)
+            .auto_start(true)
+            .enable_bootstrap(true)
+            .build();
+
+        let (reaction, handle) = ApplicationReaction::builder("oracle-overlap-reaction")
+            .with_query(QUERY_ID)
+            .build();
+
+        let core = DrasiLib::builder()
+            .with_id("oracle-overlap-test")
+            .with_source(source)
+            .with_query(query)
+            .with_reaction(reaction)
+            .build()
+            .await
+            .context("Failed to build DrasiLib")?;
+
+        let mut subscription = handle
+            .subscribe_with_options(
+                SubscriptionOptions::default().with_timeout(Duration::from_secs(5)),
+            )
+            .await
+            .context("Failed to subscribe to ApplicationReaction")?;
+
+        core.start().await.context("Failed to start DrasiLib")?;
+
+        // Mutate rows concurrently with the initial bootstrap snapshot so the
+        // changes straddle the bootstrap boundary SCN.
+        update_product(&oracle, 10, "ConcurrentUpdated", 999.0)
+            .context("Failed concurrent update")?;
+        delete_product(&oracle, 20).context("Failed concurrent delete")?;
+        insert_product(&oracle, SEED_COUNT + 1, "ConcurrentInserted", 1001.0)
+            .context("Failed concurrent insert")?;
+
+        // Collect diffs and ensure no seed row is replayed by CDC after the
+        // bootstrap boundary, while each concurrent change is seen exactly once.
+        let mut update_count = 0usize;
+        let mut delete_count = 0usize;
+        let mut insert_count = 0usize;
+        let mut seed_cdc_adds: HashMap<i64, usize> = HashMap::new();
+
+        for _ in 0..120 {
+            match tokio::time::timeout(Duration::from_secs(1), subscription.recv()).await {
+                Ok(Some(result)) => {
+                    for diff in &result.results {
+                        match diff {
+                            ResultDiff::Add { data, .. } => {
+                                let name = data
+                                    .get("name")
+                                    .and_then(value_as_string)
+                                    .unwrap_or_default();
+                                if name == "ConcurrentInserted" {
+                                    insert_count += 1;
+                                } else if name.starts_with("Seed") {
+                                    if let Some(id) = data.get("id").and_then(as_i64) {
+                                        *seed_cdc_adds.entry(id).or_default() += 1;
+                                    }
+                                }
+                            }
+                            ResultDiff::Update { data, .. } => {
+                                if data.get("name").and_then(value_as_string).as_deref()
+                                    == Some("ConcurrentUpdated")
+                                {
+                                    update_count += 1;
+                                }
+                            }
+                            ResultDiff::Delete { data, .. } => {
+                                if data.get("id").and_then(as_i64) == Some(20) {
+                                    delete_count += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {}
+            }
+
+            if update_count >= 1 && delete_count >= 1 && insert_count >= 1 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            update_count, 1,
+            "concurrent UPDATE should be observed exactly once via CDC"
+        );
+        assert_eq!(
+            delete_count, 1,
+            "concurrent DELETE should be observed exactly once via CDC"
+        );
+        assert_eq!(
+            insert_count, 1,
+            "concurrent INSERT should be observed exactly once via CDC"
+        );
+        assert!(
+            seed_cdc_adds.is_empty(),
+            "seed rows were replayed by CDC after the bootstrap boundary (overlap): {seed_cdc_adds:?}"
+        );
+
+        // Final materialized state must reflect bootstrap + concurrent changes
+        // exactly once each, with no duplicates or gaps.
+        let mut final_rows = Vec::new();
+        for _ in 0..60 {
+            final_rows = core
+                .get_query_results(QUERY_ID)
+                .await
+                .context("Failed to read final query results")?;
+            let has_update = final_rows.iter().any(|row| {
+                row.get("id").and_then(as_i64) == Some(10)
+                    && row.get("name").and_then(value_as_string).as_deref()
+                        == Some("ConcurrentUpdated")
+            });
+            let has_insert = final_rows.iter().any(|row| {
+                row.get("name").and_then(value_as_string).as_deref() == Some("ConcurrentInserted")
+            });
+            let deleted_absent = final_rows
+                .iter()
+                .all(|row| row.get("id").and_then(as_i64) != Some(20));
+            if final_rows.len() == SEED_COUNT as usize && has_update && has_insert && deleted_absent
+            {
+                break;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut rows_by_id: HashMap<i64, usize> = HashMap::new();
+        for row in &final_rows {
+            if let Some(id) = row.get("id").and_then(as_i64) {
+                *rows_by_id.entry(id).or_default() += 1;
+            }
+        }
+
+        assert_eq!(
+            final_rows.len(),
+            SEED_COUNT as usize,
+            "unexpected final row count: {rows_by_id:?}"
+        );
+        for id in 1..=SEED_COUNT {
+            let expected = if id == 20 { 0 } else { 1 };
+            assert_eq!(
+                rows_by_id.get(&id).copied().unwrap_or_default(),
+                expected,
+                "seed id {id} missing or duplicated in final results"
+            );
+        }
+        assert_eq!(
+            rows_by_id.get(&(SEED_COUNT + 1)).copied().unwrap_or_default(),
+            1,
+            "concurrently inserted row missing or duplicated in final results"
+        );
+        assert!(
+            final_rows.iter().any(|row| {
+                row.get("id").and_then(as_i64) == Some(10)
+                    && row.get("name").and_then(value_as_string).as_deref()
+                        == Some("ConcurrentUpdated")
+            }),
+            "concurrent update not reflected in final results"
+        );
+
+        core.stop().await.context("Failed to stop DrasiLib")?;
+        oracle.cleanup().await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("Oracle overlap handover test timed out after 420 seconds"),
     }
 
     Ok(())
