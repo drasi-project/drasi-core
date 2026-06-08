@@ -1791,6 +1791,87 @@ mod tests {
         SourceBase::new(params).unwrap()
     }
 
+    /// Bootstrap provider that returns a fixed `source_position`, used to
+    /// exercise the framework's auto-publish of the bootstrap→CDC boundary.
+    struct PositionProvider {
+        position: bytes::Bytes,
+    }
+
+    #[async_trait]
+    impl BootstrapProvider for PositionProvider {
+        async fn bootstrap(
+            &self,
+            _request: BootstrapRequest,
+            _context: &BootstrapContext,
+            event_tx: BootstrapEventSender,
+            _settings: Option<&crate::config::SourceSubscriptionSettings>,
+        ) -> Result<BootstrapResult> {
+            drop(event_tx); // no bootstrap events
+            Ok(BootstrapResult {
+                event_count: 0,
+                source_position: Some(self.position.clone()),
+            })
+        }
+    }
+
+    /// Source-agnostic e2e handover test (issue #455, Part 1): the framework
+    /// must publish `BootstrapResult.source_position` to the boundary cell for
+    /// the first-ever bootstrap so a CDC-start task awaiting the boundary
+    /// resumes at exactly the snapshot boundary (no overlap, no gap).
+    #[tokio::test]
+    async fn test_initial_bootstrap_publishes_boundary_to_cdc() {
+        let mut params = SourceBaseParams::new("agnostic-handover");
+        params.bootstrap_provider = Some(Box::new(PositionProvider {
+            position: bytes::Bytes::from_static(b"boundary-xyz"),
+        }));
+        let base = SourceBase::new(params).unwrap();
+
+        // A CDC-start task awaits the boundary, exactly like a real source.
+        let cdc = base.clone_shared();
+        let cdc_task = tokio::spawn(async move { cdc.wait_for_bootstrap_boundary().await });
+
+        // Initial subscription: enable bootstrap, no resume_from.
+        let _resp = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, None, true), "test")
+            .await
+            .unwrap();
+
+        let boundary = tokio::time::timeout(std::time::Duration::from_secs(5), cdc_task)
+            .await
+            .expect("CDC task should observe the boundary in time")
+            .unwrap();
+
+        assert_eq!(
+            boundary,
+            Some(bytes::Bytes::from_static(b"boundary-xyz")),
+            "CDC start must observe exactly the snapshot boundary published by bootstrap"
+        );
+    }
+
+    /// A resume/crash-recovery subscription (`resume_from.is_some()`) must NOT
+    /// publish a bootstrap boundary — that path uses `resume_from` directly.
+    #[tokio::test]
+    async fn test_resume_subscription_does_not_publish_boundary() {
+        let mut params = SourceBaseParams::new("agnostic-resume");
+        params.bootstrap_provider = Some(Box::new(PositionProvider {
+            position: bytes::Bytes::from_static(b"boundary-xyz"),
+        }));
+        let base = SourceBase::new(params).unwrap();
+
+        let resume = bytes::Bytes::from_static(b"resume-pos");
+        let _resp = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, Some(resume), true), "test")
+            .await
+            .unwrap();
+
+        // Give any (incorrect) bootstrap task a chance to run.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            base.try_bootstrap_boundary().is_none(),
+            "resume subscriptions must not publish a bootstrap boundary"
+        );
+    }
+
     #[tokio::test]
     async fn test_create_position_handle_initializes_to_u64_max() {
         let base = SourceBase::new(SourceBaseParams::new("ph-init")).unwrap();
