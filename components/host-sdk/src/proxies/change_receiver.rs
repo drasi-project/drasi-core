@@ -265,11 +265,12 @@ unsafe impl Sync for FfiBootstrapReceiverState {}
 
 impl Drop for FfiBootstrapReceiverState {
     fn drop(&mut self) {
-        // Run plugin drop on a dedicated thread to avoid initializing
-        // plugin TLS on the caller's thread (matches FfiReceiverState::drop).
+        // Run plugin drop on the shared worker thread to avoid TLS destructor
+        // races on macOS arm64 (see drop_worker module for details, matches
+        // FfiReceiverState::drop).
         let drop_fn = self.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
     }
 }
 
