@@ -26,6 +26,7 @@ use rdkafka::message::Message;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tracing::{error, info, warn};
@@ -39,7 +40,7 @@ pub struct KafkaConsumerTask {
     pub source_id: String,
     pub shutdown_rx: watch::Receiver<bool>,
     pub resume_positions: Arc<RwLock<HashMap<String, Vec<i64>>>>,
-    pub await_bootstrap_boundary: Arc<RwLock<bool>>,
+    pub await_bootstrap_boundary: Arc<AtomicBool>,
 }
 
 impl KafkaConsumerTask {
@@ -82,15 +83,24 @@ impl KafkaConsumerTask {
         );
 
         let min_resume_offsets = self.minimum_resume_offsets(partition_count).await;
-        let bootstrap_offsets =
-            if min_resume_offsets.is_none() && *self.await_bootstrap_boundary.read().await {
-                Some(
-                    self.wait_for_initial_bootstrap_offsets(partition_count)
-                        .await?,
-                )
-            } else {
-                None
-            };
+        let bootstrap_offsets = if min_resume_offsets.is_none()
+            && self.await_bootstrap_boundary.load(Ordering::Acquire)
+        {
+            match self
+                .wait_for_initial_bootstrap_offsets(partition_count)
+                .await
+            {
+                Ok(offsets) => Some(offsets),
+                // A shutdown during the boundary wait is a clean exit, not an error.
+                Err(e) if *self.shutdown_rx.borrow() => {
+                    info!("[{}] Kafka consumer shutting down: {e}", self.source_id);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            None
+        };
 
         // Assign to all partitions.
         let mut tpl = TopicPartitionList::new();
@@ -244,7 +254,7 @@ impl KafkaConsumerTask {
             boundary = self.base.wait_for_bootstrap_boundary() => boundary,
             _ = self.shutdown_rx.changed() => {
                 if *self.shutdown_rx.borrow() {
-                    return Ok(vec![0; partition_count]);
+                    return Err(anyhow!("shutting down while waiting for bootstrap boundary"));
                 }
                 self.base.wait_for_bootstrap_boundary().await
             }
@@ -438,7 +448,7 @@ mod tests {
             source_id: "test-source".to_string(),
             shutdown_rx,
             resume_positions: Arc::new(RwLock::new(HashMap::new())),
-            await_bootstrap_boundary: Arc::new(RwLock::new(false)),
+            await_bootstrap_boundary: Arc::new(AtomicBool::new(false)),
         }
     }
 
