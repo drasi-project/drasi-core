@@ -1,32 +1,49 @@
+// Copyright 2026 The Drasi Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 syntax = "proto3";
 
+// Wire contract for the Drasi gRPC reaction.
+//
+// Consumed by `drasi-reaction-grpc`. This file is intentionally narrow:
+// it defines only what the reaction puts on the wire when forwarding
+// continuous-query results to a downstream gRPC service. It carries no
+// source-side, bootstrap, streaming, or subscription types — those are
+// out of scope and live in their own components' protos when needed.
 package drasi.v1;
 
-import "drasi/v1/common.proto";
-import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
 
-// Reaction service for receiving query results from Drasi
+// Service the gRPC reaction calls on its configured downstream
+// endpoint. One unary `ProcessResults` RPC is sent per batch.
 service ReactionService {
-    // Process a batch of query results
     rpc ProcessResults(ProcessResultsRequest) returns (ProcessResultsResponse);
-
-    // Stream query results
-    rpc StreamResults(stream QueryResult) returns (stream StreamResultsResponse);
-
-    // Subscribe to query results (server-side streaming)
-    rpc Subscribe(SubscribeRequest) returns (stream QueryResult);
-
-    // Health check
-    rpc HealthCheck(google.protobuf.Empty) returns (ReactionHealthCheckResponse);
 }
 
-// Request for processing results
+// One ProcessResults call. Carries a single-query batch in `results`
+// plus per-call entries in `metadata`.
+//
+// The reaction sends `metadata` entries both here as a body field and
+// as actual gRPC request headers via `tonic::Request::metadata_mut()`,
+// so receivers can read either. Entries with header names or values
+// that are not valid HTTP/2 metadata are sent only in this body field.
 message ProcessResultsRequest {
     QueryResult results = 1;
-    map<string, string> metadata = 2; // Optional metadata
+    map<string, string> metadata = 2;
 }
 
-// Response for processing results
 message ProcessResultsResponse {
     bool success = 1;
     string message = 2;
@@ -34,32 +51,44 @@ message ProcessResultsResponse {
     uint32 items_processed = 4;
 }
 
-// Response for streaming results
-message StreamResultsResponse {
-    bool success = 1;
-    string message = 2;
-    string error = 3;
-    uint64 batches_processed = 4;
-    uint64 items_processed = 5;
+// One coalesced batch of result-change items for a single continuous
+// query. Multiple query ids in the same batching window arrive as
+// separate `ProcessResultsRequest` RPCs — `query_id` is singular.
+message QueryResult {
+    string query_id = 1;
+    repeated QueryResultItem results = 2;
+    google.protobuf.Timestamp timestamp = 3;
 }
 
-// Subscribe to query results
-message SubscribeRequest {
-    repeated string query_ids = 1; // Query IDs to subscribe to
-    bool include_initial_state = 2; // Whether to receive initial state
+// Operation captured by a single QueryResultItem.
+enum QueryResultItemType {
+    QUERY_RESULT_ITEM_TYPE_UNSPECIFIED = 0;
+    QUERY_RESULT_ITEM_TYPE_ADD         = 1;
+    QUERY_RESULT_ITEM_TYPE_UPDATE      = 2;
+    QUERY_RESULT_ITEM_TYPE_DELETE      = 3;
+    QUERY_RESULT_ITEM_TYPE_AGGREGATION = 4;
+    QUERY_RESULT_ITEM_TYPE_NOOP        = 5;
 }
 
-// Health check response
-message ReactionHealthCheckResponse {
-    enum Status {
-        STATUS_UNSPECIFIED = 0;
-        STATUS_HEALTHY = 1;
-        STATUS_DEGRADED = 2;
-        STATUS_UNHEALTHY = 3;
-    }
-
-    Status status = 1;
-    string message = 2;
-    string version = 3;
-    uint64 pending_items = 4; // Number of items pending processing
+// One result-change item.
+//
+// Per-variant field population:
+//   ADD          — only `after` set
+//   DELETE       — only `before` set
+//   UPDATE       — both set
+//   AGGREGATION  — `after` set; `before` set if known
+//   NOOP         — neither set
+//
+// `payload` is populated only when an output template is configured
+// for the (query_id, item_type) pair and renders to valid JSON.
+// Absent when no template is configured, when render fails, when the
+// template renders to empty, and for AGGREGATION / NOOP (which
+// bypass template rendering entirely). Receivers can always recover
+// the raw change from `before` / `after`.
+message QueryResultItem {
+    google.protobuf.Struct before = 1;
+    google.protobuf.Struct after  = 2;
+    QueryResultItemType item_type = 3;
+    uint64 row_signature = 4;
+    optional google.protobuf.Struct payload = 5;
 }

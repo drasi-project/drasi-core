@@ -9,31 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- **Proto schema v3.** `QueryResultItem` in `proto/drasi/v1/common.proto` redesigned:
-  - Removed `data` and the string `type` tag. Field tags 1 and 2 are
-    permanently reserved to prevent accidental reuse.
-  - Added `item_type` (`QueryResultItemType` enum: `ADD`, `UPDATE`, `DELETE`,
-    `AGGREGATION`, `NOOP`) replacing the string `type`. Eliminates the prior
-    `"ADD"` / `"aggregation"` casing inconsistency on the wire.
+- **Proto file cleanup.** `proto/drasi/v1/common.proto` is removed and
+  `proto/drasi/v1/reaction.proto` is now the single source-of-truth
+  proto file for the reaction. All source-side message types (`Element`,
+  `Node`, `Relation`, `SourceChange`, `ChangeType`, `BootstrapRequest`,
+  `BootstrapResponse`, `ElementReference`, `ElementMetadata`) and the
+  unused `ReactionService` RPCs (`StreamResults`, `Subscribe`,
+  `HealthCheck`) along with their request / response messages have been
+  removed — they were never referenced by the reaction. The retained
+  surface is `service ReactionService` with the single `ProcessResults`
+  RPC plus the `ProcessResultsRequest`, `ProcessResultsResponse`,
+  `QueryResult`, `QueryResultItem`, and `QueryResultItemType` messages.
+- **Proto schema reshape.** `QueryResultItem` is the new shape:
+  - Removed the string `type` and the `data` field (the latter was a
+    duplicate of `after`/`before` for ADD/UPDATE/DELETE and only
+    smuggled `row_signature` for AGGREGATION).
+  - Added `item_type` (`QueryResultItemType` enum: `ADD`, `UPDATE`,
+    `DELETE`, `AGGREGATION`, `NOOP`) replacing the string `type`.
+    Eliminates the prior `"ADD"` / `"aggregation"` casing inconsistency
+    on the wire.
   - Added `row_signature` (uint64) as a first-class field on every item.
-    Previously this was only carried inside `data` for `aggregation` items.
-  - Added optional `payload` (Struct) — populated only when an output template
-    is configured for the (query, op) pair and renders to valid JSON. Absent
-    by default, on render failure, on empty templates, and for
-    AGGREGATION/NOOP. Events are never dropped: receivers can always recover
-    the change from `before` / `after`.
-  - `before` / `after` continue to be populated as introduced in this release:
-    `after` for ADD, `before` for DELETE, both for UPDATE.
-- **`config_version` bumps from `2.0.0` to `3.0.0`** and the crate version
-  bumps to `0.5.0`. Receivers compiled against the prior schema must
-  regenerate their stubs.
-- **Configured `metadata` is now also propagated as gRPC request headers.**
-  Previously the configured `metadata` map only populated
-  `ProcessResultsRequest.metadata` (a body field). It is now additionally set
-  via `tonic::Request::metadata_mut().insert(...)`, matching the README's
-  "authentication or routing headers" framing. The body field is preserved.
-  Entries with invalid header names/values are skipped with a warning and
-  still ride in the body field.
+    Previously this was only carried inside `data` for `aggregation`
+    items.
+  - Added optional `payload` (Struct) — populated only when an output
+    template is configured for the (query, op) pair and renders to
+    valid JSON. Absent by default, on render failure, on empty
+    templates, and for AGGREGATION / NOOP. Events are never dropped:
+    receivers can always recover the change from `before` / `after`.
+  - `before` and `after` are populated as the framework-controlled raw
+    row state: `after` for ADD, `before` for DELETE, both for UPDATE,
+    and (with `before` optional) for AGGREGATION.
+- **`config_version` bumps from `2.0.0` to `3.0.0`** and the crate
+  version bumps to `0.5.0`. Receivers compiled against the prior schema
+  must regenerate their stubs.
+- **Configured `metadata` is now also propagated as gRPC request
+  headers.** Previously the configured `metadata` map only populated
+  `ProcessResultsRequest.metadata` (a body field). It is now
+  additionally set via `tonic::Request::metadata_mut().insert(...)`,
+  matching the README's "authentication or routing headers" framing.
+  The body field is preserved. Entries with invalid header names /
+  values are skipped from the headers with a warning and still ride
+  in the body field.
 
 ### Features
 

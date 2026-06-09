@@ -26,16 +26,12 @@
 
 #![allow(dead_code)]
 
-use std::pin::Pin;
 use std::sync::Arc;
 
 use drasi_reaction_grpc::proto::drasi_v1::reaction_service_server::{
     ReactionService, ReactionServiceServer,
 };
-use drasi_reaction_grpc::proto::drasi_v1::{
-    ProcessResultsResponse, QueryResult as ProtoQueryResult, ReactionHealthCheckResponse,
-    StreamResultsResponse, SubscribeRequest,
-};
+use drasi_reaction_grpc::proto::drasi_v1::ProcessResultsResponse;
 use drasi_reaction_grpc::ProcessResultsRequest;
 use prost_types::Struct;
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -184,41 +180,6 @@ impl ReactionService for MockReactionService {
             error: String::new(),
             items_processed: item_count as u32,
         }))
-    }
-
-    type StreamResultsStream = Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<Item = Result<StreamResultsResponse, Status>>
-                + Send,
-        >,
-    >;
-
-    async fn stream_results(
-        &self,
-        _request: Request<tonic::Streaming<ProtoQueryResult>>,
-    ) -> Result<Response<Self::StreamResultsStream>, Status> {
-        Err(Status::unimplemented("not used in tests"))
-    }
-
-    type SubscribeStream = Pin<
-        Box<
-            dyn tonic::codegen::tokio_stream::Stream<Item = Result<ProtoQueryResult, Status>>
-                + Send,
-        >,
-    >;
-
-    async fn subscribe(
-        &self,
-        _request: Request<SubscribeRequest>,
-    ) -> Result<Response<Self::SubscribeStream>, Status> {
-        Err(Status::unimplemented("not used in tests"))
-    }
-
-    async fn health_check(
-        &self,
-        _request: Request<()>,
-    ) -> Result<Response<ReactionHealthCheckResponse>, Status> {
-        Err(Status::unimplemented("not used in tests"))
     }
 }
 

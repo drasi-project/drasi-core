@@ -4,7 +4,9 @@
 runtime ([`drasi-lib`](../../../lib)). It streams the result changes produced by Drasi
 continuous queries to a downstream gRPC service via the
 `drasi.v1.ReactionService.ProcessResults` RPC defined in
-[`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto).
+[`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto). The proto file is
+intentionally narrow — it carries only the reaction's wire contract; no source,
+bootstrap, streaming, or subscription types.
 
 Changes can be delivered two ways:
 
@@ -313,12 +315,11 @@ message QueryResult {
 }
 
 message QueryResultItem {
-    reserved 1, 2;                          // formerly `type` and `data` (proto v2)
-    google.protobuf.Struct before = 3;
-    google.protobuf.Struct after  = 4;
-    QueryResultItemType item_type = 5;
-    uint64 row_signature = 6;
-    optional google.protobuf.Struct payload = 7;
+    google.protobuf.Struct before = 1;
+    google.protobuf.Struct after  = 2;
+    QueryResultItemType item_type = 3;
+    uint64 row_signature = 4;
+    optional google.protobuf.Struct payload = 5;
 }
 
 enum QueryResultItemType {
