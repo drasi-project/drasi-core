@@ -16,11 +16,7 @@ workspace = true
 
 [features]
 default = []
-# `parallel_solver` dispatches path-solving work via `tokio::spawn`, which only
-# yields real parallelism on a multi-threaded runtime. Enabling it pulls in
-# tokio's `rt-multi-thread` feature so the parallelism is actually available;
-# without this feature the tasks would run cooperatively on a single thread.
-parallel_solver = ["tokio/rt-multi-thread"]
+parallel_solver = []
 
 [dependencies]
 async-trait = "0.1.68"
