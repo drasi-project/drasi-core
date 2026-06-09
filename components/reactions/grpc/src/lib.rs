@@ -14,7 +14,14 @@
 
 #![allow(unexpected_cfgs)]
 
-//! Unified gRPC reaction plugin for Drasi.
+//! gRPC reaction plugin for Drasi.
+//!
+//! Forwards continuous query result changes to a downstream gRPC service via
+//! the `ReactionService.ProcessResults` RPC, either with **fixed-size
+//! batching** (default) or **adaptive batching** that scales batch size with
+//! observed throughput. An optional Handlebars-based output template engine
+//! can reshape each result into a user-defined `payload` while always
+//! preserving the raw `before` / `after` row state on the wire.
 
 pub(crate) mod adaptive_batcher;
 pub mod config;
@@ -120,6 +127,75 @@ impl GrpcReactionBuilder {
         adaptive: drasi_lib::reactions::common::AdaptiveBatchConfig,
     ) -> Self {
         self.with_batching(BatchingConfig::adaptive(adaptive))
+    }
+
+    /// Convenience: enable adaptive batching with default tuning.
+    pub fn with_adaptive_defaults(self) -> Self {
+        self.with_adaptive_batching(drasi_lib::reactions::common::AdaptiveBatchConfig::default())
+    }
+
+    /// Set the minimum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed` (replacing it with an adaptive
+    /// config whose other fields take their defaults). For explicit control
+    /// over all adaptive parameters, prefer
+    /// [`with_adaptive_batching`](Self::with_adaptive_batching) with a full
+    /// `AdaptiveBatchConfig`.
+    pub fn with_min_batch_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_min_batch_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the maximum adaptive batch size.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_max_batch_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_max_batch_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the adaptive throughput window size (in 100 ms units; `10` = 1 s).
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_window_size(mut self, n: usize) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_window_size = n;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
+    }
+
+    /// Set the adaptive batch flush timeout in milliseconds.
+    ///
+    /// **Side effect:** calling this enables adaptive mode if the builder
+    /// currently has `BatchingConfig::Fixed`.
+    pub fn with_batch_timeout_ms(mut self, ms: u64) -> Self {
+        let mut cfg = self
+            .config
+            .batching
+            .as_adaptive_config()
+            .unwrap_or_default();
+        cfg.adaptive_batch_timeout_ms = ms;
+        self.config.batching = BatchingConfig::adaptive(cfg);
+        self
     }
 
     pub fn with_output_templates(mut self, templates: OutputTemplates) -> Self {

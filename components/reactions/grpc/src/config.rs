@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for the unified gRPC reaction.
+//! Configuration types for the gRPC reaction.
 
 use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateRouting};
 use serde::{Deserialize, Serialize};

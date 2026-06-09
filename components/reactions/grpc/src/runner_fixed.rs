@@ -16,8 +16,7 @@
 //!
 //! Accumulates `ProtoQueryResultItem`s and flushes when either the
 //! configured batch size or flush timeout is reached. This is the default
-//! batching mode and matches the historical behavior of `drasi-reaction-grpc`
-//! prior to the unification with `grpc-adaptive`.
+//! batching mode for the gRPC reaction.
 
 use std::collections::HashMap;
 use std::time::Duration;

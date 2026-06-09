@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Descriptor for the unified gRPC reaction plugin.
+//! Descriptor for the gRPC reaction plugin.
 
 use std::collections::HashMap;
 
@@ -242,7 +242,7 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
     }
 
     fn config_version(&self) -> &str {
-        "2.0.0"
+        "3.0.0"
     }
 
     fn config_schema_name(&self) -> &str {
@@ -250,14 +250,39 @@ impl ReactionPluginDescriptor for GrpcReactionDescriptor {
     }
 
     fn config_schema_json(&self) -> String {
+        use drasi_plugin_sdk::schema_ui::SchemaUiAnnotator;
         let api = GrpcReactionSchemas::openapi();
-        serde_json::to_string(
+        let schemas = serde_json::to_value(
             &api.components
                 .as_ref()
                 .expect("OpenAPI components missing")
                 .schemas,
         )
-        .expect("Failed to serialize config schema")
+        .expect("Failed to serialize config schema");
+
+        SchemaUiAnnotator::new(schemas, "reaction.grpc.GrpcReactionConfig")
+            .expect("root schema not found")
+            .field("endpoint", |f| {
+                f.group("Connection")
+                    .order(1)
+                    .placeholder("grpc://localhost:50052")
+            })
+            .field("timeoutMs", |f| {
+                f.group("Connection").order(2).placeholder("5000")
+            })
+            .field("initialConnectionTimeoutMs", |f| {
+                f.group("Connection").order(3).placeholder("10000")
+            })
+            .field("connectionRetryAttempts", |f| {
+                f.group("Reliability").order(10).placeholder("5")
+            })
+            .field("maxRetries", |f| {
+                f.group("Reliability").order(11).placeholder("3")
+            })
+            .field("metadata", |f| f.group("Auth").order(20))
+            .field("batching", |f| f.group("Batching").order(30))
+            .field("outputTemplates", |f| f.group("Templates").order(40))
+            .annotate()
     }
 
     async fn create_reaction(

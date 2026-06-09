@@ -39,6 +39,11 @@ use crate::proto::drasi_v1::{
 pub(crate) struct RecordedBatch {
     pub query_id: String,
     pub item_count: usize,
+    /// ASCII gRPC metadata headers observed on the inbound request.
+    /// Binary headers and framework-internal entries (`te`, `user-agent`,
+    /// `grpc-*`) are intentionally not filtered out — tests should assert
+    /// presence of the keys they care about.
+    pub metadata_headers: std::collections::HashMap<String, String>,
 }
 
 /// Shared, cloneable handle to the state captured by the mock server.
@@ -101,6 +106,18 @@ impl ReactionService for MockReactionService {
         &self,
         request: Request<ProcessResultsRequest>,
     ) -> Result<Response<ProcessResultsResponse>, Status> {
+        // Snapshot ASCII metadata headers before consuming the request.
+        let metadata_headers: std::collections::HashMap<String, String> = request
+            .metadata()
+            .iter()
+            .filter_map(|kv| match kv {
+                tonic::metadata::KeyAndValueRef::Ascii(k, v) => {
+                    Some((k.as_str().to_string(), v.to_str().ok()?.to_string()))
+                }
+                tonic::metadata::KeyAndValueRef::Binary(_, _) => None,
+            })
+            .collect();
+
         let req = request.into_inner();
         let (query_id, item_count) = req
             .results
@@ -121,6 +138,7 @@ impl ReactionService for MockReactionService {
         self.recorder.batches.lock().await.push(RecordedBatch {
             query_id,
             item_count,
+            metadata_headers,
         });
         self.recorder.notify.notify_waiters();
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unified gRPC reaction (fixed + adaptive batching).
+//! gRPC reaction (fixed + adaptive batching).
 
 use std::collections::HashMap;
 
@@ -125,6 +125,22 @@ impl Reaction for GrpcReaction {
                 BatchingConfig::Adaptive { .. } => "adaptive",
             }
         );
+
+        // Warn on a no-op `outputTemplates` block — present but with no
+        // default template and no routes. Items will emit with no `payload`
+        // field, which is the same outcome as omitting `outputTemplates`
+        // entirely; surface this so a misconfiguration doesn't silently
+        // disable the templating path. Non-fatal.
+        if let Some(ref t) = self.config.output_templates {
+            if t.default_template.is_none() && t.routes.is_empty() {
+                log::warn!(
+                    "[{}] `outputTemplates` is configured but contains no `defaultTemplate` and \
+                     no `routes` — reaction will emit items with no `payload` field. Either add \
+                     a template or omit the `outputTemplates` block entirely.",
+                    self.base.id
+                );
+            }
+        }
 
         self.base
             .set_status(

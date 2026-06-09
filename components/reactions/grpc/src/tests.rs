@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the unified gRPC reaction.
+//! Unit tests for the gRPC reaction.
 
 use super::*;
 use drasi_lib::reactions::common::AdaptiveBatchConfig;
@@ -189,8 +189,8 @@ fn test_dto_descriptor_round_trip() {
     use crate::descriptor::{GrpcReactionConfigDto, GrpcReactionDescriptor};
     use drasi_plugin_sdk::prelude::ReactionPluginDescriptor;
     let descriptor = GrpcReactionDescriptor;
-    // The descriptor version must reflect the breaking redesign.
-    assert_eq!(descriptor.config_version(), "2.0.0");
+    // The descriptor version must reflect the proto v3 redesign.
+    assert_eq!(descriptor.config_version(), "3.0.0");
 
     // Schema bundle includes our sub-DTOs.
     let schema_json = descriptor.config_schema_json();
@@ -266,11 +266,16 @@ mod integration {
     use std::time::Duration;
 
     fn item() -> ProtoQueryResultItem {
+        // v3 schema: no string `type`, no `data`; carries item_type enum
+        // (encoded as i32 on the wire), explicit row_signature, and an
+        // optional templated payload (omitted here).
+        use crate::proto::drasi_v1::QueryResultItemType;
         ProtoQueryResultItem {
-            r#type: "ADD".to_string(),
-            data: None,
             before: None,
             after: None,
+            item_type: QueryResultItemType::Add as i32,
+            row_signature: 0,
+            payload: None,
         }
     }
 
@@ -362,6 +367,81 @@ mod integration {
         )
         .await;
         assert!(result.is_err(), "exhausted retries should surface an error");
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_propagates_metadata_as_grpc_headers() {
+        // The configured `metadata` map must be set as actual gRPC request
+        // headers (in addition to the in-body field) so receivers can read
+        // auth/routing entries via tonic::Request::metadata() — matching
+        // the README's "authentication or routing headers" framing.
+        let server = test_server::start().await;
+        let mut client = create_client(&server.endpoint, 2000).await.unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("authorization".to_string(), "Bearer abc123".to_string());
+        metadata.insert("x-tenant".to_string(), "tenant-42".to_string());
+
+        send_batch_with_retry(
+            &mut client,
+            vec![item()],
+            "q1",
+            &metadata,
+            0,
+            &server.endpoint,
+            2000,
+        )
+        .await
+        .unwrap();
+
+        let batches = server.recorder.batches().await;
+        assert_eq!(batches.len(), 1);
+        let observed = &batches[0].metadata_headers;
+        assert_eq!(
+            observed.get("authorization").map(String::as_str),
+            Some("Bearer abc123"),
+            "authorization must arrive as a gRPC header (not only in the body field)"
+        );
+        assert_eq!(
+            observed.get("x-tenant").map(String::as_str),
+            Some("tenant-42")
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_skips_metadata_entries_with_invalid_header_names() {
+        // Invalid header names (e.g. containing uppercase or whitespace)
+        // must be logged-and-skipped rather than failing the batch — the
+        // entry still rides in the body field.
+        let server = test_server::start().await;
+        let mut client = create_client(&server.endpoint, 2000).await.unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert("Invalid Header Name".to_string(), "v".to_string());
+        metadata.insert("x-good".to_string(), "ok".to_string());
+
+        send_batch_with_retry(
+            &mut client,
+            vec![item()],
+            "q1",
+            &metadata,
+            0,
+            &server.endpoint,
+            2000,
+        )
+        .await
+        .unwrap();
+
+        let batches = server.recorder.batches().await;
+        assert_eq!(batches.len(), 1, "batch must still be delivered");
+        let observed = &batches[0].metadata_headers;
+        assert_eq!(observed.get("x-good").map(String::as_str), Some("ok"));
+        assert!(
+            !observed.keys().any(|k| k.contains(' ')),
+            "invalid header name must not be propagated"
+        );
         server.shutdown().await;
     }
 

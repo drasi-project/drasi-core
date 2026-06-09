@@ -1,162 +1,561 @@
-# gRPC Reaction
+# Drasi gRPC Reaction
 
-`drasi-reaction-grpc` streams Drasi continuous-query results to a downstream gRPC service using the `ReactionService` defined in [`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto).
+`drasi-reaction-grpc` is the gRPC reaction for the [Drasi](https://drasi.io) embedded
+runtime ([`drasi-lib`](../../../lib)). It streams the result changes produced by Drasi
+continuous queries to a downstream gRPC service via the
+`drasi.v1.ReactionService.ProcessResults` RPC defined in
+[`proto/drasi/v1/reaction.proto`](proto/drasi/v1/reaction.proto).
 
-It supports two batching strategies (selected by configuration) and an optional Handlebars-based output template system that lets you reshape each result item before it is sent on the wire.
+Changes can be delivered two ways:
 
-> **⚠️ Breaking change (v0.4.0).** This crate replaces both the previous `drasi-reaction-grpc` and the now-removed `drasi-reaction-grpc-adaptive` crate. The configuration schema has been redesigned (camelCase, batching mode selector, output templates). There is no backward compatibility with previous configurations. See [`CHANGELOG.md`](CHANGELOG.md).
+- **Fixed batching** (default) — items accumulate until either `batchSize` items have
+  been collected or `batchFlushTimeoutMs` elapses (whichever comes first).
+- **Adaptive batching** (optional) — batch size scales automatically between
+  `adaptiveMinBatchSize` and `adaptiveMaxBatchSize` based on observed throughput,
+  trading a small amount of latency for higher throughput on bursty workloads.
+  Enabled by configuring `batching.mode = "adaptive"`.
 
-## Features
+Both modes support [Handlebars](https://handlebarsjs.com/) output templates that
+populate an optional `payload` field on every result item, while the raw `before` /
+`after` row state is always emitted on the wire so receivers can recover the change
+even when no template is configured (or a template fails to render).
 
-- **Streaming gRPC delivery** to a configurable endpoint, with retry/reconnect.
-- **Two batching modes**:
-  - **`fixed`** — flush when `batchSize` items have accumulated or `batchFlushTimeoutMs` elapses (whichever comes first).
-  - **`adaptive`** — throughput-aware batching that scales batch size between `adaptiveMinBatchSize` and `adaptiveMaxBatchSize` based on observed event rate.
-- **Optional output templates** (Handlebars) per query / per operation (`added`, `updated`, `deleted`). When templates are not configured, the raw `before`/`after` payload is forwarded as-is.
-- **Per-call gRPC metadata** for authentication or routing headers.
-- Conforms to the modern Drasi reaction plugin patterns: camelCase typed config, OpenAPI schema descriptor, builder API, and optional `dynamic-plugin` feature.
+The reaction is built in Rust with `GrpcReaction::builder()` and added to a running
+`DrasiLib` via `add_reaction(...)`. See [Examples](#examples).
 
-## Configuration
+---
 
-Fields are camelCase in JSON / YAML. Defaults are shown in parentheses.
+## Table of contents
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `endpoint` | `String` | `grpc://localhost:50052` | gRPC server endpoint to connect to. |
-| `timeoutMs` | `u64` | `5000` | Per-RPC timeout. |
-| `maxRetries` | `u32` | `3` | Maximum retry attempts per batch send. |
-| `connectionRetryAttempts` | `u32` | `5` | Maximum attempts when (re)establishing the channel. |
-| `initialConnectionTimeoutMs` | `u64` | `10000` | Timeout for each connection attempt. |
-| `metadata` | `Map<String,String>` | `{}` | Static gRPC metadata headers added to every RPC. |
-| `batching` | `BatchingConfig` | `{ mode: "fixed", ... }` | Batching strategy — see below. |
-| `outputTemplates` | `OutputTemplates?` | _unset_ | Optional Handlebars output templates — see below. |
+1. [Quick start](#quick-start)
+2. [Configuration reference](#configuration-reference)
+3. [Output templates and per-query routing](#output-templates-and-per-query-routing)
+4. [Templating](#templating)
+5. [Output payload schema](#output-payload-schema)
+6. [Adaptive batching](#adaptive-batching)
+7. [Render-error fallback](#render-error-fallback)
+8. [Authentication](#authentication)
+9. [Examples](#examples)
+10. [Plugin metadata](#plugin-metadata)
+11. [Testing](#testing)
+12. [Changelog](#changelog)
 
-### Batching
+---
 
-The `batching` object is discriminated by `mode`.
+## Quick start
 
-**Fixed batching:**
+Here is a complete example of how to use the gRPC Reaction. It uses a `MockSource` to
+generate simulated sensor data, a Cypher continuous query that surfaces hot sensors,
+and the gRPC reaction that streams each result change to a downstream collector
+listening on `grpc://localhost:50052`.
 
-```yaml
-batching:
-  mode: fixed
-  batchSize: 100              # default 100
-  batchFlushTimeoutMs: 1000   # default 1000
+Add the crates to your `Cargo.toml`:
+
+```toml
+[dependencies]
+drasi-lib            = { path = "../drasi-core/lib" }
+drasi-source-mock    = { path = "../drasi-core/components/sources/mock" }
+drasi-reaction-grpc  = { path = "../drasi-core/components/reactions/grpc" }
+
+anyhow      = "1"
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+env_logger  = "0.11"
 ```
 
-**Adaptive batching** (camelCase fields, matching the rest of the config schema):
-
-```yaml
-batching:
-  mode: adaptive
-  adaptiveMinBatchSize: 10          # default 1
-  adaptiveMaxBatchSize: 1000        # default 100
-  adaptiveWindowSize: 10            # default 10 (= 1 second; units are 100 ms)
-  adaptiveBatchTimeoutMs: 500       # default 1000
-```
-
-### Output Templates (optional)
-
-When `outputTemplates` is set, the reaction renders the configured Handlebars template for each diff and uses the rendered JSON as the `data` payload on the wire. If a template is empty, parsing fails, or rendering fails, the reaction logs a warning and falls back to the raw payload — events are never dropped.
-
-```yaml
-outputTemplates:
-  defaultTemplate:
-    added:   { template: '{"event":"add","row":{{json after}}}' }
-    updated: { template: '{"event":"update","row":{{json after}},"prev":{{json before}}}' }
-    deleted: { template: '{"event":"delete","row":{{json before}}}' }
-  routes:
-    "high-volume-query":
-      added:   { template: '{"id":"{{after.id}}"}' }
-```
-
-Handlebars context fields available in a template:
-
-| Field | Description |
-|---|---|
-| `before` | The previous row state (object / map, absent for `ADD`). |
-| `after`  | The new row state (object / map, absent for `DELETE`). |
-| `data`   | The full diff payload as JSON (the same shape that would be sent without a template). |
-| `operation` | `ADD`, `UPDATE`, `DELETE`, `AGGREGATION`, or `NOOP`. |
-| `query_id` | The originating query id. |
-
-A `json` helper is registered so templates can emit a nested object/array as JSON (e.g. `{{json after}}`).
-
-If `outputTemplates` is not set at all, the original payload is forwarded with no rendering overhead.
-
-## Example YAML
-
-**Fixed batching, no templates:**
-
-```yaml
-endpoint: grpc://collector.observability.svc.cluster.local:50052
-timeoutMs: 2000
-metadata:
-  x-api-key: "${API_KEY}"
-batching:
-  mode: fixed
-  batchSize: 250
-  batchFlushTimeoutMs: 500
-```
-
-**Adaptive batching with templates:**
-
-```yaml
-endpoint: grpc://collector:50052
-batching:
-  mode: adaptive
-  adaptiveMinBatchSize: 50
-  adaptiveMaxBatchSize: 2000
-  adaptiveWindowSize: 20
-  adaptiveBatchTimeoutMs: 250
-outputTemplates:
-  defaultTemplate:
-    added:   { template: '{"op":"add","row":{{json after}}}' }
-    updated: { template: '{"op":"upd","row":{{json after}}}' }
-    deleted: { template: '{"op":"del","row":{{json before}}}' }
-```
-
-## Builder API
+Rust code for the example:
 
 ```rust,ignore
-use drasi_reaction_grpc::{
-    GrpcReaction, GrpcReactionConfig, BatchingConfig, OutputTemplates,
-};
-use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpec};
+use std::sync::Arc;
 
-// Fixed batching (default).
-let reaction = GrpcReaction::builder("my-grpc-reaction")
-    .with_endpoint("grpc://collector:50052")
-    .with_fixed_batching(/* batch_size */ 200, /* flush_ms */ 500)
-    .with_metadata("x-api-key", "abc")
+use anyhow::Result;
+use drasi_lib::{DrasiLib, Query};
+use drasi_reaction_grpc::GrpcReaction;
+use drasi_source_mock::{DataType, MockSource};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // 1. Source: emit a new SensorReading for each of 3 sensors every 2 seconds.
+    let source = MockSource::builder("sensor-source")
+        .with_data_type(DataType::sensor_reading(3))
+        .with_interval_ms(2_000)
+        .build()?;
+
+    // 2. Continuous query: surface sensors whose temperature crosses above 25 °C.
+    let hot_sensors = Query::cypher("hot-sensors")
+        .query(
+            r#"
+            MATCH (s:SensorReading)
+            WHERE s.temperature > 25
+            RETURN s.sensor_id   AS sensor_id,
+                   s.temperature AS temperature,
+                   s.humidity    AS humidity
+            "#,
+        )
+        .from_source("sensor-source")
+        .enable_bootstrap(true)
+        .auto_start(true)
+        .build();
+
+    // 3. Reaction: stream each result change as a `ProcessResults` RPC to a
+    //    downstream gRPC collector on grpc://localhost:50052.
+    let reaction = GrpcReaction::builder("hot-sensors-grpc")
+        .with_queries(vec!["hot-sensors".to_string()])
+        .with_endpoint("grpc://localhost:50052")
+        .with_timeout_ms(5_000)
+        .build()?;
+
+    // 4. Wire everything into a DrasiLib instance and start.
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("grpc-reaction-quickstart")
+            .with_source(source)
+            .with_query(hot_sensors)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    println!("gRPC reaction running. Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    core.stop().await?;
+    Ok(())
+}
+```
+
+With no `output_templates` configured, each result change is delivered with raw
+`before` / `after` row state and `payload` absent; see
+[Output payload schema](#output-payload-schema). To switch the same reaction to
+adaptive batched delivery, replace the fixed batching with an adaptive config:
+
+```rust,ignore
+use drasi_lib::reactions::common::AdaptiveBatchConfig;
+use drasi_reaction_grpc::GrpcReaction;
+
+let reaction = GrpcReaction::builder("hot-sensors-grpc")
+    .with_queries(vec!["hot-sensors".to_string()])
+    .with_endpoint("grpc://localhost:50052")
+    .with_adaptive_batching(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 50,
+        adaptive_max_batch_size: 2_000,
+        adaptive_window_size: 100,        // 10 s throughput window
+        adaptive_batch_timeout_ms: 500,
+    })
     .build()?;
+```
 
-// Adaptive batching with per-query templates.
-let templates = OutputTemplates {
-    default_template: Some(QueryConfig {
-        added: Some(TemplateSpec::new(
-            r#"{"op":"add","row":{{json after}}}"#,
-        )),
-        ..Default::default()
-    }),
-    ..Default::default()
+---
+
+## Configuration reference
+
+`GrpcReactionConfig` is the struct populated by `GrpcReactionBuilder`. All keys
+serialize and deserialize in `camelCase` when supplied via descriptor configuration
+(JSON / YAML); defaults are applied by the builder.
+
+| Field | Type | Default | Builder setter | Description |
+|-------|------|---------|----------------|-------------|
+| `endpoint` | `String` | `grpc://localhost:50052` | `with_endpoint` | gRPC server endpoint to connect to. |
+| `timeoutMs` | `u64` | `5000` | `with_timeout_ms` | Per-RPC timeout in milliseconds. |
+| `maxRetries` | `u32` | `3` | `with_max_retries` | Maximum retry attempts per batch on transient send errors. Batches that exhaust retries are logged and dropped; the client reconnects before the next batch. |
+| `connectionRetryAttempts` | `u32` | `5` | `with_connection_retry_attempts` | Maximum attempts when (re)establishing the channel after a connection-level error. |
+| `initialConnectionTimeoutMs` | `u64` | `10000` | `with_initial_connection_timeout_ms` | Timeout for each connection attempt. |
+| `metadata` | `Map<String,String>` | `{}` | `with_metadata(k, v)` / `with_all_metadata(map)` | Sent on every call **both** as `ProcessResultsRequest.metadata` (a body field on the proto) **and** as actual gRPC request headers (`tonic::Request::metadata_mut()`). ASCII-only; entries with invalid header names/values are skipped from the headers with a warning and still ride in the body field. |
+| `batching` | `BatchingConfig` | `Fixed { batchSize: 100, batchFlushTimeoutMs: 1000 }` | `with_fixed_batching`, `with_adaptive_batching`, or the per-field adaptive setters | Batching strategy — see [Adaptive batching](#adaptive-batching). |
+| `outputTemplates` | `Option<OutputTemplates>` | `None` | `with_output_templates` | Optional Handlebars output templates — see [Output templates and per-query routing](#output-templates-and-per-query-routing). When present but containing neither a `defaultTemplate` nor any `routes` entry, a warning is logged at startup (the configuration is a no-op). |
+
+Builder-only settings (not stored on `GrpcReactionConfig`):
+
+| Setter | Default | Description |
+|--------|---------|-------------|
+| `with_queries(Vec<String>)` / `with_query(...)` | _empty_ | Query IDs this reaction subscribes to. |
+| `with_priority_queue_capacity(usize)` | runtime default | Capacity of the inbound queue that buffers query results before processing. Tune for high-throughput sources. |
+| `with_auto_start(bool)` | `true` | Whether the reaction starts automatically when `DrasiLib` is running. |
+
+### `BatchingConfig`
+
+Discriminated by `mode`. Fixed (default) and adaptive are mutually exclusive.
+
+| `mode = "fixed"` field | Type | Default | Builder setter | Description |
+|-----------|------|---------|----------------|-------------|
+| `batchSize` | `usize` | `100` | `with_fixed_batching(size, ms)` | Maximum items in a single `ProcessResults` RPC; the runner flushes when this is reached. |
+| `batchFlushTimeoutMs` | `u64` | `1000` | `with_fixed_batching(size, ms)` | Maximum time to hold a partial batch before flushing. |
+
+| `mode = "adaptive"` field | Type | Default | Builder setter | Description |
+|-----------|------|---------|----------------|-------------|
+| `adaptiveMinBatchSize` | `usize` | `1` | `with_min_batch_size(n)` | Lower bound on batch size, used during idle / low traffic. |
+| `adaptiveMaxBatchSize` | `usize` | `100` | `with_max_batch_size(n)` | Upper bound on batch size, used during bursts. |
+| `adaptiveWindowSize` | `usize` | `10` | `with_window_size(n)` | Throughput sample window in 100 ms units (`10` = 1 s, `100` = 10 s). |
+| `adaptiveBatchTimeoutMs` | `u64` | `1000` | `with_batch_timeout_ms(ms)` | Maximum time the adaptive batcher waits before flushing a partial batch. |
+
+Convenience: `with_adaptive_batching(AdaptiveBatchConfig)` accepts a full struct;
+`with_adaptive_defaults()` enables adaptive mode with all defaults. Each per-field
+setter (`with_min_batch_size`, `with_max_batch_size`, `with_window_size`,
+`with_batch_timeout_ms`) **implicitly enables adaptive mode** if the builder is
+currently fixed, populating the remaining adaptive fields from
+`AdaptiveBatchConfig::default()`.
+
+### `OutputTemplates`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `defaultTemplate` | `Option<QueryConfig>` | Applied to any query without a matching `routes` entry. |
+| `routes` | `HashMap<String, QueryConfig>` | Per-query overrides keyed by **exact query id** (no suffix-fallback). |
+
+### `QueryConfig`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `added` | `Option<TemplateSpec>` | Template used when a result row is added. |
+| `updated` | `Option<TemplateSpec>` | Template used when a result row is updated. |
+| `deleted` | `Option<TemplateSpec>` | Template used when a result row is deleted. |
+
+`TemplateSpec` is a Handlebars body `template` string (the gRPC reaction uses
+`TemplateSpec<()>` — there is no per-template HTTP-style extension data because gRPC
+sends every batch on the same `ProcessResults` RPC).
+
+---
+
+## Output templates and per-query routing
+
+`outputTemplates` lets each query customise the `payload` field on each emitted
+`QueryResultItem`. For each result, the reaction selects a template in this order:
+
+1. `outputTemplates.routes[<query_id>]` — a per-query override, matched by **exact**
+   query id. There is no dotted-suffix fallback — a route key `sales.q1` is not
+   selected for a query id `q1`.
+2. `outputTemplates.defaultTemplate` — a shared fallback, if present.
+3. **No template** — the result item is emitted with `payload` absent. `before` /
+   `after` still carry the raw row state.
+
+Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching
+the result's operation is used. Operations without a spec emit with `payload`
+absent. `AGGREGATION` and `NOOP` items always emit with `payload` absent (they
+bypass template rendering entirely).
+
+```rust,ignore
+use std::collections::HashMap;
+use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+use drasi_reaction_grpc::OutputTemplates;
+
+let orders = QueryConfig {
+    added: Some(TemplateSpec::new(
+        r#"{"event":"created","order":{{json after}}}"#,
+    )),
+    deleted: Some(TemplateSpec::new(
+        r#"{"event":"cancelled","orderId":"{{before.id}}"}"#,
+    )),
+    updated: None,
 };
 
+let mut routes = HashMap::new();
+routes.insert("orders-by-region".to_string(), orders);
+
+let templates = OutputTemplates {
+    default_template: None,
+    routes,
+};
+```
+
+---
+
+## Templating
+
+Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply only to the
+body of each emitted item's `payload` field. The render context is:
+
+| Variable | Available for | Meaning |
+|----------|---------------|---------|
+| `after` | added, updated, aggregation | The new / current row payload. |
+| `before` | updated, deleted, aggregation (if known) | The previous row payload. |
+| `data` | all CRUD ops | Cross-reaction-compatibility alias — for `ADD`/`DELETE` it is the row, for `UPDATE` it is the updated row. (The v3 proto envelope has no `data` field; the alias is kept in the template context so templates can be shared across reactions.) |
+| `operation` | all | `ADD`, `UPDATE`, `DELETE`, `AGGREGATION`, or `NOOP`. |
+| `query_id` | all | The originating query id. |
+
+A `json` helper is registered for embedding a nested object or array as JSON:
+
+```handlebars
+{
+  "query": "{{query_id}}",
+  "operation": "{{operation}}",
+  "row": {{json after}}
+}
+```
+
+The template **must render to valid JSON**. If it does not (or fails to render at
+all), the reaction logs a warning and omits `payload` entirely — see
+[Render-error fallback](#render-error-fallback). If the JSON rendered is not a
+top-level object, the framework wraps it as `{"value": ...}` before encoding into the
+proto `Struct`.
+
+---
+
+## Output payload schema
+
+Every batch is sent as one unary `ProcessResults` RPC on the
+`drasi.v1.ReactionService`. The request and response shapes are:
+
+```protobuf
+service ReactionService {
+    rpc ProcessResults(ProcessResultsRequest) returns (ProcessResultsResponse);
+}
+
+message ProcessResultsRequest {
+    QueryResult results = 1;
+    map<string, string> metadata = 2;       // also sent as actual gRPC headers
+}
+
+message QueryResult {
+    string query_id = 1;
+    repeated QueryResultItem results = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+message QueryResultItem {
+    reserved 1, 2;                          // formerly `type` and `data` (proto v2)
+    google.protobuf.Struct before = 3;
+    google.protobuf.Struct after  = 4;
+    QueryResultItemType item_type = 5;
+    uint64 row_signature = 6;
+    optional google.protobuf.Struct payload = 7;
+}
+
+enum QueryResultItemType {
+    QUERY_RESULT_ITEM_TYPE_UNSPECIFIED = 0;
+    QUERY_RESULT_ITEM_TYPE_ADD         = 1;
+    QUERY_RESULT_ITEM_TYPE_UPDATE      = 2;
+    QUERY_RESULT_ITEM_TYPE_DELETE      = 3;
+    QUERY_RESULT_ITEM_TYPE_AGGREGATION = 4;
+    QUERY_RESULT_ITEM_TYPE_NOOP        = 5;
+}
+
+message ProcessResultsResponse {
+    bool success = 1;
+    string message = 2;
+    string error = 3;
+    uint32 items_processed = 4;
+}
+```
+
+How the per-variant fields are populated:
+
+| `item_type`   | `before`            | `after`             | `payload` (when template configured & renders OK) |
+|---------------|---------------------|---------------------|---------------------------------------------------|
+| `ADD`         | _absent_            | new row             | rendered                                          |
+| `DELETE`      | previous row        | _absent_            | rendered                                          |
+| `UPDATE`      | previous row        | new row             | rendered                                          |
+| `AGGREGATION` | previous (if known) | new aggregate state | always absent (bypasses templates)                |
+| `NOOP`        | _absent_            | _absent_            | always absent (bypasses templates)                |
+
+`row_signature` is the row's identity across emissions and is set on every item
+(`0` for `NOOP`). Receivers can use it to correlate or de-duplicate without parsing
+the payload.
+
+`payload` is structurally a `google.protobuf.Struct` (JSON-equivalent). If a template
+renders a non-object top-level value, it is wrapped as `{"value": ...}` before
+encoding.
+
+One `ProcessResultsRequest` carries one `QueryResult` (a single `query_id` + N items
++ timestamp). When items for multiple query IDs are batched together by the adaptive
+runner, the batcher splits them and sends one RPC per query — the proto envelope
+itself is single-query.
+
+---
+
+## Adaptive batching
+
+Switching `batching.mode` to `"adaptive"` (or calling any per-field setter on the
+builder) puts the reaction behind an internal batcher that scales batch size based
+on observed throughput between `adaptiveMinBatchSize` and `adaptiveMaxBatchSize`,
+flushing a partial batch after `adaptiveBatchTimeoutMs`.
+
+Internally the gRPC adaptive runner has a two-stage pipeline:
+
+1. **Per-query buffering in the runner** — incoming results accumulate per
+   `query_id`. The runner releases the buffered batch to the downstream
+   `AdaptiveBatcher` when (a) a different `query_id` arrives or (b) the buffer
+   reaches 100 items.
+2. **Throughput-aware batching by the `AdaptiveBatcher`** — re-coalesces batches by
+   `query_id` and emits them either when its size threshold is reached or when
+   `adaptiveBatchTimeoutMs` elapses.
+
+This shape favours single-query throughput (one RPC per (query, time-window)). For
+low-latency single-query workloads, prefer fixed batching with `batchSize: 1` and a
+small `batchFlushTimeoutMs`.
+
+On shutdown the runner drains the in-flight batch through the batcher, then bounds
+the batcher join to **5 seconds** via `tokio::time::timeout` — so a stuck downstream
+cannot block `stop()` indefinitely. A warning is logged if the drain does not
+complete in time and the in-flight batch is abandoned.
+
+---
+
+## Render-error fallback
+
+If an output template fails to render — for example because it references a field
+missing from the row, or because the rendered string is not valid JSON — the
+reaction:
+
+1. Logs a warning with the query id and the render error.
+2. **Omits the `payload` field** on the emitted `QueryResultItem`.
+3. Still populates `before` / `after` / `item_type` / `row_signature` as usual, so
+   receivers can recover the change from the raw row state.
+
+Render failures never drop events. Receivers should treat `payload` as best-effort:
+the contract is "if present, the rendered template; if absent, read `before` /
+`after`".
+
+---
+
+## Authentication
+
+Use `with_metadata(...)` to attach per-call entries that ride on every RPC. Each
+entry is sent **both** in `ProcessResultsRequest.metadata` (the body field on the
+proto) **and** as a real gRPC request header on the underlying HTTP/2 call, so
+either reception style (body field or `Context::metadata()`) works for receivers:
+
+```rust,ignore
 let reaction = GrpcReaction::builder("my-grpc-reaction")
+    .with_queries(vec!["orders-by-region".to_string()])
     .with_endpoint("grpc://collector:50052")
-    .with_adaptive_batching(AdaptiveBatchConfig::default())
+    .with_metadata("authorization", std::env::var("MY_BEARER_TOKEN")?)
+    .with_metadata("x-tenant", "tenant-42")
+    .build()?;
+```
+
+The reaction does not resolve secret-store references itself — supply the resolved
+value (from `std::env`, a Drasi state store, or your application's secret manager).
+Entries with invalid HTTP/2 header names or values are skipped from the headers
+with a warning, but still ride in the body field.
+
+---
+
+## Examples
+
+### 1. Fixed batching, no templates
+
+Each batch sent as one `ProcessResults` RPC; up to 100 items per batch or every 1 s
+(the defaults):
+
+```rust,ignore
+let reaction = GrpcReaction::builder("orders-grpc")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_endpoint("grpc://collector:50052")
+    .build()?;
+core.add_reaction(reaction).await?;
+```
+
+### 2. Fixed batching with a per-query template
+
+Reshape each ADD into a domain event placed on `payload`:
+
+```rust,ignore
+use std::collections::HashMap;
+use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
+use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
+
+let mut routes = HashMap::new();
+routes.insert(
+    "orders-by-region".to_string(),
+    QueryConfig {
+        added: Some(TemplateSpec::new(
+            r#"{"event":"OrderCreated","id":"{{after.id}}","total":{{after.total}}}"#,
+        )),
+        updated: None,
+        deleted: Some(TemplateSpec::new(
+            r#"{"event":"OrderCancelled","id":"{{before.id}}"}"#,
+        )),
+    },
+);
+
+let templates = OutputTemplates {
+    default_template: None,
+    routes,
+};
+
+let reaction = GrpcReaction::builder("orders-events")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_endpoint("grpc://collector:50052")
+    .with_fixed_batching(100, 250)
     .with_output_templates(templates)
     .build()?;
 ```
 
-## Operational Notes
+### 3. Adaptive batching (high throughput)
 
-- The reaction sends each batch as a unary `ProcessResults` RPC on the `ReactionService`. On a connection-level error it reconnects with exponential backoff bounded by `connectionRetryAttempts` × `initialConnectionTimeoutMs`.
-- `maxRetries` controls per-batch retry on transient send errors. Batches that exhaust retries are logged and dropped, and the client reconnects before the next batch.
-- All event/result delivery is best-effort at-least-once at the gRPC level; downstream consumers should be idempotent.
-- The reaction processing task is supervised by the host runtime via `ComponentStatusHandle`; a panic surfaces as a component failure.
+Burst-friendly tuning via the per-field setters, which implicitly enable adaptive
+mode:
 
-## Building as a Dynamic Plugin
+```rust,ignore
+let reaction = GrpcReaction::builder("metrics-grpc")
+    .with_queries(vec!["server-metrics".to_string()])
+    .with_endpoint("grpc://collector:50052")
+    .with_min_batch_size(50)
+    .with_max_batch_size(2_000)
+    .with_window_size(100)        // 10 s throughput window
+    .with_batch_timeout_ms(500)
+    .build()?;
+```
+
+### 4. Adaptive batching with a default template
+
+```rust,ignore
+use drasi_lib::reactions::common::{AdaptiveBatchConfig, QueryConfig, TemplateSpec};
+use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
+
+let templates = OutputTemplates {
+    default_template: Some(QueryConfig {
+        added: Some(TemplateSpec::new(r#"{"op":"add","row":{{json after}}}"#)),
+        updated: Some(TemplateSpec::new(r#"{"op":"upd","row":{{json after}},"prev":{{json before}}}"#)),
+        deleted: Some(TemplateSpec::new(r#"{"op":"del","row":{{json before}}}"#)),
+    }),
+    routes: std::collections::HashMap::new(),
+};
+
+let reaction = GrpcReaction::builder("orders-batched")
+    .with_queries(vec!["orders-by-region".to_string(), "shipments".to_string()])
+    .with_endpoint("grpc://collector:50052")
+    .with_adaptive_batching(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 50,
+        adaptive_max_batch_size: 2_000,
+        adaptive_window_size: 100,
+        adaptive_batch_timeout_ms: 500,
+    })
+    .with_output_templates(templates)
+    .build()?;
+```
+
+### 5. Authenticated reaction with per-tenant routing header
+
+```rust,ignore
+let reaction = GrpcReaction::builder("orders-authed")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_endpoint("grpc://collector:50052")
+    .with_metadata("authorization", std::env::var("MY_BEARER_TOKEN")?)
+    .with_metadata("x-tenant", "tenant-42")
+    .with_fixed_batching(100, 1_000)
+    .build()?;
+```
+
+---
+
+## Plugin metadata
+
+The reaction also ships as a Drasi dynamic plugin. The plugin descriptor publishes
+named OpenAPI sub-schemas for `GrpcReactionConfig`, `BatchingConfig`,
+`OutputTemplates`, `QueryConfig`, and `TemplateSpec`, plus `SchemaUiAnnotator`
+groupings (`Connection`, `Reliability`, `Auth`, `Batching`, `Templates`) so
+management UIs can render the configuration form.
+
+| Property | Value |
+|----------|-------|
+| Plugin kind | `grpc` |
+| Config version | `3.0.0` |
+| Crate version | `0.5.0` |
+| Dynamic plugin feature | `dynamic-plugin` |
+
+Build as a dynamic plugin:
 
 ```bash
 cargo build -p drasi-reaction-grpc --release --features dynamic-plugin
@@ -164,6 +563,34 @@ cargo build -p drasi-reaction-grpc --release --features dynamic-plugin
 
 The produced `cdylib` exports the standard Drasi plugin entry point.
 
-## License
+---
 
-Apache-2.0 — see the workspace [`LICENSE`](../../../LICENSE).
+## Testing
+
+```bash
+cargo test -p drasi-reaction-grpc
+```
+
+Unit tests cover config defaults, builder semantics (including per-field adaptive
+setters), template routing strictness (no dotted-suffix fallback), template render
+success/failure, and `build_proto_item` field population for every variant.
+
+Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
+`ReactionService` server bound to an ephemeral loopback port to exercise:
+
+- Fixed batching end-to-end (round-trip; verify `item_type`, `row_signature`,
+  `before`/`after`, and absence of `payload` with no template).
+- Fixed batching with a template (verify `payload` populated alongside raw
+  `before`/`after`).
+- Render-error fallback: a non-JSON template output triggers a warning and emits
+  the item with `payload` absent — receivers still get the raw row state.
+- `UPDATE` and `DELETE` template context (before / after population).
+- Per-call metadata propagated as actual gRPC request headers.
+- Adaptive batching steady-state delivery with `row_signature` round-trip.
+- Bounded shutdown drain (the 5 s `tokio::time::timeout` wrap on the batcher join).
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).

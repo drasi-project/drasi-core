@@ -59,12 +59,49 @@ message SourceChange {
     string source_id = 5;
 }
 
-// Query result item
+// Type of change carried by a QueryResultItem (v3 schema).
+//
+// Replaces the v2 string `type` tag, eliminating the prior casing
+// inconsistency between CRUD ops and aggregation/noop.
+enum QueryResultItemType {
+    QUERY_RESULT_ITEM_TYPE_UNSPECIFIED = 0;
+    QUERY_RESULT_ITEM_TYPE_ADD         = 1;
+    QUERY_RESULT_ITEM_TYPE_UPDATE      = 2;
+    QUERY_RESULT_ITEM_TYPE_DELETE      = 3;
+    QUERY_RESULT_ITEM_TYPE_AGGREGATION = 4;
+    QUERY_RESULT_ITEM_TYPE_NOOP        = 5;
+}
+
+// Query result item (v3 schema).
+//
+// Field tags 1 and 2 (formerly `type` and `data`) are permanently
+// reserved. `data` was removed because it duplicated `after`/`before`
+// for ADD/UPDATE/DELETE; templated output now lands on the dedicated
+// optional `payload` field below.
 message QueryResultItem {
-    string type = 1; // "ADD", "UPDATE", "DELETE"
-    google.protobuf.Struct data = 2;
-    google.protobuf.Struct before = 3; // For UPDATE
-    google.protobuf.Struct after = 4; // For UPDATE
+    reserved 1, 2;
+    reserved "type", "data";
+
+    // Raw row state, framework-controlled.
+    // ADD          — only `after` set
+    // DELETE       — only `before` set
+    // UPDATE       — both set
+    // AGGREGATION  — `after` set; `before` set if known
+    // NOOP         — neither set
+    google.protobuf.Struct before = 3;
+    google.protobuf.Struct after  = 4;
+
+    // Discriminator for the change type.
+    QueryResultItemType item_type = 5;
+
+    // Identity of the row across emissions. First-class on every item.
+    uint64 row_signature = 6;
+
+    // User-customizable payload. Populated only when an output template
+    // is configured for the (query_id, operation) pair and renders to
+    // valid JSON. Absent when no template is configured, when render
+    // fails, or for AGGREGATION/NOOP (which bypass template rendering).
+    optional google.protobuf.Struct payload = 7;
 }
 
 // Query result batch

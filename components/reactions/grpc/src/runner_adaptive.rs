@@ -28,9 +28,9 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::reactions::common::{base::ReactionBase, AdaptiveBatchConfig as LibAdaptiveConfig};
+use drasi_lib::reactions::common::{base::ReactionBase, AdaptiveBatchConfig};
 
-use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
+use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::config::GrpcReactionConfig;
 use crate::connection::create_client_with_retry;
 use crate::proto::{ProtoQueryResultItem, ReactionServiceClient};
@@ -39,7 +39,7 @@ use crate::templates::{build_proto_item, TemplateEngine};
 
 pub(crate) struct AdaptiveRunnerParams {
     pub reaction_name: String,
-    pub adaptive: LibAdaptiveConfig,
+    pub adaptive: AdaptiveBatchConfig,
     pub base: ReactionBase,
     pub config: GrpcReactionConfig,
     pub shutdown_rx: oneshot::Receiver<()>,
@@ -63,7 +63,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let status_handle = base.status_handle();
 
     // Convert the public lib config into the runtime batcher config.
-    let runtime_cfg = AdaptiveBatchConfig {
+    let runtime_cfg = AdaptiveBatcherConfig {
         min_batch_size: adaptive.adaptive_min_batch_size,
         max_batch_size: adaptive.adaptive_max_batch_size,
         throughput_window: Duration::from_millis(adaptive.adaptive_window_size as u64 * 100),
@@ -259,7 +259,18 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     }
 
     drop(batch_tx);
-    let _ = batcher_handle.await;
+    // Bound the drain: send_batch_with_retry can loop up to 60 s, so an
+    // in-flight batch must not block stop() indefinitely. Matches the
+    // pattern HTTP adopted in adaptive_loop.rs:134-139 (PR #485 review).
+    if tokio::time::timeout(Duration::from_secs(5), batcher_handle)
+        .await
+        .is_err()
+    {
+        warn!(
+            "[{reaction_name}] Adaptive batcher did not finish within the 5 s shutdown window — \
+             in-flight batch abandoned"
+        );
+    }
 
     info!("[{reaction_name}] Adaptive gRPC reaction completed");
     status_handle

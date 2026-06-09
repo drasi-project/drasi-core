@@ -75,7 +75,7 @@ pub(crate) async fn send_batch_with_retry(
             attempt_start
         );
 
-        let request = tonic::Request::new(ProcessResultsRequest {
+        let mut request = tonic::Request::new(ProcessResultsRequest {
             results: Some(ProtoQueryResult {
                 query_id: query_id.to_string(),
                 results: batch.clone(),
@@ -83,6 +83,35 @@ pub(crate) async fn send_batch_with_retry(
             }),
             metadata: metadata.clone(),
         });
+
+        // Also surface configured metadata as actual gRPC request headers
+        // (HTTP/2 trailers), in addition to the in-body `metadata` field.
+        // Receivers can read either; this matches the README's
+        // "authentication or routing headers" framing. Invalid header
+        // names/values are logged and skipped rather than failing the
+        // batch — the entry is still available in the body field.
+        for (k, v) in metadata.iter() {
+            match (
+                k.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>(),
+                v.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>(),
+            ) {
+                (Ok(name), Ok(value)) => {
+                    request.metadata_mut().insert(name, value);
+                }
+                (Err(e), _) => {
+                    warn!(
+                        "Skipping metadata header with invalid name '{k}': {e}; \
+                         entry still sent in request body"
+                    );
+                }
+                (_, Err(e)) => {
+                    warn!(
+                        "Skipping metadata header '{k}' with invalid value: {e}; \
+                         entry still sent in request body"
+                    );
+                }
+            }
+        }
 
         trace!(
             "About to send ProcessResults request - endpoint: {}, query_id: {}, batch_size: {}",
