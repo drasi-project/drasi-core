@@ -124,6 +124,17 @@ async fn standard_default_fallback_posts_to_changes_query() {
     let reqs = server.received_requests().await.unwrap();
     assert!(!reqs.is_empty(), "expected at least one request");
     assert_eq!(reqs[0].url.path(), "/changes/q1");
+    assert_eq!(reqs[0].method.as_str(), "POST");
+    // With no template, the body is the raw row JSON (Add data is the row payload).
+    let body = std::str::from_utf8(&reqs[0].body).unwrap();
+    assert_eq!(body, r#"{"id":1}"#);
+    assert_eq!(
+        reqs[0]
+            .headers
+            .get("content-type")
+            .map(|v| v.to_str().unwrap()),
+        Some("application/json")
+    );
 }
 
 #[tokio::test]
@@ -462,16 +473,183 @@ async fn adaptive_with_batch_endpoint_posts_to_batch_when_multi() {
     r.stop().await.unwrap();
 
     let reqs = server.received_requests().await.unwrap();
-    assert!(!reqs.is_empty(), "expected a batch POST");
-    let batch_request = reqs
-        .iter()
-        .find(|r| r.url.path() == "/batch")
-        .expect("expected a /batch POST");
+    assert_eq!(reqs.len(), 1, "expected exactly one batch POST");
+    let batch_request = &reqs[0];
+    assert_eq!(batch_request.url.path(), "/batch");
+    assert_eq!(batch_request.method.as_str(), "POST");
+    assert_eq!(
+        batch_request
+            .headers
+            .get("content-type")
+            .map(|v| v.to_str().unwrap()),
+        Some("application/json")
+    );
+
     let body: serde_json::Value = serde_json::from_slice(&batch_request.body).unwrap();
-    assert!(body.is_array(), "batch body should be an array");
-    let arr = body.as_array().unwrap();
-    assert!(!arr.is_empty());
-    let first = &arr[0];
-    assert_eq!(first.get("query_id"), Some(&json!("q1")));
-    assert!(first.get("count").and_then(|c| c.as_u64()).unwrap_or(0) >= 1);
+    let arr = body.as_array().expect("batch body should be an array");
+    // One QueryResult with 5 diffs → one channel message → one BatchResult group.
+    assert_eq!(arr.len(), 1, "expected a single coalesced query group");
+
+    let group = &arr[0];
+    assert_eq!(group.get("query_id"), Some(&json!("q1")));
+    assert_eq!(group.get("count"), Some(&json!(5)));
+    let timestamp = group
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .expect("timestamp field should be a string");
+    chrono::DateTime::parse_from_rfc3339(timestamp).expect("timestamp should be RFC 3339");
+
+    let results = group
+        .get("results")
+        .and_then(|r| r.as_array())
+        .expect("results should be an array");
+    assert_eq!(results.len(), 5);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(r.get("type"), Some(&json!("ADD")), "diff {i} should be ADD");
+        assert_eq!(
+            r.get("data").and_then(|d| d.get("id")),
+            Some(&json!(i as i64)),
+            "diff {i} should carry id={i}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive partial-batch flush on timeout
+// ---------------------------------------------------------------------------
+
+/// When the inbound rate is below `min_batch_size`, the batcher must still
+/// flush a partial batch once `max_wait_time` (the `adaptive_batch_timeout_ms`
+/// from config) elapses. Deterministic: a single diff is sent and we wait
+/// for one HTTP request to land.
+#[tokio::test]
+async fn adaptive_flushes_partial_batch_on_timeout_below_min_size() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/changes/q1"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let r = Arc::new(
+        HttpReaction::builder("adaptive-partial-flush")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_adaptive(AdaptiveBatchConfig {
+                // min is intentionally larger than what we will send, so the
+                // batch can only be emitted via the timeout path.
+                adaptive_min_batch_size: 10,
+                adaptive_max_batch_size: 100,
+                adaptive_window_size: 10,
+                adaptive_batch_timeout_ms: 100,
+            })
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    enqueue_add(&r, "q1", json!({"id": 1})).await;
+
+    // 2 s is generous relative to the 100 ms timeout, eliminating flakiness
+    // from CI scheduler jitter while still detecting a real regression.
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "the partial batch should be flushed exactly once"
+    );
+    assert_eq!(reqs[0].url.path(), "/changes/q1");
+    let body = std::str::from_utf8(&reqs[0].body).unwrap();
+    assert_eq!(body, r#"{"id":1}"#);
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard
+// ---------------------------------------------------------------------------
+
+/// `process_result` rejects a rendered absolute URL whose host does not match
+/// the configured `base_url` host (SSRF guard in process.rs). The reaction
+/// must log and continue without producing an outbound request.
+///
+/// The test pairs the SSRF case with a safe relative-URL case in the *same*
+/// `QueryResult`. Because the standard loop iterates result diffs in order,
+/// the successful safe request acts as a synchronization barrier proving the
+/// SSRF case has already been processed and rejected.
+#[tokio::test]
+async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
+    let server = mock_server::start().await;
+    Mock::given(method("POST"))
+        .and(path("/safe"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // ADD template renders an absolute URL pointing at a different host —
+    // must be blocked by the SSRF guard.
+    let ssrf_add = TemplateSpec {
+        template: r#"{}"#.to_string(),
+        extension: HttpCallExt {
+            url: "http://evil.example.com/x".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+    // DELETE template renders a safe relative URL — must be delivered, and
+    // serves as the synchronization barrier for the test.
+    let safe_delete = TemplateSpec {
+        template: r#"{}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/safe".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    };
+
+    let r = Arc::new(
+        HttpReaction::builder("ssrf-guard")
+            .with_base_url(server.uri())
+            .with_query("q1")
+            .with_query_template(
+                "q1",
+                HttpQueryConfig {
+                    added: Some(ssrf_add),
+                    deleted: Some(safe_delete),
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap(),
+    );
+    r.start().await.unwrap();
+
+    // Single QueryResult with two diffs guarantees in-order processing by the
+    // standard loop: SSRF first (rejected), then the safe Delete (delivered).
+    let qr = make_query_result(
+        "q1",
+        vec![
+            ResultDiff::Add {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+            ResultDiff::Delete {
+                data: json!({"id": 1}),
+                row_signature: 0,
+            },
+        ],
+    );
+    r.enqueue_query_result(qr).await.expect("enqueue");
+
+    wait_for_requests(&server, 1, 2000).await;
+    r.stop().await.unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs.len(),
+        1,
+        "SSRF request must be blocked; only the safe request should land"
+    );
+    assert_eq!(reqs[0].url.path(), "/safe");
 }

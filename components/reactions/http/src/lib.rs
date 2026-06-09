@@ -26,19 +26,24 @@
 //!
 //! ## Quick start (per-result)
 //!
-//! ```rust,ignore
-//! use drasi_reaction_http::{HttpReaction, HttpReactionConfig};
+//! ```
+//! # fn main() -> anyhow::Result<()> {
+//! use drasi_reaction_http::HttpReaction;
 //!
 //! let reaction = HttpReaction::builder("my-http")
 //!     .with_queries(vec!["query1".to_string()])
 //!     .with_base_url("https://api.example.com")
 //!     .with_token("secret")
 //!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Quick start (adaptive batching)
 //!
-//! ```rust,ignore
+//! ```
+//! # fn main() -> anyhow::Result<()> {
 //! use drasi_reaction_http::{AdaptiveBatchConfig, HttpReaction};
 //!
 //! let reaction = HttpReaction::builder("my-http")
@@ -47,6 +52,9 @@
 //!     .with_adaptive(AdaptiveBatchConfig::default())
 //!     .with_batch_endpoint("/batch")
 //!     .build()?;
+//! # let _ = reaction;
+//! # Ok(())
+//! # }
 //! ```
 
 pub(crate) mod adaptive_batcher;
