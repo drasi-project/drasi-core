@@ -13,15 +13,8 @@
 // limitations under the License.
 
 use super::MqttReactionBuilder;
-use crate::adaptive_batcher::AdaptiveBatchConfig;
-use crate::{
-    adaptive_batcher::AdaptiveBatcher,
-    config::{
-        MqttAuthMode, MqttCallSpec, MqttQueryConfig, MqttReactionConfig, MqttTransportMode,
-        RetainPolicy,
-    },
-    mqtt,
-};
+use crate::config::{MqttExtension, MqttProtocolVersion, MqttReactionConfig, MqttQueryConfig};
+use crate::mqtt;
 use anyhow::Result;
 use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
@@ -47,14 +40,68 @@ use tokio::sync::mpsc;
 pub struct Processor {}
 
 impl Processor {
-    //==============================================================================
-    // MAIN EXECUTION FUNC
-    //==============================================================================
-    /// Entry point for the MQTT reaction's processing logic.
+
+    pub async fn run_processing_loop(
+        reaction_name: String,
+        base: ReactionBase,
+        config: MqttReactionConfig,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+        match config.protocol_version {
+            MqttProtocolVersion::V5 => {
+                // start the main V5 processing task
+                Ok(tokio::task::spawn(Self::run_processing_loop_v5(
+                    reaction_name,
+                    base,
+                    config,
+                    shutdown_rx,
+                )))
+            }
+            MqttProtocolVersion::V3_1_1 => {
+                // start the main V3 processing task
+                Ok(tokio::task::spawn(Self::run_processing_loop_v3_1_1(
+                    reaction_name,
+                    base,
+                    config,
+                    shutdown_rx,
+                )))
+            }
+        }
+    }
+
+    async fn run_processing_loop_v5(
+        reaction_name: String,
+        base: ReactionBase,
+        config: MqttReactionConfig,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+
+        // setup connection and start event loop
+    }
+
+    async fn run_processing_loop_v3_1_1(
+        reaction_name: String,
+        base: ReactionBase,
+        config: MqttReactionConfig,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+
+        // clone priority queue
+        let priority_queue = base.priority_queue.clone();
+        
+
+        // setup connection and start event loop
+        let mqtt_client = match MqttClient::new(config.client_id, &config, shutdown_rx) 
+    }
+
+    fn process_result() {
+
+    }
+
+
     pub(super) async fn run_internal(
         reaction_name: String,
         base: ReactionBase,
-        adaptive_config: AdaptiveBatchConfig,
         config: MqttReactionConfig,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
@@ -81,207 +128,18 @@ impl Processor {
             };
 
         // Main processing loop
-        match adaptive_config.adaptive_enabled {
-            false => {
-                Self::basic_processing(
-                    mqtt_client,
-                    priority_queue,
-                    Arc::clone(&status),
-                    config,
-                    shutdown_rx,
-                    event_loop_shutdown_tx,
-                )
-                .await
-            }
-            true => {
-                Self::adaptive_batch_processing(
-                    mqtt_client,
-                    priority_queue,
-                    Arc::clone(&status),
-                    config,
-                    adaptive_config,
-                    shutdown_rx,
-                    event_loop_shutdown_tx,
-                )
-                .await
-            }
-        }
+        Self::basic_processing(
+            mqtt_client,
+            priority_queue,
+            Arc::clone(&status),
+            config,
+            shutdown_rx,
+            event_loop_shutdown_tx,
+        )
+        .await;
 
         info!("[{reaction_name}] MQTT reaction stopped");
         *status.write().await = ComponentStatus::Stopped;
-    }
-
-    //==============================================================================
-    // ADAPTIVE BATCHING PROCESSING
-    //==============================================================================
-    async fn adaptive_batch_processing(
-        mqtt_client: MqttClient,
-        priority_queue: drasi_lib::channels::PriorityQueue<drasi_lib::channels::QueryResult>,
-        status: Arc<tokio::sync::RwLock<ComponentStatus>>,
-        config: MqttReactionConfig,
-        adaptive_config: AdaptiveBatchConfig,
-        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-        mut event_loop_shutdown_tx: tokio::sync::mpsc::Sender<()>,
-    ) {
-        // Create channel for batching with capacity based on batch configuration
-        let batch_channel_capacity = adaptive_config.recommended_channel_capacity();
-        let (batch_tx, batch_rx) = mpsc::channel(batch_channel_capacity);
-
-        debug!(
-            "[{}] MqttAdaptiveReaction using batch channel capacity: {} (max_batch_size: {} × 5)",
-            mqtt_client.client_id, batch_channel_capacity, adaptive_config.max_batch_size
-        );
-
-        // Set up Handlebars with json helper
-        let handlebars = create_handlebars();
-
-        let reaction_name = mqtt_client.client_id.clone();
-
-        // Spawn adaptive batcher task
-        let batcher_handle = tokio::spawn({
-            let reaction_name = mqtt_client.client_id.clone();
-            async move {
-                let mut batcher = AdaptiveBatcher::new(batch_rx, adaptive_config);
-
-                let mut total_batches = 0u64;
-                let mut total_results = 0u64;
-
-                info!("[{reaction_name}] Adaptive MQTT batcher started");
-
-                while let Some(batch) = batcher.next_batch().await {
-                    if batch.is_empty() {
-                        continue;
-                    }
-
-                    // get the total number of results in the batch for all queries.
-                    let batch_size = batch
-                        .iter()
-                        .map(|(_, v): &(String, Vec<ResultDiff>)| v.len())
-                        .sum::<usize>();
-
-                    total_batches += 1;
-                    total_results += batch_size as u64;
-
-                    debug!("[{reaction_name}] Processing adaptive batch of {batch_size} results");
-
-                    Self::process_batch(batch, &mqtt_client, &config, &handlebars).await;
-
-                    if total_batches.is_multiple_of(100) {
-                        info!(
-                                "[{}] Adaptive MQTT metrics - Batches: {}, Results: {}, Avg batch size: {:.1}",
-                                reaction_name,
-                                total_batches,
-                                total_results,
-                                total_results as f64 / total_batches as f64
-                            );
-                    }
-                }
-                info!(
-                        "[{reaction_name}] Adaptive MQTT batcher stopped - Total batches: {total_batches}, Total results: {total_results}"
-                    );
-            }
-        });
-
-        // Main processing loop for incoming results to be batched
-        loop {
-            // Use select to wait for either a result OR shutdown signal
-            let query_result_arc = tokio::select! {
-                biased;
-
-                _ = &mut shutdown_rx => {
-                    debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
-                    break;
-                }
-
-                result = priority_queue.dequeue() => result,
-            };
-            let query_result = query_result_arc.as_ref();
-
-            if !matches!(*status.read().await, ComponentStatus::Running) {
-                info!("[{reaction_name}] Reaction status changed to non-running, exiting");
-                break;
-            }
-
-            if query_result.results.is_empty() {
-                continue;
-            }
-
-            // Send to batcher
-            if batch_tx
-                .send((query_result.query_id.clone(), query_result.results.clone()))
-                .await
-                .is_err()
-            {
-                error!("[{reaction_name}] Failed to send to batch channel");
-                break;
-            }
-        }
-
-        // Close the batch channel
-        drop(batch_tx);
-
-        // Wait for batcher to complete
-        let _ = tokio::time::timeout(Duration::from_secs(5), batcher_handle).await;
-
-        info!("[{reaction_name}] Adaptive MQTT reaction completed");
-    }
-
-    // Process a batch of results, final process is done by the process_result function which is shared with basic processing.
-    async fn process_batch(
-        batch: Vec<(String, Vec<ResultDiff>)>,
-        mqtt_client: &MqttClient,
-        config: &MqttReactionConfig,
-        handlebars: &Handlebars<'_>,
-    ) {
-        // Group by query_id for batch processing
-        let mut batch_by_query: HashMap<String, Vec<ResultDiff>> = HashMap::new();
-        for (query_id, results) in batch {
-            batch_by_query.entry(query_id).or_default().extend(results);
-        }
-
-        for (query_id, results) in batch_by_query {
-            // Check if we have a route configured for this query
-            let route = config.query_configs.get(&query_id).or_else(|| {
-                config.query_configs.get("*").or_else(|| {
-                    // * to handle cases of select-all
-                    query_id
-                        .split('.')
-                        .next_back()
-                        .and_then(|name| config.query_configs.get(name))
-                })
-            });
-
-            let query_config = match route {
-                Some(config) => config.clone(),
-                None => {
-                    debug!(
-                        "[{}] No configuration for query '{}', using default",
-                        mqtt_client.client_id, query_id
-                    );
-                    default_config_for_query(&config.default_topic)
-                }
-            };
-
-            debug!(
-                "[{}] Processing {} results from query '{}'",
-                mqtt_client.client_id,
-                results.len(),
-                query_id
-            );
-
-            // Process each result
-            for result in &results {
-                if let Err(e) =
-                    Self::process_result(mqtt_client, handlebars, result, &query_id, &query_config)
-                        .await
-                {
-                    error!(
-                        "[{}] Failed to process result: {}",
-                        mqtt_client.client_id, e
-                    );
-                }
-            }
-        }
     }
 
     //==============================================================================

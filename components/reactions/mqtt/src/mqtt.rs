@@ -14,10 +14,7 @@
 
 use super::processor::Processor;
 use super::MqttReactionBuilder;
-use crate::adaptive_batcher::AdaptiveBatchConfig;
-use crate::config::{
-    MqttAuthMode, MqttQueryConfig, MqttReactionConfig, MqttTransportMode, RetainPolicy,
-};
+use crate::config::MqttReactionConfig;
 use anyhow::Result;
 use drasi_core::evaluation::variable_value::de;
 use drasi_lib::{
@@ -39,7 +36,7 @@ use rumqttc::v5::{mqttbytes::QoS, AsyncClient, Event, Incoming, MqttOptions};
 pub struct MqttReaction {
     base: ReactionBase,
     config: MqttReactionConfig,
-    adaptive_config: AdaptiveBatchConfig,
+    event_loop_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl MqttReaction {
@@ -52,7 +49,7 @@ impl MqttReaction {
     ///
     /// The event channel is automatically injected when the reaction is added
     /// to DrasiLib via `add_reaction()`.
-    pub fn new(id: impl Into<String>, queries: Vec<String>, config: MqttReactionConfig) -> Self {
+    pub fn new(id: impl Into<String>, queries: Vec<String>, config: MqttReactionConfig) -> anyhow::Result<Self> {
         Self::create_internal(id.into(), queries, config, None, true)
     }
 
@@ -65,7 +62,7 @@ impl MqttReaction {
         queries: Vec<String>,
         config: MqttReactionConfig,
         priority_queue_capacity: usize,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::create_internal(
             id.into(),
             queries,
@@ -82,7 +79,7 @@ impl MqttReaction {
         config: MqttReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::create_internal(id, queries, config, priority_queue_capacity, auto_start)
     }
 
@@ -93,41 +90,22 @@ impl MqttReaction {
         config: MqttReactionConfig,
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+
+        config.validate(&queries)?;
+
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
         }
-        let adaptive_mqtt_config = match config.adaptive.clone() {
-            Some(adaptive_config) => {
-                // Adaptive batcher.
-                AdaptiveBatchConfig {
-                    min_batch_size: adaptive_config.adaptive_min_batch_size,
-                    max_batch_size: adaptive_config.adaptive_max_batch_size,
-                    throughput_window: Duration::from_millis(
-                        (adaptive_config.adaptive_window_size as u64) * 100,
-                    ),
-                    max_wait_time: Duration::from_millis(adaptive_config.adaptive_batch_timeout_ms),
-                    min_wait_time: Duration::from_millis(100), // Minimum wait time before sending a batch, even if min_batch_size is not reached.
-                    adaptive_enabled: true,
-                }
-            }
-            None => {
-                // Basic reaction without adaptive batcher.
-                AdaptiveBatchConfig {
-                    adaptive_enabled: false,
-                    ..Default::default()
-                }
-            }
-        };
 
         let base = ReactionBase::new(params);
 
-        Self {
+        Ok(Self {
             base,
-            config: config.clone(),
-            adaptive_config: adaptive_mqtt_config,
-        }
+            config: config,
+            event_loop_task: Arc::new(tokio::sync::Mutex::new(None)),
+        })
     }
 }
 
@@ -144,60 +122,76 @@ impl Reaction for MqttReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         let mut props = HashMap::new();
         props.insert(
-            "broker_addr".to_string(),
-            serde_json::Value::String(self.config.broker_addr.clone()),
+            "url".to_string(),
+            serde_json::Value::String(self.config.url.clone()),
         );
         props.insert(
-            "port".to_string(),
-            serde_json::Value::Number(self.config.port.into()),
+            "client_id".to_string(),
+            self.config
+                .client_id
+                .as_ref()
+                .map_or(serde_json::Value::Null, |v| serde_json::Value::String(v.clone())),
         );
         props.insert(
-            "transport_mode".to_string(),
-            serde_json::Value::String(format!("{:?}", self.config.transport_mode)),
+            "protocol_version".to_string(),
+            serde_json::Value::String(
+                match self.config.protocol_version {
+                    crate::config::MqttProtocolVersion::V5 => "v5",
+                    crate::config::MqttProtocolVersion::V3_1_1 => "v3_1_1",
+                }
+                .to_string(),
+            ),
         );
         props.insert(
-            "keep_alive".to_string(),
-            serde_json::Value::Number(self.config.keep_alive.into()),
+            "routes_count".to_string(),
+            serde_json::Value::Number((self.config.routes.len() as u64).into()),
         );
         props.insert(
-            "clean_session".to_string(),
-            serde_json::Value::Bool(self.config.clean_session),
+            "has_default_template".to_string(),
+            serde_json::Value::Bool(self.config.default_template.is_some()),
         );
         props.insert(
-            "request_channel_capacity".to_string(),
-            serde_json::Value::Number(self.config.request_channel_capacity.into()),
+            "has_identity_provider".to_string(),
+            serde_json::Value::Bool(self.config.identity_provider.is_some()),
+        );
+        props.insert(
+            "has_tls".to_string(),
+            serde_json::Value::Bool(self.config.tls.is_some()),
         );
         props.insert(
             "event_channel_capacity".to_string(),
             serde_json::Value::Number(self.config.event_channel_capacity.into()),
         );
         props.insert(
-            "pending_throttle".to_string(),
-            serde_json::Value::Number(self.config.pending_throttle.into()),
-        );
-        props.insert(
-            "connection_timeout".to_string(),
-            serde_json::Value::Number(self.config.connection_timeout.into()),
-        );
-        props.insert(
-            "max_packet_size".to_string(),
-            serde_json::Value::Number(self.config.max_packet_size.into()),
-        );
-        props.insert(
             "max_inflight".to_string(),
-            serde_json::Value::Number(self.config.max_inflight.into()),
+            self.config
+                .max_inflight
+                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
         );
         props.insert(
-            "auth_mode".to_string(),
-            serde_json::Value::String(format!("{:?}", self.config.auth_mode)),
+            "keep_alive".to_string(),
+            self.config
+                .keep_alive
+                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
         );
-
-        if self.adaptive_config.adaptive_enabled {
-            props.insert(
-                "adaptive_batching".to_string(),
-                serde_json::Value::String(format!("{:?}", self.config.adaptive)),
-            );
-        }
+        props.insert(
+            "clean_start".to_string(),
+            self.config
+                .clean_start
+                .map_or(serde_json::Value::Null, serde_json::Value::Bool),
+        );
+        props.insert(
+            "conn_timeout".to_string(),
+            self.config
+                .conn_timeout
+                .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
+        );
+        props.insert(
+            "session_expiry_interval".to_string(),
+            self.config.session_expiry_interval.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::Number(v.into())
+            }),
+        );
 
         props
     }
@@ -218,49 +212,52 @@ impl Reaction for MqttReaction {
         log_component_start("MQTT Reaction", &self.base.id);
 
         info!(
-            "[{}] MQTT reaction started - sending to default topic: {}",
-            self.base.id, self.config.default_topic
+            "[{}] MQTT reaction started",
+            self.base.id
         );
 
-        // Transition to Starting
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Starting,
-                Some("Starting MQTT reaction".to_string()),
-            )
-            .await?;
+        // transition to Starting
+        self.base.set_status(
+            ComponentStatus::Starting,
+            Some(format!("[{}] Starting MQTT reaction", self.base.id)),
+        ).await;
 
-        // Transition to Running
-        self.base
-            .set_status_with_event(
-                ComponentStatus::Running,
-                Some("MQTT reaction started".to_string()),
-            )
-            .await?;
-
-        // Create shutdown channel for graceful termination
+        
+        // create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+
+        // create shutdown channel for graceful termination
         let shared_base = self.base.clone_shared();
         let reaction_name = self.base.id.clone();
-        let adaptive_config = self.adaptive_config.clone();
         let config = self.config.clone();
 
-        // Spawn the main processing task
+        // start the main processing task
         let processing_task_handle = tokio::spawn(Processor::run_internal(
             reaction_name,
             shared_base,
-            adaptive_config,
             config,
             shutdown_rx,
         ));
 
-        // Store the processing task handle
+        // store the processing task handle
         self.base.set_processing_task(processing_task_handle).await;
+
+        // transition to Running
+        self.base
+            .set_status(
+                ComponentStatus::Running,
+                Some(format!("[{}] MQTT reaction started", self.base.id)),
+            )
+            .await;
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+
+        self.base.set_status(ComponentStatus::Stopping, Some(format!("[{}] MQTT reaction stopping", self.base.id))).await;
+
+
         // Use ReactionBase common stop functionality
         self.base.stop_common().await?;
 
@@ -268,11 +265,11 @@ impl Reaction for MqttReaction {
 
         // Transition to Stopped
         self.base
-            .set_status_with_event(
+            .set_status(
                 ComponentStatus::Stopped,
-                Some("MQTT reaction stopped successfully".to_string()),
+                Some(format!("[{}] MQTT reaction stopped", self.base.id)),
             )
-            .await?;
+            .await;
 
         Ok(())
     }
