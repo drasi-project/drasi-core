@@ -221,20 +221,22 @@ sends every batch on the same `ProcessResults` RPC).
 
 ## Output templates and per-query routing
 
-`outputTemplates` lets each query customise the `payload` field on each emitted
-`QueryResultItem`. For each result, the reaction selects a template in this order:
+`outputTemplates` lets each query customise the **content** of `before` / `after` on each emitted `QueryResultItem`. For each result, the reaction selects a template in this order:
 
 1. `outputTemplates.routes[<query_id>]` — a per-query override, matched by **exact**
    query id. There is no dotted-suffix fallback — a route key `sales.q1` is not
    selected for a query id `q1`.
 2. `outputTemplates.defaultTemplate` — a shared fallback, if present.
-3. **No template** — the result item is emitted with `payload` absent. `before` /
-   `after` still carry the raw row state.
+3. **No template** — the item is emitted with the **raw row state** in whichever
+   of `before` / `after` is present for the op.
 
-Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching
-the result's operation is used. Operations without a spec emit with `payload`
-absent. `AGGREGATION` and `NOOP` items always emit with `payload` absent (they
-bypass template rendering entirely).
+Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching the result's operation is used. Each present row state is rendered through that spec **independently**:
+
+- `ADD` runs the `added` template once on the new row → output goes into `after`.
+- `DELETE` runs the `deleted` template once on the old row → output goes into `before`.
+- `UPDATE` runs the `updated` template **twice** — once on the before-row → `before`, once on the after-row → `after`.
+
+Operations without a matching spec emit the field's raw row state. Aggregation surfaces as UPDATE (matches RabbitMQ and Azure Storage); Noop is dropped at the runner.
 
 ```rust,ignore
 use std::collections::HashMap;
@@ -243,12 +245,14 @@ use drasi_reaction_grpc::OutputTemplates;
 
 let orders = QueryConfig {
     added: Some(TemplateSpec::new(
-        r#"{"event":"created","order":{{json after}}}"#,
+        r#"{"event":"created","order":{{json row}}}"#,
+    )),
+    updated: Some(TemplateSpec::new(
+        r#"{"event":"updated","order":{{json row}}}"#,
     )),
     deleted: Some(TemplateSpec::new(
-        r#"{"event":"cancelled","orderId":"{{before.id}}"}"#,
+        r#"{"event":"cancelled","orderId":"{{row.id}}"}"#,
     )),
-    updated: None,
 };
 
 let mut routes = HashMap::new();
@@ -264,16 +268,14 @@ let templates = OutputTemplates {
 
 ## Templating
 
-Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply only to the
-body of each emitted item's `payload` field. The render context is:
+Templates use [Handlebars](https://handlebarsjs.com/) syntax. Each render produces a single JSON object that replaces the raw row state in one proto field. The render context is:
 
-| Variable | Available for | Meaning |
-|----------|---------------|---------|
-| `after` | added, updated, aggregation | The new / current row payload. |
-| `before` | updated, deleted, aggregation (if known) | The previous row payload. |
-| `data` | all CRUD ops | Cross-reaction-compatibility alias — for `ADD`/`DELETE` it is the row, for `UPDATE` it is the updated row. (The v3 proto envelope has no `data` field; the alias is kept in the template context so templates can be shared across reactions.) |
-| `operation` | all | `ADD`, `UPDATE`, `DELETE`, `AGGREGATION`, or `NOOP`. |
-| `query_id` | all | The originating query id. |
+| Variable | Meaning |
+|----------|---------|
+| `row` | The single row state being rendered (the before-row for `Side::Before`, the after-row for `Side::After`). |
+| `query_id` | The originating query id. |
+| `operation` | `"ADD"`, `"UPDATE"`, or `"DELETE"` (Aggregation surfaces here as `"UPDATE"`). |
+| `side` | `"before"` or `"after"`. Useful inside an `updated` template that wants to differentiate per side; harmless to ignore. For ADD it is `"after"`; for DELETE it is `"before"`. |
 
 A `json` helper is registered for embedding a nested object or array as JSON:
 
@@ -281,15 +283,12 @@ A `json` helper is registered for embedding a nested object or array as JSON:
 {
   "query": "{{query_id}}",
   "operation": "{{operation}}",
-  "row": {{json after}}
+  "side": "{{side}}",
+  "row": {{json row}}
 }
 ```
 
-The template **must render to valid JSON**. If it does not (or fails to render at
-all), the reaction logs a warning and omits `payload` entirely — see
-[Render-error fallback](#render-error-fallback). If the JSON rendered is not a
-top-level object, the framework wraps it as `{"value": ...}` before encoding into the
-proto `Struct`.
+The template **must render to valid JSON**. If it does not (or fails to render at all), the reaction logs a warning and falls back to the **raw row state** for that field — see [Render-error fallback](#render-error-fallback). If the JSON rendered is not a top-level object, the framework wraps it as `{"value": ...}` before encoding into the proto `Struct`.
 
 ---
 
@@ -314,21 +313,20 @@ message QueryResult {
     google.protobuf.Timestamp timestamp = 3;
 }
 
-message QueryResultItem {
-    google.protobuf.Struct before = 1;
-    google.protobuf.Struct after  = 2;
-    QueryResultItemType item_type = 3;
-    uint64 row_signature = 4;
-    optional google.protobuf.Struct payload = 5;
-}
-
 enum QueryResultItemType {
+    // Required by proto3 (zero value must exist); never emitted by the
+    // reaction. Aggregation surfaces as UPDATE; Noop never reaches the wire.
     QUERY_RESULT_ITEM_TYPE_UNSPECIFIED = 0;
     QUERY_RESULT_ITEM_TYPE_ADD         = 1;
     QUERY_RESULT_ITEM_TYPE_UPDATE      = 2;
     QUERY_RESULT_ITEM_TYPE_DELETE      = 3;
-    QUERY_RESULT_ITEM_TYPE_AGGREGATION = 4;
-    QUERY_RESULT_ITEM_TYPE_NOOP        = 5;
+}
+
+message QueryResultItem {
+    QueryResultItemType item_type = 1;
+    uint64 row_signature = 2;
+    google.protobuf.Struct before = 3;   // populated for UPDATE and DELETE
+    google.protobuf.Struct after  = 4;   // populated for ADD and UPDATE
 }
 
 message ProcessResultsResponse {
@@ -341,26 +339,22 @@ message ProcessResultsResponse {
 
 How the per-variant fields are populated:
 
-| `item_type`   | `before`            | `after`             | `payload` (when template configured & renders OK) |
-|---------------|---------------------|---------------------|---------------------------------------------------|
-| `ADD`         | _absent_            | new row             | rendered                                          |
-| `DELETE`      | previous row        | _absent_            | rendered                                          |
-| `UPDATE`      | previous row        | new row             | rendered                                          |
-| `AGGREGATION` | previous (if known) | new aggregate state | always absent (bypasses templates)                |
-| `NOOP`        | _absent_            | _absent_            | always absent (bypasses templates)                |
+| `item_type` | `before`            | `after`             | Behavior with a template configured                      |
+|-------------|---------------------|---------------------|----------------------------------------------------------|
+| `ADD`       | _absent_            | new row             | `after` carries the rendered `added` template output     |
+| `DELETE`    | previous row        | _absent_            | `before` carries the rendered `deleted` template output  |
+| `UPDATE`    | previous row        | new row             | both fields carry **independently** rendered output of the `updated` template (run twice, once per side) |
 
-`row_signature` is the row's identity across emissions and is set on every item
-(`0` for `NOOP`). Receivers can use it to correlate or de-duplicate without parsing
-the payload.
+Notes:
 
-`payload` is structurally a `google.protobuf.Struct` (JSON-equivalent). If a template
-renders a non-object top-level value, it is wrapped as `{"value": ...}` before
-encoding.
+- **Aggregation** results surface as `item_type == UPDATE` on the wire (matches the RabbitMQ and Azure Storage reactions). When the diff carries a `before` value, both sides are templated; otherwise only `after` is templated.
+- **Noop** results are dropped at the runner level — they never appear in `QueryResult.results`.
+- When **no template** is configured for the op, the field carries the raw row state.
+- On **render failure** (template syntax error, non-JSON output, missing field reference, etc.), the reaction logs a warning and falls back to the raw row state for that field. Events are never dropped.
+- `row_signature` is the row's identity across emissions and is set on every item. Receivers can use it to correlate or de-duplicate without parsing the row.
+- `before` / `after` are structurally `google.protobuf.Struct` (JSON-equivalent). If a template renders a non-object top-level value, it is wrapped as `{"value": ...}` before encoding.
 
-One `ProcessResultsRequest` carries one `QueryResult` (a single `query_id` + N items
-+ timestamp). When items for multiple query IDs are batched together by the adaptive
-runner, the batcher splits them and sends one RPC per query — the proto envelope
-itself is single-query.
+One `ProcessResultsRequest` carries one `QueryResult` (a single `query_id` + N items + timestamp). When items for multiple query IDs are batched together by the adaptive runner, the batcher splits them and sends one RPC per query — the proto envelope itself is single-query.
 
 ---
 
@@ -398,14 +392,16 @@ If an output template fails to render — for example because it references a fi
 missing from the row, or because the rendered string is not valid JSON — the
 reaction:
 
-1. Logs a warning with the query id and the render error.
-2. **Omits the `payload` field** on the emitted `QueryResultItem`.
-3. Still populates `before` / `after` / `item_type` / `row_signature` as usual, so
-   receivers can recover the change from the raw row state.
+1. Logs a warning with the query id, operation, side, and the render error.
+2. **Falls back to the raw row state** for that field.
+3. Still emits the item with the correct `item_type` / `row_signature` and any
+   successfully-rendered sibling field (e.g., for an `UPDATE` where only the
+   before-side render failed, `before` carries the raw row while `after` carries
+   the templated output).
 
-Render failures never drop events. Receivers should treat `payload` as best-effort:
-the contract is "if present, the rendered template; if absent, read `before` /
-`after`".
+Render failures never drop events. Receivers always read `before` / `after` for the
+op — the contract is "if a template is configured and rendered, this is the
+template output; otherwise this is the raw row state".
 
 ---
 
@@ -461,11 +457,11 @@ routes.insert(
     "orders-by-region".to_string(),
     QueryConfig {
         added: Some(TemplateSpec::new(
-            r#"{"event":"OrderCreated","id":"{{after.id}}","total":{{after.total}}}"#,
+            r#"{"event":"OrderCreated","id":"{{row.id}}","total":{{row.total}}}"#,
         )),
         updated: None,
         deleted: Some(TemplateSpec::new(
-            r#"{"event":"OrderCancelled","id":"{{before.id}}"}"#,
+            r#"{"event":"OrderCancelled","id":"{{row.id}}"}"#,
         )),
     },
 );
@@ -507,9 +503,9 @@ use drasi_reaction_grpc::{GrpcReaction, OutputTemplates};
 
 let templates = OutputTemplates {
     default_template: Some(QueryConfig {
-        added: Some(TemplateSpec::new(r#"{"op":"add","row":{{json after}}}"#)),
-        updated: Some(TemplateSpec::new(r#"{"op":"upd","row":{{json after}},"prev":{{json before}}}"#)),
-        deleted: Some(TemplateSpec::new(r#"{"op":"del","row":{{json before}}}"#)),
+        added: Some(TemplateSpec::new(r#"{"op":"add","row":{{json row}}}"#)),
+        updated: Some(TemplateSpec::new(r#"{"op":"upd","row":{{json row}}}"#)),
+        deleted: Some(TemplateSpec::new(r#"{"op":"del","row":{{json row}}}"#)),
     }),
     routes: std::collections::HashMap::new(),
 };

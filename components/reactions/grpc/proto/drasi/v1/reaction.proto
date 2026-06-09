@@ -61,34 +61,38 @@ message QueryResult {
 }
 
 // Operation captured by a single QueryResultItem.
+//
+// Aggregations surface as UPDATE on the wire (consistent with the
+// other Drasi reactions). Noop results are dropped at the runner
+// before reaching the wire and have no enum value here.
 enum QueryResultItemType {
+    // Required by proto3 (every enum must have a zero-valued first
+    // variant). Never emitted by the reaction; receiving this value
+    // indicates a contract violation.
     QUERY_RESULT_ITEM_TYPE_UNSPECIFIED = 0;
     QUERY_RESULT_ITEM_TYPE_ADD         = 1;
     QUERY_RESULT_ITEM_TYPE_UPDATE      = 2;
     QUERY_RESULT_ITEM_TYPE_DELETE      = 3;
-    QUERY_RESULT_ITEM_TYPE_AGGREGATION = 4;
-    QUERY_RESULT_ITEM_TYPE_NOOP        = 5;
 }
 
 // One result-change item.
 //
-// Per-variant field population:
-//   ADD          — only `after` set
-//   DELETE       — only `before` set
-//   UPDATE       — both set
-//   AGGREGATION  — `after` set; `before` set if known
-//   NOOP         — neither set
+// `before` and `after` carry the row state on either side of the
+// change. Per op:
+//   ADD     — only `after` set (the row did not exist before).
+//   DELETE  — only `before` set (the row no longer exists).
+//   UPDATE  — both set (row content changed).
 //
-// `payload` is populated only when an output template is configured
-// for the (query_id, item_type) pair and renders to valid JSON.
-// Absent when no template is configured, when render fails, when the
-// template renders to empty, and for AGGREGATION / NOOP (which
-// bypass template rendering entirely). Receivers can always recover
-// the raw change from `before` / `after`.
+// When an output template is configured for the `(query_id, op)` pair,
+// each present row state is rendered through it independently — once
+// for ADD/DELETE, twice for UPDATE (once per side). The rendered
+// content replaces the raw row state in the corresponding Struct
+// field. When no template is configured or rendering fails for a
+// given side, that field carries the raw row state. Events are never
+// dropped because of a render failure.
 message QueryResultItem {
-    google.protobuf.Struct before = 1;
-    google.protobuf.Struct after  = 2;
-    QueryResultItemType item_type = 3;
-    uint64 row_signature = 4;
-    optional google.protobuf.Struct payload = 5;
+    QueryResultItemType item_type = 1;
+    uint64 row_signature = 2;
+    google.protobuf.Struct before = 3;
+    google.protobuf.Struct after  = 4;
 }

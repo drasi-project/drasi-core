@@ -38,7 +38,7 @@ use tokio::sync::{oneshot, Mutex, Notify};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-/// One item recorded from the wire — preserves the full v3 envelope so
+/// One item recorded from the wire. Preserves the full v3 envelope so
 /// tests can assert exact contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedItem {
@@ -46,7 +46,6 @@ pub struct RecordedItem {
     pub row_signature: u64,
     pub before: Option<Struct>,
     pub after: Option<Struct>,
-    pub payload: Option<Struct>,
 }
 
 /// One `ProcessResults` invocation, with full per-item detail and the
@@ -161,7 +160,6 @@ impl ReactionService for MockReactionService {
                 row_signature: it.row_signature,
                 before: it.before,
                 after: it.after,
-                payload: it.payload,
             })
             .collect();
         let item_count = items.len();

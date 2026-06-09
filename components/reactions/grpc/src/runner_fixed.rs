@@ -196,6 +196,13 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         last_query_id = query_id.clone();
 
         for result in &query_result.results {
+            // Noop diffs are filtered at the runner so they never reach
+            // the wire — matches the established Drasi convention
+            // (rabbitmq.rs:724-726, azure-storage reaction.rs:440).
+            if matches!(result, drasi_lib::channels::ResultDiff::Noop) {
+                debug!("[{reaction_name}] Ignoring noop result");
+                continue;
+            }
             let proto_item = build_proto_item(&config, template_engine.as_ref(), query_id, result);
             batch.push(proto_item);
 

@@ -20,25 +20,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface is `service ReactionService` with the single `ProcessResults`
   RPC plus the `ProcessResultsRequest`, `ProcessResultsResponse`,
   `QueryResult`, `QueryResultItem`, and `QueryResultItemType` messages.
-- **Proto schema reshape.** `QueryResultItem` is the new shape:
-  - Removed the string `type` and the `data` field (the latter was a
-    duplicate of `after`/`before` for ADD/UPDATE/DELETE and only
-    smuggled `row_signature` for AGGREGATION).
-  - Added `item_type` (`QueryResultItemType` enum: `ADD`, `UPDATE`,
-    `DELETE`, `AGGREGATION`, `NOOP`) replacing the string `type`.
-    Eliminates the prior `"ADD"` / `"aggregation"` casing inconsistency
-    on the wire.
+- **Proto envelope reshape.** `QueryResultItem` is now
+  `{ item_type, row_signature, before, after }`:
+  - Removed the string `type` field and the `data` field. `data` was a
+    duplicate of `after` / `before` for ADD/UPDATE/DELETE; on the wire
+    the row state is carried directly by `before` and `after`.
+  - Added `item_type` (`QueryResultItemType` enum) replacing the string
+    `type`. Eliminates the prior `"ADD"` / `"aggregation"` casing
+    inconsistency on the wire.
   - Added `row_signature` (uint64) as a first-class field on every item.
-    Previously this was only carried inside `data` for `aggregation`
-    items.
-  - Added optional `payload` (Struct) — populated only when an output
-    template is configured for the (query, op) pair and renders to
-    valid JSON. Absent by default, on render failure, on empty
-    templates, and for AGGREGATION / NOOP. Events are never dropped:
-    receivers can always recover the change from `before` / `after`.
-  - `before` and `after` are populated as the framework-controlled raw
-    row state: `after` for ADD, `before` for DELETE, both for UPDATE,
-    and (with `before` optional) for AGGREGATION.
+  - `before` and `after` carry the row state on either side of the
+    change: `ADD` → only `after`; `DELETE` → only `before`; `UPDATE`
+    → both.
+- **Enum surface narrowed to 3 ops.** `QueryResultItemType` no longer
+  has `AGGREGATION` or `NOOP` variants:
+  - Aggregation results surface as `item_type == UPDATE` on the wire
+    (matches the RabbitMQ and Azure Storage reactions).
+  - Noop results are dropped at the runner level and never appear in
+    `QueryResult.results`.
+- **Templating model redesigned to per-row.** Templates reshape the row
+  content that lands in `before` / `after`, replacing the previous
+  separate `payload` field (which has been removed):
+  - The `added` template runs once on the new row for ADD → output goes
+    into `after`.
+  - The `deleted` template runs once on the old row for DELETE → output
+    goes into `before`.
+  - The `updated` template runs **twice**, independently, for UPDATE —
+    once with the before-row → `before`, once with the after-row →
+    `after`. Aggregation reuses the same path.
+  - New template context variables: `row` (the row being rendered),
+    `query_id`, `operation`, `side` (`"before"` or `"after"`). The
+    previous `before` / `after` / `data` context variables are removed.
+  - Render failure (template parse error, non-JSON output, missing
+    field) falls back to the **raw row state** for that field. Events
+    are never dropped.
 - **`config_version` bumps from `2.0.0` to `3.0.0`** and the crate
   version bumps to `0.5.0`. Receivers compiled against the prior schema
   must regenerate their stubs.
@@ -57,20 +72,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   using the shared `AdaptiveBatchConfig`.
 - Added optional **Handlebars output templates** via `outputTemplates`
   (`defaultTemplate` + per-query `routes`), with `added`/`updated`/`deleted`
-  template specs. Render failures omit `payload` rather than dropping events;
-  receivers fall back to `before` / `after`.
+  template specs. Rendered output replaces the raw row content in the
+  corresponding `before` / `after` field; render failures fall back to the
+  raw row state.
 - New typed builder API (`GrpcReaction::builder(...)`) with
   `with_fixed_batching`, `with_adaptive_batching`, `with_output_templates`,
-  and `with_metadata` convenience methods.
+  per-field adaptive setters (`with_min_batch_size`, `with_max_batch_size`,
+  `with_window_size`, `with_batch_timeout_ms`), and `with_metadata`
+  convenience methods.
 - OpenAPI descriptor (`config_version = "3.0.0"`) with named sub-schemas for
-  `BatchingConfig`, `OutputTemplates`, `QueryConfig`, and `TemplateSpec`.
+  `BatchingConfig`, `OutputTemplates`, `QueryConfig`, and `TemplateSpec`, plus
+  `SchemaUiAnnotator` groupings for management UIs.
 
 ### Miscellaneous Tasks
 
 - Refreshed copyright headers to 2026.
-- Expanded `src/tests.rs` with proto v3 coverage (item_type enum propagation,
-  row_signature on every variant, payload present/absent matrix) and gRPC
-  metadata-header propagation tests.
+- Expanded `src/tests.rs` and `src/templates.rs` test coverage with
+  per-op raw-vs-templated assertions, UPDATE both-sides-rendered
+  assertions, Aggregation-as-UPDATE assertion, Noop-unreachable
+  contract pin, exact-id routing regression guard, and `row_signature`
+  propagation tests.
+- Added `tests/mock_server.rs` and `tests/integration_tests.rs` with 14
+  end-to-end scenarios that push real `QueryResult` events through the
+  reaction to an in-process tonic mock `ReactionService`, asserting
+  exact wire shape of every `QueryResultItem` plus gRPC headers.
 - Unified `drasi-reaction-grpc` and the previously separate
   `drasi-reaction-grpc-adaptive` crate into a single reaction. The
   `grpc-adaptive` crate has been removed from the workspace.

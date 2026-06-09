@@ -14,13 +14,32 @@
 
 //! Handlebars-based output template engine for the gRPC reaction.
 //!
-//! When a [`TemplateSpec`] is registered for a `(query_id, OperationType)`
-//! tuple, the rendered JSON string is parsed into a `serde_json::Value` and
-//! populates the optional [`ProtoQueryResultItem::payload`] field. The
-//! `before` / `after` fields carry the raw row state where applicable
-//! (`after` for Add, `before` for Delete, both for Update) — only
-//! `payload` is template-rendered and it is omitted entirely when no
-//! template is configured or when render fails (events are never dropped).
+//! Templates reshape the **row content** of each `QueryResultItem` that
+//! the reaction puts on the wire. The model is per-row:
+//!
+//! | Op       | Renders the configured op-template…                              |
+//! |----------|------------------------------------------------------------------|
+//! | `ADD`    | once, with the new row → output goes into `after`.               |
+//! | `DELETE` | once, with the old row → output goes into `before`.              |
+//! | `UPDATE` | twice, independently per side: old row → `before`, new row → `after`. |
+//!
+//! `AGGREGATION` is treated as `UPDATE` (consistent with the RabbitMQ
+//! and Azure Storage reactions). `NOOP` is filtered out by the runners
+//! before `build_proto_item` is ever invoked.
+//!
+//! When no template is configured for the op, or when rendering fails,
+//! the field carries the raw row state. Events are never dropped.
+//!
+//! Per-render Handlebars context shape:
+//!
+//! ```text
+//! {
+//!   "row":       <the single row state being rendered>,
+//!   "query_id":  "...",
+//!   "operation": "ADD" | "UPDATE" | "DELETE",
+//!   "side":      "before" | "after"
+//! }
+//! ```
 
 use drasi_lib::channels::ResultDiff;
 use drasi_lib::reactions::common::{OperationType, TemplateRouting, TemplateSpec};
@@ -32,6 +51,23 @@ use crate::config::GrpcReactionConfig;
 use crate::helpers::convert_json_to_proto_struct;
 use crate::proto::drasi_v1::QueryResultItemType;
 use crate::proto::ProtoQueryResultItem;
+
+/// Which side of an UPDATE / ADD / DELETE a single render is producing.
+/// Exposed to the template as the `side` context variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    Before,
+    After,
+}
+
+impl Side {
+    fn as_str(self) -> &'static str {
+        match self {
+            Side::Before => "before",
+            Side::After => "after",
+        }
+    }
+}
 
 /// Cached Handlebars renderer.
 ///
@@ -54,34 +90,38 @@ impl TemplateEngine {
         Self { handlebars }
     }
 
-    /// Render the template against the diff into a JSON value suitable for
-    /// `ProtoQueryResultItem.payload`.
-    ///
-    /// Returns `None` on render failure or when the rendered string is not
-    /// valid JSON; a warning is logged. Callers omit `payload` in that case
-    /// — receivers can still recover the change from `before` / `after`.
-    pub(crate) fn render_payload(
+    /// Render the configured template against a single row state. Returns
+    /// `None` on render failure or when the rendered string is not valid
+    /// JSON; a warning is logged. Callers fall back to the raw row state
+    /// in that case — events are never dropped.
+    pub(crate) fn render_row(
         &self,
         query_id: &str,
+        operation: OperationType,
+        side: Side,
+        row: &Value,
         spec: &TemplateSpec,
-        diff: &ResultDiff,
     ) -> Option<Value> {
-        let context = build_context(query_id, diff);
+        let context = build_row_context(query_id, operation, side, row);
         match self.handlebars.render_template(&spec.template, &context) {
             Ok(rendered) => match serde_json::from_str::<Value>(&rendered) {
                 Ok(value) => Some(value),
                 Err(parse_err) => {
                     warn!(
-                        "Template for query '{query_id}' rendered non-JSON output: {parse_err}; \
-                         omitting payload — receivers can read before/after for the raw change"
+                        "Template for query '{query_id}' ({op} {side}) rendered non-JSON output: \
+                         {parse_err}; falling back to raw row state",
+                        op = op_as_str(operation),
+                        side = side.as_str()
                     );
                     None
                 }
             },
             Err(render_err) => {
                 warn!(
-                    "Template render failed for query '{query_id}': {render_err}; \
-                     omitting payload — receivers can read before/after for the raw change"
+                    "Template render failed for query '{query_id}' ({op} {side}): {render_err}; \
+                     falling back to raw row state",
+                    op = op_as_str(operation),
+                    side = side.as_str()
                 );
                 None
             }
@@ -89,8 +129,16 @@ impl TemplateEngine {
     }
 }
 
+fn op_as_str(op: OperationType) -> &'static str {
+    match op {
+        OperationType::Add => "ADD",
+        OperationType::Update => "UPDATE",
+        OperationType::Delete => "DELETE",
+    }
+}
+
 /// Register the `json` Handlebars helper so templates can serialize a nested
-/// object/array to a JSON string (e.g. `{{json after}}`). Mirrors the helper
+/// object/array to a JSON string (e.g. `{{json row}}`). Mirrors the helper
 /// registered by the SSE/Loki/SQS reactions for cross-reaction template
 /// compatibility.
 fn register_json_helper(handlebars: &mut Handlebars<'static>) {
@@ -116,139 +164,150 @@ fn register_json_helper(handlebars: &mut Handlebars<'static>) {
     );
 }
 
-/// Build the Handlebars context map for a single `ResultDiff`.
+/// Build the per-render Handlebars context for one row state.
 ///
-/// The shape (`before` / `after` / `data` / `operation` / `query_id`)
-/// matches the SSE and HTTP reactions, so existing template authors can
-/// reuse familiar placeholders. `operation` uses the canonical uppercase
-/// values (`ADD` / `UPDATE` / `DELETE` / `AGGREGATION` / `NOOP`) shared
-/// across reactions. `data` is included for backwards-compatible template
-/// authoring even though the v3 proto envelope no longer carries it.
-fn build_context(query_id: &str, diff: &ResultDiff) -> Map<String, Value> {
+/// Contract:
+/// - `row` — the single row being rendered (the `before` row for
+///   `Side::Before`, the `after` row for `Side::After`).
+/// - `query_id` — the originating continuous-query id.
+/// - `operation` — `"ADD"` / `"UPDATE"` / `"DELETE"` (Aggregation
+///   surfaces here as `"UPDATE"`).
+/// - `side` — `"before"` or `"after"`. Useful inside an `updated`
+///   template that wants to differentiate per side; harmless to ignore.
+fn build_row_context(
+    query_id: &str,
+    operation: OperationType,
+    side: Side,
+    row: &Value,
+) -> Map<String, Value> {
     let mut ctx = Map::new();
+    ctx.insert("row".into(), row.clone());
     ctx.insert("query_id".into(), json!(query_id));
-    match diff {
-        ResultDiff::Add { data, .. } => {
-            ctx.insert("operation".into(), json!("ADD"));
-            ctx.insert("data".into(), data.clone());
-            ctx.insert("after".into(), data.clone());
-        }
-        ResultDiff::Delete { data, .. } => {
-            ctx.insert("operation".into(), json!("DELETE"));
-            ctx.insert("data".into(), data.clone());
-            ctx.insert("before".into(), data.clone());
-        }
-        ResultDiff::Update {
-            data,
-            before,
-            after,
-            ..
-        } => {
-            ctx.insert("operation".into(), json!("UPDATE"));
-            ctx.insert("data".into(), data.clone());
-            ctx.insert("before".into(), before.clone());
-            ctx.insert("after".into(), after.clone());
-        }
-        ResultDiff::Aggregation { before, after, .. } => {
-            ctx.insert("operation".into(), json!("AGGREGATION"));
-            if let Some(b) = before {
-                ctx.insert("before".into(), b.clone());
-            }
-            ctx.insert("after".into(), after.clone());
-        }
-        ResultDiff::Noop => {
-            ctx.insert("operation".into(), json!("NOOP"));
-        }
-    }
+    ctx.insert("operation".into(), json!(op_as_str(operation)));
+    ctx.insert("side".into(), json!(side.as_str()));
     ctx
 }
 
-/// Map a `ResultDiff` to its canonical [`OperationType`] for template
-/// lookup. Returns `None` for diffs that do not map to a CRUD operation
-/// (Noop, Aggregation) — those bypass template rendering.
-pub(crate) fn diff_to_op(diff: &ResultDiff) -> Option<OperationType> {
-    match diff {
-        ResultDiff::Add { .. } => Some(OperationType::Add),
-        ResultDiff::Update { .. } => Some(OperationType::Update),
-        ResultDiff::Delete { .. } => Some(OperationType::Delete),
-        ResultDiff::Aggregation { .. } | ResultDiff::Noop => None,
+/// Render a single row through the configured `(query_id, op)` template
+/// if one exists, falling back to the raw row on miss or render failure.
+fn render_or_raw(
+    cfg: &GrpcReactionConfig,
+    engine: Option<&TemplateEngine>,
+    query_id: &str,
+    op: OperationType,
+    side: Side,
+    row: &Value,
+) -> Value {
+    let Some(engine) = engine else {
+        return row.clone();
+    };
+    let Some(spec) = cfg.get_template_spec(query_id, op) else {
+        return row.clone();
+    };
+    if spec.template.trim().is_empty() {
+        return row.clone();
     }
+    engine
+        .render_row(query_id, op, side, row, spec)
+        .unwrap_or_else(|| row.clone())
 }
 
-/// Discriminator emitted on `ProtoQueryResultItem.item_type` for each
-/// diff variant. The v3 schema uses a proto enum, eliminating the prior
-/// string-casing inconsistency between CRUD ops and aggregation/noop.
-fn item_type_for(diff: &ResultDiff) -> QueryResultItemType {
-    match diff {
-        ResultDiff::Add { .. } => QueryResultItemType::Add,
-        ResultDiff::Update { .. } => QueryResultItemType::Update,
-        ResultDiff::Delete { .. } => QueryResultItemType::Delete,
-        ResultDiff::Aggregation { .. } => QueryResultItemType::Aggregation,
-        ResultDiff::Noop => QueryResultItemType::Noop,
-    }
-}
-
-/// Row identity carried by the diff. Surfaced on every item via the v3
-/// `row_signature` field so receivers can correlate/de-duplicate without
-/// parsing the payload.
-fn row_signature_for(diff: &ResultDiff) -> u64 {
-    match diff {
-        ResultDiff::Add { row_signature, .. }
-        | ResultDiff::Delete { row_signature, .. }
-        | ResultDiff::Update { row_signature, .. }
-        | ResultDiff::Aggregation { row_signature, .. } => *row_signature,
-        ResultDiff::Noop => 0,
-    }
-}
-
-/// Raw `(before, after)` row state for a diff, as emitted on the v3
-/// envelope's framework-controlled fields.
-fn before_after_for(diff: &ResultDiff) -> (Option<Value>, Option<Value>) {
-    match diff {
-        ResultDiff::Add { data, .. } => (None, Some(data.clone())),
-        ResultDiff::Delete { data, .. } => (Some(data.clone()), None),
-        ResultDiff::Update { before, after, .. } => (Some(before.clone()), Some(after.clone())),
-        ResultDiff::Aggregation { before, after, .. } => (before.clone(), Some(after.clone())),
-        ResultDiff::Noop => (None, None),
-    }
-}
-
-/// Build the proto item emitted for a single `ResultDiff` under the v3
-/// schema.
+/// Build the proto item emitted for a single `ResultDiff`.
 ///
-/// `before` / `after` carry the raw row state where applicable (`after`
-/// for Add, `before` for Delete, both for Update; both for Aggregation
-/// where `before` is known). `payload` is populated only when an output
-/// template is configured for the `(query_id, op)` pair and renders to
-/// valid JSON; it is omitted on render failure, empty templates, missing
-/// template, or for AGGREGATION / NOOP. Events are never dropped — a
-/// receiver can always recover the change from `before` / `after`.
+/// Contract:
+/// - `before` / `after` carry the row state present for the op:
+///   ADD → only `after`; DELETE → only `before`; UPDATE → both;
+///   Aggregation → treated as UPDATE (`after` always present, `before`
+///   present iff the diff carried one).
+/// - When a template is configured for the `(query_id, op)` pair, each
+///   present row state is rendered independently — once for ADD/DELETE,
+///   twice for UPDATE (same `updated` template, different row each
+///   time). Render failures fall back to the raw row state for that
+///   field. Events are never dropped.
+/// - `item_type` is `ADD` / `UPDATE` / `DELETE`; Aggregation is mapped
+///   to `UPDATE` on the wire.
+///
+/// # Panics
+///
+/// Panics on `ResultDiff::Noop`. Runners must filter Noop entries out
+/// before invoking this — matches the established pattern in the
+/// RabbitMQ and Azure Storage reactions, where Noop is dropped at the
+/// runner level and never put on the wire.
 pub(crate) fn build_proto_item(
     cfg: &GrpcReactionConfig,
     engine: Option<&TemplateEngine>,
     query_id: &str,
     diff: &ResultDiff,
 ) -> ProtoQueryResultItem {
-    let (before, after) = before_after_for(diff);
+    let (item_type, op, row_signature, raw_before, raw_after) = match diff {
+        ResultDiff::Add {
+            data,
+            row_signature,
+        } => (
+            QueryResultItemType::Add,
+            OperationType::Add,
+            *row_signature,
+            None,
+            Some(data.clone()),
+        ),
+        ResultDiff::Delete {
+            data,
+            row_signature,
+        } => (
+            QueryResultItemType::Delete,
+            OperationType::Delete,
+            *row_signature,
+            Some(data.clone()),
+            None,
+        ),
+        ResultDiff::Update {
+            before,
+            after,
+            row_signature,
+            ..
+        } => (
+            QueryResultItemType::Update,
+            OperationType::Update,
+            *row_signature,
+            Some(before.clone()),
+            Some(after.clone()),
+        ),
+        ResultDiff::Aggregation {
+            before,
+            after,
+            row_signature,
+        } => (
+            // Aggregation surfaces as UPDATE on the wire — same as
+            // RabbitMQ (rabbitmq.rs:700-723) and Azure Storage
+            // (reaction.rs:434-439).
+            QueryResultItemType::Update,
+            OperationType::Update,
+            *row_signature,
+            before.clone(),
+            Some(after.clone()),
+        ),
+        ResultDiff::Noop => unreachable!(
+            "build_proto_item must not be called for Noop diffs; runners must filter them out"
+        ),
+    };
 
-    let payload = engine
-        .zip(diff_to_op(diff))
-        .and_then(|(eng, op)| cfg.get_template_spec(query_id, op).map(|spec| (eng, spec)))
-        .and_then(|(eng, spec)| {
-            if spec.template.trim().is_empty() {
-                None
-            } else {
-                eng.render_payload(query_id, spec, diff)
-            }
-        })
-        .map(|value| convert_json_to_proto_struct(&value));
+    let before_struct = raw_before
+        .as_ref()
+        .map(|row| render_or_raw(cfg, engine, query_id, op, Side::Before, row))
+        .as_ref()
+        .map(convert_json_to_proto_struct);
+
+    let after_struct = raw_after
+        .as_ref()
+        .map(|row| render_or_raw(cfg, engine, query_id, op, Side::After, row))
+        .as_ref()
+        .map(convert_json_to_proto_struct);
 
     ProtoQueryResultItem {
-        before: before.as_ref().map(convert_json_to_proto_struct),
-        after: after.as_ref().map(convert_json_to_proto_struct),
-        item_type: item_type_for(diff) as i32,
-        row_signature: row_signature_for(diff),
-        payload,
+        item_type: item_type as i32,
+        row_signature,
+        before: before_struct,
+        after: after_struct,
     }
 }
 
@@ -256,6 +315,7 @@ pub(crate) fn build_proto_item(
 mod tests {
     use super::*;
     use crate::config::OutputTemplates;
+    use crate::helpers::convert_json_to_proto_struct;
     use drasi_lib::reactions::common::{QueryConfig, TemplateRouting, TemplateSpec};
     use serde_json::json;
     use std::collections::HashMap;
@@ -284,11 +344,23 @@ mod tests {
         }
     }
 
-    fn query_config_add(template: &str) -> QueryConfig {
+    fn aggregation(before: Option<Value>, after: Value) -> ResultDiff {
+        ResultDiff::Aggregation {
+            before,
+            after,
+            row_signature: 0,
+        }
+    }
+
+    fn query_config(
+        added: Option<&str>,
+        updated: Option<&str>,
+        deleted: Option<&str>,
+    ) -> QueryConfig {
         QueryConfig {
-            added: Some(TemplateSpec::new(template)),
-            updated: None,
-            deleted: None,
+            added: added.map(TemplateSpec::new),
+            updated: updated.map(TemplateSpec::new),
+            deleted: deleted.map(TemplateSpec::new),
         }
     }
 
@@ -305,155 +377,303 @@ mod tests {
         }
     }
 
-    #[test]
-    fn diff_to_op_maps_crud_and_skips_aggregation_noop() {
-        assert_eq!(diff_to_op(&add(json!({}))), Some(OperationType::Add));
-        assert_eq!(
-            diff_to_op(&update(json!({}), json!({}))),
-            Some(OperationType::Update)
-        );
-        assert_eq!(diff_to_op(&delete(json!({}))), Some(OperationType::Delete));
-        assert_eq!(diff_to_op(&ResultDiff::Noop), None);
-        assert_eq!(
-            diff_to_op(&ResultDiff::Aggregation {
-                before: None,
-                after: json!({}),
-                row_signature: 0
-            }),
-            None
-        );
-    }
-
-    #[test]
-    fn build_context_uses_uppercase_operation_and_injects_query_id() {
-        let ctx = build_context("orders", &add(json!({"id": 1})));
-        assert_eq!(ctx.get("operation").unwrap(), "ADD");
-        assert_eq!(ctx.get("query_id").unwrap(), "orders");
-        assert_eq!(ctx.get("after").unwrap(), &json!({"id": 1}));
-        assert!(ctx.get("before").is_none());
-
-        let ctx = build_context("orders", &delete(json!({"id": 2})));
-        assert_eq!(ctx.get("operation").unwrap(), "DELETE");
-        assert_eq!(ctx.get("before").unwrap(), &json!({"id": 2}));
-        assert!(ctx.get("after").is_none());
-
-        let ctx = build_context(
-            "orders",
-            &update(json!({"id": 3, "v": "old"}), json!({"id": 3, "v": "new"})),
-        );
-        assert_eq!(ctx.get("operation").unwrap(), "UPDATE");
-        assert_eq!(ctx.get("before").unwrap(), &json!({"id": 3, "v": "old"}));
-        assert_eq!(ctx.get("after").unwrap(), &json!({"id": 3, "v": "new"}));
-
-        let ctx = build_context("orders", &ResultDiff::Noop);
-        assert_eq!(ctx.get("operation").unwrap(), "NOOP");
-    }
-
-    #[test]
-    fn render_payload_returns_some_for_valid_json_template() {
-        let engine = TemplateEngine::new();
-        let spec = TemplateSpec::new(r#"{"snapshot":{{json after}},"q":"{{query_id}}"}"#);
-        let out = engine
-            .render_payload("orders", &spec, &add(json!({"id": 7, "name": "x"})))
-            .expect("template renders to valid JSON");
-        assert_eq!(
-            out,
-            json!({"snapshot": {"id": 7, "name": "x"}, "q": "orders"})
-        );
-    }
-
-    #[test]
-    fn render_payload_returns_none_on_non_json_output() {
-        let engine = TemplateEngine::new();
-        let spec = TemplateSpec::new("this is not json {{after.id}}");
-        let out = engine.render_payload("q", &spec, &add(json!({"id": 7})));
-        assert!(
-            out.is_none(),
-            "non-JSON render must omit payload so receivers fall back to before/after"
-        );
-    }
-
     fn item_type(item: &ProtoQueryResultItem) -> QueryResultItemType {
         QueryResultItemType::try_from(item.item_type).expect("valid enum tag")
     }
 
+    /// Round-trip a proto `Struct` field back to JSON for ergonomic
+    /// equality assertions in tests. Uses the same shape that the wire
+    /// would carry.
+    fn struct_field(item_field: &Option<prost_types::Struct>) -> Option<Value> {
+        item_field.as_ref().map(|s| {
+            let mut map = serde_json::Map::new();
+            for (k, v) in &s.fields {
+                map.insert(k.clone(), value_to_json(v));
+            }
+            Value::Object(map)
+        })
+    }
+
+    fn value_to_json(v: &prost_types::Value) -> Value {
+        use prost_types::value::Kind;
+        match &v.kind {
+            Some(Kind::NullValue(_)) | None => Value::Null,
+            Some(Kind::BoolValue(b)) => Value::Bool(*b),
+            Some(Kind::NumberValue(n)) => {
+                if n.is_finite()
+                    && n.fract() == 0.0
+                    && *n >= i64::MIN as f64
+                    && *n <= i64::MAX as f64
+                {
+                    Value::Number(serde_json::Number::from(*n as i64))
+                } else {
+                    serde_json::Number::from_f64(*n)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)
+                }
+            }
+            Some(Kind::StringValue(s)) => Value::String(s.clone()),
+            Some(Kind::ListValue(l)) => Value::Array(l.values.iter().map(value_to_json).collect()),
+            Some(Kind::StructValue(s)) => {
+                let mut map = serde_json::Map::new();
+                for (k, vv) in &s.fields {
+                    map.insert(k.clone(), value_to_json(vv));
+                }
+                Value::Object(map)
+            }
+        }
+    }
+
+    // ---- Context shape ---------------------------------------------------
+
     #[test]
-    fn build_proto_item_add_populates_after_only_with_item_type_add() {
+    fn context_exposes_row_query_id_operation_and_side() {
+        let row = json!({"id": 7, "name": "alice"});
+        let ctx = build_row_context("orders", OperationType::Add, Side::After, &row);
+        assert_eq!(ctx.get("row").unwrap(), &row);
+        assert_eq!(ctx.get("query_id").unwrap(), "orders");
+        assert_eq!(ctx.get("operation").unwrap(), "ADD");
+        assert_eq!(ctx.get("side").unwrap(), "after");
+
+        let ctx = build_row_context("orders", OperationType::Delete, Side::Before, &row);
+        assert_eq!(ctx.get("operation").unwrap(), "DELETE");
+        assert_eq!(ctx.get("side").unwrap(), "before");
+
+        let ctx = build_row_context("orders", OperationType::Update, Side::Before, &row);
+        assert_eq!(ctx.get("operation").unwrap(), "UPDATE");
+        assert_eq!(ctx.get("side").unwrap(), "before");
+    }
+
+    // ---- ADD -------------------------------------------------------------
+
+    #[test]
+    fn add_no_template_emits_after_with_raw_row_and_no_before() {
         let cfg = GrpcReactionConfig::default();
-        let item = build_proto_item(&cfg, None, "q", &add(json!({"id": 1})));
+        let item = build_proto_item(&cfg, None, "q", &add(json!({"id": 1, "name": "a"})));
         assert_eq!(item_type(&item), QueryResultItemType::Add);
-        assert!(item.after.is_some(), "ADD must populate `after`");
+        assert_eq!(item.row_signature, 0);
+        assert_eq!(struct_field(&item.after), Some(json!({"id": 1, "name": "a"})));
+        assert!(item.before.is_none(), "ADD must leave `before` absent");
+    }
+
+    #[test]
+    fn add_with_template_renders_into_after() {
+        let cfg = config_with(
+            Some(query_config(
+                Some(r#"{"id":"{{row.id}}","kind":"created"}"#),
+                None,
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(
+            &cfg,
+            Some(&engine),
+            "q",
+            &add(json!({"id": "abc", "extra": "ignored"})),
+        );
+        assert_eq!(item_type(&item), QueryResultItemType::Add);
+        assert_eq!(
+            struct_field(&item.after),
+            Some(json!({"id": "abc", "kind": "created"})),
+            "`after` must carry the rendered template output, not the raw row"
+        );
+        assert!(item.before.is_none(), "ADD never populates `before`");
+    }
+
+    // ---- DELETE ----------------------------------------------------------
+
+    #[test]
+    fn delete_no_template_emits_before_with_raw_row_and_no_after() {
+        let cfg = GrpcReactionConfig::default();
+        let item = build_proto_item(&cfg, None, "q", &delete(json!({"id": 42})));
+        assert_eq!(item_type(&item), QueryResultItemType::Delete);
+        assert_eq!(struct_field(&item.before), Some(json!({"id": 42})));
+        assert!(item.after.is_none(), "DELETE must leave `after` absent");
+    }
+
+    #[test]
+    fn delete_with_template_renders_into_before() {
+        let cfg = config_with(
+            Some(query_config(
+                None,
+                None,
+                Some(r#"{"removed_id":"{{row.id}}"}"#),
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(&cfg, Some(&engine), "q", &delete(json!({"id": "x42"})));
+        assert_eq!(item_type(&item), QueryResultItemType::Delete);
+        assert_eq!(
+            struct_field(&item.before),
+            Some(json!({"removed_id": "x42"})),
+            "DELETE template renders into `before`"
+        );
+        assert!(item.after.is_none());
+    }
+
+    // ---- UPDATE ----------------------------------------------------------
+
+    #[test]
+    fn update_no_template_emits_raw_before_and_after() {
+        let cfg = GrpcReactionConfig::default();
+        let item = build_proto_item(
+            &cfg,
+            None,
+            "q",
+            &update(json!({"v": "old"}), json!({"v": "new"})),
+        );
+        assert_eq!(item_type(&item), QueryResultItemType::Update);
+        assert_eq!(struct_field(&item.before), Some(json!({"v": "old"})));
+        assert_eq!(struct_field(&item.after), Some(json!({"v": "new"})));
+    }
+
+    #[test]
+    fn update_with_template_renders_both_sides_independently() {
+        // The SAME `updated` template runs TWICE: once with the before
+        // row, once with the after row. Output of each goes into the
+        // corresponding proto field.
+        let cfg = config_with(
+            Some(query_config(
+                None,
+                Some(r#"{"value":"{{row.v}}"}"#),
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(
+            &cfg,
+            Some(&engine),
+            "q",
+            &update(json!({"v": "old"}), json!({"v": "new"})),
+        );
+        assert_eq!(item_type(&item), QueryResultItemType::Update);
+        assert_eq!(
+            struct_field(&item.before),
+            Some(json!({"value": "old"})),
+            "`before` must be rendered from the before-row independently"
+        );
+        assert_eq!(
+            struct_field(&item.after),
+            Some(json!({"value": "new"})),
+            "`after` must be rendered from the after-row independently"
+        );
+    }
+
+    #[test]
+    fn update_template_sees_side_variable_as_before_then_after() {
+        // The `side` context variable lets a single `updated` template
+        // emit different output per side if it needs to.
+        let cfg = config_with(
+            Some(query_config(
+                None,
+                Some(r#"{"v":"{{row.v}}","s":"{{side}}"}"#),
+                None,
+            )),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(
+            &cfg,
+            Some(&engine),
+            "q",
+            &update(json!({"v": "old"}), json!({"v": "new"})),
+        );
+        assert_eq!(
+            struct_field(&item.before),
+            Some(json!({"v": "old", "s": "before"}))
+        );
+        assert_eq!(
+            struct_field(&item.after),
+            Some(json!({"v": "new", "s": "after"}))
+        );
+    }
+
+    // ---- Aggregation surfaces as UPDATE ----------------------------------
+
+    #[test]
+    fn aggregation_with_both_sides_surfaces_as_update_with_both_rendered() {
+        // Aggregation reuses the `updated` template, identical to
+        // RabbitMQ/Azure Storage. With `before == Some`, both sides
+        // render and item_type is UPDATE on the wire.
+        let cfg = config_with(
+            Some(query_config(None, Some(r#"{"sum":{{row.sum}}}"#), None)),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(
+            &cfg,
+            Some(&engine),
+            "q",
+            &aggregation(Some(json!({"sum": 1})), json!({"sum": 5})),
+        );
+        assert_eq!(
+            item_type(&item),
+            QueryResultItemType::Update,
+            "Aggregation must surface as UPDATE on the wire"
+        );
+        assert_eq!(struct_field(&item.before), Some(json!({"sum": 1})));
+        assert_eq!(struct_field(&item.after), Some(json!({"sum": 5})));
+    }
+
+    #[test]
+    fn aggregation_with_no_before_only_renders_after() {
+        let cfg = config_with(
+            Some(query_config(None, Some(r#"{"sum":{{row.sum}}}"#), None)),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(
+            &cfg,
+            Some(&engine),
+            "q",
+            &aggregation(None, json!({"sum": 7})),
+        );
+        assert_eq!(item_type(&item), QueryResultItemType::Update);
         assert!(
             item.before.is_none(),
-            "ADD must leave `before` absent — receivers use after-only"
+            "Aggregation without prior state leaves `before` absent"
         );
-        assert!(
-            item.payload.is_none(),
-            "no template configured ⇒ payload absent"
+        assert_eq!(struct_field(&item.after), Some(json!({"sum": 7})));
+    }
+
+    // ---- Render failure fall-back ---------------------------------------
+
+    #[test]
+    fn render_failure_falls_back_to_raw_row_for_that_field() {
+        // Non-JSON output triggers the parse-failure warn-and-fallback
+        // path. The field carries the raw row state instead.
+        let cfg = config_with(
+            Some(query_config(Some("plain text {{row.id}}"), None, None)),
+            HashMap::new(),
+        );
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": 99})));
+        assert_eq!(
+            struct_field(&item.after),
+            Some(json!({"id": 99})),
+            "render failure must fall back to raw row state — never drop"
         );
     }
 
     #[test]
-    fn build_proto_item_delete_populates_before_only_with_item_type_delete() {
-        let cfg = GrpcReactionConfig::default();
-        let item = build_proto_item(&cfg, None, "q", &delete(json!({"id": 1})));
-        assert_eq!(item_type(&item), QueryResultItemType::Delete);
-        assert!(item.before.is_some(), "DELETE must populate `before`");
-        assert!(
-            item.after.is_none(),
-            "DELETE must leave `after` absent — receivers use before-only"
+    fn empty_template_falls_back_to_raw_row() {
+        let cfg = config_with(
+            Some(query_config(Some("   "), None, None)),
+            HashMap::new(),
         );
-        assert!(item.payload.is_none());
+        let engine = TemplateEngine::new();
+        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": 1})));
+        assert_eq!(struct_field(&item.after), Some(json!({"id": 1})));
     }
 
-    #[test]
-    fn build_proto_item_update_populates_both_with_item_type_update() {
-        let cfg = GrpcReactionConfig::default();
-        let item = build_proto_item(&cfg, None, "q", &update(json!({"id": 1}), json!({"id": 2})));
-        assert_eq!(item_type(&item), QueryResultItemType::Update);
-        assert!(item.before.is_some());
-        assert!(item.after.is_some());
-        assert!(item.payload.is_none());
-    }
+    // ---- row_signature ---------------------------------------------------
 
     #[test]
-    fn build_proto_item_aggregation_populates_after_and_optional_before() {
-        let cfg = GrpcReactionConfig::default();
-        let diff = ResultDiff::Aggregation {
-            before: Some(json!({"prev": 1})),
-            after: json!({"curr": 2}),
-            row_signature: 99,
-        };
-        let item = build_proto_item(&cfg, None, "q", &diff);
-        assert_eq!(item_type(&item), QueryResultItemType::Aggregation);
-        assert!(item.before.is_some());
-        assert!(item.after.is_some());
-        assert_eq!(item.row_signature, 99);
-
-        let diff_no_before = ResultDiff::Aggregation {
-            before: None,
-            after: json!({"curr": 3}),
-            row_signature: 5,
-        };
-        let item = build_proto_item(&cfg, None, "q", &diff_no_before);
-        assert_eq!(item_type(&item), QueryResultItemType::Aggregation);
-        assert!(item.before.is_none());
-        assert!(item.after.is_some());
-    }
-
-    #[test]
-    fn build_proto_item_noop_emits_no_before_no_after_no_payload() {
-        let cfg = GrpcReactionConfig::default();
-        let item = build_proto_item(&cfg, None, "q", &ResultDiff::Noop);
-        assert_eq!(item_type(&item), QueryResultItemType::Noop);
-        assert!(item.before.is_none());
-        assert!(item.after.is_none());
-        assert!(item.payload.is_none());
-        assert_eq!(item.row_signature, 0);
-    }
-
-    #[test]
-    fn build_proto_item_propagates_row_signature_for_every_variant() {
+    fn row_signature_propagates_for_add_update_delete_aggregation() {
         let cfg = GrpcReactionConfig::default();
 
         let add_diff = ResultDiff::Add {
@@ -495,119 +715,63 @@ mod tests {
             build_proto_item(&cfg, None, "q", &agg_diff).row_signature,
             44
         );
-
-        assert_eq!(
-            build_proto_item(&cfg, None, "q", &ResultDiff::Noop).row_signature,
-            0
-        );
     }
+
+    // ---- Noop contract ---------------------------------------------------
 
     #[test]
-    fn build_proto_item_populates_payload_when_template_renders_successfully() {
-        let cfg = config_with(
-            Some(query_config_add(r#"{"hello":"{{after.id}}"}"#)),
-            HashMap::new(),
-        );
-        let engine = TemplateEngine::new();
-        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": "abc"})));
-        let payload = item.payload.as_ref().expect("payload must be present");
-        let hello = payload
-            .fields
-            .get("hello")
-            .and_then(|v| match &v.kind {
-                Some(prost_types::value::Kind::StringValue(s)) => Some(s.as_str()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(hello, "abc");
-        // before/after still carry the raw row state.
-        assert!(item.after.is_some());
+    #[should_panic(expected = "Noop")]
+    fn build_proto_item_panics_for_noop_to_enforce_runner_filtering() {
+        // Runners must filter Noop before calling build_proto_item.
+        // This test pins the contract.
+        let cfg = GrpcReactionConfig::default();
+        let _ = build_proto_item(&cfg, None, "q", &ResultDiff::Noop);
     }
 
-    #[test]
-    fn build_proto_item_omits_payload_when_template_render_fails_but_keeps_before_after() {
-        // Non-JSON output triggers the parse-failure warn-and-omit path.
-        let cfg = config_with(
-            Some(query_config_add("plain text {{after.id}}")),
-            HashMap::new(),
-        );
-        let engine = TemplateEngine::new();
-        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": 7})));
-        assert!(
-            item.payload.is_none(),
-            "render failure must omit payload so receivers fall back to before/after"
-        );
-        assert!(
-            item.after.is_some(),
-            "render failure must not drop the raw `after` row state"
-        );
-    }
-
-    #[test]
-    fn build_proto_item_omits_payload_when_template_string_is_empty() {
-        let cfg = config_with(Some(query_config_add("   ")), HashMap::new());
-        let engine = TemplateEngine::new();
-        let item = build_proto_item(&cfg, Some(&engine), "q", &add(json!({"id": 1})));
-        assert!(
-            item.payload.is_none(),
-            "empty template must omit payload — never falls back to a raw-data payload"
-        );
-        assert!(item.after.is_some());
-    }
-
-    #[test]
-    fn build_proto_item_omits_payload_for_aggregation_even_with_template_configured() {
-        // Aggregation bypasses template rendering: diff_to_op returns None,
-        // so the (engine, op) zip is None and payload is omitted regardless
-        // of whether routes/default would otherwise apply.
-        let cfg = config_with(
-            Some(query_config_add(r#"{"should":"never render"}"#)),
-            HashMap::new(),
-        );
-        let engine = TemplateEngine::new();
-        let diff = ResultDiff::Aggregation {
-            before: None,
-            after: json!({"k": 1}),
-            row_signature: 0,
-        };
-        let item = build_proto_item(&cfg, Some(&engine), "q", &diff);
-        assert!(item.payload.is_none());
-    }
+    // ---- Route lookup strictness ----------------------------------------
 
     #[test]
     fn route_lookup_requires_exact_query_id_no_dotted_suffix_fallback() {
-        // Regression guard for HTTP commit ca0b826's strict-routing rule:
-        // a route key with a dotted suffix must NOT be selected for a query
-        // id that only matches the suffix. The shared TemplateRouting trait
-        // (drasi_lib::reactions::common) is what we delegate to; this test
-        // pins the exact-id behavior so a future change in the shared trait
-        // cannot silently widen routing.
+        // A route key with a dotted suffix must NOT be selected for a
+        // query id that only matches the suffix. The shared
+        // TemplateRouting trait (drasi_lib::reactions::common) is what
+        // we delegate to; this pins the exact-id behavior so a future
+        // change in the shared trait cannot silently widen routing.
         let mut routes = HashMap::new();
         routes.insert(
             "sales.q1".to_string(),
-            query_config_add(r#"{"src":"namespaced-route"}"#),
+            query_config(Some(r#"{"src":"namespaced-route"}"#), None, None),
         );
-        let cfg = config_with(Some(query_config_add(r#"{"src":"default"}"#)), routes);
+        let cfg = config_with(
+            Some(query_config(Some(r#"{"src":"default"}"#), None, None)),
+            routes,
+        );
+        let engine = TemplateEngine::new();
 
         // Query id "q1" must fall through to the default template, NOT
-        // resolve to the "sales.q1" entry by stripping the "sales." prefix.
-        let engine = TemplateEngine::new();
-        let spec = cfg.get_template_spec("q1", OperationType::Add).unwrap();
+        // resolve to the "sales.q1" entry by stripping the prefix.
+        let item = build_proto_item(&cfg, Some(&engine), "q1", &add(json!({})));
         assert_eq!(
-            engine.render_payload("q1", spec, &add(json!({}))).unwrap(),
-            json!({"src": "default"}),
+            struct_field(&item.after),
+            Some(json!({"src": "default"})),
             "query id `q1` must not match route key `sales.q1` via suffix fallback"
         );
 
-        // Conversely, the exact route key resolves to the namespaced spec.
-        let spec = cfg
-            .get_template_spec("sales.q1", OperationType::Add)
-            .unwrap();
+        // The exact route key resolves to the namespaced spec.
+        let item = build_proto_item(&cfg, Some(&engine), "sales.q1", &add(json!({})));
         assert_eq!(
-            engine
-                .render_payload("sales.q1", spec, &add(json!({})))
-                .unwrap(),
-            json!({"src": "namespaced-route"})
+            struct_field(&item.after),
+            Some(json!({"src": "namespaced-route"}))
         );
+    }
+
+    // ---- Silence unused-import lint for the rendering helper -------------
+
+    #[test]
+    fn helpers_smoke() {
+        // Touch `convert_json_to_proto_struct` so the explicit import
+        // in this test module isn't flagged unused when other tests
+        // construct ProtoQueryResultItem directly elsewhere.
+        let _ = convert_json_to_proto_struct(&json!({"k": 1}));
     }
 }

@@ -266,16 +266,12 @@ mod integration {
     use std::time::Duration;
 
     fn item() -> ProtoQueryResultItem {
-        // v3 schema: no string `type`, no `data`; carries item_type enum
-        // (encoded as i32 on the wire), explicit row_signature, and an
-        // optional templated payload (omitted here).
         use crate::proto::drasi_v1::QueryResultItemType;
         ProtoQueryResultItem {
-            before: None,
-            after: None,
             item_type: QueryResultItemType::Add as i32,
             row_signature: 0,
-            payload: None,
+            before: None,
+            after: None,
         }
     }
 

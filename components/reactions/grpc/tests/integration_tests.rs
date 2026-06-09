@@ -22,12 +22,8 @@
 //!    trait, then stops it.
 //! 3. Asserts the **exact** wire shape of the items the server
 //!    received: `item_type` enum value, `row_signature`, presence /
-//!    absence and contents of `before` / `after` / `payload`, plus
-//!    metadata propagated as gRPC headers.
-//!
-//! Compared to `src/tests.rs::integration` (which exercises the
-//! send/runner internals via `pub(crate)` APIs), this file pins the
-//! public contract a downstream embedder sees end-to-end.
+//!    absence and contents of `before` / `after`, plus metadata
+//!    propagated as gRPC headers.
 
 mod mock_server;
 
@@ -45,11 +41,11 @@ use crate::mock_server::struct_to_json;
 
 // Mirrors of the prost-generated QueryResultItemType numeric tags so
 // integration assertions don't need to import generated proto code.
+// Aggregation surfaces as UPDATE on the wire; Noop is dropped before
+// the wire — neither has a wire enum value.
 const ITEM_TYPE_ADD: i32 = 1;
 const ITEM_TYPE_UPDATE: i32 = 2;
 const ITEM_TYPE_DELETE: i32 = 3;
-const ITEM_TYPE_AGGREGATION: i32 = 4;
-const ITEM_TYPE_NOOP: i32 = 5;
 
 fn add(data: serde_json::Value, row_signature: u64) -> ResultDiff {
     ResultDiff::Add {
@@ -75,11 +71,23 @@ fn update(before: serde_json::Value, after: serde_json::Value, row_signature: u6
     }
 }
 
+fn aggregation(
+    before: Option<serde_json::Value>,
+    after: serde_json::Value,
+    row_signature: u64,
+) -> ResultDiff {
+    ResultDiff::Aggregation {
+        before,
+        after,
+        row_signature,
+    }
+}
+
 fn make_query_result(query_id: &str, diffs: Vec<ResultDiff>) -> QueryResult {
     QueryResult::new(query_id.to_string(), 0, Utc::now(), diffs, HashMap::new())
 }
 
-fn template_for_add(template: &str) -> QueryConfig {
+fn template_added(template: &str) -> QueryConfig {
     QueryConfig {
         added: Some(TemplateSpec::new(template)),
         updated: None,
@@ -87,28 +95,34 @@ fn template_for_add(template: &str) -> QueryConfig {
     }
 }
 
-fn template_full(template_add: &str, template_upd: &str, template_del: &str) -> QueryConfig {
+fn template_updated(template: &str) -> QueryConfig {
     QueryConfig {
-        added: Some(TemplateSpec::new(template_add)),
-        updated: Some(TemplateSpec::new(template_upd)),
-        deleted: Some(TemplateSpec::new(template_del)),
+        added: None,
+        updated: Some(TemplateSpec::new(template)),
+        deleted: None,
     }
 }
 
-/// Drain shutdown helper — stops the reaction, then awaits a small
-/// grace period to let the bounded-shutdown timeout fire if it must.
+fn template_deleted(template: &str) -> QueryConfig {
+    QueryConfig {
+        added: None,
+        updated: None,
+        deleted: Some(TemplateSpec::new(template)),
+    }
+}
+
 async fn shutdown(reaction: &GrpcReaction) {
     let _ = reaction.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Fixed batching
+// Fixed batching — ADD
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_no_template_emits_one_rpc_with_correct_item_type_and_no_payload() {
+async fn fixed_add_no_template_emits_raw_row_in_after_and_no_before() {
     let server = mock_server::start().await;
-    let reaction = GrpcReaction::builder("test-fixed-add")
+    let reaction = GrpcReaction::builder("test-fixed-add-raw")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into()])
         .with_fixed_batching(1, 10_000)
@@ -128,29 +142,22 @@ async fn fixed_no_template_emits_one_rpc_with_correct_item_type_and_no_payload()
         .recorder
         .wait_for_items(1, Duration::from_secs(5))
         .await;
-    assert_eq!(total, 1, "expected exactly one item delivered");
+    assert_eq!(total, 1);
 
     let batches = server.recorder.batches().await;
     assert_eq!(batches.len(), 1, "expected exactly one ProcessResults RPC");
     let batch = &batches[0];
     assert_eq!(batch.query_id, "q1");
-    assert!(
-        batch.had_rfc3339_timestamp,
-        "QueryResult envelope must carry a valid timestamp"
-    );
+    assert!(batch.had_rfc3339_timestamp);
 
     let item = &batch.items[0];
     assert_eq!(item.item_type, ITEM_TYPE_ADD);
-    assert_eq!(item.row_signature, 42, "row_signature must propagate");
-    assert!(item.before.is_none(), "ADD must not populate `before`");
+    assert_eq!(item.row_signature, 42);
+    assert!(item.before.is_none(), "ADD must leave `before` absent");
     assert_eq!(
         item.after.as_ref().map(struct_to_json),
         Some(json!({"id": 7, "name": "alice"})),
-        "ADD must populate `after` with the raw row state"
-    );
-    assert!(
-        item.payload.is_none(),
-        "no template configured ⇒ payload must be absent"
+        "ADD without a template must carry the raw row in `after`"
     );
 
     shutdown(&reaction).await;
@@ -158,15 +165,13 @@ async fn fixed_no_template_emits_one_rpc_with_correct_item_type_and_no_payload()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_with_template_populates_payload_and_keeps_before_after() {
+async fn fixed_add_with_template_renders_into_after() {
     let server = mock_server::start().await;
     let templates = OutputTemplates {
-        default_template: Some(template_for_add(
-            r#"{"event":"created","id":"{{after.id}}"}"#,
-        )),
+        default_template: Some(template_added(r#"{"event":"created","id":"{{row.id}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-tmpl")
+    let reaction = GrpcReaction::builder("test-fixed-add-tmpl")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into()])
         .with_fixed_batching(1, 10_000)
@@ -178,47 +183,78 @@ async fn fixed_with_template_populates_payload_and_keeps_before_after() {
     reaction
         .enqueue_query_result(make_query_result(
             "q1",
-            vec![add(json!({"id": "abc", "name": "alice"}), 0)],
+            vec![add(json!({"id": "abc", "extra": "ignored"}), 0)],
         ))
         .await
         .expect("enqueue");
 
-    let total = server
+    server
         .recorder
         .wait_for_items(1, Duration::from_secs(5))
         .await;
-    assert_eq!(total, 1);
-
     let batches = server.recorder.batches().await;
     let item = &batches[0].items[0];
     assert_eq!(item.item_type, ITEM_TYPE_ADD);
     assert_eq!(
-        item.payload.as_ref().map(struct_to_json),
-        Some(json!({"event": "created", "id": "abc"})),
-        "payload must be the rendered template output"
-    );
-    assert_eq!(
         item.after.as_ref().map(struct_to_json),
-        Some(json!({"id": "abc", "name": "alice"})),
-        "after must still carry the raw row state alongside payload"
+        Some(json!({"event": "created", "id": "abc"})),
+        "ADD's `after` must carry the rendered template output, not the raw row"
     );
+    assert!(item.before.is_none(), "ADD never populates `before`");
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Fixed batching — DELETE
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_delete_no_template_emits_raw_row_in_before_and_no_after() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-fixed-del-raw")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![delete(json!({"id": "x42"}), 13)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(item.item_type, ITEM_TYPE_DELETE);
+    assert_eq!(item.row_signature, 13);
+    assert_eq!(
+        item.before.as_ref().map(struct_to_json),
+        Some(json!({"id": "x42"}))
+    );
+    assert!(item.after.is_none(), "DELETE must leave `after` absent");
 
     shutdown(&reaction).await;
     server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_template_render_failure_omits_payload_but_keeps_before_after() {
+async fn fixed_delete_with_template_renders_into_before() {
     let server = mock_server::start().await;
-    // Non-JSON template output triggers the parse-failure path in
-    // TemplateEngine::render_payload, which logs a warning and returns
-    // None — `payload` must be omitted, NOT replaced with raw data, and
-    // the event must still be delivered.
     let templates = OutputTemplates {
-        default_template: Some(template_for_add("plain text {{after.id}}")),
+        default_template: Some(template_deleted(r#"{"removed":"{{row.id}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-fixed-render-fail")
+    let reaction = GrpcReaction::builder("test-fixed-del-tmpl")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into()])
         .with_fixed_batching(1, 10_000)
@@ -228,51 +264,42 @@ async fn fixed_template_render_failure_omits_payload_but_keeps_before_after() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 99}), 0)]))
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![delete(json!({"id": "x42"}), 0)],
+        ))
         .await
         .expect("enqueue");
 
-    let total = server
+    server
         .recorder
         .wait_for_items(1, Duration::from_secs(5))
         .await;
-    assert_eq!(
-        total, 1,
-        "event must still be delivered after render failure"
-    );
-
     let batches = server.recorder.batches().await;
     let item = &batches[0].items[0];
-    assert!(
-        item.payload.is_none(),
-        "render failure must omit payload, NOT substitute raw data"
-    );
+    assert_eq!(item.item_type, ITEM_TYPE_DELETE);
     assert_eq!(
-        item.after.as_ref().map(struct_to_json),
-        Some(json!({"id": 99})),
-        "after must still carry the raw row state so receivers can recover"
+        item.before.as_ref().map(struct_to_json),
+        Some(json!({"removed": "x42"})),
+        "DELETE's `before` must carry the rendered template output"
     );
+    assert!(item.after.is_none());
 
     shutdown(&reaction).await;
     server.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Fixed batching — UPDATE (the key new behavior)
+// ---------------------------------------------------------------------------
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_update_template_context_has_before_and_after() {
+async fn fixed_update_no_template_emits_raw_before_and_after() {
     let server = mock_server::start().await;
-    let templates = OutputTemplates {
-        default_template: Some(template_full(
-            "{}",
-            r#"{"v":"{{after.v}}","prev":"{{before.v}}"}"#,
-            "{}",
-        )),
-        routes: HashMap::new(),
-    };
-    let reaction = GrpcReaction::builder("test-update")
+    let reaction = GrpcReaction::builder("test-fixed-upd-raw")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into()])
         .with_fixed_batching(1, 10_000)
-        .with_output_templates(templates)
         .build()
         .expect("builder");
     reaction.start().await.expect("start");
@@ -301,23 +328,22 @@ async fn fixed_update_template_context_has_before_and_after() {
         item.after.as_ref().map(struct_to_json),
         Some(json!({"v": "new"}))
     );
-    assert_eq!(
-        item.payload.as_ref().map(struct_to_json),
-        Some(json!({"v": "new", "prev": "old"}))
-    );
 
     shutdown(&reaction).await;
     server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_delete_template_context_has_before_only() {
+async fn fixed_update_template_renders_both_before_and_after_independently() {
+    // The single `updated` template is applied independently to the
+    // before-row and the after-row. Each rendered output lands in its
+    // corresponding proto field.
     let server = mock_server::start().await;
     let templates = OutputTemplates {
-        default_template: Some(template_full("{}", "{}", r#"{"deleted":"{{before.id}}"}"#)),
+        default_template: Some(template_updated(r#"{"value":"{{row.v}}"}"#)),
         routes: HashMap::new(),
     };
-    let reaction = GrpcReaction::builder("test-delete")
+    let reaction = GrpcReaction::builder("test-fixed-upd-tmpl")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into()])
         .with_fixed_batching(1, 10_000)
@@ -329,7 +355,7 @@ async fn fixed_delete_template_context_has_before_only() {
     reaction
         .enqueue_query_result(make_query_result(
             "q1",
-            vec![delete(json!({"id": "x42"}), 13)],
+            vec![update(json!({"v": "old"}), json!({"v": "new"}), 99)],
         ))
         .await
         .expect("enqueue");
@@ -340,21 +366,211 @@ async fn fixed_delete_template_context_has_before_only() {
         .await;
     let batches = server.recorder.batches().await;
     let item = &batches[0].items[0];
-    assert_eq!(item.item_type, ITEM_TYPE_DELETE);
-    assert_eq!(item.row_signature, 13);
+    assert_eq!(item.item_type, ITEM_TYPE_UPDATE);
+    assert_eq!(item.row_signature, 99);
     assert_eq!(
         item.before.as_ref().map(struct_to_json),
-        Some(json!({"id": "x42"}))
+        Some(json!({"value": "old"})),
+        "`before` must be rendered from the before-row"
     );
-    assert!(item.after.is_none(), "DELETE must not populate `after`");
     assert_eq!(
-        item.payload.as_ref().map(struct_to_json),
-        Some(json!({"deleted": "x42"}))
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"value": "new"})),
+        "`after` must be rendered from the after-row"
     );
 
     shutdown(&reaction).await;
     server.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_update_template_sees_side_variable_differently_per_render() {
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_updated(r#"{"v":"{{row.v}}","s":"{{side}}"}"#)),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-fixed-upd-side")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![update(json!({"v": "old"}), json!({"v": "new"}), 0)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.before.as_ref().map(struct_to_json),
+        Some(json!({"v": "old", "s": "before"}))
+    );
+    assert_eq!(
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"v": "new", "s": "after"}))
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Render-failure fall-back
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fixed_template_render_failure_falls_back_to_raw_row_state() {
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_added("plain text {{row.id}}")),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-fixed-render-fail")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 99}), 0)],
+        ))
+        .await
+        .expect("enqueue");
+
+    let total = server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    assert_eq!(total, 1, "event must still be delivered after render failure");
+
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"id": 99})),
+        "render failure must fall back to the raw row state in `after`"
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation → UPDATE on the wire
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregation_emits_as_update_on_the_wire_with_both_sides_templated() {
+    let server = mock_server::start().await;
+    let templates = OutputTemplates {
+        default_template: Some(template_updated(r#"{"sum":{{row.sum}}}"#)),
+        routes: HashMap::new(),
+    };
+    let reaction = GrpcReaction::builder("test-agg")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .with_output_templates(templates)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![aggregation(Some(json!({"sum": 1})), json!({"sum": 5}), 0)],
+        ))
+        .await
+        .expect("enqueue");
+
+    server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    let batches = server.recorder.batches().await;
+    let item = &batches[0].items[0];
+    assert_eq!(
+        item.item_type, ITEM_TYPE_UPDATE,
+        "Aggregation must surface as UPDATE on the wire"
+    );
+    assert_eq!(
+        item.before.as_ref().map(struct_to_json),
+        Some(json!({"sum": 1}))
+    );
+    assert_eq!(
+        item.after.as_ref().map(struct_to_json),
+        Some(json!({"sum": 5}))
+    );
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Noop dropped at the runner — never reaches the wire
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn noop_results_are_not_emitted_on_the_wire() {
+    let server = mock_server::start().await;
+    let reaction = GrpcReaction::builder("test-noop-drop")
+        .with_endpoint(server.endpoint.clone())
+        .with_queries(vec!["q1".into()])
+        .with_fixed_batching(1, 10_000)
+        .build()
+        .expect("builder");
+    reaction.start().await.expect("start");
+
+    reaction
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![
+                ResultDiff::Noop,
+                add(json!({"id": 1}), 0),
+                ResultDiff::Noop,
+            ],
+        ))
+        .await
+        .expect("enqueue");
+
+    let total = server
+        .recorder
+        .wait_for_items(1, Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        total, 1,
+        "exactly one item must arrive — Noop entries are dropped at the runner"
+    );
+
+    let batches = server.recorder.batches().await;
+    let total_items: usize = batches.iter().map(|b| b.items.len()).sum();
+    assert_eq!(total_items, 1, "no Noop items should leak through");
+    assert_eq!(batches[0].items[0].item_type, ITEM_TYPE_ADD);
+
+    shutdown(&reaction).await;
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Metadata propagation
+// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
@@ -370,7 +586,10 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
@@ -382,8 +601,7 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
     let observed = &batches[0].metadata_headers;
     assert_eq!(
         observed.get("authorization").map(String::as_str),
-        Some("Bearer test-token"),
-        "authorization must arrive as an actual gRPC header end-to-end"
+        Some("Bearer test-token")
     );
     assert_eq!(
         observed.get("x-tenant").map(String::as_str),
@@ -400,18 +618,10 @@ async fn metadata_is_propagated_as_grpc_headers_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_delivers_steady_load() {
-    // The gRPC adaptive runner buffers per-query in its main loop and
-    // only forwards to the AdaptiveBatcher when either (a) the
-    // query_id changes or (b) ≥100 items have accumulated. To exercise
-    // a real adaptive flush via the batcher we therefore alternate
-    // two query IDs — every other event forces the runner to release
-    // the previously-buffered batch downstream.
     let server = mock_server::start().await;
     let reaction = GrpcReaction::builder("test-adaptive")
         .with_endpoint(server.endpoint.clone())
         .with_queries(vec!["q1".into(), "q2".into()])
-        // Uses the new per-field setter (gap p09): implicitly enables
-        // adaptive mode with the rest of the adaptive defaults.
         .with_min_batch_size(1)
         .with_max_batch_size(50)
         .with_batch_timeout_ms(100)
@@ -422,36 +632,26 @@ async fn adaptive_delivers_steady_load() {
     for i in 0..10 {
         let q = if i % 2 == 0 { "q1" } else { "q2" };
         reaction
-            .enqueue_query_result(make_query_result(q, vec![add(json!({"id": i}), i as u64)]))
+            .enqueue_query_result(make_query_result(
+                q,
+                vec![add(json!({"id": i}), i as u64)],
+            ))
             .await
             .expect("enqueue");
     }
 
-    // The final item for whichever query is "last" remains buffered
-    // until stop()/drain. Wait for 9 of 10 to confirm steady-state
-    // delivery, then stop to flush the trailing item.
     let observed = server
         .recorder
         .wait_for_items(9, Duration::from_secs(5))
         .await;
-    assert!(
-        observed >= 9,
-        "adaptive must deliver alternating-query events promptly via batcher coalescing; \
-         observed {observed} of 10 before shutdown"
-    );
+    assert!(observed >= 9, "observed {observed} of 10 pre-stop");
 
     reaction.stop().await.expect("stop");
-    // After shutdown the runner's drain flushes the trailing buffered
-    // item; assert the total settled at 10.
     let total = server
         .recorder
         .wait_for_items(10, Duration::from_secs(5))
         .await;
-    assert_eq!(
-        total, 10,
-        "adaptive must deliver every enqueued item exactly once (including \
-         the trailing item flushed on shutdown drain)"
-    );
+    assert_eq!(total, 10);
 
     let batches = server.recorder.batches().await;
     let mut observed_ids: Vec<u64> = batches
@@ -459,23 +659,13 @@ async fn adaptive_delivers_steady_load() {
         .flat_map(|b| b.items.iter().map(|i| i.row_signature))
         .collect();
     observed_ids.sort_unstable();
-    assert_eq!(
-        observed_ids,
-        (0..10u64).collect::<Vec<_>>(),
-        "every row_signature must arrive exactly once across all batches"
-    );
+    assert_eq!(observed_ids, (0..10u64).collect::<Vec<_>>());
 
     server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
-    // The gRPC adaptive runner accumulates per-query in its main loop
-    // and relies on the drain path to flush any in-flight batch on
-    // shutdown. With min_batch_size=10 and 1 item enqueued, the
-    // batcher would never fire on size alone — the drain must release
-    // the item, exercising the bounded `tokio::time::timeout(5s,
-    // batcher_handle)` we added (gap p02) without hitting the timeout.
     let server = mock_server::start().await;
     let reaction = GrpcReaction::builder("test-adaptive-drain")
         .with_endpoint(server.endpoint.clone())
@@ -491,12 +681,13 @@ async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
-    // Give the runner a moment to receive and buffer; nothing should be
-    // sent yet (min=10, only 1 item, same query_id, < 100 threshold).
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         server.recorder.total_items().await,
@@ -523,10 +714,6 @@ async fn adaptive_flushes_buffered_batch_on_shutdown_drain() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adaptive_shutdown_completes_within_bounded_window() {
-    // The runner_adaptive shutdown drain is bounded to 5 s via
-    // tokio::time::timeout (gap p02). With a healthy server, stop() must
-    // complete well within that — assert under 3 s to give headroom and
-    // surface any regression to the unbounded behavior.
     let server = mock_server::start().await;
     let reaction = GrpcReaction::builder("test-adaptive-stop")
         .with_endpoint(server.endpoint.clone())
@@ -542,12 +729,13 @@ async fn adaptive_shutdown_completes_within_bounded_window() {
     reaction.start().await.expect("start");
 
     reaction
-        .enqueue_query_result(make_query_result("q1", vec![add(json!({"id": 1}), 0)]))
+        .enqueue_query_result(make_query_result(
+            "q1",
+            vec![add(json!({"id": 1}), 0)],
+        ))
         .await
         .expect("enqueue");
 
-    // Let one batch land so the drain path is exercised against an
-    // actually-streaming runner.
     server
         .recorder
         .wait_for_items(1, Duration::from_secs(5))
@@ -558,8 +746,7 @@ async fn adaptive_shutdown_completes_within_bounded_window() {
     let stop_elapsed = stop_start.elapsed();
     assert!(
         stop_elapsed < Duration::from_secs(3),
-        "stop() should complete promptly (< 3 s) under healthy conditions; \
-         took {stop_elapsed:?}"
+        "stop() must complete promptly; took {stop_elapsed:?}"
     );
 
     server.shutdown().await;
