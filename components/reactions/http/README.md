@@ -1,132 +1,268 @@
 # Drasi HTTP Reaction
 
-`drasi-reaction-http` is a unified HTTP reaction for [Drasi](https://drasi.io). It forwards continuous query results to one or more HTTP endpoints, with full support for Handlebars templating, per-query routing, and an optional **adaptive batching** mode that automatically scales batch sizes to match incoming load.
+`drasi-reaction-http` is the HTTP reaction for the [Drasi](https://drasi.io) embedded
+runtime ([`drasi-lib`](../../../lib)). It forwards the result changes produced by Drasi
+continuous queries to HTTP endpoints.
 
-This crate replaces the previous `drasi-reaction-http-adaptive` crate; both standard per-result delivery and adaptive batched delivery are now driven by the same configuration schema.
+Changes can be distributed two ways:
 
-> **Note** — version `0.3.0` is a breaking change. The configuration schema, builder API, and runtime types have all changed. There is no compatibility shim with `0.2.x` configurations or with `drasi-reaction-http-adaptive`.
+- **Single notifications** (default) — each added / updated / deleted result row is delivered
+  as its own HTTP request.
+- **Adaptive batching** (optional) — result changes are coalesced into batches whose size
+  scales automatically with incoming load, trading a small amount of latency for higher
+  throughput and reduced network traffic. Enabled by adding an `AdaptiveBatchConfig`.
+
+Both modes support [Handlebars](https://handlebarsjs.com/) templating of the request URL,
+method, body, and headers, plus per-query routing and bearer-token authentication.
+
+The reaction is built in Rust with `HttpReactionBuilder` and added to a running `DrasiLib`
+via `add_reaction(...)`. See [Examples](#examples).
 
 ---
 
 ## Table of contents
 
-1. [Features](#features)
-2. [Quick start](#quick-start)
-3. [Configuration reference](#configuration-reference)
+1. [Quick start](#quick-start)
+2. [Configuration reference](#configuration-reference)
+3. [Output templates and per-query routing](#output-templates-and-per-query-routing)
 4. [Templating](#templating)
-5. [Per-query routing](#per-query-routing)
+5. [Output payload schema](#output-payload-schema)
+   - [Single-notification payloads](#single-notification-payloads)
+   - [Batch payloads](#batch-payloads)
 6. [Adaptive batching](#adaptive-batching)
-7. [Batch endpoint coalescing](#batch-endpoint-coalescing)
-8. [Render-error fallback](#render-error-fallback)
-9. [Authentication](#authentication)
-10. [Builder API](#builder-api)
-11. [Plugin metadata](#plugin-metadata)
-12. [Testing](#testing)
-13. [Changelog](#changelog)
-
----
-
-## Features
-
-- Forward Drasi continuous-query result diffs to any HTTP endpoint.
-- Handlebars templates for the URL, method, body, and headers — per operation (`added`, `updated`, `deleted`).
-- Per-query template overrides plus a shared `outputTemplates` default.
-- Optional **adaptive batching** that dynamically scales batch size between configurable min/max bounds based on observed throughput.
-- Optional **batch endpoint** that coalesces multi-result batches into a single POST, reducing overhead for fan-out scenarios.
-- Always-on HTTP/2 connection pooling.
-- Render-error fallback that POSTs the raw diff to `/changes/{queryId}` instead of dropping events.
-- Bearer-token authentication.
-- Ships as both an embedded Rust dependency and a dynamic plugin (`--features dynamic-plugin`).
+7. [Render-error fallback](#render-error-fallback)
+8. [Authentication](#authentication)
+9. [Examples](#examples)
+10. [Plugin metadata](#plugin-metadata)
+11. [Testing](#testing)
+12. [Changelog](#changelog)
 
 ---
 
 ## Quick start
 
-Standard per-result delivery:
+Here is a complete example of how to use the HTTP Reaction. It uses a `MockSource` to
+generate simulated sensor data, a Cypher continuous query that surfaces hot sensors,
+and the HTTP reaction that forwards each result change to an HTTP endpoint.
 
-```yaml
-apiVersion: v1
-kind: Reaction
-name: my-http-reaction
-spec:
-  kind: http
-  properties:
-    baseUrl: "https://example.com/api"
-    timeoutMs: 5000
-    queries:
-      - queryId: orders-by-region
+Add the crates to your `Cargo.toml`:
+
+```toml
+[dependencies]
+drasi-lib            = { path = "../drasi-core/lib" }
+drasi-source-mock    = { path = "../drasi-core/components/sources/mock" }
+drasi-reaction-http  = { path = "../drasi-core/components/reactions/http" }
+
+anyhow      = "1"
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+env_logger  = "0.11"
 ```
 
-Adaptive batched delivery to a coalesced batch endpoint:
+Rust code for the example:
 
-```yaml
-apiVersion: v1
-kind: Reaction
-name: my-adaptive-http-reaction
-spec:
-  kind: http
-  properties:
-    baseUrl: "https://example.com/api"
-    timeoutMs: 5000
-    batchEndpoint: "/events/batch"
-    adaptive:
-      adaptiveMinBatchSize: 50
-      adaptiveMaxBatchSize: 2000
-      adaptiveWindowSize: 100
-      adaptiveBatchTimeoutMs: 500
-    queries:
-      - queryId: orders-by-region
+```rust
+use std::sync::Arc;
+
+use anyhow::Result;
+use drasi_lib::{DrasiLib, Query};
+use drasi_reaction_http::HttpReactionBuilder;
+use drasi_source_mock::{DataType, MockSource};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // 1. Source: emit a new SensorReading for each of 3 sensors every 2 seconds.
+    let source = MockSource::builder("sensor-source")
+        .with_data_type(DataType::sensor_reading(3))
+        .with_interval_ms(2_000)
+        .build()?;
+
+    // 2. Continuous query: surface sensors whose temperature crosses above 25 °C.
+    let hot_sensors = Query::cypher("hot-sensors")
+        .query(
+            r#"
+            MATCH (s:SensorReading)
+            WHERE s.temperature > 25
+            RETURN s.sensor_id   AS sensor_id,
+                   s.temperature AS temperature,
+                   s.humidity    AS humidity
+            "#,
+        )
+        .from_source("sensor-source")
+        .enable_bootstrap(true)
+        .auto_start(true)
+        .build();
+
+    // 3. Reaction: POST each result change to https://example.com/api/changes/hot-sensors
+    //    (the built-in default endpoint when no output templates are configured).
+    let reaction = HttpReactionBuilder::new("hot-sensors-webhook")
+        .with_queries(vec!["hot-sensors".to_string()])
+        .with_base_url("https://example.com/api")
+        .with_timeout_ms(5_000)
+        .build()?;
+
+    // 4. Wire everything into a DrasiLib instance and start.
+    let core = Arc::new(
+        DrasiLib::builder()
+            .with_id("http-reaction-quickstart")
+            .with_source(source)
+            .with_query(hot_sensors)
+            .with_reaction(reaction)
+            .build()
+            .await?,
+    );
+    core.start().await?;
+
+    println!("HTTP reaction running. Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    core.stop().await?;
+    Ok(())
+}
+```
+
+With no `output_templates` configured, each result row is POSTed to
+`{base_url}/changes/{query_id}` — `https://example.com/api/changes/hot-sensors` in the
+example above (see [Output payload schema](#output-payload-schema)).
+
+To switch the same reaction to adaptive batched delivery, add an `AdaptiveBatchConfig`
+and a batch endpoint:
+
+```rust
+use drasi_reaction_http::{AdaptiveBatchConfig, HttpReactionBuilder};
+
+let reaction = HttpReactionBuilder::new("hot-sensors-webhook")
+    .with_queries(vec!["hot-sensors".to_string()])
+    .with_base_url("https://example.com/api")
+    .with_adaptive(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 50,
+        adaptive_max_batch_size: 2_000,
+        adaptive_window_size: 100,
+        adaptive_batch_timeout_ms: 500,
+    })
+    .with_batch_endpoint("/events/batch")
+    .build()?;
 ```
 
 ---
 
 ## Configuration reference
 
-All top-level fields are camelCase.
+`HttpReactionConfig` is the struct populated by `HttpReactionBuilder`. All fields are
+optional unless noted; defaults are applied by the builder.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `baseUrl` | `string` | `http://localhost` | Base URL prepended to every relative per-call URL. Optional. |
-| `token` | `string` | _none_ | Bearer token sent as `Authorization: Bearer <token>`. |
-| `timeoutMs` | `u64` | `5000` | Per-request HTTP timeout. |
-| `outputTemplates` | object | _none_ | Shared per-operation templates and per-query routes (see [Templating](#templating)). |
-| `batchEndpoint` | `string` | _none_ | When set, `adaptive` **must** also be enabled; every coalesced batch is POSTed to `{baseUrl}{batchEndpoint}` as a single payload. If `batchEndpoint` is set without `adaptive`, the reaction fails to start. |
-| `adaptive` | object | _none_ | When present, enables adaptive batching (see [Adaptive batching](#adaptive-batching)). |
+| Field | Type | Default | Builder setter | Description |
+|-------|------|---------|----------------|-------------|
+| `base_url` | `String` | `http://localhost` | `with_base_url` | Base URL prepended to every relative per-call URL. |
+| `token` | `Option<String>` | `None` | `with_token` | Bearer token sent as `Authorization: Bearer <token>` on every request. |
+| `timeout_ms` | `u64` | `5000` | `with_timeout_ms` | Per-request HTTP timeout in milliseconds. |
+| `output_templates` | `Option<HttpOutputTemplates>` | `None` | `with_default_template`, `with_query_template`, `with_output_templates` | Per-query and default templates for the URL, method, body, and headers. See [Output templates](#output-templates-and-per-query-routing). |
+| `adaptive` | `Option<AdaptiveBatchConfig>` | `None` | `with_adaptive` (or `with_min_batch_size` / `with_max_batch_size` / `with_window_size` / `with_batch_timeout_ms`) | When `Some`, enables [adaptive batching](#adaptive-batching). When `None`, the reaction delivers one HTTP request per result. |
+| `batch_endpoint` | `Option<String>` | `None` | `with_batch_endpoint` | Path appended to `base_url`. When set, every coalesced batch is POSTed to `{base_url}{batch_endpoint}` as a single payload. **Requires `adaptive`** — if set without `adaptive`, the reaction fails to start (logs an error, sets status to `Stopped`, and returns an error). |
 
-### `outputTemplates` (and per-query `routes`)
+Builder-only settings (not stored on `HttpReactionConfig`):
+
+| Setter | Default | Description |
+|--------|---------|-------------|
+| `with_queries(Vec<String>)` / `with_query(...)` | _empty_ | Query IDs this reaction subscribes to. |
+| `with_priority_queue_capacity(usize)` | runtime default | Capacity of the inbound queue that buffers query results before processing. Tune for high-throughput sources. |
+| `with_auto_start(bool)` | `true` | Whether the reaction starts automatically when `DrasiLib` is running. |
+
+### `HttpOutputTemplates`
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `added` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is added. |
-| `updated` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is updated. |
-| `deleted` | `TemplateSpec<HttpCallExt>` | Template applied when a result row is deleted. |
+| `default_template` | `Option<HttpQueryConfig>` | Applied to any query without a matching `routes` entry. |
+| `routes` | `HashMap<String, HttpQueryConfig>` | Per-query overrides keyed by query id. |
 
-Each `TemplateSpec<HttpCallExt>` looks like:
+### `HttpQueryConfig`
 
-```yaml
-template: "<Handlebars body template>"
-url: "<Handlebars URL template>"
-method: POST              # GET | POST | PUT | PATCH | DELETE
-headers:
-  Content-Type: "application/json"
-  X-Custom-Header: "value"
+| Field | Type | Description |
+|-------|------|-------------|
+| `added` | `Option<HttpCallSpec>` | Template used when a result row is added. |
+| `updated` | `Option<HttpCallSpec>` | Template used when a result row is updated. |
+| `deleted` | `Option<HttpCallSpec>` | Template used when a result row is deleted. |
+
+### `HttpCallSpec`
+
+`HttpCallSpec = TemplateSpec<HttpCallExt>` — a Handlebars body `template` plus an
+`HttpCallExt { url, method, headers }`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `template` | `String` | _empty_ | Handlebars template for the request body. When empty, the raw result JSON is sent. |
+| `extension.url` | `String` | _empty_ | Handlebars template for the URL. A relative value is appended to `base_url`; an absolute `http(s)://` value is allowed only if its host matches `base_url`'s host. |
+| `extension.method` | `String` | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE` (case-insensitive). |
+| `extension.headers` | `HashMap<String, String>` | _empty_ | Additional headers. Values support Handlebars templates. |
+
+### `AdaptiveBatchConfig`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `adaptive_min_batch_size` | `usize` | `1` | Lower bound on batch size, used during idle/low traffic. |
+| `adaptive_max_batch_size` | `usize` | `100` | Upper bound on batch size, used during bursts. |
+| `adaptive_window_size` | `usize` | `10` | Throughput sample window in 100&nbsp;ms units (`10` = 1&nbsp;s, `50` = 5&nbsp;s, `100` = 10&nbsp;s). Range 1–255. |
+| `adaptive_batch_timeout_ms` | `u64` | `1000` | Maximum time to wait before flushing a partial batch. |
+
+---
+
+## Output templates and per-query routing
+
+`output_templates` lets each query customise how its result changes are delivered. For each
+result, the reaction selects a template in this order:
+
+1. `output_templates.routes[<query_id>]` — a per-query override, if present.
+2. `output_templates.default_template` — a shared fallback, if present.
+3. A built-in default: `POST {base_url}/changes/{query_id}` with the raw result JSON as the
+   body (used when neither of the above matches the operation).
+
+Within the selected `HttpQueryConfig`, the `added` / `updated` / `deleted` spec matching
+the result's operation is used. If that specific operation has no spec, the built-in
+default applies for that operation.
+
+```rust
+use std::collections::HashMap;
+use drasi_reaction_http::{HttpCallExt, HttpQueryConfig, TemplateSpec};
+
+let orders = HttpQueryConfig {
+    added: Some(TemplateSpec {
+        template: r#"{"event":"created","order":{{json after}}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/orders".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    }),
+    deleted: Some(TemplateSpec {
+        template: r#"{"event":"cancelled","orderId":"{{before.id}}"}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/orders/{{before.id}}".to_string(),
+            method: "DELETE".to_string(),
+            headers: HashMap::new(),
+        },
+    }),
+    ..Default::default()
+};
 ```
+
+Route keys are matched against the full query id.
 
 ---
 
 ## Templating
 
-Templates use [Handlebars](https://handlebarsjs.com/) syntax. The context exposes the following variables, depending on the operation:
+Templates use [Handlebars](https://handlebarsjs.com/) syntax and apply to the body
+`template`, the `url`, and header values. The render context depends on the operation:
 
 | Variable | Available for | Meaning |
 |----------|---------------|---------|
-| `after` | added, updated | The new/current row payload. |
+| `after` | added, updated | The new / current row payload. |
 | `before` | updated, deleted | The previous row payload. |
 | `data` | updated, and non-row results | The raw diff payload. |
 | `query_name` | all | The query identifier. |
 | `operation` | all | The operation: `ADD`, `UPDATE`, or `DELETE`. |
 
-Example body template:
+A `json` helper is registered for embedding a value as JSON:
 
 ```handlebars
 {
@@ -136,164 +272,262 @@ Example body template:
 }
 ```
 
-When `url` or `method` or `headers` are templated, the same context applies.
-
 ---
 
-## Per-query routing
+## Output payload schema
 
-The `outputTemplates.routes` map lets each query opt into per-query template
-overrides, keyed by query id; `outputTemplates.defaultTemplate` applies to any
-query without a matching route:
+### Single-notification payloads
 
-```yaml
-outputTemplates:
-  defaultTemplate:
-    added:
-      template: '{{json after}}'
-      url: "/events"
-      method: POST
-  routes:
-    orders-by-region:
-      added:
-        template: '{"event":"created","order":{{json after}}}'
-        url: "/orders"
-        method: POST
-      deleted:
-        template: '{"event":"cancelled","orderId":"{{before.id}}"}'
-        url: "/orders/{{before.id}}"
-        method: DELETE
+In single-notification mode (and in adaptive mode without a `batch_endpoint`), each result
+is delivered by rendering its selected [`HttpCallSpec`](#httpcallspec):
+
+- **Body** — the rendered `template`. When `template` is empty, the reaction sends raw JSON:
+  - For **added** and **deleted** results, the body is the row object (the result's `data`).
+  - For **updated** results, the body is the full result-diff object (see below).
+- **URL** — the rendered `url` appended to `base_url`, or `{base_url}/changes/{query_id}`
+  when no template applies.
+- **Method** — the spec's `method` (default `POST`).
+- **Headers** — `Content-Type: application/json`, the optional bearer token, and any
+  rendered custom headers.
+
+The raw result-diff object has a `type` discriminator:
+
+```json
+{ "type": "ADD",    "data": { }, "row_signature": 0 }
+{ "type": "DELETE", "data": { }, "row_signature": 0 }
+{ "type": "UPDATE", "data": { }, "before": { }, "after": { }, "row_signature": 0 }
 ```
 
-Route keys are matched against the full query id only. If neither a route nor a
-default template matches the operation, the reaction falls back to a built-in
-default: POST the raw diff to `{baseUrl}/changes/{queryId}`.
+### Batch payloads
 
----
-
-## Adaptive batching
-
-Set the `adaptive` block to enable an internal batcher that dynamically scales batch sizes based on observed throughput.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `adaptiveMinBatchSize` | `usize` | `1` | Lower bound on batch size. |
-| `adaptiveMaxBatchSize` | `usize` | `100` | Upper bound on batch size. |
-| `adaptiveWindowSize` | `usize` | `10` | Throughput sample window in 100 ms units (e.g. `10` = 1 s, `50` = 5 s, `100` = 10 s). |
-| `adaptiveBatchTimeoutMs` | `u64` | `100` | Maximum time to wait before flushing a partial batch. |
-
-The adaptive loop:
-
-1. Pulls query results off the internal channel.
-2. Groups results into batches whose size is decided by the batcher's throughput monitor.
-3. Delivers each batch either (a) coalesced to `batchEndpoint`, or (b) fanned out per-route using the same templating rules as the standard loop.
-
-> **Tip** — when both `adaptive` and `batchEndpoint` are set, every coalesced batch is POSTed to `batchEndpoint` as a single payload. When `batchEndpoint` is not set, each batch is fanned out per-route instead.
-
----
-
-## Batch endpoint coalescing
-
-When `batchEndpoint` is set, the adaptive loop POSTs a single JSON array, one
-entry per coalesced query:
+In adaptive mode **with** `batch_endpoint` set, each coalesced batch is POSTed to
+`{base_url}{batch_endpoint}` as a single JSON array. Each array element groups the results
+of one query in that batch:
 
 ```json
 [
   {
     "query_id": "orders-by-region",
-    "results": [ { "type": "ADD", "data": { } } ],
+    "results": [
+      { "type": "ADD",    "data": { }, "row_signature": 0 },
+      { "type": "UPDATE", "data": { }, "before": { }, "after": { }, "row_signature": 0 }
+    ],
     "timestamp": "2026-01-01T00:00:00+00:00",
-    "count": 1
+    "count": 2
   }
 ]
 ```
 
-The URL is `{baseUrl}{batchEndpoint}`. The endpoint must accept POST.
+| Field | Type | Description |
+|-------|------|-------------|
+| `query_id` | `string` | The query whose results are in this group. |
+| `results` | `array` | The coalesced result diffs (same shape as the raw diff above). |
+| `timestamp` | `string` | RFC 3339 timestamp of when the batch was assembled. |
+| `count` | `number` | Number of results in `results`. |
+
+The batch endpoint must accept `POST`.
+
+---
+
+## Adaptive batching
+
+Adding an `AdaptiveBatchConfig` switches the reaction from single-notification delivery to
+an internal batcher that coalesces result changes and scales batch size based on observed
+throughput. The batcher:
+
+1. Pulls query results off the internal queue.
+2. Groups them into batches whose size adapts between `adaptive_min_batch_size` and
+   `adaptive_max_batch_size` according to recent throughput, flushing a partial batch
+   after `adaptive_batch_timeout_ms`.
+3. Delivers each batch either:
+   - **coalesced** to `batch_endpoint` as one request (when `batch_endpoint` is set), or
+   - **fanned out** per result using the same [templating and routing](#output-templates-and-per-query-routing)
+     rules as single-notification mode (when `batch_endpoint` is not set).
+
+Use a coalesced `batch_endpoint` when your receiver can accept many changes in one
+request — this is the configuration that most reduces network traffic. Use adaptive without
+a `batch_endpoint` when you want the batcher's throughput smoothing but still need each
+change delivered to its own templated endpoint.
 
 ---
 
 ## Render-error fallback
 
-If a per-result template (URL, body, or headers) fails to render — for example, because a template references a field that's missing from the payload — the reaction:
+If a per-result template (URL, body, or header) fails to render — for example because it
+references a field that is missing from the payload — the reaction:
 
-1. Logs a warning with the query ID and the rendering error.
-2. POSTs the raw diff JSON to `{baseUrl}/changes/{queryId}` as a fallback so events are not silently dropped.
+1. Logs a warning with the query id and the render error.
+2. POSTs the raw result JSON to `{base_url}/changes/{query_id}` instead.
 
-This behavior is always on; there is no configuration to disable it.
+This guarantees changes are never silently dropped because of a template error. The
+behaviour is always on and cannot be disabled.
 
 ---
 
 ## Authentication
 
-Set `token` to send a bearer token on every request:
+Call `with_token(...)` to send a bearer token on every request:
 
-```yaml
-properties:
-  baseUrl: https://example.com
-  token: ${SECRET:my-api-token}
+```rust
+let reaction = HttpReactionBuilder::new("my-http-reaction")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_base_url("https://example.com/api")
+    .with_token(std::env::var("MY_API_TOKEN")?)
+    .build()?;
 ```
 
-Drasi's secret-store integrations (`file`, `keyring`, Azure Key Vault) all work transparently.
+The reaction does not resolve secret-store references itself; supply the resolved token
+value (e.g. from `std::env`, a Drasi state store, or your application's secret manager).
 
 ---
 
-## Builder API
+## Examples
 
-Use `HttpReactionBuilder` to construct an `HttpReaction` programmatically (for embedded use or tests):
+### 1. Single notifications to the built-in default endpoint
+
+Each result POSTed as raw JSON to `https://example.com/api/changes/<query_id>`:
 
 ```rust
-use drasi_reaction_http::{
-    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec,
-};
-use std::collections::HashMap;
+let reaction = HttpReactionBuilder::new("orders-webhook")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_base_url("https://example.com/api")
+    .build()?;
+core.add_reaction(reaction).await?;
+```
 
-let reaction = HttpReactionBuilder::new("my-http")
-    .with_queries(vec!["orders".to_string()])
-    .with_base_url("http://localhost:8080")
-    .with_timeout_ms(5_000)
-    .with_token("secret")
-    .with_default_template(HttpQueryConfig {
-        added: Some(TemplateSpec {
-            template: r#"{"data":{{json after}}}"#.to_string(),
-            extension: HttpCallExt {
-                url: "/events".to_string(),
-                method: "POST".to_string(),
-                headers: HashMap::new(),
-            },
-        }),
-        ..Default::default()
-    })
-    .with_query_template(
-        "orders",
-        HttpQueryConfig {
-            deleted: Some(TemplateSpec {
-                template: r#"{"orderId":"{{before.id}}"}"#.to_string(),
-                extension: HttpCallExt {
-                    url: "/orders/{{before.id}}".to_string(),
-                    method: "DELETE".to_string(),
-                    headers: HashMap::new(),
-                },
-            }),
-            ..Default::default()
+### 2. Single notifications with a REST-style per-query template
+
+Map each operation to a different verb and path:
+
+```rust
+use std::collections::HashMap;
+use drasi_reaction_http::{HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec};
+
+let orders = HttpQueryConfig {
+    added: Some(TemplateSpec {
+        template: r#"{{json after}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/orders".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
         },
-    )
+    }),
+    updated: Some(TemplateSpec {
+        template: r#"{{json after}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/orders/{{after.id}}".to_string(),
+            method: "PUT".to_string(),
+            headers: HashMap::new(),
+        },
+    }),
+    deleted: Some(TemplateSpec {
+        template: String::new(),
+        extension: HttpCallExt {
+            url: "/orders/{{before.id}}".to_string(),
+            method: "DELETE".to_string(),
+            headers: HashMap::new(),
+        },
+    }),
+};
+
+let reaction = HttpReactionBuilder::new("orders-rest")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_base_url("https://example.com/api")
+    .with_query_template("orders-by-region", orders)
+    .build()?;
+```
+
+### 3. Adaptive batching, coalesced to one batch endpoint (max throughput)
+
+```rust
+use drasi_reaction_http::{AdaptiveBatchConfig, HttpReactionBuilder};
+
+let reaction = HttpReactionBuilder::new("orders-batched")
+    .with_queries(vec!["orders-by-region".to_string(), "shipments".to_string()])
+    .with_base_url("https://example.com/api")
     .with_adaptive(AdaptiveBatchConfig {
-        adaptive_min_batch_size: 10,
-        adaptive_max_batch_size: 500,
-        adaptive_window_size: 50,
-        adaptive_batch_timeout_ms: 250,
+        adaptive_min_batch_size: 50,
+        adaptive_max_batch_size: 2_000,
+        adaptive_window_size: 100,       // 10 s throughput window
+        adaptive_batch_timeout_ms: 500,
     })
     .with_batch_endpoint("/events/batch")
     .build()?;
 ```
 
-> The convenience setters (`with_min_batch_size`, `with_max_batch_size`,
-> `with_window_size`, `with_batch_timeout_ms`) enable adaptive mode implicitly
-> if it is not already enabled.
+### 4. Adaptive batching, fanned out per result (no batch endpoint)
+
+Throughput smoothing while still delivering each change to its templated endpoint:
+
+```rust
+use std::collections::HashMap;
+use drasi_reaction_http::{
+    AdaptiveBatchConfig, HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec,
+};
+
+let default_tmpl = HttpQueryConfig {
+    added: Some(TemplateSpec {
+        template: r#"{{json after}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/events".to_string(),
+            method: "POST".to_string(),
+            headers: HashMap::new(),
+        },
+    }),
+    ..Default::default()
+};
+
+let reaction = HttpReactionBuilder::new("orders-smoothed")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_base_url("https://example.com/api")
+    .with_default_template(default_tmpl)
+    .with_adaptive(AdaptiveBatchConfig {
+        adaptive_min_batch_size: 1,
+        adaptive_max_batch_size: 200,
+        adaptive_window_size: 30,        // 3 s throughput window
+        adaptive_batch_timeout_ms: 50,
+    })
+    .build()?;
+```
+
+### 5. Authenticated requests with custom headers
+
+```rust
+use std::collections::HashMap;
+use drasi_reaction_http::{HttpCallExt, HttpQueryConfig, HttpReactionBuilder, TemplateSpec};
+
+let mut headers = HashMap::new();
+headers.insert("X-Query".to_string(), "{{query_name}}".to_string());
+headers.insert("X-Operation".to_string(), "{{operation}}".to_string());
+
+let default_tmpl = HttpQueryConfig {
+    added: Some(TemplateSpec {
+        template: r#"{{json after}}"#.to_string(),
+        extension: HttpCallExt {
+            url: "/events".to_string(),
+            method: "POST".to_string(),
+            headers,
+        },
+    }),
+    ..Default::default()
+};
+
+let reaction = HttpReactionBuilder::new("orders-authed")
+    .with_queries(vec!["orders-by-region".to_string()])
+    .with_base_url("https://example.com/api")
+    .with_token(std::env::var("MY_API_TOKEN")?)
+    .with_default_template(default_tmpl)
+    .build()?;
+```
 
 ---
 
 ## Plugin metadata
+
+The reaction also ships as a Drasi dynamic plugin. The plugin descriptor publishes named
+OpenAPI sub-schemas for `HttpReactionConfig`, `HttpOutputTemplates`, `HttpQueryConfig`,
+`HttpCallSpec`, and `AdaptiveBatchConfig`, plus `SchemaUiAnnotator` groupings so management
+UIs can render the configuration form.
 
 | Property | Value |
 |----------|-------|
@@ -308,8 +542,6 @@ Build as a dynamic plugin:
 cargo build -p drasi-reaction-http --features dynamic-plugin
 ```
 
-The descriptor publishes named OpenAPI sub-schemas for `HttpReactionConfig`, `HttpOutputTemplates`, `HttpTemplateSpec`, `HttpQueryConfig`, and `AdaptiveBatchConfig`, plus `SchemaUiAnnotator` groupings so management UIs can render the unified form correctly.
-
 ---
 
 ## Testing
@@ -318,17 +550,19 @@ The descriptor publishes named OpenAPI sub-schemas for `HttpReactionConfig`, `Ht
 cargo test -p drasi-reaction-http
 ```
 
-Unit tests cover config defaults, builder semantics, template routing, lifecycle, and runtime conversion. Integration tests use [`wiremock`](https://crates.io/crates/wiremock) to exercise:
+Unit tests cover config defaults, builder semantics, template routing, lifecycle, and
+runtime conversion. Integration tests use [`wiremock`](https://crates.io/crates/wiremock) to
+exercise:
 
-- Standard per-result delivery with a per-query template.
+- Single-notification delivery with a per-query template.
 - Bearer-token header injection.
-- Render-error fallback to `/changes/{queryId}`.
+- Render-error fallback to `/changes/{query_id}`.
 - Default fallback when no template matches.
-- Adaptive mode with `batchEndpoint` set — coalesced batch POST.
-- Adaptive mode without `batchEndpoint` — per-route fan-out.
+- Adaptive mode with `batch_endpoint` set — coalesced batch POST.
+- Adaptive mode without `batch_endpoint` — per-result fan-out.
 
 ---
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md). The `0.3.0` entry documents the breaking unification of `drasi-reaction-http` and `drasi-reaction-http-adaptive`.
+See [CHANGELOG.md](./CHANGELOG.md).
