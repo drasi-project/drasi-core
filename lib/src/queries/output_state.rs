@@ -151,6 +151,11 @@ impl QueryOutputState {
         self.outbox.len()
     }
 
+    /// Return the sequence of the earliest entry in the outbox, or `None` if empty.
+    pub fn outbox_earliest_seq(&self) -> Option<u64> {
+        self.outbox.front().map(|r| r.sequence)
+    }
+
     /// Return the number of results in the live result set.
     pub fn results_len(&self) -> usize {
         self.results.len()
