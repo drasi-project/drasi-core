@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-source-http"
-version = "0.2.2"
+version = "0.2.4"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "HTTP source plugin for Drasi"
@@ -33,6 +33,7 @@ workspace = true
 drasi-lib.workspace = true
 drasi-core.workspace = true
 drasi-plugin-sdk = { workspace = true }
+drasi-source-mapping.workspace = true
 utoipa = { workspace = true }
 anyhow = "1.0"
 async-trait = "0.1"
