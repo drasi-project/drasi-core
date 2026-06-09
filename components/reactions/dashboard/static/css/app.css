@@ -756,6 +756,14 @@ p { margin: 0.5em 0; }
 .widget-table tbody tr:hover {
   background: var(--bg-hover);
 }
+.widget-table a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.widget-table a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
 
 /* ─── Widget: KPI ────────────────────────────────────────── */
 .widget-kpi {
@@ -836,6 +844,17 @@ p { margin: 0.5em 0; }
   font-size: 0.8rem;
 }
 .widget-markdown th { color: var(--text-muted); font-weight: 500; }
+.widget-markdown a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: rgba(74, 222, 128, 0.4);
+  text-underline-offset: 2px;
+  transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+}
+.widget-markdown a:hover {
+  color: var(--accent-hover);
+  text-decoration-color: var(--accent-hover);
+}
 .widget-error { color: var(--accent-error, #f87171); }
 .widget-error pre { white-space: pre-wrap; word-break: break-word; }
 
