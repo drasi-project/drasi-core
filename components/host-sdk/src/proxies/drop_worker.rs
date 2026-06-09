@@ -91,9 +91,9 @@ fn drop_worker_tx() -> &'static mpsc::Sender<DropRequest> {
                     }));
                     ON_DROP_WORKER.with(|f| f.set(false));
                     if result.is_err() {
-                        eprintln!(
-                            "[drasi-drop-worker] plugin drop_fn panicked; worker thread \
-                             recovered and will continue processing drops"
+                        log::error!(
+                            "plugin drop_fn panicked; worker thread recovered and will continue \
+                             processing drops"
                         );
                     }
                     let _ = request.done_tx.send(());
@@ -145,9 +145,8 @@ pub(crate) fn execute_drop_fn(
     // happens, emit a diagnostic rather than silently proceeding as if the drop
     // completed.
     if done_rx.recv().is_err() {
-        eprintln!(
-            "[drasi-drop-worker] worker exited before completing drop_fn; \
-             plugin resources may have leaked"
+        log::error!(
+            "drasi-drop-worker exited before completing drop_fn; plugin resources may have leaked"
         );
     }
 }
