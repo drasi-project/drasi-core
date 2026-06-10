@@ -33,7 +33,8 @@ FFI boundary through this directory. The general patterns are:
 1. Add the field to the vtable struct in `vtables.rs`
 2. Implement the vtable function in `vtable_gen.rs`
 3. Update the host-side proxy in `components/host-sdk/src/proxies/`
-4. **Bump `FFI_SDK_VERSION` major version** in `metadata.rs`
+4. **Bump `FFI_SDK_VERSION`** in `metadata.rs` so the major.minor pair changes
+   (see "Version compatibility" below)
 
 ### When modifying FFI types
 
@@ -58,5 +59,16 @@ If a new domain type needs to cross FFI as an opaque pointer:
 ### Version compatibility
 
 `metadata.rs` defines `FFI_SDK_VERSION` which is checked at plugin load time.
-The host (`components/host-sdk/src/loader.rs`) validates that major.minor versions match.
-**Always bump the version when changing any `#[repr(C)]` type layout.**
+The host (`components/host-sdk/src/loader.rs`) validates that the **major.minor**
+versions match exactly; any difference rejects the plugin with a descriptive
+error before any unsafe FFI call.
+
+**Always bump the version when changing any `#[repr(C)]` type layout.** Because
+the loader compares the full `major.minor` pair, any ABI-breaking change must
+change at least the minor version:
+
+- **Pre-1.0 (current):** a minor bump (e.g. `0.8.x` → `0.9.0`) is sufficient and
+  is the convention for ABI-breaking changes while the SDK is unstable. The
+  patch component is reserved for ABI-compatible changes.
+- **Post-1.0:** ABI-breaking changes must bump the **major** version, matching
+  SemVer expectations once the SDK is declared stable.

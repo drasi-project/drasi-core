@@ -160,7 +160,6 @@ pub struct SourceSubscriptionConfig {
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
 ///     request_position_handle: false,
-///     last_sequence: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -177,10 +176,6 @@ pub struct SourceSubscriptionSettings {
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
-    /// The last sequence number processed by this query before shutdown.
-    /// Sources use this to ensure their sequence counter continues from where it left off,
-    /// maintaining monotonicity across restarts.
-    pub last_sequence: Option<u64>,
 }
 
 /// Root configuration for drasi-lib

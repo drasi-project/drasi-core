@@ -243,12 +243,13 @@ pub trait Source: Send + Sync {
     /// a bootstrap receiver for initial data.
     ///
     /// # Important
-    /// Implementations **must** call
-    /// [`SourceBase::apply_subscription_settings(&settings)`](crate::sources::base::SourceBase::apply_subscription_settings)
-    /// at the start of their implementation (or delegate to
-    /// [`SourceBase::subscribe_with_bootstrap()`](crate::sources::base::SourceBase::subscribe_with_bootstrap)
-    /// which does it automatically). Failing to do so will break sequence
-    /// monotonicity after restarts.
+    /// Implementations that maintain a sequence counter must recover its
+    /// monotonicity after a restart from their durable position (e.g. the WAL
+    /// head via [`SourceBase::set_next_sequence`](crate::sources::base::SourceBase::set_next_sequence),
+    /// or the native `resume_from` position). Delegating to
+    /// [`SourceBase::subscribe_with_replay()`](crate::sources::base::SourceBase::subscribe_with_replay)
+    /// or [`SourceBase::subscribe_with_bootstrap()`](crate::sources::base::SourceBase::subscribe_with_bootstrap)
+    /// handles the base-level bookkeeping automatically.
     ///
     /// # Arguments
     /// * `settings` - Subscription settings including query ID, text, and labels of interest

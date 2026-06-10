@@ -491,13 +491,12 @@ pub trait BootstrapProvider: Send + Sync {
 pub struct BootstrapResult {
     /// Number of bootstrap events sent through the channel.
     pub event_count: usize,
-    /// The snapshot's position in the source's sequence space (e.g., a
-    /// Postgres WAL LSN). `None` for providers without a positional concept.
-    pub last_sequence: Option<u64>,
-    /// Whether the bootstrap's sequence namespace matches the streaming
-    /// source's sequence namespace (typically `true` only for homogeneous
-    /// source + bootstrapper pairs, e.g., Postgres / Postgres).
-    pub sequences_aligned: bool,
+    /// Opaque token identifying the snapshot's position in the source's CDC
+    /// stream (e.g., a Postgres WAL LSN, Oracle SCN, MySQL binlog offset).
+    /// Persisted as the initial recovery checkpoint and used to start the CDC
+    /// stream exactly at the snapshot boundary. `None` for providers without a
+    /// positional concept.
+    pub source_position: Option<bytes::Bytes>,
 }
 
 pub struct BootstrapRequest {
