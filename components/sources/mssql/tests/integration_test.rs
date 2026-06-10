@@ -18,16 +18,26 @@ mod mssql_helpers;
 
 use anyhow::{Context, Result};
 use drasi_bootstrap_mssql::MsSqlBootstrapProvider;
+use drasi_core::models::SourceChange;
 use drasi_lib::channels::ResultDiff;
+use drasi_lib::channels::SourceEvent;
+use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::{ComponentStatus, DrasiLib, Query, Source};
 use drasi_reaction_application::subscription::SubscriptionOptions;
 use drasi_reaction_application::ApplicationReaction;
 use drasi_source_mssql::{MsSqlSource, StartPosition};
 use mssql_helpers::{execute_sql, setup_mssql, MssqlConfig};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `dbo.Products:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
 
 const TEST_DB: &str = "DrasiTest";
 const TEST_TABLE: &str = "dbo.Products";
@@ -286,6 +296,233 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
     match result {
         Ok(inner) => inner?,
         Err(_) => anyhow::bail!("Integration test timed out after 180 seconds"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+#[cfg(not(target_arch = "aarch64"))]
+async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .is_test(true)
+        .try_init();
+
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let mssql = setup_mssql()
+            .await
+            .context("Failed to start MSSQL container")?;
+        let db_config = prepare_database(mssql.config())
+            .await
+            .context("Failed to prepare MSSQL database")?;
+
+        // Seed rows BEFORE subscribing. They are part of the bootstrap snapshot
+        // (taken inside a SNAPSHOT-isolation tx that captures the CDC max LSN as
+        // the boundary) and must never be replayed by CDC after the boundary.
+        const SEED_COUNT: i64 = 100;
+        let mut client = db_config.connect().await?;
+        for chunk_start in (1..=SEED_COUNT).step_by(50) {
+            let chunk_end = (chunk_start + 49).min(SEED_COUNT);
+            let mut sql = String::new();
+            for id in chunk_start..=chunk_end {
+                sql.push_str(&format!(
+                    "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({id}, 'Seed{id}', 1.00);\n"
+                ));
+            }
+            execute_sql(&mut client, &sql).await?;
+        }
+        // Allow the CDC capture job to process the seed inserts so the captured
+        // max LSN (the boundary) is past them.
+        sleep(Duration::from_secs(5)).await;
+
+        let bootstrap_provider = MsSqlBootstrapProvider::builder()
+            .with_source_id(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_tables(vec![TEST_TABLE.to_string()])
+            .build()
+            .context("Failed to build MSSQL bootstrap provider")?;
+
+        let source = MsSqlSource::builder(SOURCE_ID)
+            .with_host(&db_config.host)
+            .with_port(db_config.port)
+            .with_database(&db_config.database)
+            .with_user(&db_config.user)
+            .with_password(&db_config.password)
+            .with_table(TEST_TABLE)
+            .with_poll_interval_ms(250)
+            .with_start_position(StartPosition::Current)
+            .with_trust_server_certificate(true)
+            .with_bootstrap_provider(bootstrap_provider)
+            .build()
+            .context("Failed to build MSSQL source")?;
+
+        source.start().await.context("Failed to start MSSQL source")?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if source.status().await == ComponentStatus::Running {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        anyhow::ensure!(
+            source.status().await == ComponentStatus::Running,
+            "MSSQL source did not reach Running state"
+        );
+
+        // Subscribe directly to the source so we observe both the bootstrap
+        // snapshot and the CDC stream deterministically (a reaction subscription
+        // can miss bootstrap events delivered before it attaches).
+        let settings = SourceSubscriptionSettings {
+            source_id: SOURCE_ID.to_string(),
+            enable_bootstrap: true,
+            query_id: "q-handover".to_string(),
+            nodes: HashSet::from(["Products".to_string()]),
+            relations: HashSet::new(),
+            resume_from: None,
+            request_position_handle: true,
+        };
+        let response = source
+            .subscribe(settings)
+            .await
+            .context("Failed to subscribe to MSSQL source")?;
+        let mut bootstrap_rx = response
+            .bootstrap_receiver
+            .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+        let mut cdc_rx = response.receiver;
+
+        // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+        // closes) once the snapshot completes and the boundary is published.
+        let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(60), bootstrap_rx.recv()).await {
+                Ok(Some(event)) => {
+                    if let SourceChange::Insert { element } = &event.change {
+                        if let Some(id) =
+                            element_id_int(element.get_reference().element_id.as_ref())
+                        {
+                            *bootstrap_ids.entry(id).or_default() += 1;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => anyhow::bail!("Timed out draining bootstrap snapshot"),
+            }
+        }
+
+        anyhow::ensure!(
+            bootstrap_ids.len() == SEED_COUNT as usize,
+            "bootstrap should snapshot every seed row exactly once (got {})",
+            bootstrap_ids.len()
+        );
+        for id in 1..=SEED_COUNT {
+            anyhow::ensure!(
+                bootstrap_ids.get(&id).copied().unwrap_or_default() == 1,
+                "seed row {id} missing or duplicated in bootstrap snapshot"
+            );
+        }
+
+        // Bootstrap is complete and the boundary is published. Mutations now are
+        // strictly after the boundary and must each be delivered exactly once by
+        // CDC, with no seed rows replayed.
+        let insert_id = SEED_COUNT + 1000;
+        execute_sql(
+            &mut client,
+            &format!(
+                "INSERT INTO dbo.Products (ProductId, Name, Price) VALUES ({insert_id}, 'PostBoundary', 9.99);"
+            ),
+        )
+        .await?;
+        execute_sql(
+            &mut client,
+            "UPDATE dbo.Products SET Name = 'UpdatedDuringBootstrap' WHERE ProductId = 1;",
+        )
+        .await?;
+        execute_sql(&mut client, "DELETE FROM dbo.Products WHERE ProductId = 2;").await?;
+
+        let mut inserts: HashMap<i64, usize> = HashMap::new();
+        let mut updates: HashMap<i64, usize> = HashMap::new();
+        let mut deletes: HashMap<i64, usize> = HashMap::new();
+        let started = Instant::now();
+        let mut idle_since = Instant::now();
+        while started.elapsed() < Duration::from_secs(60) {
+            match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+                Ok(Ok(wrapper)) => {
+                    idle_since = Instant::now();
+                    if let SourceEvent::Change(change) = &wrapper.event {
+                        if let Some(id) =
+                            element_id_int(change.get_reference().element_id.as_ref())
+                        {
+                            match change {
+                                SourceChange::Insert { .. } => {
+                                    *inserts.entry(id).or_default() += 1
+                                }
+                                SourceChange::Update { .. } => {
+                                    *updates.entry(id).or_default() += 1
+                                }
+                                SourceChange::Delete { .. } => {
+                                    *deletes.entry(id).or_default() += 1
+                                }
+                                SourceChange::Future { .. } => {}
+                            }
+                        }
+                    }
+                }
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let done = inserts.get(&insert_id) == Some(&1)
+                        && updates.get(&1) == Some(&1)
+                        && deletes.get(&2) == Some(&1);
+                    if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // No gap: every post-boundary change delivered exactly once.
+        anyhow::ensure!(
+            inserts.get(&insert_id) == Some(&1),
+            "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.get(&1) == Some(&1),
+            "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.get(&2) == Some(&1),
+            "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+        );
+
+        // No overlap: CDC must not replay any pre-boundary seed row. The only
+        // change events permitted are the three post-boundary mutations.
+        anyhow::ensure!(
+            inserts.len() == 1,
+            "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+        );
+        anyhow::ensure!(
+            updates.len() == 1,
+            "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+        );
+        anyhow::ensure!(
+            deletes.len() == 1,
+            "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+        );
+
+        source.stop().await.context("Failed to stop MSSQL source")?;
+        mssql.cleanup().await;
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner?,
+        Err(_) => anyhow::bail!("test_mssql_bootstrap_cdc_overlap_handover timed out"),
     }
 
     Ok(())

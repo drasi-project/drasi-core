@@ -71,7 +71,6 @@ fn fresh_settings(source_id: &str) -> SourceSubscriptionSettings {
         relations: HashSet::new(),
         request_position_handle: true,
         resume_from: None,
-        last_sequence: None,
     }
 }
 
@@ -85,7 +84,6 @@ fn resume_settings(source_id: &str, resume_seq: u64) -> SourceSubscriptionSettin
         relations: HashSet::new(),
         request_position_handle: true,
         resume_from: Some(bytes::Bytes::from(resume_seq.to_be_bytes().to_vec())),
-        last_sequence: Some(resume_seq),
     }
 }
 

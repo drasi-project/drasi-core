@@ -1026,7 +1026,6 @@ impl Query for DrasiQuery {
                             if let Some(cp) = checkpoints.get(&settings.source_id) {
                                 checkpoint_sequences_per_source
                                     .insert(settings.source_id.clone(), cp.sequence);
-                                settings.last_sequence = Some(cp.sequence);
                                 settings.request_position_handle = true;
                                 if let Some(pos) = &cp.source_position {
                                     settings.resume_from = Some(pos.clone());
@@ -1200,7 +1199,6 @@ impl Query for DrasiQuery {
                 );
                 for (_, _, settings) in &mut sources_to_subscribe {
                     settings.resume_from = None;
-                    settings.last_sequence = None;
                     settings.request_position_handle = has_persistent_backend;
                 }
                 // Reset per-loop accumulators
@@ -1474,6 +1472,16 @@ impl Query for DrasiQuery {
 
                 // Collect position handle if source provides one
                 if let Some(handle) = subscription_response.position_handle {
+                    // Seed the handle with the query's checkpoint sequence (if
+                    // resuming) so the source includes this subscriber in its
+                    // min-watermark from the start. Without this, a resuming
+                    // query whose handle stays at u64::MAX would be invisible to
+                    // the min-watermark, letting upstream advance past its
+                    // checkpoint. First-run queries (no checkpoint) leave the
+                    // handle at u64::MAX ("no position confirmed yet").
+                    if let Some(seq) = checkpoint_sequences_per_source.get(source_id) {
+                        handle.store(*seq, std::sync::atomic::Ordering::Release);
+                    }
                     position_handles.insert(source_id.clone(), handle);
                 }
 
@@ -1556,11 +1564,6 @@ impl Query for DrasiQuery {
         // Gate that blocks the streaming event processor until bootstrap completes.
         // Events buffer safely in the priority queue during bootstrap.
         let bootstrap_gate = Arc::new(Notify::new());
-
-        // Channel for the bootstrap supervisor to send handover checkpoints
-        // to the processor task after all bootstrap tasks complete.
-        let (handover_tx, handover_rx) =
-            tokio::sync::oneshot::channel::<std::collections::HashMap<String, u64>>();
 
         // NEW: Handle bootstrap channels
         if !bootstrap_channels.is_empty() {
@@ -1712,15 +1715,15 @@ impl Query for DrasiQuery {
                         }
 
                         // Await the BootstrapResult from the source's bootstrap provider.
-                        // This contains handover metadata (last_sequence, sequences_aligned).
+                        // This carries the optional source_position snapshot boundary.
                         let bootstrap_result = if let Some(rx) = bootstrap_result_rx {
                             match rx.await {
                                 Ok(Ok(result)) => {
                                     debug!(
                                         "[BOOTSTRAP] Query '{}' received handover from source '{}': \
-                                         last_sequence={:?}, sequences_aligned={}",
+                                         source_position={:?}",
                                         query_id_clone, source_id_clone,
-                                        result.last_sequence, result.sequences_aligned
+                                        result.source_position.as_ref().map(|p| p.len())
                                     );
                                     Some(result)
                                 }
@@ -1783,77 +1786,43 @@ impl Query for DrasiQuery {
                                 Some(format!("Bootstrap failed: {panic_count} task(s) panicked")),
                             ).await;
 
-                            // Send empty handover so processor doesn't block
-                            let _ = handover_tx.send(std::collections::HashMap::new());
+                            // Open the gate so the processor doesn't block
                             bootstrap_gate_clone.notify_one();
                             return;
                         }
 
-                        // Collect handover checkpoints from BootstrapResults.
-                        //
-                        // Two purposes:
-                        // 1. **Dedup map** (in-memory): For aligned sources with last_sequence,
-                        //    buffered streaming events at or below that sequence are filtered.
-                        //    Only populated when `sequences_aligned == true`.
-                        // 2. **Recovery checkpoint** (persisted): For ANY source that provides
-                        //    a last_sequence, we persist a checkpoint (optionally with
-                        //    source_position bytes) so crash-after-bootstrap can resume
-                        //    from the snapshot boundary without re-bootstrapping.
-                        let mut handover_checkpoints: std::collections::HashMap<String, u64> =
-                            std::collections::HashMap::new();
-
-                        // Tracks source positions from bootstrap for persistence
-                        let mut handover_positions: std::collections::HashMap<String, (u64, Option<bytes::Bytes>)> =
+                        // Persist the bootstrap snapshot boundary (source_position)
+                        // as a recovery checkpoint so a crash after bootstrap but
+                        // before the first streaming event doesn't lose progress and
+                        // avoids a redundant re-bootstrap. Bootstrap events don't go
+                        // through dispatch_event(), so there is no sequence yet; use
+                        // 0 as the sentinel sequence alongside the source_position.
+                        let mut handover_positions: std::collections::HashMap<String, Option<bytes::Bytes>> =
                             std::collections::HashMap::new();
 
                         for (source_id, bootstrap_result) in join_results.iter().filter_map(|r| r.as_ref().ok()) {
                             if let Some(br) = bootstrap_result {
-                                // Dedup map: only for aligned sources
-                                if br.sequences_aligned {
-                                    if let Some(seq) = br.last_sequence {
-                                        debug!(
-                                            "[BOOTSTRAP] Query '{query_id_clone}' handover checkpoint for '{source_id}': seq={seq}"
-                                        );
-                                        handover_checkpoints.insert(source_id.clone(), seq);
-                                    }
-                                } else {
-                                    debug!(
-                                        "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' sequences not aligned, \
-                                         no dedup checkpoint (accept all buffered events)"
-                                    );
-                                }
-
-                                // Recovery checkpoint: persist whenever we have a sequence
-                                // OR a source_position. source_position enables native
-                                // stream resumption; sequence enables dedup. Bootstrap
-                                // events don't go through dispatch_event(), so sequence
-                                // may be None even when source_position is present. Use
-                                // 0 as the sentinel sequence in that case.
-                                if br.last_sequence.is_some() || br.source_position.is_some() {
-                                    let seq = br.last_sequence.unwrap_or(0);
+                                if let Some(pos) = &br.source_position {
                                     // Validate source_position size (same limit as dispatch_event)
-                                    let position = br.source_position.as_ref().and_then(|pos| {
-                                        if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
-                                            warn!(
-                                                "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
-                                                 bootstrap source_position is {} bytes (> {} limit); \
-                                                 dropping position, checkpoint will have sequence only",
-                                                pos.len(),
-                                                crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
-                                            );
-                                            None
-                                        } else {
-                                            Some(pos.clone())
-                                        }
-                                    });
-                                    handover_positions.insert(source_id.clone(), (seq, position));
+                                    if pos.len() > crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES {
+                                        warn!(
+                                            "[BOOTSTRAP] Query '{query_id_clone}' source '{source_id}' \
+                                             bootstrap source_position is {} bytes (> {} limit); \
+                                             dropping position, no recovery checkpoint persisted",
+                                            pos.len(),
+                                            crate::sources::base::SourceBase::MAX_SOURCE_POSITION_BYTES
+                                        );
+                                    } else {
+                                        handover_positions.insert(source_id.clone(), Some(pos.clone()));
+                                    }
                                 }
                             }
                         }
 
                         info!(
                             "[BOOTSTRAP] Query '{query_id_clone}' all sources completed bootstrap, \
-                             handover checkpoints: {handover_checkpoints:?}"
+                             {} recovery checkpoint(s) to persist",
+                            handover_positions.len()
                         );
 
                         // Persist recovery checkpoints before opening the gate.
@@ -1877,9 +1846,9 @@ impl Query for DrasiQuery {
                             };
 
                             if session_ok {
-                                for (source_id, (seq, position)) in &handover_positions {
+                                for (source_id, position) in &handover_positions {
                                     if let Err(e) = checkpoint_store_for_supervisor
-                                        .stage_checkpoint(source_id, *seq, position.as_ref())
+                                        .stage_checkpoint(source_id, 0, position.as_ref())
                                         .await
                                     {
                                         warn!(
@@ -1898,9 +1867,6 @@ impl Query for DrasiQuery {
                                 }
                             }
                         }
-
-                        // Send handover checkpoints to the processor task
-                        let _ = handover_tx.send(handover_checkpoints);
 
                         // Emit bootstrapCompleted control signal
                         let mut metadata = HashMap::new();
@@ -1954,8 +1920,7 @@ impl Query for DrasiQuery {
                 "Query '{}' no bootstrap channels, skipping bootstrap",
                 self.base.config.id
             );
-            // No bootstrap needed — send empty handover and open the gate immediately
-            let _ = handover_tx.send(std::collections::HashMap::new());
+            // No bootstrap needed — open the gate immediately
             bootstrap_gate.notify_one();
         }
 
@@ -2060,29 +2025,10 @@ impl Query for DrasiQuery {
 
                 info!("Query '{query_id}' starting priority queue event processor");
 
-                // Initialize dedup filter from stored checkpoints (if resuming).
-                // Then apply handover checkpoints from the bootstrap supervisor
-                // which override the initial state for bootstrapped sources.
+                // Initialize the crash-recovery dedup filter from stored checkpoints
+                // (if resuming) so buffered streaming events at or below the
+                // checkpoint sequence are filtered on replay.
                 let mut dedup = super::SequenceDedup::new(checkpoint_sequences_per_source.clone());
-                if let Ok(handover) = handover_rx.await {
-                    for (source_id, seq) in &handover {
-                        dedup.advance(source_id, *seq);
-                    }
-                    if !handover.is_empty() {
-                        info!(
-                            "Query '{query_id}' applied {} handover checkpoint(s) to dedup filter",
-                            handover.len()
-                        );
-                    }
-
-                    // Update position handles with handover checkpoints so sources
-                    // know the query's durable progress from the start.
-                    for (source_id, seq) in &handover {
-                        if let Some(handle) = position_handles_for_processor.get(source_id) {
-                            handle.store(*seq, std::sync::atomic::Ordering::Release);
-                        }
-                    }
-                }
 
                 loop {
                     // Check if query is still running

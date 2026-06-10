@@ -178,7 +178,7 @@ impl BootstrapProvider for NoOpBootstrapProvider {
 
 **Behavior**: Logs the bootstrap request for the query and immediately returns `BootstrapResult::default()` (event_count = 0) without sending any events.
 
-**Returns**: `Result<BootstrapResult>` — always returns a default `BootstrapResult` (`event_count: 0`, `last_sequence: None`, `sequences_aligned: false`) indicating zero elements were sent.
+**Returns**: `Result<BootstrapResult>` — always returns a default `BootstrapResult` (`event_count: 0`, `source_position: None`) indicating zero elements were sent.
 
 ### NoOpBootstrapProviderBuilder
 

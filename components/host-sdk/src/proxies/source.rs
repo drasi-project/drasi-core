@@ -212,12 +212,6 @@ impl Source for SourceProxy {
             None => (std::ptr::null(), 0u32),
         };
 
-        // Pass last_sequence across FFI (bool flag + u64 value)
-        let (has_last_sequence, last_sequence_val) = match settings.last_sequence {
-            Some(seq) => (true, seq),
-            None => (false, 0u64),
-        };
-
         let resp_ptr = (self.vtable.subscribe_fn)(
             self.vtable.state,
             source_id_ffi,
@@ -227,8 +221,6 @@ impl Source for SourceProxy {
             relations_ffi,
             resume_from_ptr,
             resume_from_len,
-            has_last_sequence,
-            last_sequence_val,
             settings.request_position_handle,
         );
 
@@ -337,11 +329,6 @@ impl Source for SourceProxy {
                         )));
                         return;
                     }
-                    let last_sequence = if ffi_result.last_sequence >= 0 {
-                        Some(ffi_result.last_sequence as u64)
-                    } else {
-                        None
-                    };
                     let source_position = if !ffi_result.source_position_ptr.is_null()
                         && ffi_result.source_position_len > 0
                     {
@@ -364,8 +351,6 @@ impl Source for SourceProxy {
                     };
                     let _ = tx.send(Ok(drasi_lib::bootstrap::BootstrapResult {
                         event_count: ffi_result.event_count as usize,
-                        last_sequence,
-                        sequences_aligned: ffi_result.sequences_aligned,
                         source_position,
                     }));
                 }));
