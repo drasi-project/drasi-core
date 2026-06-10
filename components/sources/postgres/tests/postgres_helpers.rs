@@ -272,6 +272,37 @@ pub async fn create_decimal_test_table(client: &Client, table_name: &str) -> Res
     Ok(())
 }
 
+pub async fn create_timestamptz_test_table(client: &Client, table_name: &str) -> Result<()> {
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n    id INTEGER PRIMARY KEY,\n    created_at TIMESTAMPTZ NOT NULL\n)"
+    );
+    execute_sql(client, &create_sql).await?;
+
+    let replica_sql = format!("ALTER TABLE {table_name} REPLICA IDENTITY FULL");
+    execute_sql(client, &replica_sql).await?;
+
+    Ok(())
+}
+
+/// Insert a row whose `created_at` value is provided as a raw PostgreSQL
+/// timestamptz literal (e.g. `2026-05-13 22:03:45.423627+00`). The literal is
+/// embedded directly so the test controls the exact textual form Postgres
+/// stores, exercising the logical replication text decode path.
+pub async fn insert_timestamptz_test_row(
+    client: &Client,
+    table: &str,
+    id: i32,
+    created_at_literal: &str,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} (id, created_at) VALUES ($1, '{}'::timestamptz)",
+        quote_ident(table),
+        created_at_literal.replace('\'', "''")
+    );
+    client.execute(&sql, &[&id]).await?;
+    Ok(())
+}
+
 pub async fn insert_decimal_test_row(
     client: &Client,
     table: &str,
