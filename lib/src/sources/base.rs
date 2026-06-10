@@ -1556,10 +1556,21 @@ impl SourceBase {
     ///
     /// Only channel-mode dispatchers are cleared — broadcast mode keeps a
     /// single persistent dispatcher.
+    ///
+    /// This also clears the per-subscriber position-filter high-water marks
+    /// (`subscriber_resume_positions`). Those entries are keyed by dispatcher
+    /// index; once the dispatchers vec is cleared, indices restart at 0 and are
+    /// reused by whichever queries subscribe on the next lifecycle. Leaving the
+    /// stale entries behind would apply one query's high-water mark to a
+    /// different query's dispatcher, corrupting replay dedup on restart (e.g.
+    /// causing already-committed rows to be re-delivered, or new rows to be
+    /// suppressed). The filter state is rebuilt cleanly from each subscriber's
+    /// `resume_from` when it re-subscribes.
     pub async fn clear_dispatchers(&self) {
         if self.dispatch_mode == DispatchMode::Channel {
             let mut dispatchers = self.dispatchers.write().await;
             dispatchers.clear();
+            self.subscriber_resume_positions.write().await.clear();
         }
     }
 
@@ -2808,5 +2819,55 @@ mod tests {
             r.is_err(),
             "event below high-water mark should be suppressed"
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_dispatchers_resets_position_filter_state() {
+        // Regression: on a stop/restart cycle, clear_dispatchers() must also
+        // clear the per-subscriber high-water marks. Those are keyed by
+        // dispatcher index; if they survive, a new subscriber that lands on a
+        // reused index inherits a stale high-water mark and either re-sees
+        // already-committed rows or has new rows incorrectly suppressed.
+        let params = SourceBaseParams::new("clear-hwm").with_dispatch_mode(DispatchMode::Channel);
+        let base = SourceBase::new(params).unwrap();
+        base.set_position_comparator(ByteLexPositionComparator)
+            .await;
+
+        // Lifecycle 1: a subscriber processes an event and gets a high-water
+        // mark at [0x30] on dispatcher index 0.
+        let mut rx = base.create_streaming_receiver().await.unwrap();
+        base.dispatch_event(make_event("clear-hwm", Some(&[0x30])))
+            .await
+            .unwrap();
+        let _ = rx.recv().await.unwrap();
+        assert_eq!(
+            base.subscriber_resume_positions
+                .read()
+                .await
+                .get(&0)
+                .map(|b| b.as_ref()),
+            Some([0x30].as_slice()),
+            "high-water mark should be set after first dispatch"
+        );
+
+        // Stop: clear dispatchers — the stale [0x30] mark for index 0 must go.
+        base.clear_dispatchers().await;
+        assert!(
+            base.subscriber_resume_positions.read().await.is_empty(),
+            "clear_dispatchers must reset per-subscriber position filter state"
+        );
+
+        // Lifecycle 2: a fresh subscriber reuses dispatcher index 0. Without
+        // the reset, the stale [0x30] mark would suppress an earlier replayed
+        // event at [0x20]; with the reset it must be delivered.
+        let mut rx2 = base.create_streaming_receiver().await.unwrap();
+        base.dispatch_event(make_event("clear-hwm", Some(&[0x20])))
+            .await
+            .unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv())
+            .await
+            .expect("event should be delivered, not suppressed by stale mark")
+            .unwrap();
+        assert_eq!(ev.source_position.as_ref().unwrap().as_ref(), &[0x20]);
     }
 }

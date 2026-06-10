@@ -1370,8 +1370,14 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 
 /// Two queries subscribe to the same source. After both process some CDC events,
 /// query2 is stopped and query1 advances further. On full restart the source
-/// rewinds to query2's (earlier) checkpoint. Position filtering must suppress
-/// the replayed events for query1 while delivering them to query2.
+/// rewinds to query2's (earlier) checkpoint. Position filtering must suppress the
+/// replayed events for query1 (so query1 does not re-emit an already-committed row
+/// at a new outbox sequence) while delivering them to query2.
+///
+/// Note: the ApplicationReaction used here is non-durable and replays its query
+/// outbox on restart, so query1's existing 602 entry may be re-delivered at the
+/// SAME sequence (at-least-once). The assertion below therefore tolerates a
+/// same-sequence replay and only fails on a 602 emitted at a NEW, higher sequence.
 #[tokio::test]
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
@@ -1526,11 +1532,26 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         )
         .await?;
 
-        wait_for_change(&mut sub1, 15, |e| {
-            matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")])
-        })
-        .await
-        .context("query1 did not see row 602")?;
+        // Capture the outbox sequence at which query1 emits row 602. A non-durable
+        // reaction (ApplicationReaction) replays its query outbox on restart, so this
+        // exact entry MAY be re-delivered later at the SAME sequence — that is an
+        // acceptable at-least-once re-delivery. What must NOT happen is the source
+        // re-dispatching the already-committed row 602 to query1, which would cause a
+        // NEW emission at a HIGHER sequence.
+        let mut q1_602_seq: Option<u64> = None;
+        for _ in 0..15 {
+            if let Some(result) = sub1.recv().await {
+                if result
+                    .results
+                    .iter()
+                    .any(|e| matches_change(e, "ADD", &[("id", "602"), ("name", "OnlyQ1")]))
+                {
+                    q1_602_seq = Some(result.sequence);
+                    break;
+                }
+            }
+        }
+        let q1_602_seq = q1_602_seq.context("query1 did not see row 602")?;
 
         // Let checkpoint persist for query1
         sleep(Duration::from_secs(2)).await;
@@ -1549,7 +1570,10 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
 
         // --- Phase 4: Full restart ---
         // Source rewinds to min(query1_cp, query2_cp) = query2's earlier checkpoint.
-        // Row 602 will be replayed but should be filtered for query1 (already committed).
+        // Row 602 is replayed by the source but must be filtered for query1 (already
+        // committed), so query1 must not RE-EMIT 602 at a new outbox sequence. The
+        // non-durable reaction may still re-deliver query1's existing 602 outbox entry
+        // (same sequence) as an at-least-once replay, which is acceptable.
         core.start().await.context("Failed to restart")?;
 
         // The original subscription stays valid across stop/start since the
@@ -1568,15 +1592,20 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         .await
         .context("query2 did not see row 603")?;
 
-        // query1 should see row 603 but NOT a duplicate of 602
-        // We wait for 603 and check that 602 doesn't appear again.
-        let mut saw_602_duplicate = false;
+        // query1 must see the new row 603. It MAY see row 602 again as an at-least-once
+        // replay of its existing outbox entry (same sequence) — acceptable for a
+        // non-durable reaction. It must NOT see 602 at a NEW (higher) outbox sequence,
+        // which would mean the source re-delivered an already-committed row to query1
+        // and query1 re-emitted it (position-filter failure).
+        let mut saw_602_new_emission = false;
         let mut saw_603 = false;
         for _ in 0..20 {
             if let Some(result) = sub1.recv().await {
                 for entry in &result.results {
-                    if matches_change(entry, "ADD", &[("id", "602")]) {
-                        saw_602_duplicate = true;
+                    if matches_change(entry, "ADD", &[("id", "602")])
+                        && result.sequence > q1_602_seq
+                    {
+                        saw_602_new_emission = true;
                     }
                     if matches_change(entry, "ADD", &[("id", "603"), ("name", "WhileStopped")]) {
                         saw_603 = true;
@@ -1593,8 +1622,9 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             "query1 should see the new row 603 inserted while stopped"
         );
         assert!(
-            !saw_602_duplicate,
-            "query1 should NOT see row 602 again — position filtering must suppress it"
+            !saw_602_new_emission,
+            "query1 saw row 602 at a NEW outbox sequence (> {q1_602_seq}) after restart — \
+             the source position filter must suppress already-committed rows for query1"
         );
 
         core.stop().await.context("Failed to stop DrasiLib")?;

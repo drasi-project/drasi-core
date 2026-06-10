@@ -532,11 +532,11 @@ impl Source for SourceProxy {
 
 impl Drop for SourceProxy {
     fn drop(&mut self) {
-        // Run plugin drop on a dedicated thread to avoid initializing
-        // plugin TLS on the caller's thread (macOS TLS cleanup deadlock).
+        // Run plugin drop on the shared worker thread to avoid TLS destructor
+        // races on macOS arm64 (see drop_worker module for details).
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
 
         // Bug C fix: leak the per-instance callback context Arc unconditionally.
         // The strong reference handed to the plugin via `Arc::into_raw` in
@@ -653,6 +653,6 @@ impl Drop for SourcePluginProxy {
     fn drop(&mut self) {
         let drop_fn = self.vtable.drop_fn;
         let state = drasi_plugin_sdk::ffi::SendMutPtr(self.vtable.state);
-        let _ = std::thread::spawn(move || (drop_fn)(state.as_ptr())).join();
+        super::drop_worker::execute_drop_fn(drop_fn, state);
     }
 }
