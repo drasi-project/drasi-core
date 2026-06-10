@@ -35,7 +35,7 @@ use crate::channels::events::SourceEventWrapper;
 use crate::channels::{ChannelChangeReceiver, ComponentStatus, SubscriptionResponse};
 use crate::config::{QueryConfig, SourceSubscriptionSettings};
 use crate::context::SourceRuntimeContext;
-use crate::indexes::{IndexBackendPlugin, StorageBackendRef, StorageBackendSpec};
+use crate::indexes::{IndexBackendPlugin, StorageBackendRef};
 use crate::sources::{Source, SourceBase, SourceBaseParams, SourceError};
 use crate::{DrasiLib, Query, RecoveryPolicy};
 
@@ -50,8 +50,6 @@ struct E2eTestSource {
     replay_capable: bool,
     /// Records the most recent `resume_from` received in subscribe().
     last_resume_from: Arc<RwLock<Option<Bytes>>>,
-    /// Records the most recent `last_sequence` received in subscribe().
-    last_sequence_seen: Arc<RwLock<Option<u64>>>,
     /// Number of times subscribe was called.
     subscribe_count: Arc<AtomicU32>,
     /// Number of remaining subscribe failures (decremented each call).
@@ -68,7 +66,6 @@ impl E2eTestSource {
             base: SourceBase::new(SourceBaseParams::new(id))?,
             replay_capable,
             last_resume_from: Arc::new(RwLock::new(None)),
-            last_sequence_seen: Arc::new(RwLock::new(None)),
             subscribe_count: Arc::new(AtomicU32::new(0)),
             remaining_failures: Arc::new(AtomicU32::new(0)),
             position_handle_removed: Arc::new(AtomicU32::new(0)),
@@ -78,10 +75,6 @@ impl E2eTestSource {
 
     fn last_resume_from(&self) -> Arc<RwLock<Option<Bytes>>> {
         self.last_resume_from.clone()
-    }
-
-    fn last_sequence_seen(&self) -> Arc<RwLock<Option<u64>>> {
-        self.last_sequence_seen.clone()
     }
 
     fn subscribe_count_handle(&self) -> Arc<AtomicU32> {
@@ -163,7 +156,6 @@ impl Source for E2eTestSource {
 
         // Record what the query sent us
         *self.last_resume_from.write().await = settings.resume_from.clone();
-        *self.last_sequence_seen.write().await = settings.last_sequence;
 
         // Check for injected failures
         if self
@@ -225,9 +217,10 @@ async fn build_e2e_lib(
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
     let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-    let mut builder = DrasiLib::builder()
-        .with_id(id)
-        .with_index_provider(Arc::new(provider) as Arc<dyn IndexBackendPlugin>);
+    let mut builder = DrasiLib::builder().with_id(id).with_index_provider(
+        "persistent",
+        Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
+    );
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);
@@ -247,11 +240,7 @@ fn make_persistent_query(
         .from_source(source_id)
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }));
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()));
 
     if let Some(policy) = recovery_policy {
         q = q.with_recovery_policy(policy);
@@ -343,7 +332,6 @@ async fn test_e2e_checkpoint_round_trip() {
     // Create source and grab shared handles before moving
     let source = E2eTestSource::new("e2e-src", true).unwrap();
     let resume_from = source.last_resume_from();
-    let last_seq = source.last_sequence_seen();
     let event_tx = source.event_sender();
     let sub_count = source.subscribe_count_handle();
 
@@ -393,10 +381,6 @@ async fn test_e2e_checkpoint_round_trip() {
         resumed.is_some(),
         "After restart, resume_from should be set from checkpoint"
     );
-
-    // Also verify last_sequence was passed
-    let seq = last_seq.read().await;
-    assert!(seq.is_some(), "last_sequence should be set from checkpoint");
 
     core.stop_query("e2e-q").await.unwrap();
 }
@@ -624,11 +608,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .from_source("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
     core.add_query(query1).await.unwrap();
     core.start_query("cfg-q").await.unwrap();
@@ -648,11 +628,7 @@ async fn test_e2e_config_change_triggers_rebootstrap() {
         .from_source("cfg-src")
         .auto_start(false)
         .enable_bootstrap(false)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: "/tmp/e2e-test-drasi".to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
     core.update_query("cfg-q", query2).await.unwrap();
 

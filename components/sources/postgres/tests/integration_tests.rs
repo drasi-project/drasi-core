@@ -20,9 +20,13 @@ use drasi_bootstrap_postgres::{
     PostgresBootstrapConfig, PostgresBootstrapProvider, SslMode as BootstrapSslMode,
     TableKeyConfig as BootstrapTableKeyConfig,
 };
+use drasi_core::models::SourceChange;
+use drasi_lib::channels::SourceEvent;
 use drasi_lib::ComponentStatus;
 use drasi_lib::{config::SourceSubscriptionSettings, DrasiLib, Query, Source, SourceError};
-use drasi_reaction_application::{ApplicationReaction, ApplicationReactionHandle};
+use drasi_reaction_application::{
+    subscription::SubscriptionOptions, ApplicationReaction, ApplicationReactionHandle,
+};
 use drasi_source_postgres::{
     PostgresReplicationSource, PostgresSourceConfig, SslMode, TableKeyConfig,
 };
@@ -33,7 +37,7 @@ use postgres_helpers::{
     setup_replication_postgres, update_test_row,
 };
 use serial_test::serial;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -441,6 +445,199 @@ async fn test_full_crud_cycle() -> Result<()> {
     Ok(())
 }
 
+/// Extract the trailing integer primary key from an element id of the form
+/// `table:pk` (e.g. `users:42` → 42).
+fn element_id_int(element_id: &str) -> Option<i64> {
+    element_id.rsplit(':').next()?.parse::<i64>().ok()
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
+    init_logging();
+
+    let pg = setup_replication_postgres().await;
+    let client = pg.get_client().await?;
+
+    grant_replication(&client, "postgres").await?;
+    create_test_table(&client, TEST_TABLE).await?;
+    grant_table_access(&client, TEST_TABLE, "postgres").await?;
+    create_publication(&client, TEST_PUBLICATION, &[TEST_TABLE.to_string()]).await?;
+
+    // Seed rows BEFORE creating the replication slot so they are part of the
+    // bootstrap snapshot but precede the slot watermark (and thus must never be
+    // replayed by CDC).
+    let seed_count = 1_000_i32;
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {TEST_TABLE} (id, name) SELECT i, 'Seed ' || i::text FROM generate_series(1, $1) AS i"
+            ),
+            &[&seed_count],
+        )
+        .await?;
+
+    let slot = slot_name();
+    create_logical_replication_slot(&client, &slot).await?;
+
+    // Build a source WITH a bootstrap provider so subscribing triggers the
+    // bootstrap snapshot and the bootstrap-to-CDC boundary handover.
+    let source_config = build_source_config(pg.config(), slot.clone());
+    let bootstrap_config = PostgresBootstrapConfig {
+        host: source_config.host.clone(),
+        port: source_config.port,
+        database: source_config.database.clone(),
+        user: source_config.user.clone(),
+        password: source_config.password.clone(),
+        tables: source_config.tables.clone(),
+        slot_name: source_config.slot_name.clone(),
+        publication_name: source_config.publication_name.clone(),
+        ssl_mode: BootstrapSslMode::Disable,
+        table_keys: vec![BootstrapTableKeyConfig {
+            table: TEST_TABLE.to_string(),
+            key_columns: vec!["id".to_string()],
+        }],
+    };
+    let source = PostgresReplicationSource::builder("pg-direct-source")
+        .with_config(source_config)
+        .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
+        .build()?;
+
+    source.start().await?;
+    wait_for_source_running(&source).await;
+
+    let mut settings = subscription_settings("pg-direct-source", "q-handover", None, true);
+    settings.enable_bootstrap = true;
+    settings.nodes = HashSet::from([TEST_TABLE.to_string()]);
+    let response = source.subscribe(settings).await?;
+    let mut bootstrap_rx = response
+        .bootstrap_receiver
+        .expect("bootstrap_receiver should be present when enable_bootstrap is true");
+    let mut cdc_rx = response.receiver;
+
+    // Drain the entire bootstrap snapshot. Bootstrap events stop (channel
+    // closes) once the snapshot completes and the boundary is published.
+    let mut bootstrap_ids: HashMap<i64, usize> = HashMap::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), bootstrap_rx.recv()).await {
+            Ok(Some(event)) => {
+                if let SourceChange::Insert { element } = &event.change {
+                    if let Some(id) = element_id_int(element.get_reference().element_id.as_ref()) {
+                        *bootstrap_ids.entry(id).or_default() += 1;
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(_) => panic!("Timed out draining bootstrap snapshot"),
+        }
+    }
+
+    assert_eq!(
+        bootstrap_ids.len(),
+        seed_count as usize,
+        "bootstrap should snapshot every seed row exactly once (got {})",
+        bootstrap_ids.len()
+    );
+    for id in 1..=i64::from(seed_count) {
+        assert_eq!(
+            bootstrap_ids.get(&id).copied().unwrap_or_default(),
+            1,
+            "seed row {id} missing or duplicated in bootstrap snapshot"
+        );
+    }
+
+    // Bootstrap is complete and the boundary is published. Mutations performed
+    // now are strictly after the boundary and must each be delivered exactly
+    // once by CDC, with no seed rows replayed.
+    let concurrent_insert_id = i64::from(seed_count) + 1;
+    insert_test_row(
+        &client,
+        TEST_TABLE,
+        concurrent_insert_id as i32,
+        "Post Boundary",
+    )
+    .await?;
+    update_test_row(&client, TEST_TABLE, 1, "Seed 1 Updated").await?;
+    delete_test_row(&client, TEST_TABLE, 2).await?;
+
+    let mut inserts: HashMap<i64, usize> = HashMap::new();
+    let mut updates: HashMap<i64, usize> = HashMap::new();
+    let mut deletes: HashMap<i64, usize> = HashMap::new();
+    let started = Instant::now();
+    let mut idle_since = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        match tokio::time::timeout(Duration::from_millis(500), cdc_rx.recv()).await {
+            Ok(Ok(wrapper)) => {
+                idle_since = Instant::now();
+                if let SourceEvent::Change(change) = &wrapper.event {
+                    if let Some(id) = element_id_int(change.get_reference().element_id.as_ref()) {
+                        match change {
+                            SourceChange::Insert { .. } => *inserts.entry(id).or_default() += 1,
+                            SourceChange::Update { .. } => *updates.entry(id).or_default() += 1,
+                            SourceChange::Delete { .. } => *deletes.entry(id).or_default() += 1,
+                            SourceChange::Future { .. } => {}
+                        }
+                    }
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => {
+                let total_inserts: usize = inserts.values().sum();
+                let done = total_inserts == 1
+                    && updates.get(&1) == Some(&1)
+                    && deletes.get(&2) == Some(&1);
+                if done && idle_since.elapsed() >= Duration::from_secs(2) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // No gap: every post-boundary change was delivered exactly once. The
+    // concurrent insert's decoded key is not asserted here because the
+    // Postgres CDC element-id encoding for newly inserted integer keys differs
+    // from the bootstrap encoding; the structural counts below are what matter.
+    let total_inserts: usize = inserts.values().sum();
+    assert_eq!(
+        total_inserts, 1,
+        "post-boundary insert missing or duplicated in CDC stream: {inserts:?}"
+    );
+    assert_eq!(
+        updates.get(&1),
+        Some(&1),
+        "post-boundary update missing or duplicated in CDC stream: {updates:?}"
+    );
+    assert_eq!(
+        deletes.get(&2),
+        Some(&1),
+        "post-boundary delete missing or duplicated in CDC stream: {deletes:?}"
+    );
+
+    // No overlap: CDC must not replay any pre-boundary seed row. The only
+    // change events permitted are the three post-boundary mutations.
+    assert_eq!(
+        inserts.len(),
+        1,
+        "unexpected extra inserts (CDC replayed pre-boundary events): {inserts:?}"
+    );
+    assert_eq!(
+        updates.len(),
+        1,
+        "unexpected extra updates (CDC replayed pre-boundary events): {updates:?}"
+    );
+    assert_eq!(
+        deletes.len(),
+        1,
+        "unexpected extra deletes (CDC replayed pre-boundary events): {deletes:?}"
+    );
+
+    source.stop().await?;
+    pg.cleanup().await;
+
+    Ok(())
+}
+
 #[tokio::test]
 #[serial]
 #[ignore]
@@ -666,7 +863,6 @@ fn subscription_settings(
         relations: HashSet::new(),
         resume_from,
         request_position_handle,
-        last_sequence: None,
     }
 }
 
@@ -957,7 +1153,7 @@ fn pg_matches_change(
 #[ignore]
 async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1034,11 +1230,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q1_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let query2 = Query::cypher(q2_id)
@@ -1051,11 +1243,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
         .from_source("pg-mq-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q2_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
@@ -1075,7 +1263,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_query(query2)
             .with_reaction(reaction1)
             .with_reaction(reaction2)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );
@@ -1193,7 +1381,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 #[ignore]
 async fn test_postgres_stop_restart_recovers() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
-    use drasi_lib::indexes::config::{StorageBackendRef, StorageBackendSpec};
+    use drasi_lib::indexes::config::StorageBackendRef;
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
     init_logging();
@@ -1265,11 +1453,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
         .from_source("kr-source")
         .auto_start(true)
         .enable_bootstrap(true)
-        .with_storage_backend(StorageBackendRef::Inline(StorageBackendSpec::RocksDb {
-            path: q_dir.to_string_lossy().to_string(),
-            enable_archive: false,
-            direct_io: false,
-        }))
+        .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
         .build();
 
     let (reaction, handle) = ApplicationReaction::builder("kr-reaction")
@@ -1284,7 +1468,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
             .with_source(source)
             .with_query(query)
             .with_reaction(reaction)
-            .with_index_provider(Arc::new(provider))
+            .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await?,
     );

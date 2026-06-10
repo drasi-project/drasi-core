@@ -1483,7 +1483,6 @@ mod source_trait {
             relations: HashSet::new(),
             resume_from: None,
             request_position_handle: false,
-            last_sequence: None,
         };
 
         let result = source.subscribe(settings).await;
