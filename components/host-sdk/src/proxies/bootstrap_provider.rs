@@ -122,12 +122,6 @@ impl BootstrapProvider for BootstrapProviderProxy {
             ));
         }
 
-        let last_sequence = if ffi_result.last_sequence >= 0 {
-            Some(ffi_result.last_sequence as u64)
-        } else {
-            None
-        };
-
         let source_position =
             if !ffi_result.source_position_ptr.is_null() && ffi_result.source_position_len > 0 {
                 let bytes = unsafe {
@@ -151,8 +145,6 @@ impl BootstrapProvider for BootstrapProviderProxy {
 
         Ok(BootstrapResult {
             event_count: ffi_result.event_count as usize,
-            last_sequence,
-            sequences_aligned: ffi_result.sequences_aligned,
             source_position,
         })
     }

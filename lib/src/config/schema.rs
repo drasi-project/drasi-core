@@ -160,7 +160,6 @@ pub struct SourceSubscriptionConfig {
 ///     relations: ["PLACED_BY"].iter().map(|s| s.to_string()).collect(),
 ///     resume_from: None,
 ///     request_position_handle: false,
-///     last_sequence: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -177,10 +176,6 @@ pub struct SourceSubscriptionSettings {
     /// If true, the query requests a shared `Arc<AtomicU64>` position handle in the
     /// `SubscriptionResponse` for reporting its durably-processed position back to the source.
     pub request_position_handle: bool,
-    /// The last sequence number processed by this query before shutdown.
-    /// Sources use this to ensure their sequence counter continues from where it left off,
-    /// maintaining monotonicity across restarts.
-    pub last_sequence: Option<u64>,
 }
 
 /// Root configuration for drasi-lib
@@ -580,14 +575,12 @@ impl DrasiLibConfig {
         for query in &self.queries {
             if let Some(backend_ref) = &query.storage_backend {
                 match backend_ref {
-                    StorageBackendRef::Named(backend_id) => {
-                        if !storage_backend_ids.contains(backend_id) {
-                            return Err(anyhow::anyhow!(
-                                "Query '{}' references unknown storage backend: '{}'",
-                                query.id,
-                                backend_id
-                            ));
-                        }
+                    StorageBackendRef::Named(_backend_id) => {
+                        // Named references are validated leniently here: a name absent
+                        // from `storage_backends` may still be satisfied by a provider
+                        // injected at build time via `with_index_provider`. Strict
+                        // referential validation (against the union of declared backends
+                        // and injected providers) is performed in the builder.
                     }
                     StorageBackendRef::Inline(spec) => {
                         // Validate inline backend configuration

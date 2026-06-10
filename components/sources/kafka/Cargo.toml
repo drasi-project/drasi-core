@@ -55,6 +55,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rdkafka = "0.36"
 serde_json = "1.0"
 drasi-source-mapping.workspace = true
+drasi-bootstrap-kafka = { path = "../../bootstrappers/kafka" }
 
 [features]
 dynamic-plugin = []

@@ -32,7 +32,7 @@
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::Instrument;
@@ -234,6 +234,61 @@ pub struct SourceBase {
     /// Pruned explicitly via `prune_position_map()` after the source has
     /// successfully acknowledged the confirmed position to its upstream.
     sequence_position_map: Arc<RwLock<BTreeMap<u64, Bytes>>>,
+    /// Bootstrap-to-CDC boundary handoff for the first-ever bootstrap (Part 1
+    /// of issue #455 — overlap elimination).
+    ///
+    /// For "bootstrap-first" sources (Postgres, MSSQL, MySQL, Kafka) the
+    /// bootstrapper captures the source's native CDC boundary (WAL LSN, CDC log
+    /// LSN, binlog file+offset, partition→offset vector) *atomically* with the
+    /// snapshot and returns it as `BootstrapResult.source_position`. The
+    /// framework publishes that token here (see `handle_bootstrap_subscription`)
+    /// so the source's CDC-start task can begin streaming exactly at the
+    /// snapshot boundary — no overlap, no gap, no after-the-fact dedup.
+    ///
+    /// For "source-first" sources (Oracle) the source captures the boundary
+    /// itself inside `subscribe()` and publishes it here directly while also
+    /// injecting it into the `BootstrapContext` (`AS OF SCN`).
+    ///
+    /// A `watch` channel initialized to `None`. The first *initial* bootstrap
+    /// (`resume_from == None`) that yields a `source_position` wins; later
+    /// bootstraps never overwrite it. Crash-recovery subscriptions
+    /// (`resume_from.is_some()`) bypass this entirely and use the existing
+    /// `resume_from` path.
+    bootstrap_boundary: Arc<tokio::sync::watch::Sender<Option<Bytes>>>,
+    /// Mirrors whether a bootstrap provider is configured. Set at construction
+    /// from `params` and flipped true by `set_bootstrap_provider`. CDC sources
+    /// read this (via [`SourceBase::has_bootstrap_provider`]) to decide whether
+    /// their start task should participate in the bootstrap-boundary handover.
+    has_bootstrap_provider: Arc<AtomicBool>,
+    /// Set true by `subscribe_with_bootstrap_context` when an *initial* bootstrap
+    /// is requested (`enable_bootstrap && resume_from.is_none()`), before the
+    /// dispatcher is registered so it is visible once `wait_for_subscribers()`
+    /// releases. A source's CDC-start task consumes it exactly once via
+    /// [`SourceBase::take_pending_initial_bootstrap`] to decide whether to wait
+    /// for the snapshot boundary. Reset by `reset_bootstrap_boundary` on start.
+    pending_initial_bootstrap: Arc<AtomicBool>,
+}
+
+/// Publish a bootstrap-to-CDC boundary token into a `watch` sender using the
+/// canonical "first non-`None` value wins" semantics. Shared by
+/// [`SourceBase::publish_bootstrap_boundary`] and the bootstrap spawn task in
+/// `handle_bootstrap_subscription` (which only captures the sender, not `self`),
+/// so the invariant lives in exactly one place.
+fn publish_boundary_token(
+    sender: &tokio::sync::watch::Sender<Option<Bytes>>,
+    position: Bytes,
+) -> bool {
+    let mut set = false;
+    sender.send_if_modified(|current| {
+        if current.is_none() {
+            *current = Some(position);
+            set = true;
+            true
+        } else {
+            false
+        }
+    });
+    set
 }
 
 impl SourceBase {
@@ -265,6 +320,7 @@ impl SourceBase {
         let bootstrap_provider = params
             .bootstrap_provider
             .map(|p| Arc::from(p) as Arc<dyn BootstrapProvider>);
+        let has_bootstrap_provider = bootstrap_provider.is_some();
 
         Ok(Self {
             id: params.id.clone(),
@@ -286,6 +342,9 @@ impl SourceBase {
             subscriber_resume_positions: Arc::new(RwLock::new(HashMap::new())),
             position_comparator: Arc::new(RwLock::new(None)),
             sequence_position_map: Arc::new(RwLock::new(BTreeMap::new())),
+            bootstrap_boundary: Arc::new(tokio::sync::watch::channel(None).0),
+            has_bootstrap_provider: Arc::new(AtomicBool::new(has_bootstrap_provider)),
+            pending_initial_bootstrap: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -523,41 +582,24 @@ impl SourceBase {
             .store(sequence.saturating_add(1), Ordering::Relaxed);
     }
 
-    /// Apply subscription settings that affect the source base.
+    /// Returns whether a bootstrap provider is configured for this source.
     ///
-    /// Should be called at the start of `Source::subscribe()` implementations.
-    /// Handles:
-    /// - Recovering the sequence counter from `last_sequence` to maintain monotonicity
-    ///   across restarts.
-    /// - Clearing stale sequence→position mappings when the counter advances, so
-    ///   that `compute_confirmed_source_position()` cannot map a position handle to
-    ///   a WAL position that predates the subscriber's actual checkpoint.
-    pub fn apply_subscription_settings(
-        &self,
-        settings: &crate::config::SourceSubscriptionSettings,
-    ) {
-        if let Some(last_seq) = settings.last_sequence {
-            // Atomically advance to last_seq+1, never go backwards.
-            // fetch_max is safe under concurrent subscriptions.
-            let next = last_seq.saturating_add(1);
-            let prev = self.next_sequence.fetch_max(next, Ordering::Relaxed);
-            if next > prev {
-                info!(
-                    "[{}] Sequence counter recovered to {} (from checkpoint last_sequence={})",
-                    self.id, next, last_seq
-                );
-                // The counter jumped forward, meaning sequences currently in the
-                // position map were assigned before this subscriber's checkpoint
-                // was created. Those mappings are stale and would cause
-                // compute_confirmed_source_position() to return incorrect
-                // positions. Clear the map synchronously (try_write avoids
-                // async in a non-async fn; contention here is near-zero since
-                // dispatching is paused during subscribe).
-                if let Ok(mut map) = self.sequence_position_map.try_write() {
-                    map.clear();
-                }
-            }
-        }
+    /// CDC sources use this to decide whether their start task should
+    /// participate in the bootstrap-to-CDC boundary handover.
+    pub fn has_bootstrap_provider(&self) -> bool {
+        self.has_bootstrap_provider.load(Ordering::Acquire)
+    }
+
+    /// Consume the "initial bootstrap pending" signal exactly once.
+    ///
+    /// Returns true if an initial bootstrap (`enable_bootstrap &&
+    /// resume_from.is_none()`) was requested by a subscriber since the last
+    /// reset, and atomically clears the flag. A source's CDC-start task calls
+    /// this after `wait_for_subscribers()` to decide whether to wait for the
+    /// snapshot boundary; streaming-only or resuming subscriptions return false
+    /// and start from their configured/current position instead.
+    pub fn take_pending_initial_bootstrap(&self) -> bool {
+        self.pending_initial_bootstrap.swap(false, Ordering::AcqRel)
     }
 
     /// Returns a cloneable [`ComponentStatusHandle`] for use in spawned tasks.
@@ -593,6 +635,9 @@ impl SourceBase {
             subscriber_resume_positions: self.subscriber_resume_positions.clone(),
             position_comparator: self.position_comparator.clone(),
             sequence_position_map: self.sequence_position_map.clone(),
+            bootstrap_boundary: self.bootstrap_boundary.clone(),
+            has_bootstrap_provider: self.has_bootstrap_provider.clone(),
+            pending_initial_bootstrap: self.pending_initial_bootstrap.clone(),
         }
     }
 
@@ -608,6 +653,7 @@ impl SourceBase {
     /// ```
     pub async fn set_bootstrap_provider(&self, provider: impl BootstrapProvider + 'static) {
         *self.bootstrap_provider.write().await = Some(Arc::new(provider));
+        self.has_bootstrap_provider.store(true, Ordering::Release);
     }
 
     /// Set the position comparator for per-subscriber replay filtering.
@@ -688,6 +734,58 @@ impl SourceBase {
         }
     }
 
+    /// Publish the bootstrap-to-CDC boundary token.
+    ///
+    /// Records the source's native CDC boundary captured atomically with the
+    /// initial snapshot so the CDC-start task can begin streaming exactly at
+    /// that boundary. Only the first non-`None` boundary wins; subsequent
+    /// calls are ignored. Returns `true` if this call set the boundary.
+    ///
+    /// Called automatically by the framework from
+    /// `handle_bootstrap_subscription` for "bootstrap-first" sources, or
+    /// directly by "source-first" sources (Oracle) that capture the boundary
+    /// in `subscribe()`.
+    pub fn publish_bootstrap_boundary(&self, position: Bytes) -> bool {
+        publish_boundary_token(&self.bootstrap_boundary, position)
+    }
+
+    /// Return the bootstrap boundary token if one has already been published,
+    /// without waiting. Returns `None` if no boundary has been published yet.
+    pub fn try_bootstrap_boundary(&self) -> Option<Bytes> {
+        self.bootstrap_boundary.borrow().clone()
+    }
+
+    /// Await the bootstrap-to-CDC boundary token.
+    ///
+    /// Resolves as soon as a boundary has been published via
+    /// [`publish_bootstrap_boundary`](Self::publish_bootstrap_boundary).
+    /// "Bootstrap-first" sources call this from their CDC-start task on the
+    /// first-ever start (no `resume_from`) to learn where to begin streaming.
+    ///
+    /// Returns `None` if the boundary channel has been closed (the source is
+    /// shutting down) before any boundary was published.
+    pub async fn wait_for_bootstrap_boundary(&self) -> Option<Bytes> {
+        let mut rx = self.bootstrap_boundary.subscribe();
+        loop {
+            if let Some(pos) = rx.borrow_and_update().clone() {
+                return Some(pos);
+            }
+            if rx.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Reset the bootstrap boundary so a fresh first-ever bootstrap can publish
+    /// a new token. Sources call this from `start()` so a restart that has no
+    /// stored checkpoint re-negotiates the boundary instead of reusing a stale
+    /// one from a previous run.
+    pub fn reset_bootstrap_boundary(&self) {
+        self.bootstrap_boundary.send_replace(None);
+        self.pending_initial_bootstrap
+            .store(false, Ordering::Release);
+    }
+
     /// Subscribe to this source with optional bootstrap
     ///
     /// This is the standard subscribe implementation that all sources can use.
@@ -700,9 +798,6 @@ impl SourceBase {
         settings: &crate::config::SourceSubscriptionSettings,
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
-        // Recover sequence counter from checkpoint before anything else
-        self.apply_subscription_settings(settings);
-
         self.subscribe_with_bootstrap_context(settings, source_type, HashMap::new())
             .await
     }
@@ -723,6 +818,17 @@ impl SourceBase {
             settings.resume_from,
             settings.request_position_handle
         );
+
+        // Record that an initial bootstrap was requested so each CDC source's
+        // start task knows to wait for the snapshot boundary. Set *before* the
+        // dispatcher is registered below so it is visible once the task's
+        // wait_for_subscribers() releases. Streaming-only (enable_bootstrap=false)
+        // and resuming (resume_from.is_some()) subscriptions leave it unset, so
+        // those sources start from their configured/current position instead.
+        if settings.enable_bootstrap && settings.resume_from.is_none() {
+            self.pending_initial_bootstrap
+                .store(true, Ordering::Release);
+        }
 
         // Create streaming receiver using helper method
         let receiver = self.create_streaming_receiver().await?;
@@ -772,16 +878,13 @@ impl SourceBase {
         // Only persistent (replay-capable) queries request a handle. Volatile
         // queries are deliberately excluded from the min-watermark so they
         // cannot pin upstream advancement.
+        //
+        // The handle is created at the default u64::MAX ("no position confirmed
+        // yet"); the query manager seeds it with the query's checkpoint sequence
+        // (when resuming) so a resuming subscriber is included in the
+        // min-watermark from the start.
         let position_handle = if settings.request_position_handle {
             let handle = self.create_position_handle(&settings.query_id).await;
-            // Initialize the handle to the query's checkpoint sequence so that
-            // compute_confirmed_position() includes this subscriber from the
-            // start. Without this, a resuming query whose handle stays at
-            // u64::MAX would be invisible to the min-watermark, letting
-            // flush_lsn advance past its checkpoint.
-            if let Some(last_seq) = settings.last_sequence {
-                handle.store(last_seq, Ordering::Release);
-            }
             Some(handle)
         } else {
             None
@@ -832,9 +935,6 @@ impl SourceBase {
         source_type: &str,
     ) -> Result<SubscriptionResponse> {
         use crate::channels::dispatcher::ReplayThenLiveReceiver;
-
-        // Recover sequence counter from checkpoint
-        self.apply_subscription_settings(settings);
 
         info!(
             "Query '{}' subscribing to {} source '{}' with WAL replay from seq {}",
@@ -911,12 +1011,13 @@ impl SourceBase {
             dyn crate::channels::ChangeReceiver<crate::channels::events::SourceEventWrapper>,
         > = Box::new(ReplayThenLiveReceiver::new(replay_wrappers, live_receiver));
 
-        // Position handle
+        // Position handle — initialize to the resume sequence so a resuming
+        // subscriber is included in the min-watermark from the start (without
+        // this, a handle left at u64::MAX would be invisible to the watermark,
+        // letting upstream advance past the subscriber's checkpoint).
         let position_handle = if settings.request_position_handle {
             let handle = self.create_position_handle(&settings.query_id).await;
-            if let Some(last_seq) = settings.last_sequence {
-                handle.store(last_seq, Ordering::Release);
-            }
+            handle.store(resume_seq, Ordering::Release);
             Some(handle)
         } else {
             None
@@ -992,6 +1093,12 @@ impl SourceBase {
             let settings_clone = settings.clone();
             let source_id = self.id.clone();
 
+            // Boundary handoff: for the first-ever bootstrap (no resume_from)
+            // publish the captured source_position so the CDC-start task can
+            // begin streaming exactly at the snapshot boundary (Part 1).
+            let boundary = self.bootstrap_boundary.clone();
+            let is_initial_bootstrap = settings.resume_from.is_none();
+
             // Get instance_id from context for log routing isolation
             let instance_id = self
                 .context()
@@ -1016,12 +1123,30 @@ impl SourceBase {
                         Ok(result) => {
                             info!(
                                 "Bootstrap completed successfully for query '{}', sent {} events \
-                                 (last_sequence={:?}, sequences_aligned={})",
+                                 (source_position: {} bytes)",
                                 settings_clone.query_id,
                                 result.event_count,
-                                result.last_sequence,
-                                result.sequences_aligned
+                                result
+                                    .source_position
+                                    .as_ref()
+                                    .map(|p| p.len())
+                                    .unwrap_or(0)
                             );
+
+                            // Publish the bootstrap-to-CDC boundary for the
+                            // first-ever bootstrap so the source's CDC stream
+                            // starts exactly at the snapshot boundary. Only the
+                            // first non-None boundary wins.
+                            if is_initial_bootstrap {
+                                if let Some(position) = result.source_position.clone() {
+                                    if publish_boundary_token(&boundary, position) {
+                                        info!(
+                                            "Published bootstrap-to-CDC boundary for query '{}'",
+                                            settings_clone.query_id
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             error!(
@@ -1560,6 +1685,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bootstrap_boundary_first_publish_wins() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-src")).unwrap();
+
+        assert!(base.try_bootstrap_boundary().is_none());
+
+        assert!(base.publish_bootstrap_boundary(Bytes::from_static(b"lsn-1")));
+        // Second publish is ignored — first boundary wins.
+        assert!(!base.publish_bootstrap_boundary(Bytes::from_static(b"lsn-2")));
+
+        assert_eq!(
+            base.try_bootstrap_boundary(),
+            Some(Bytes::from_static(b"lsn-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_bootstrap_boundary_resolves_on_publish() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-wait")).unwrap();
+        let waiter = base.clone_shared();
+
+        let handle = tokio::spawn(async move { waiter.wait_for_bootstrap_boundary().await });
+
+        // Give the waiter a chance to park.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        base.publish_bootstrap_boundary(Bytes::from_static(b"scn-42"));
+
+        let got = handle.await.unwrap();
+        assert_eq!(got, Some(Bytes::from_static(b"scn-42")));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_bootstrap_boundary_returns_immediately_if_set() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-set")).unwrap();
+        base.publish_bootstrap_boundary(Bytes::from_static(b"pos"));
+        assert_eq!(
+            base.wait_for_bootstrap_boundary().await,
+            Some(Bytes::from_static(b"pos"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reset_bootstrap_boundary_allows_new_publish() {
+        let base = SourceBase::new(SourceBaseParams::new("boundary-reset")).unwrap();
+        base.publish_bootstrap_boundary(Bytes::from_static(b"old"));
+        base.reset_bootstrap_boundary();
+        assert!(base.try_bootstrap_boundary().is_none());
+        assert!(base.publish_bootstrap_boundary(Bytes::from_static(b"new")));
+        assert_eq!(
+            base.try_bootstrap_boundary(),
+            Some(Bytes::from_static(b"new"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_get_id() {
         let base = SourceBase::new(SourceBaseParams::new("id-check")).unwrap();
         assert_eq!(base.get_id(), "id-check");
@@ -1631,7 +1810,6 @@ mod tests {
             relations: HashSet::new(),
             resume_from,
             request_position_handle,
-            last_sequence: None,
         }
     }
 
@@ -1656,6 +1834,87 @@ mod tests {
         let mut params = SourceBaseParams::new(id);
         params.bootstrap_provider = Some(Box::new(NoopProvider));
         SourceBase::new(params).unwrap()
+    }
+
+    /// Bootstrap provider that returns a fixed `source_position`, used to
+    /// exercise the framework's auto-publish of the bootstrap→CDC boundary.
+    struct PositionProvider {
+        position: bytes::Bytes,
+    }
+
+    #[async_trait]
+    impl BootstrapProvider for PositionProvider {
+        async fn bootstrap(
+            &self,
+            _request: BootstrapRequest,
+            _context: &BootstrapContext,
+            event_tx: BootstrapEventSender,
+            _settings: Option<&crate::config::SourceSubscriptionSettings>,
+        ) -> Result<BootstrapResult> {
+            drop(event_tx); // no bootstrap events
+            Ok(BootstrapResult {
+                event_count: 0,
+                source_position: Some(self.position.clone()),
+            })
+        }
+    }
+
+    /// Source-agnostic e2e handover test (issue #455, Part 1): the framework
+    /// must publish `BootstrapResult.source_position` to the boundary cell for
+    /// the first-ever bootstrap so a CDC-start task awaiting the boundary
+    /// resumes at exactly the snapshot boundary (no overlap, no gap).
+    #[tokio::test]
+    async fn test_initial_bootstrap_publishes_boundary_to_cdc() {
+        let mut params = SourceBaseParams::new("agnostic-handover");
+        params.bootstrap_provider = Some(Box::new(PositionProvider {
+            position: bytes::Bytes::from_static(b"boundary-xyz"),
+        }));
+        let base = SourceBase::new(params).unwrap();
+
+        // A CDC-start task awaits the boundary, exactly like a real source.
+        let cdc = base.clone_shared();
+        let cdc_task = tokio::spawn(async move { cdc.wait_for_bootstrap_boundary().await });
+
+        // Initial subscription: enable bootstrap, no resume_from.
+        let _resp = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, None, true), "test")
+            .await
+            .unwrap();
+
+        let boundary = tokio::time::timeout(std::time::Duration::from_secs(5), cdc_task)
+            .await
+            .expect("CDC task should observe the boundary in time")
+            .unwrap();
+
+        assert_eq!(
+            boundary,
+            Some(bytes::Bytes::from_static(b"boundary-xyz")),
+            "CDC start must observe exactly the snapshot boundary published by bootstrap"
+        );
+    }
+
+    /// A resume/crash-recovery subscription (`resume_from.is_some()`) must NOT
+    /// publish a bootstrap boundary — that path uses `resume_from` directly.
+    #[tokio::test]
+    async fn test_resume_subscription_does_not_publish_boundary() {
+        let mut params = SourceBaseParams::new("agnostic-resume");
+        params.bootstrap_provider = Some(Box::new(PositionProvider {
+            position: bytes::Bytes::from_static(b"boundary-xyz"),
+        }));
+        let base = SourceBase::new(params).unwrap();
+
+        let resume = bytes::Bytes::from_static(b"resume-pos");
+        let _resp = base
+            .subscribe_with_bootstrap(&make_settings("q1", true, Some(resume), true), "test")
+            .await
+            .unwrap();
+
+        // Give any (incorrect) bootstrap task a chance to run.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            base.try_bootstrap_boundary().is_none(),
+            "resume subscriptions must not publish a bootstrap boundary"
+        );
     }
 
     #[tokio::test]
@@ -2355,7 +2614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_position_handle_initialized_to_last_sequence() {
+    async fn test_position_handle_not_seeded_by_base() {
         use crate::config::SourceSubscriptionSettings;
 
         let params = SourceBaseParams::new("ph-init").with_dispatch_mode(DispatchMode::Channel);
@@ -2366,7 +2625,6 @@ mod tests {
             source_id: "ph-init".to_string(),
             enable_bootstrap: false,
             resume_from: Some(Bytes::from_static(&[0x00, 0x01])),
-            last_sequence: Some(42),
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2377,12 +2635,14 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.expect("should have handle");
-        // Handle should be initialized to last_sequence, not u64::MAX
-        assert_eq!(handle.load(Ordering::Relaxed), 42);
+        // The base no longer self-seeds the handle on this path; it stays at
+        // u64::MAX ("no position confirmed yet") and the query manager seeds it
+        // from the checkpoint sequence when resuming.
+        assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[tokio::test]
-    async fn test_position_handle_stays_max_without_last_sequence() {
+    async fn test_position_handle_stays_max_on_fresh_bootstrap() {
         use crate::config::SourceSubscriptionSettings;
 
         let params = SourceBaseParams::new("ph-no-ls").with_dispatch_mode(DispatchMode::Channel);
@@ -2393,7 +2653,6 @@ mod tests {
             source_id: "ph-no-ls".to_string(),
             enable_bootstrap: true,
             resume_from: None,
-            last_sequence: None,
             request_position_handle: true,
             nodes: Default::default(),
             relations: Default::default(),
@@ -2404,7 +2663,7 @@ mod tests {
             .await
             .unwrap();
         let handle = response.position_handle.expect("should have handle");
-        // No last_sequence → handle stays at u64::MAX
+        // Fresh bootstrap (no checkpoint) → handle stays at u64::MAX
         assert_eq!(handle.load(Ordering::Relaxed), u64::MAX);
     }
 

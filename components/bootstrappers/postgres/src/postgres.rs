@@ -14,8 +14,9 @@
 
 //! PostgreSQL bootstrap provider for reading initial data from PostgreSQL databases
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -30,6 +31,24 @@ use drasi_lib::bootstrap::{
 use drasi_lib::channels::SourceChangeEvent;
 
 pub use crate::config::{PostgresBootstrapConfig, SslMode, TableKeyConfig};
+
+fn parse_lsn(lsn_str: &str) -> Result<u64> {
+    let parts: Vec<&str> = lsn_str.split('/').collect();
+    if parts.len() != 2 {
+        return Err(anyhow!("Invalid LSN format: {lsn_str}"));
+    }
+
+    let high = u64::from_str_radix(parts[0], 16)
+        .with_context(|| format!("Invalid high bits in LSN: {lsn_str}"))?;
+    let low = u64::from_str_radix(parts[1], 16)
+        .with_context(|| format!("Invalid low bits in LSN: {lsn_str}"))?;
+
+    Ok((high << 32) | low)
+}
+
+fn lsn_to_position_bytes(lsn: u64) -> Bytes {
+    Bytes::from(lsn.to_be_bytes().to_vec())
+}
 
 /// Bootstrap provider for PostgreSQL sources
 ///
@@ -222,20 +241,13 @@ impl BootstrapProvider for PostgresBootstrapProvider {
         let query_id = request.query_id.clone();
 
         // Execute bootstrap
-        let count = handler.execute(request, context, event_tx).await?;
+        let (count, source_position) = handler.execute(request, context, event_tx).await?;
 
         info!("Completed PostgreSQL bootstrap for query {query_id}: sent {count} records");
 
-        // `last_sequence` / `sequences_aligned` are intentionally left at their
-        // defaults here. The handler already captures the snapshot LSN via
-        // `SELECT pg_current_wal_lsn()`; a follow-up issue will parse that LSN
-        // and populate these fields so Postgres→Postgres handover can dedup
-        // buffered stream events.
         Ok(BootstrapResult {
             event_count: count,
-            last_sequence: None,
-            sequences_aligned: false,
-            source_position: None,
+            source_position: Some(source_position),
         })
     }
 }
@@ -299,7 +311,7 @@ impl PostgresBootstrapHandler {
         request: BootstrapRequest,
         context: &BootstrapContext,
         event_tx: drasi_lib::channels::BootstrapEventSender,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Bytes)> {
         info!(
             "Bootstrap: Connecting to PostgreSQL at {}:{}",
             self.config.host, self.config.port
@@ -313,9 +325,10 @@ impl PostgresBootstrapHandler {
 
         info!("Bootstrap: Connected, creating snapshot transaction...");
         // Start snapshot transaction and capture LSN
-        let (transaction, lsn) = self.create_snapshot(&mut client).await?;
+        let (transaction, snapshot_lsn) = self.create_snapshot(&mut client).await?;
+        let source_position = lsn_to_position_bytes(snapshot_lsn);
 
-        info!("Bootstrap snapshot created at LSN: {lsn}");
+        info!("Bootstrap snapshot created at LSN: {snapshot_lsn:x}");
 
         // Resolve labels to verified table names
         let tables = self.resolve_tables(&request, &transaction).await?;
@@ -339,7 +352,7 @@ impl PostgresBootstrapHandler {
         transaction.commit().await?;
 
         info!("Bootstrap completed: {total_count} total elements sent");
-        Ok(total_count)
+        Ok((total_count, source_position))
     }
 
     /// Create a regular PostgreSQL connection
@@ -366,10 +379,7 @@ impl PostgresBootstrapHandler {
     }
 
     /// Create a consistent snapshot and capture current LSN
-    async fn create_snapshot<'a>(
-        &self,
-        client: &'a mut Client,
-    ) -> Result<(Transaction<'a>, String)> {
+    async fn create_snapshot<'a>(&self, client: &'a mut Client) -> Result<(Transaction<'a>, u64)> {
         // Start transaction with repeatable read isolation
         let transaction = client
             .build_transaction()
@@ -382,6 +392,7 @@ impl PostgresBootstrapHandler {
             .query_one("SELECT pg_current_wal_lsn()::text", &[])
             .await?;
         let lsn: String = row.get(0);
+        let lsn = parse_lsn(&lsn).context("Failed to parse PostgreSQL snapshot LSN")?;
 
         Ok((transaction, lsn))
     }
