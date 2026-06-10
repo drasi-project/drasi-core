@@ -1890,6 +1890,12 @@ Use integration tests for real external systems or protocol servers:
 - embedded brokers or test doubles for stream sources
 - failure/restart tests for durability
 
+> 🟡 **SHOULD** — Use the Rust `testcontainers` crate to provision external
+> services required by integration tests. Prefer test-owned containers with
+> explicit readiness checks over manually starting Docker containers, shell
+> scripts, or `docker compose` harnesses. This keeps `cargo test` self-contained
+> and makes service lifecycle, ports, logs, and cleanup part of the test.
+
 Run your source crate's tests from its package directory:
 
 ```bash

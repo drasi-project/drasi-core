@@ -2477,9 +2477,11 @@ mod tests {
 
 > 🟡 **SHOULD** — Add an integration test that exercises your reaction
 > end-to-end through `DrasiLib::builder().with_reaction(...).build()`
-> for at least one happy path. Use `cargo test` defaults; do not
-> require external services unless you provide a docker-compose
-> harness alongside.
+> for at least one happy path. Use `cargo test` defaults. When a test
+> needs an external service, provision it with the Rust `testcontainers`
+> crate instead of manually starting Docker containers, shell scripts, or
+> `docker compose` harnesses. This keeps service lifecycle, readiness,
+> ports, logs, and cleanup owned by the test.
 
 > 🟡 **SHOULD** — Avoid `.unwrap()` outside of test code. Use
 > `anyhow::Result` propagation in production code paths; reserve
