@@ -286,8 +286,8 @@ pub async fn create_timestamptz_test_table(client: &Client, table_name: &str) ->
 
 /// Insert a row whose `created_at` value is provided as a raw PostgreSQL
 /// timestamptz literal (e.g. `2026-05-13 22:03:45.423627+00`). The literal is
-/// embedded directly so the test controls the exact textual form Postgres
-/// stores, exercising the logical replication text decode path.
+/// embedded directly so the test can supply specific input syntaxes (including
+/// short offsets like `+00`) while exercising the logical replication text decode path.
 pub async fn insert_timestamptz_test_row(
     client: &Client,
     table: &str,
