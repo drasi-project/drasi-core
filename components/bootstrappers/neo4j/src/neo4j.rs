@@ -164,8 +164,6 @@ impl BootstrapProvider for Neo4jBootstrapProvider {
 
         Ok(BootstrapResult {
             event_count: total,
-            last_sequence: None,
-            sequences_aligned: false,
             source_position: bootstrap_cursor,
         })
     }
