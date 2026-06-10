@@ -284,24 +284,22 @@ pub async fn create_timestamptz_test_table(client: &Client, table_name: &str) ->
     Ok(())
 }
 
-/// Insert a row whose `created_at` value is provided as a PostgreSQL
-/// timestamptz literal (e.g. `2026-05-13 22:03:45.423627+00`). The literal is
-/// passed as a bound parameter and cast with `::timestamptz`, letting the test
-/// supply specific input syntaxes while exercising the logical replication
-/// text decode path. Note that PostgreSQL stores timestamptz internally as a
-/// UTC instant, so the literal's offset form does not affect what the WAL
-/// emits — the short-offset form is produced by the server's time zone.
+/// Insert a row with the given `created_at` UTC instant via a parameterized
+/// query, consistent with the other insert helpers. PostgreSQL stores
+/// `timestamptz` as a UTC instant regardless of the INSERT syntax, and its
+/// pgoutput text protocol emits the offset in short form (e.g. `+00` rather
+/// than `+00:00`); this is what the decoder under test must parse.
 pub async fn insert_timestamptz_test_row(
     client: &Client,
     table: &str,
     id: i32,
-    created_at_literal: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     let sql = format!(
-        "INSERT INTO {} (id, created_at) VALUES ($1, ($2::text)::timestamptz)",
+        "INSERT INTO {} (id, created_at) VALUES ($1, $2)",
         quote_ident(table)
     );
-    client.execute(&sql, &[&id, &created_at_literal]).await?;
+    client.execute(&sql, &[&id, &created_at]).await?;
     Ok(())
 }
 

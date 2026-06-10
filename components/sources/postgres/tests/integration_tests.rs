@@ -695,13 +695,13 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
     core.start().await?;
 
     // Insert a timestamptz row. The value is stored in UTC; the logical
-    // replication walsender (UTC server) emits it in text form with a
-    // short-form `+00` offset, which is exactly the case the decoder fix
-    // addresses.
+    // replication walsender (server `timezone` GUC = UTC) emits it in text
+    // form with a short-form `+00` offset, which is exactly the case the
+    // decoder fix addresses.
     let expected = chrono::DateTime::parse_from_rfc3339("2026-05-13T22:03:45.423627+00:00")
         .expect("static timestamp literal should parse")
         .with_timezone(&chrono::Utc);
-    insert_timestamptz_test_row(&client, TS_TABLE, 1, "2026-05-13 22:03:45.423627+00").await?;
+    insert_timestamptz_test_row(&client, TS_TABLE, 1, expected).await?;
 
     wait_for_query_results(&core, "ts-test-query", move |results| {
         if results.is_empty() {

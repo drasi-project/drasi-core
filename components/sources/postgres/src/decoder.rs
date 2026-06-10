@@ -853,4 +853,41 @@ mod tests {
             other => panic!("expected TimestampTz, got {other:?}"),
         }
     }
+
+    #[test]
+    fn test_decode_timestamptz_text_z_suffix() {
+        // A space-separated timestamp with a bare `Z` suffix fails
+        // `parse_from_rfc3339` (which requires a `T` separator) and must be
+        // handled by the `%#z` fallback.
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45.423627Z", 1184)
+            .expect("should parse timestamptz with bare Z UTC suffix");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(
+                    ts,
+                    Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap()
+                        + chrono::Duration::microseconds(423627)
+                );
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_timestamptz_text_no_fractional_seconds() {
+        // The `%.f` specifier is optional, so whole-second timestamps (which
+        // PostgreSQL emits when subsecond precision is zero) must parse too.
+        let decoder = PgOutputDecoder::new();
+        let value = decoder
+            .decode_column_value(b"2026-05-13 22:03:45+00", 1184)
+            .expect("should parse timestamptz without fractional seconds");
+        match value {
+            PostgresValue::TimestampTz(ts) => {
+                assert_eq!(ts, Utc.with_ymd_and_hms(2026, 5, 13, 22, 3, 45).unwrap());
+            }
+            other => panic!("expected TimestampTz, got {other:?}"),
+        }
+    }
 }
