@@ -556,10 +556,10 @@ impl PgOutputDecoder {
                     // PostgreSQL's logical replication protocol may send the
                     // timezone offset in short form (e.g. `+00`, `-05`) rather
                     // than the full ISO 8601 form (`+00:00`, `-05:00`). The
-                    // `%#z` specifier accepts offsets with missing minutes, so
-                    // we use it as a fallback after the stricter formats.
+                    // `%#z` specifier is a superset of `%z`: it accepts offsets
+                    // with missing minutes (and a bare `Z`) as well as the
+                    // 4-digit forms, so it is used as the fallback after rfc3339.
                     let timestamp = DateTime::parse_from_rfc3339(trimmed)
-                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%z"))
                         .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z"))
                         .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
                         .with_timezone(&Utc);
