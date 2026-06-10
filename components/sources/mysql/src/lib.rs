@@ -122,6 +122,7 @@ impl Source for MySqlReplicationSource {
 
         self.base.set_status(ComponentStatus::Starting, None).await;
         self.shutdown.store(false, Ordering::Relaxed);
+        self.base.reset_bootstrap_boundary();
         info!("Starting MySQL replication source: {}", self.base.id);
 
         let config = self.config.clone();

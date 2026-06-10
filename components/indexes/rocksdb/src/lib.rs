@@ -27,11 +27,13 @@
 //!
 //! let provider = RocksDbIndexProvider::new("/data/drasi", true, false);
 //! let drasi = DrasiLib::builder()
-//!     .with_index_provider(Arc::new(provider))
+//!     .with_index_provider("rocksdb", Arc::new(provider))
 //!     .build()?;
 //! ```
 
 pub mod checkpoint;
+#[cfg(feature = "plugin-descriptor")]
+mod descriptor;
 pub mod element_index;
 pub mod future_queue;
 pub mod live_results;
@@ -47,6 +49,9 @@ pub use live_results::RocksDbLiveResultsWriter;
 pub use outbox::RocksDbOutboxWriter;
 pub use plugin::open_unified_db;
 pub use plugin::RocksDbIndexProvider;
+
+#[cfg(feature = "plugin-descriptor")]
+pub use descriptor::{RocksDbIndexConfigDto, RocksDbIndexDescriptor};
 
 // Re-export session types
 pub use session_state::RocksDbSessionControl;

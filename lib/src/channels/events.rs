@@ -375,8 +375,8 @@ pub struct SubscriptionResponse {
     /// minimum across all subscribers to advance its upstream cursor.
     /// Sources should initialize this to `u64::MAX` (meaning "no position confirmed yet").
     pub position_handle: Option<Arc<AtomicU64>>,
-    /// Receives the `BootstrapResult` after bootstrap completes, carrying handover
-    /// metadata (`last_sequence`, `sequences_aligned`) for the bootstrap-to-streaming
+    /// Receives the `BootstrapResult` after bootstrap completes, carrying the
+    /// optional `source_position` snapshot boundary for the bootstrap-to-streaming
     /// transition. `None` when bootstrap is not active or for FFI/plugin sources.
     pub bootstrap_result_receiver:
         Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
@@ -774,7 +774,6 @@ mod tests {
             relations: HashSet::new(),
             resume_from: Some(position_bytes.clone()),
             request_position_handle: true,
-            last_sequence: None,
         };
         assert_eq!(settings.resume_from, Some(position_bytes));
         assert!(settings.request_position_handle);
