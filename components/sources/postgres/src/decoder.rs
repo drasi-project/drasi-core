@@ -559,12 +559,8 @@ impl PgOutputDecoder {
                     // `%#z` specifier accepts offsets with missing minutes, so
                     // we use it as a fallback after the stricter formats.
                     let timestamp = DateTime::parse_from_rfc3339(trimmed)
-                        .or_else(|_| {
-                            DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%z")
-                        })
-                        .or_else(|_| {
-                            DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z")
-                        })
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%z"))
+                        .or_else(|_| DateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S%.f%#z"))
                         .map_err(|e| anyhow!("Failed to parse timestamptz from '{text}': {e}"))?
                         .with_timezone(&Utc);
                     Ok(PostgresValue::TimestampTz(timestamp))

@@ -720,9 +720,7 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
         match chrono::DateTime::parse_from_rfc3339(created_at) {
             Ok(parsed) => {
                 if parsed.with_timezone(&chrono::Utc) != expected {
-                    log::error!(
-                        "created_at instant mismatch: expected {expected}, got {parsed}"
-                    );
+                    log::error!("created_at instant mismatch: expected {expected}, got {parsed}");
                     return false;
                 }
                 true
